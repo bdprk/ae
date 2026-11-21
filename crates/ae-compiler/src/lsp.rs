@@ -340,7 +340,7 @@ pub struct Document {
     /// The resolver's name resolution for this document's text, computed
     /// lazily and invalidated on every update (R3d: hover and definition
     /// read the def table instead of matching text).
-    pub resolution: OnceCell<std::sync::Arc<ae_resolve::resolve::Resolution>>,
+    pub resolution: OnceCell<std::sync::Arc<(ae_resolve::module::Module, ae_resolve::resolve::Resolution)>>,
 }
 
 impl Document {
@@ -362,15 +362,15 @@ impl Document {
         self.text = text;
     }
 
-    /// The document's name resolution, computed on first use from its text.
-    /// Documents the shared module parse rejects (lex or declaration
-    /// diagnostics) have no resolution: their features fall back to the
+    /// The document's module and name resolution, computed on first use
+    /// from its text. Documents the shared module parse rejects (lex or
+    /// declaration diagnostics) have none: their features fall back to the
     /// text heuristics.
-    pub fn resolution(&self) -> Option<&std::sync::Arc<ae_resolve::resolve::Resolution>> {
+    pub fn resolution(&self) -> Option<&std::sync::Arc<(ae_resolve::module::Module, ae_resolve::resolve::Resolution)>> {
         let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
         let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
         let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], tokens.as_slice());
-        self.resolution.set(std::sync::Arc::new(resolution)).ok()?;
+        self.resolution.set(std::sync::Arc::new((module, resolution))).ok()?;
         self.resolution.get()
     }
 }
@@ -677,7 +677,8 @@ impl LspServer {
     /// its def; functions render their parameter and return spellings,
     /// structs render their fields, bindings render their inferred type.
     fn hover_from_defs(&self, doc: &Document, offset: usize) -> Option<String> {
-        let resolution = doc.resolution()?;
+        let cached = doc.resolution()?;
+        let resolution = &cached.1;
         let def = def_at(resolution, offset)?;
         let describe = |spelling: &ae_resolve::TypeSpelling| describe_spelling(spelling, resolution);
         match def.kind {
@@ -721,7 +722,8 @@ impl LspServer {
     /// ranges absolute to their own file, which this slice does not map to
     /// document URIs yet — they fall back to the text scan.
     fn definition_from_defs(&self, doc: &Document, offset: usize) -> Option<Location> {
-        let resolution = doc.resolution()?;
+        let cached = doc.resolution()?;
+        let resolution = &cached.1;
         let def = def_at(resolution, offset)?;
         if def.imported {
             return None;
@@ -853,10 +855,28 @@ impl LspServer {
         }
 
         // R3d: the file's own defs join the candidates — functions and
-        // structs with their declared shapes, bindings with their inferred
-        // types. Scope-exact completion (live bindings only at the cursor)
-        // needs live-range computation and stays a later slice.
-        if let Some(resolution) = doc.resolution() {
+        // structs with their declared shapes, and the enclosing function's
+        // locals (declared before the cursor) with their inferred types.
+        // Exact live-scope completion needs scope-structured ranges and
+        // stays a later slice.
+        if let Some(cached) = doc.resolution() {
+            let (module, resolution) = (&cached.0, &cached.1);
+            let owner = module.functions.iter().enumerate().find(|(_, function)| {
+                matches!(&function.declaration.body, Some(body)
+                    if body.start <= offset && offset <= body.end)
+            }).and_then(|(index, _)| resolution.functions.get(index))
+                .map(|function| function.function_def);
+            if let Some(owner) = owner {
+                for def in resolution.defs.iter().filter(|def| {
+                    def.owner == Some(owner) && def.kind != ae_resolve::DefKind::Parameter
+                        && def.range.start <= offset
+                }) {
+                    let ty = def.inferred.as_ref()
+                        .map(|shape| describe_spelling(shape, resolution))
+                        .unwrap_or_else(|| "deferred".to_owned());
+                    out.push((def.name.clone(), 6, Some(format!("{}: {ty}", def.name))));
+                }
+            }
             for def in &resolution.defs {
                 if def.imported {
                     continue;
@@ -882,12 +902,6 @@ impl LspServer {
                         (3, format!("fn {}({params}){returns}", def.name))
                     }
                     ae_resolve::DefKind::Struct => (7, format!("struct {}", def.name)),
-                    ae_resolve::DefKind::Binding | ae_resolve::DefKind::ForBinding | ae_resolve::DefKind::PatternBinding => {
-                        let ty = def.inferred.as_ref()
-                            .map(|shape| describe_spelling(shape, resolution))
-                            .unwrap_or_else(|| "deferred".to_owned());
-                        (6, format!("{}: {ty}", def.name))
-                    }
                     _ => continue,
                 };
                 out.push((def.name.clone(), kind, Some(detail)));
@@ -907,7 +921,8 @@ impl LspServer {
     /// offset. Scope-exact, unlike the text fallback which renames every
     /// same-named token in the file.
     fn rename_from_defs(&self, doc: &Document, offset: usize, new_name: &str) -> Option<JsonValue> {
-        let resolution = doc.resolution()?;
+        let cached = doc.resolution()?;
+        let resolution = &cached.1;
         let def = def_at(resolution, offset)?;
         if def.imported {
             return None;
