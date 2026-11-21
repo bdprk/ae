@@ -394,6 +394,20 @@ struct-typed intermediates are chain-only receivers (a chain set distinct
 from the scalar reads), and the owner struct comes from the declared type
 of the field it reads.
 
+## Resolved drop-free struct constructions (2026-11-22)
+
+`let p = Point { x: 1, y: 2 };` joins the body route with the ownership
+bookkeeping: block scopes push and pop in `lower_scalar_statements`, owned
+slots are released at scope exit (`Frees` after the statements),
+`Return` carries `live_owned()`, and loop-local `Frees` precede
+`Break`/`Continue` (`loop_scopes` bases tracked; the block-depth guard
+mirrors the typed route). Constructions are marked only when the shape is
+complete, the struct is file-local and non-generic, `drop_fn` is None and
+every declared field is scalar — malformed shapes and drop-carrying structs
+(the `user_defined_drop` semantics) stay typed with canonical diagnostics.
+Local bindings of routed structs are field-read receivers, so `p.x` works
+on constructed values.
+
 ## Fleet cooldown (2026-11-22 02:30-04:30)
 
 The InstaBox free plan suspended all five sandboxes mid-segment
@@ -402,44 +416,13 @@ on wake; the interrupted segments left no completion lines, so the
 35-segment archive stands. Certificates renewed to 2026-11-23 04:33.
 Long-fuzz sessions should schedule idle gaps to avoid the throttle.
 
-## Next slice blueprint: no-drop struct construction in the body route
+## Next slice: calls with owned-aggregate parameters in the body route
 
-`let p = Point { x: 1, y: 2 };` in the body route needs the ownership
-bookkeeping first. The verified map (2026-11-22 04:55):
+The construction slice landed the ownership bookkeeping (scopes, Frees,
+live_owned Returns, loop-local releases). The next ADR-0230 step is calls:
+`supports_call` still excludes non-scalar signatures, so bodies calling
+functions that take owned aggregates (`take(g: Guard)`) stay typed. That
+step must reuse the compiler's move tracking (`moved`, `close_loop_moves`)
+so IDs and drop order stay stable. After that: generic and closure bodies
+(ADR-0229's recorded boundary), then R3c's type checker body.
 
-1. `Type::Struct(_)` is owned (`owned()` in mod.rs:207), so the typed route
-   emits `Frees` for struct slots at scope ends — a MIR-visible statement.
-   The body route's `Statement::Return(value, Vec::new())` must become
-   `live_owned()`.
-2. Mirror these three emission sites (parser.rs):
-   block exit — `Frees(scope's owned)` after all statements (typed: 489-498);
-   `Return` — `live_owned()` = every active scope flattened, owned only
-   (typed: 2481, 618-620);
-   `Break`/`Continue` — `Frees(loop_local_owned())` before the jump
-   (typed: 2708; `loop_local_owned` at 621-623 uses `loop_scopes` bases).
-3. Body-route restructure: `lower_scalar_statements` must push/pop
-   `self.scopes` around the body (typed `block()` at 486-499), pop BEFORE
-   propagating statement errors (the current `?` in the loop leaks the
-   scope), add the same 64 `block_depth` guard, and prepend the
-   Break/Continue Frees in the statement loop (the arm returns one
-   statement; the Frees goes in the loop). `lower_scalar_loop_body` pushes
-   `loop_scopes` (base = `scopes.len()`) around the body, mirroring the
-   typed loop at 2544-2556. Skip `close_loop_moves` for now: the route owns
-   no movable values until calls accept owned aggregates.
-4. Construction: extend the collection with a `drop_free_constructions`
-   set — `Struct` expressions (via `visit_expression_tree`) whose target is
-   a plain `Atom(Ident)` covered by `struct_constructors`, whose registry
-   struct has `drop_fn == None` and only scalar declared fields, and whose
-   shape is complete (no duplicates, every declared field present). The
-   shape gate matters for parity: a malformed construction must stay typed
-   so the typed route's canonical diagnostic survives. Eligibility adds the
-   `Struct` arm; lowering mirrors `lower_shared_argument`'s Struct arm
-   (parser.rs:1482-1506): sid from `struct_names`, values in declaration
-   order, `Expr::StructLit(sid, values)`.
-5. Field reads on such local bindings: only if the resolver's
-   `infer_expression` names the struct for the binding (check first; if
-   deferred, leave local field reads typed — construction alone is already
-   a complete slice).
-6. Gates as always, plus `emit-mir` parity on a corpus file that
-   constructs a local struct (the Frees statements must match the typed
-   route's output byte for byte).
