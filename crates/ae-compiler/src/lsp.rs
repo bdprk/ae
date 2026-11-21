@@ -363,6 +363,9 @@ impl Document {
     }
 
     /// The document's name resolution, computed on first use from its text.
+    /// Documents the shared module parse rejects (lex or declaration
+    /// diagnostics) have no resolution: their features fall back to the
+    /// text heuristics.
     pub fn resolution(&self) -> Option<&std::sync::Arc<ae_resolve::resolve::Resolution>> {
         let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
         let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
@@ -388,6 +391,22 @@ fn occurrence_at(
         .find(|occurrence| occurrence.range.start <= offset && offset < occurrence.range.end)?;
     let def = resolution.defs.get(occurrence.target?.0 as usize)?;
     Some((occurrence, def))
+}
+
+/// The def under `offset`: an occurrence's target when the cursor reads or
+/// writes a name, otherwise the def whose own declaration name the cursor
+/// sits on (declarations have no occurrence of their own). An occurrence
+/// wins, because it disambiguates shadowed names.
+fn def_at(
+    resolution: &ae_resolve::resolve::Resolution,
+    offset: usize,
+) -> Option<&ae_resolve::DefEntry> {
+    if let Some((_, def)) = occurrence_at(resolution, offset) {
+        return Some(def);
+    }
+    resolution.defs.iter().find(|def| {
+        !def.imported && def.range.start <= offset && offset < def.range.end
+    })
 }
 
 /// The display form of a spelling, with named defs rendered as their item
@@ -659,7 +678,7 @@ impl LspServer {
     /// structs render their fields, bindings render their inferred type.
     fn hover_from_defs(&self, doc: &Document, offset: usize) -> Option<String> {
         let resolution = doc.resolution()?;
-        let (_, def) = occurrence_at(resolution, offset)?;
+        let def = def_at(resolution, offset)?;
         let describe = |spelling: &ae_resolve::TypeSpelling| describe_spelling(spelling, resolution);
         match def.kind {
             ae_resolve::DefKind::Function => {
@@ -703,7 +722,7 @@ impl LspServer {
     /// document URIs yet — they fall back to the text scan.
     fn definition_from_defs(&self, doc: &Document, offset: usize) -> Option<Location> {
         let resolution = doc.resolution()?;
-        let (_, def) = occurrence_at(resolution, offset)?;
+        let def = def_at(resolution, offset)?;
         if def.imported {
             return None;
         }
@@ -841,12 +860,54 @@ impl LspServer {
         out
     }
 
+    /// R3d: rename the resolved def only — every occurrence whose target is
+    /// the same def, plus the def's own declaration range, ordered by
+    /// offset. Scope-exact, unlike the text fallback which renames every
+    /// same-named token in the file.
+    fn rename_from_defs(&self, doc: &Document, offset: usize, new_name: &str) -> Option<JsonValue> {
+        let resolution = doc.resolution()?;
+        let def = def_at(resolution, offset)?;
+        if def.imported {
+            return None;
+        }
+        let mut edits: Vec<(usize, JsonValue)> = Vec::new();
+        let mut push_edit = |range: std::ops::Range<usize>| {
+            let start = doc.line_index.offset_to_position(&doc.text, range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, range.end);
+            let mut text_edit = BTreeMap::new();
+            text_edit.insert("range".to_owned(), Self::range_to_json(&Range { start, end }));
+            text_edit.insert("newText".to_owned(), JsonValue::String(new_name.to_owned()));
+            edits.push((range.start, JsonValue::Object(text_edit)));
+        };
+        push_edit(def.range.clone());
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target == Some(def.id) {
+                    push_edit(occurrence.range.clone());
+                }
+            }
+        }
+        edits.sort_by_key(|(start, _)| *start);
+        let ordered: Vec<JsonValue> = edits.into_iter().map(|(_, edit)| edit).collect();
+        let mut changes = BTreeMap::new();
+        changes.insert(doc.uri.clone(), JsonValue::Array(ordered));
+        let mut res = BTreeMap::new();
+        res.insert("changes".to_owned(), JsonValue::Object(changes));
+        Some(JsonValue::Object(res))
+    }
+
     pub fn rename(&self, uri: &str, pos: Position, new_name: &str) -> Option<JsonValue> {
         let doc = self.documents.get(uri)?;
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
         let ident = extract_ident_at(&doc.text, offset)?;
         if !is_ident(new_name) {
             return None;
+        }
+        // R3d: the def table answers first — scope-exact edits for the
+        // resolved def only; the text scan below stays as the fallback for
+        // names the single-file pass does not own.
+        if let Some(result) = self.rename_from_defs(doc, offset, new_name) {
+            return Some(result);
         }
 
         let mut edits = Vec::new();

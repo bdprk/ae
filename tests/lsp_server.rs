@@ -217,3 +217,20 @@ fn lsp_definition_lands_on_the_struct_name_range() {
     // The def's range is the name itself, not the whole declaration.
     assert_eq!(character, "struct ".encode_utf16().count() as i64);
 }
+
+#[test]
+fn lsp_rename_is_scope_exact_via_the_def_table() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn a() -> i64 { let counter = 1; print(counter); return 0; }\nfn b() -> i64 { let counter = 2; print(counter); return 0; }\nfn main() {}"}}}"#;
+    server.handle_message(open);
+
+    // The cursor sits on fn a's `counter` declaration: only fn a's def and
+    // its read move. The text fallback would have renamed all four tokens.
+    let rename_req = r#"{"jsonrpc":"2.0","id":9,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":0,"character":20},"newName":"total"}}"#;
+    let resps = server.handle_message(rename_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let edits = val.get("result").and_then(|r| r.get("changes")).and_then(|c| c.get("file:///test.ae")).and_then(|e| e.as_array()).unwrap();
+    assert_eq!(edits.len(), 2, "scope-exact rename moved {edits:?}");
+    let lines: Vec<i64> = edits.iter().filter_map(|e| e.get("range").and_then(|r| r.get("start")).and_then(|s| s.get("line")).and_then(|l| l.as_i64())).collect();
+    assert!(lines.iter().all(|line| *line == 0), "edits leaked into fn b: {lines:?}");
+}
