@@ -67,16 +67,16 @@ fn field_ty_in(sid: usize, field: &str, structs: &[StructDef]) -> Option<Type> {
     defn.fields.iter().find(|(name, _)| name == field).map(|(_, ty)| *ty)
 }
 
-/// The struct item an immutable borrowed-struct spelling names. Only an
-/// immutable borrow qualifies: by-value and `&mut` receivers carry
-/// ownership effects (moves, drop at scope exit) that stay on the typed
-/// route.
+/// The struct item a marked slot's spelling names: an immutable borrowed
+/// parameter (`&Point`, where by-value and `&mut` receivers carry ownership
+/// effects that stay typed) or an owned local binding constructed in-route.
 fn definition_struct_item(entry: &ae_resolve::DefEntry) -> Option<ae_resolve::DefId> {
     match &entry.inferred {
         Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }) => match inner.as_ref() {
             ae_resolve::TypeSpelling::Named { def } => Some(*def),
             _ => None,
         },
+        Some(ae_resolve::TypeSpelling::Named { def }) => Some(*def),
         _ => None,
     }
 }
@@ -125,6 +125,13 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
     match &expression.kind {
         ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.get(&expression.range.start)
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)),
+        // A construction of a drop-free file-local struct with scalar
+        // fields: marked complete at collection time.
+        ExpressionKind::Struct { target, fields } => {
+            matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.drop_free_constructions.contains(&expression.range.start)
+                && fields.iter().all(|field| scalar_body_expression(&field.value, resolved, supports_call))
+        }
         // A struct parameter's field read, possibly nested (`o.inner.x`):
         // the chain's base may be a scalar read or a struct-typed chain
         // receiver, but only a scalar field lowers as a value.
@@ -699,13 +706,25 @@ impl<'a> Parser<'a> {
             expressions.scalar_definitions.extend(resolution.defs.iter()
                 .filter(|definition| definition.kind.is_local())
                 .map(|definition| (definition.range.start, definition.id)));
-            // Struct parameters (file-local, non-generic) are field-read
-            // receivers for the body route: the resolver's inferred spelling
-            // names the struct item, and the compiler's registry supplies
-            // field types for the read checks. Marked before the statement
-            // walk, whose field-read checks consult this set.
-            for definition in resolution.defs.iter().filter(|entry| entry.kind == ae_resolve::DefKind::Parameter) {
-                let names_struct = definition_struct_item(definition)
+            // Struct parameters (immutable borrows) and local bindings
+            // (owned, constructed in-route from a drop-free struct) are
+            // field-read receivers for the body route: the resolver's
+            // inferred spelling names the struct item, and the compiler's
+            // registry supplies field types for the read checks. Marked
+            // before the statement walk, whose field-read checks consult
+            // this set.
+            for definition in resolution.defs.iter().filter(|entry| {
+                entry.kind == ae_resolve::DefKind::Parameter || entry.kind == ae_resolve::DefKind::Binding
+            }) {
+                let item = match (&definition.inferred, definition.kind) {
+                    (Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }), _) => match inner.as_ref() {
+                        ae_resolve::TypeSpelling::Named { def } => Some(*def),
+                        _ => None,
+                    },
+                    (Some(ae_resolve::TypeSpelling::Named { def }), ae_resolve::DefKind::Binding) => Some(*def),
+                    _ => None,
+                };
+                let names_struct = item
                     .and_then(|item| resolution.defs.get(item.0 as usize))
                     .is_some_and(|item| {
                         item.kind == ae_resolve::DefKind::Struct && self.struct_names.contains_key(&item.name)
@@ -719,6 +738,12 @@ impl<'a> Parser<'a> {
             let closure_statements = resolution.functions.iter()
                 .flat_map(|function| function.closure_bodies.iter())
                 .flat_map(|body| body.iter());
+            for function in &module.functions {
+                if function.declaration.name.contains("make_") {
+                    for (index, statement) in function.body.iter().flatten().enumerate() {
+                    }
+                }
+            }
             for statement in function_statements.chain(closure_statements) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
@@ -778,6 +803,28 @@ impl<'a> Parser<'a> {
                                             expressions.struct_field_reads.insert(expression.range.start);
                                         } else if matches!(field_ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)) {
                                             expressions.struct_field_chains.insert(expression.range.start);
+                                        }
+                                    }
+                                }
+                            }
+                            // A construction of a file-local, non-generic,
+                            // drop-free struct with only scalar fields joins
+                            // the body route. The complete-shape gate keeps
+                            // malformed constructions on the typed route,
+                            // whose diagnostics stay canonical.
+                            if let ae_syntax::expression::ExpressionKind::Struct { target, fields } = &expression.kind {
+                                if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
+                                    if expressions.struct_constructors.contains(&target.range.start) {
+                                        if let Some(&sid) = self.struct_names.get(name) {
+                                            let defn = &self.structs[sid];
+                                            let complete = defn.drop_fn.is_none()
+                                                && fields.len() == defn.fields.len()
+                                                && defn.fields.iter().all(|(_, ty)| scalar_type(*ty))
+                                                && fields.iter().all(|field| defn.fields.iter().any(|(declared, _)| declared == &field.name))
+                                                && fields.iter().map(|field| &field.name).collect::<std::collections::HashSet<&String>>().len() == fields.len();
+                                            if complete {
+                                                expressions.drop_free_constructions.insert(expression.range.start);
+                                            }
                                         }
                                     }
                                 }
@@ -897,14 +944,30 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<Statement>, ae_span::Diagnostic> {
         use ae_syntax::statement::StatementKind;
         self.take(Kind::LBrace)?;
+        if self.block_depth >= 64 { return Err(self.fail("block nesting limit exceeded (64)")); }
+        self.block_depth += 1;
+        self.scopes.push(Vec::new());
         let mut statements = Vec::with_capacity(body.len());
-        for statement in body {
-            if matches!(statement.kind, StatementKind::ForRange { .. }) {
-                self.lower_scalar_range(statement, slots, &mut statements)?;
-            } else {
-                statements.push(self.lower_scalar_statement(statement, slots)?);
+        let lowered: Result<(), ae_span::Diagnostic> = (|| {
+            for statement in body {
+                if matches!(statement.kind, StatementKind::ForRange { .. }) {
+                    self.lower_scalar_range(statement, slots, &mut statements)?;
+                } else {
+                    let statement = self.lower_scalar_statement(statement, slots)?;
+                    if matches!(statement, Statement::Break | Statement::Continue(_)) {
+                        // Owned values declared inside the loop body die at
+                        // the jump; releases are idempotent.
+                        let owned = self.loop_local_owned();
+                        if !owned.is_empty() { statements.push(Statement::Frees(owned)); }
+                    }
+                    statements.push(statement);
+                }
             }
-        }
+            Ok(())
+        })();
+        let scope = self.scopes.pop().unwrap();
+        self.block_depth -= 1;
+        lowered?;
         self.take(Kind::RBrace)?;
         for statement in body {
             if let StatementKind::Binding { name, name_range, .. } = &statement.kind {
@@ -912,6 +975,10 @@ impl<'a> Parser<'a> {
                 slots.remove(&self.resolved_expressions().scalar_definitions[&name_range.start]);
             }
         }
+        // Owned values declared in this block are released at its end,
+        // mirroring the typed route's block exit.
+        let owned: Vec<(usize, Type)> = scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
+        if !owned.is_empty() { statements.push(Statement::Frees(owned)); }
         Ok(statements)
     }
 
@@ -966,6 +1033,9 @@ impl<'a> Parser<'a> {
                 slots.insert(def, (slot, ty));
                 self.names.insert(name.clone(), (slot, *mutable, ty));
                 self.binding_ranges.insert(slot, name_range.clone());
+                if ty.owned() {
+                    self.scopes.last_mut().expect("block scope").push((slot, ty));
+                }
                 statement
             }
             StatementKind::Assign { target, operator, value } => {
@@ -1059,7 +1129,7 @@ impl<'a> Parser<'a> {
                 if ty != self.return_type {
                     return Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"));
                 }
-                Statement::Return(value, Vec::new())
+                Statement::Return(value, self.live_owned())
             }
             StatementKind::If { condition, then_body, else_body } => {
                 let value = self.lower_scalar_condition(condition, slots)?;
@@ -1149,7 +1219,10 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<Statement>, ae_span::Diagnostic> {
         self.loop_depth += 1;
         self.loop_labels.push(label);
+        let base = self.scopes.len();
+        self.loop_scopes.push(base);
         let result = self.lower_scalar_statements(body, slots);
+        self.loop_scopes.pop();
         self.loop_labels.pop();
         self.loop_depth -= 1;
         result
@@ -1213,6 +1286,27 @@ impl<'a> Parser<'a> {
                 (Expr::Variable(slot, ty, line, column), ty)
             }
             ExpressionKind::Group(inner) => self.lower_scalar_body_expression(inner, slots)?,
+            ExpressionKind::Struct { target, fields } => {
+                // A drop-free file-local struct construction: collection
+                // confirmed the complete shape, so the field table lookup
+                // and the ordering cannot fail here.
+                let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
+                    unreachable!("scalar construction eligibility");
+                };
+                let &sid = self.struct_names.get(name).expect("scalar construction target");
+                let declared_fields = self.structs[sid].fields.clone();
+                let mut values: Vec<Option<Expr>> = (0..declared_fields.len()).map(|_| None).collect();
+                for field in fields {
+                    let slot = declared_fields.iter().position(|(declared, _)| declared == &field.name)
+                        .expect("scalar construction field");
+                    let (value, actual) = self.lower_scalar_body_expression(&field.value, slots)?;
+                    if actual != declared_fields[slot].1 {
+                        unreachable!("scalar construction field type");
+                    }
+                    values[slot] = Some(value);
+                }
+                (Expr::StructLit(sid, values.into_iter().collect::<Option<Vec<_>>>().expect("complete construction")), Type::Struct(sid))
+            }
             ExpressionKind::Field { base, name } => {
                 if matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))) {
                     // A struct parameter's scalar field read: the slot carries
@@ -2952,7 +3046,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -2978,11 +3072,13 @@ mod tests {
         structs.push(StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
         structs.push(StructDef { name: "Outer".into(), fields: vec![("inner".into(), Type::Struct(1)), ("tag".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
         structs.push(StructDef { name: "Holder".into(), fields: vec![("ready".into(), Type::Bool), ("text".into(), Type::String)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
+        structs.push(StructDef { name: "Guard".into(), fields: vec![("id".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: Some(0) });
         let mut struct_names = HashMap::new();
         struct_names.insert("Point".into(), 0);
         struct_names.insert("Holder".into(), 3);
         struct_names.insert("Inner".into(), 1);
         struct_names.insert("Outer".into(), 2);
+        struct_names.insert("Guard".into(), 4);
         let mut enums = Vec::new();
         let mut enum_names = HashMap::new();
         let mut generics = Generics::default();
@@ -3174,6 +3270,25 @@ mod tests {
                 if matches!(&**inner, Expr::Variable(0, Type::StructRef(2), ..)) && iname == "inner" && *ifty == Type::Struct(1))
                 && fname == "x" && *fty == Type::Int));
         parser.names.remove("o");
+
+        parser.seek_scalar_offset(source.find("{ let p = Point { x: 1").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved construction").unwrap();
+        assert!(matches!(body.as_slice(),
+            [Statement::Declare(slot, Expr::StructLit(sid, values)),
+             Statement::Return(Expr::Binary(l, Kind::Plus, r, ..), frees),
+             Statement::Frees(scope_frees)]
+            if *sid == 0 && values.len() == 2
+                && matches!(&**l, Expr::Field(b, f, t)
+                    if f == "x" && *t == Type::Int
+                        && matches!(&**b, Expr::Variable(ps, Type::Struct(0), ..) if *ps == *slot))
+                && matches!(&**r, Expr::Field(_, f2, t2) if f2 == "y" && *t2 == Type::Int)
+                && *frees == vec![(*slot, Type::Struct(0))]
+                && *scope_frees == vec![(*slot, Type::Struct(0))]));
+        parser.names.remove("p");
+
+        parser.seek_scalar_offset(source.find("{ let g = Guard { id: 1").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none(), "drop-carrying constructions stay typed");
+        parser.names.remove("g");
 
         for prefix in [
             "choose[",
