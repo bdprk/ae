@@ -427,8 +427,13 @@ document version) and answers hover from the occurrence under the cursor -
 functions render parameter/return spellings with named defs as item names,
 structs render fields, bindings render inferred types; definition jumps to
 the def's name range. Imported defs (other-file ranges) and
-builtin/prelude names fall back to the existing text heuristics. Rename and
-completion still match text - they are R3d's next slices.
+builtin/prelude names fall back to the existing text heuristics. Rename is
+scope-exact through the def table (the def's name range plus every
+occurrence targeting it; documents the shared parse rejects fall back to
+text). Completion still matches text - it is R3d's next slice. Note: the
+shared module parse requires `-> Ret` on non-main functions (the
+language's own rule), so documents with bare `fn a() { ... }` have no
+resolution and fall back.
 
 ## Resolved unsafe blocks (2026-11-22)
 
