@@ -355,4 +355,11 @@ the existing typed path.
 
 Local array declarations and index reads use resolved binding identities in
 the body route. Element and index type checks retain their source spans.
-Indexed stores and array parameters remain on the typed token route.
+
+## Resolved array element stores (2026-11-22)
+
+`a[i] = v` on a resolved local array lowers through the body route as
+`Statement::Store`, with the typed route's checks mirrored: the binding must
+be mutable (E0103), the index and the element must be i64 (E0201 for the
+index). Compound operators (`+=`) stay on the typed route, which rejects
+them for arrays. Array parameters remain on the typed token route.

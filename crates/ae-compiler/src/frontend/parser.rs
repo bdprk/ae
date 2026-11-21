@@ -77,11 +77,27 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     _ => scalar_body_expression(initializer, resolved, supports_call),
                 }
         }
-        StatementKind::Assign { target, value, .. } => {
-            matches!(target.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.scalar_writes.get(&target.range.start)
-                    .is_some_and(|id| !resolved.array_definitions.contains(id))
-                && scalar_body_expression(value, resolved, supports_call)
+        StatementKind::Assign { target, operator, value } => {
+            match &target.kind {
+                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
+                    resolved.scalar_writes.get(&target.range.start)
+                        .is_some_and(|id| !resolved.array_definitions.contains(id))
+                        && scalar_body_expression(value, resolved, supports_call)
+                }
+                // `a[i] = v` stores through a resolved array binding. Only
+                // the plain operator: a compound store stays on the typed
+                // route, which rejects it for arrays.
+                ae_syntax::expression::ExpressionKind::Index { base, index }
+                    if *operator == Kind::Equal =>
+                {
+                    matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                        && resolved.scalar_writes.get(&base.range.start)
+                            .is_some_and(|id| resolved.array_definitions.contains(id))
+                        && scalar_body_expression(index, resolved, supports_call)
+                        && scalar_body_expression(value, resolved, supports_call)
+                }
+                _ => false,
+            }
         }
         StatementKind::Return(value) | StatementKind::Print(value) | StatementKind::Assert(value) => {
             scalar_body_expression(value, resolved, supports_call)
@@ -776,6 +792,40 @@ impl<'a> Parser<'a> {
                 statement
             }
             StatementKind::Assign { target, operator, value } => {
+                if let ae_syntax::expression::ExpressionKind::Index { base, index } = &target.kind {
+                    // An array element store (`a[i] = v`): eligibility
+                    // confirmed a resolved array binding and the plain
+                    // operator. The checks mirror the typed store: the
+                    // binding must be mutable (E0103), the index and the
+                    // element must be i64 (E0201 for the index).
+                    let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
+                        unreachable!("scalar store eligibility");
+                    };
+                    let def = self.resolved_expressions().scalar_writes[&base.range.start];
+                    let (slot, Type::Array(len)) = slots[&def] else {
+                        unreachable!("resolved array store");
+                    };
+                    if !self.names[name].1 {
+                        self.seek_scalar_offset(base.range.start);
+                        let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                        return Err(self.immutable_binding_error(diagnostic, slot));
+                    }
+                    self.seek_scalar_offset(base.range.end);
+                    let (line, column) = self.position();
+                    let (element_index, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                    if index_ty != Type::Int {
+                        self.seek_scalar_offset(index.range.end);
+                        return Err(self.fail("array index must be an integer").with_code("E0201"));
+                    }
+                    self.seek_scalar_offset(value.range.start);
+                    let (element, element_ty) = self.lower_scalar_body_expression(value, slots)?;
+                    if element_ty != Type::Int {
+                        self.seek_scalar_offset(value.range.end);
+                        return Err(self.fail("array elements must be i64"));
+                    }
+                    self.seek_scalar_offset(statement.range.end);
+                    return Ok(Statement::Store(slot, len, element_index, element, line, column));
+                }
                 let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
                     unreachable!("scalar assignment eligibility");
                 };
@@ -2691,7 +2741,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -2833,6 +2883,34 @@ mod tests {
         assert_eq!(error.code.as_deref(), Some("E0201"));
         assert_eq!(*parser.current(), Kind::RBracket);
         parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[1] = 9").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved array store").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Array(slot, values), Statement::Store(read, 2, store_index, element, ..), Statement::Return(Expr::Index(read_back, 2, back_index, ..), _)]
+            if slot == read && read == read_back && values.len() == 2
+                && matches!(store_index, Expr::Number(1)) && matches!(element, Expr::Number(9))
+                && matches!(**back_index, Expr::Number(1))));
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[false]").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved store index error").err().unwrap();
+        assert_eq!(error.code.as_deref(), Some("E0201"));
+        assert_eq!(*parser.current(), Kind::RBracket);
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ let a = [4, 5]; a[0] = 9").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved immutable store").err().unwrap();
+        assert_eq!(error.message, "cannot assign to immutable variable 'a'");
+        assert_eq!(error.secondary.len(), 1);
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] = false").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved store value error").err().unwrap();
+        assert_eq!(error.message, "array elements must be i64");
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] += 1").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none(), "compound store stays typed");
 
         for prefix in [
             "choose[",
