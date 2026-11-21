@@ -338,3 +338,9 @@ existing operand-end diagnostic. The next slice can widen body entry to main.
 Eligible main bodies now use the same resolved body entry as scalar
 functions. Main still rejects explicit return statements at the keyword.
 Direct scalar function calls are the next body-level expression slice.
+
+## Resolved scalar direct calls (2026-11-22)
+
+Scalar bodies now lower direct calls through resolved same-module function
+signatures. Arguments lower left to right. Calls with non-scalar or
+external signatures still use the typed token path.
