@@ -419,6 +419,17 @@ every declared field is scalar — malformed shapes and drop-carrying structs
 Local bindings of routed structs are field-read receivers, so `p.x` works
 on constructed values.
 
+## R3d started: hover and definition on the def table (2026-11-22)
+
+ADR-0229 slice 6's first slice: the language server resolves open documents
+lazily (lex + parse_module_tokens + resolve_with_tokens, cached per
+document version) and answers hover from the occurrence under the cursor -
+functions render parameter/return spellings with named defs as item names,
+structs render fields, bindings render inferred types; definition jumps to
+the def's name range. Imported defs (other-file ranges) and
+builtin/prelude names fall back to the existing text heuristics. Rename and
+completion still match text - they are R3d's next slices.
+
 ## Resolved unsafe blocks (2026-11-22)
 
 `unsafe { ... }` is a scoping container: the body route wraps the lowered
