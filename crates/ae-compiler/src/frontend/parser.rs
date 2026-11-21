@@ -745,12 +745,6 @@ impl<'a> Parser<'a> {
             let closure_statements = resolution.functions.iter()
                 .flat_map(|function| function.closure_bodies.iter())
                 .flat_map(|body| body.iter());
-            for function in &module.functions {
-                if function.declaration.name.contains("make_") {
-                    for (index, statement) in function.body.iter().flatten().enumerate() {
-                    }
-                }
-            }
             for statement in function_statements.chain(closure_statements) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
@@ -3376,7 +3370,7 @@ mod tests {
         let body = parser.lower_resolved_scalar_body().expect("resolved unsafe block").unwrap();
         assert!(matches!(body.as_slice(),
             [Statement::Unsafe(inner), Statement::Return(Expr::Number(2), frees)]
-            if matches!(inner.as_slice(), [Statement::Declare(slot, Expr::Number(1))])
+            if matches!(inner.as_slice(), [Statement::Declare(_slot, Expr::Number(1))])
                 && frees.is_empty()));
         parser.seek_scalar_offset(source.find("{ let q = Point { x: 7").unwrap());
         let error = parser.lower_resolved_scalar_body().expect("resolved loop move").err().unwrap();
