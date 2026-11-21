@@ -445,6 +445,15 @@ The InstaBox free plan suspended all five sandboxes mid-segment
 on wake; the interrupted segments left no completion lines, so the
 35-segment archive stands. Certificates renewed to 2026-11-23 04:33.
 Long-fuzz sessions should schedule idle gaps to avoid the throttle.
+The cooldown killed the supervisor chains outright (processes die, not
+pause). Recovery at 06:05: a per-box `~/segment_chain.sh` (1-hour segments,
+per-segment logs, a 10-minute idle gap between segments, seeds resuming at
+last-start + completed-count) relaunched with nohup; eva 448887,
+evaluate-1 585527, evaluate-2 694695, evaluate-3 791564, ai 848504, jobs 3
+(ai 2). **pgrep checks must use the `[x]` self-match-proof form** — the
+plain pattern matched the probe itself and reported phantom processes for
+two hours. Harvest completed segments by the same seed-arithmetic the
+chain uses.
 
 ## Resolved owned-aggregate calls (2026-11-22)
 
