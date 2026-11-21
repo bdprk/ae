@@ -162,7 +162,13 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 if (resolved.direct_calls.contains(&callee.range.start)
                     || resolved.unresolved_calls.contains(&callee.range.start))
                     && supports_call(name, callee.range.start))
-                && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call))
+                && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call)
+                    // An owned aggregate passed by value is a move, not a
+                    // value read: the ident eligibility excludes struct
+                    // slots, so the argument position re-admits them.
+                    || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(_))
+                        if resolved.scalar_reads.get(&argument.range.start)
+                            .is_some_and(|id| resolved.struct_definitions.contains(id))))
         }
         _ => false,
     }
@@ -923,7 +929,13 @@ impl<'a> Parser<'a> {
                     signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
-                    && scalar_type(signature.ret) && signature.params.iter().copied().all(scalar_type)
+                    && scalar_type(signature.ret)
+                    && signature.params.iter().copied().all(|ty| {
+                        // Owned-aggregate parameters join the route: the call
+                        // moves the argument, tracked in `moved`, and the
+                        // drops pass trims the Frees lists.
+                        scalar_type(ty) || matches!(ty, Type::Struct(_))
+                    })
             })
         };
         if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call)) {
@@ -1150,7 +1162,11 @@ impl<'a> Parser<'a> {
                 if self.loop_depth >= 64 {
                     return Err(self.fail("loop nesting limit exceeded (64)"));
                 }
-                Statement::While(condition, self.lower_scalar_loop_body(body, slots, None)?)
+                let base = self.scopes.len();
+                let moved_before = self.moved.clone();
+                let loop_body = self.lower_scalar_loop_body(body, slots, None)?;
+                self.close_loop_moves(base, moved_before, statement.range.start)?;
+                Statement::While(condition, loop_body)
             }
             StatementKind::Break | StatementKind::Continue => {
                 let is_break = matches!(statement.kind, StatementKind::Break);
@@ -1282,6 +1298,12 @@ impl<'a> Parser<'a> {
                     self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101")
                 })?;
                 self.seek_scalar_offset(expression.range.start);
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"),
+                        slot,
+                    )));
+                }
                 let (line, column) = self.position();
                 (Expr::Variable(slot, ty, line, column), ty)
             }
@@ -1308,7 +1330,7 @@ impl<'a> Parser<'a> {
                 (Expr::StructLit(sid, values.into_iter().collect::<Option<Vec<_>>>().expect("complete construction")), Type::Struct(sid))
             }
             ExpressionKind::Field { base, name } => {
-                if matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))) {
+                if let ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind {
                     // A struct parameter's scalar field read: the slot carries
                     // the struct type with its registry id, so the field type
                     // comes straight from the compiler's own table.
@@ -1319,6 +1341,12 @@ impl<'a> Parser<'a> {
                         _ => unreachable!("resolved struct binding"),
                     };
                     self.seek_scalar_offset(base.range.start);
+                    if self.moved.contains(&slot) {
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{base_name}' because it was moved")).with_code("E0102"),
+                            slot,
+                        )));
+                    }
                     let (line, column) = self.position();
                     let fty = self.field_ty_checked(sid, name)?;
                     (Expr::Field(Box::new(Expr::Variable(slot, struct_ty, line, column)), name.clone(), fty), fty)
@@ -1366,6 +1394,14 @@ impl<'a> Parser<'a> {
                     if actual != *expected {
                         self.seek_scalar_offset(argument.range.end);
                         return Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())));
+                    }
+                    // An owned aggregate passed by value moves: later uses
+                    // are rejected (E0102), and the drops pass trims the
+                    // Frees lists for this slot.
+                    if actual.owned() {
+                        if let Expr::Variable(slot, ..) = &value {
+                            self.moved.insert(*slot);
+                        }
                     }
                     args.push(Argument::Value(value));
                 }
@@ -3046,7 +3082,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -3057,6 +3093,10 @@ mod tests {
         let mut functions = SharedFunctions::default();
         functions.insert("compute".into(), Signature {
             id: 9, params: vec![Type::Int], ret: Type::Int, file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
+        functions.insert("consume_point".into(), Signature {
+            id: 12, params: vec![Type::Struct(0)], ret: Type::Int, file: "case.ae".into(),
             public: false, extern_c: false,
         });
         functions.insert("imported_scalar".into(), Signature {
@@ -3289,6 +3329,37 @@ mod tests {
         parser.seek_scalar_offset(source.find("{ let g = Guard { id: 1").unwrap());
         assert!(parser.lower_resolved_scalar_body().is_none(), "drop-carrying constructions stay typed");
         parser.names.remove("g");
+
+        parser.seek_scalar_offset(source.find("{ let q = Point { x: 3").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved owned-aggregate call").unwrap();
+        assert!(matches!(body.as_slice(),
+            [Statement::Declare(q, Expr::StructLit(0, values)),
+             Statement::Declare(r, Expr::Call(12, args, Type::Int)),
+             Statement::Return(.., frees),
+             Statement::Frees(scope_frees)]
+            if values.len() == 2
+                && matches!(args.as_slice(), [Argument::Value(Expr::Variable(qs, Type::Struct(0), ..))] if *qs == *q)
+                && *frees == vec![(*q, Type::Struct(0))]
+                && *scope_frees == vec![(*q, Type::Struct(0))]));
+        parser.names.remove("q");
+        parser.names.remove("r");
+
+        parser.seek_scalar_offset(source.find("{ let q = Point { x: 5").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved use after move").err().unwrap();
+        assert_eq!(error.message, "cannot use 'q' because it was moved");
+        parser.names.remove("q");
+        parser.names.remove("r");
+        parser.names.remove("s");
+
+        let b_offset = source.find("(b: bool)").unwrap() + 1;
+        parser.names.insert("b".into(), (5, false, Type::Bool));
+        parser.binding_ranges.insert(5, b_offset..b_offset + 1);
+        parser.seek_scalar_offset(source.find("{ let q = Point { x: 7").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved loop move").err().unwrap();
+        assert!(error.message.contains("cannot move 'q' inside a loop body"));
+        parser.names.remove("q");
+        parser.names.remove("r");
+        parser.names.remove("b");
 
         for prefix in [
             "choose[",
