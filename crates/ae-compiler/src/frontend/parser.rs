@@ -29,7 +29,14 @@ fn scalar_type(ty: Type) -> bool {
 fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool) -> bool {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
-        ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.contains_key(&expression.range.start),
+        ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.get(&expression.range.start)
+            .is_some_and(|id| !resolved.array_definitions.contains(id)),
+        ExpressionKind::Index { base, index } => {
+            matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.scalar_reads.get(&base.range.start)
+                    .is_some_and(|id| resolved.array_definitions.contains(id))
+                && scalar_body_expression(index, resolved, supports_call)
+        }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False) => true,
         ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
             scalar_body_expression(inner, resolved, supports_call)
@@ -64,11 +71,16 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
     match &statement.kind {
         StatementKind::Binding { name_range, initializer, .. } => {
             resolved.scalar_definitions.contains_key(&name_range.start)
-                && scalar_body_expression(initializer, resolved, supports_call)
+                && match &initializer.kind {
+                    ae_syntax::expression::ExpressionKind::Array(elements) => elements.iter()
+                        .all(|element| scalar_body_expression(element, resolved, supports_call)),
+                    _ => scalar_body_expression(initializer, resolved, supports_call),
+                }
         }
         StatementKind::Assign { target, value, .. } => {
             matches!(target.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.scalar_writes.contains_key(&target.range.start)
+                && resolved.scalar_writes.get(&target.range.start)
+                    .is_some_and(|id| !resolved.array_definitions.contains(id))
                 && scalar_body_expression(value, resolved, supports_call)
         }
         StatementKind::Return(value) | StatementKind::Print(value) | StatementKind::Assert(value) => {
@@ -562,6 +574,9 @@ impl<'a> Parser<'a> {
             expressions.closure_headers.extend(resolution.functions.iter().flat_map(|function| {
                 function.closure_headers.iter().map(|(&offset, header)| (offset, header.clone()))
             }));
+            expressions.scalar_definitions.extend(resolution.defs.iter()
+                .filter(|definition| definition.kind.is_local())
+                .map(|definition| (definition.range.start, definition.id)));
             let function_statements = module.functions.iter()
                 .filter_map(|function| function.body.as_ref()).flatten();
             let closure_statements = resolution.functions.iter()
@@ -570,6 +585,13 @@ impl<'a> Parser<'a> {
             for statement in function_statements.chain(closure_statements) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
+                    if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
+                        if matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Array(_)) {
+                            if let Some(def) = expressions.scalar_definitions.get(&name_range.start) {
+                                expressions.array_definitions.insert(*def);
+                            }
+                        }
+                    }
                     let kind = match &statement.kind {
                         StatementKind::Binding { name_range, mutable, .. } => Some(IndexedStatement::Binding {
                             name_start: name_range.start,
@@ -614,9 +636,6 @@ impl<'a> Parser<'a> {
                     }
                 });
             }
-            expressions.scalar_definitions.extend(resolution.defs.iter()
-                .filter(|definition| definition.kind.is_local())
-                .map(|definition| (definition.range.start, definition.id)));
             for function in module.functions {
                 if function.impl_owner.is_some() || !function.declaration.type_parameters.is_empty() {
                     continue;
@@ -724,14 +743,37 @@ impl<'a> Parser<'a> {
                 if self.names.contains_key(name) {
                     return Err(self.duplicate_binding_error(name));
                 }
-                let (value, ty) = self.lower_scalar_body_expression(initializer, slots)?;
                 let slot = self.next_var;
                 self.next_var += 1;
+                let (statement, ty) = if let ae_syntax::expression::ExpressionKind::Array(elements) = &initializer.kind {
+                    if elements.is_empty() {
+                        self.seek_scalar_offset(initializer.range.start);
+                        self.pos += 1;
+                        return Err(self.fail("array must contain at least one element"));
+                    }
+                    let mut values = Vec::with_capacity(elements.len());
+                    for (index, element) in elements.iter().enumerate() {
+                        if index == 4096 {
+                            self.seek_scalar_offset(element.range.start);
+                            return Err(self.fail("array element limit exceeded (4096)"));
+                        }
+                        let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
+                        if ty != Type::Int {
+                            self.seek_scalar_offset(element.range.end);
+                            return Err(self.fail("array elements must be i64"));
+                        }
+                        values.push(value);
+                    }
+                    (Statement::Array(slot, values), Type::Array(elements.len()))
+                } else {
+                    let (value, ty) = self.lower_scalar_body_expression(initializer, slots)?;
+                    (Statement::Declare(slot, value), ty)
+                };
                 let def = self.resolved_expressions().scalar_definitions[&name_range.start];
                 slots.insert(def, (slot, ty));
                 self.names.insert(name.clone(), (slot, *mutable, ty));
                 self.binding_ranges.insert(slot, name_range.clone());
-                Statement::Declare(slot, value)
+                statement
             }
             StatementKind::Assign { target, operator, value } => {
                 let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
@@ -977,6 +1019,20 @@ impl<'a> Parser<'a> {
                     return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", signature.params.len(), args.len())));
                 }
                 (Expr::Call(signature.id, args, signature.ret), signature.ret)
+            }
+            ExpressionKind::Index { base, index } => {
+                let def = self.resolved_expressions().scalar_reads[&base.range.start];
+                let (slot, Type::Array(len)) = slots[&def] else {
+                    unreachable!("resolved array binding");
+                };
+                self.seek_scalar_offset(base.range.end);
+                let (line, column) = self.position();
+                let (value, ty) = self.lower_scalar_body_expression(index, slots)?;
+                if ty != Type::Int {
+                    self.seek_scalar_offset(index.range.end);
+                    return Err(self.fail("array index must be an integer").with_code("E0201"));
+                }
+                (Expr::Index(slot, len, Box::new(value), line, column), Type::Int)
             }
             _ => unreachable!("scalar expression eligibility"),
         })
@@ -2635,7 +2691,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -2767,6 +2823,16 @@ mod tests {
         assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(10, _, Type::Int), _)]));
         parser.seek_scalar_offset(source.find("{ return imported_private").unwrap());
         assert!(parser.lower_resolved_scalar_body().is_none());
+
+        parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[1]").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved local array").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Array(slot, values), Statement::Return(Expr::Index(read, 2, index, ..), _)]
+            if slot == read && values.len() == 2 && matches!(**index, Expr::Number(1))));
+        parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[false]").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved array error").err().unwrap();
+        assert_eq!(error.code.as_deref(), Some("E0201"));
+        assert_eq!(*parser.current(), Kind::RBracket);
+        parser.names.remove("a");
 
         for prefix in [
             "choose[",

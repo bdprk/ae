@@ -691,6 +691,7 @@ struct ResolvedExpressions {
     scalar_definitions: HashMap<usize, ae_resolve::DefId>,
     scalar_reads: HashMap<usize, ae_resolve::DefId>,
     scalar_writes: HashMap<usize, ae_resolve::DefId>,
+    array_definitions: HashSet<ae_resolve::DefId>,
 }
 
 struct Parser<'a> { file: String, source: &'a str, tokens: Rc<Vec<Token>>, shared_source: Rc<str>, pos: usize, names: HashMap<String, (usize, bool, Type)>, binding_ranges: HashMap<usize, std::ops::Range<usize>>, resolved_expressions: Rc<OnceCell<ResolvedExpressions>>, next_var: usize, expression_depth: usize, expression_nodes: usize, block_depth: usize, loop_depth: usize, loop_scopes: Vec<usize>, loop_labels: Vec<Option<usize>>, next_label: usize, unsafe_depth: usize, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, id_order: Vec<usize>, in_main: bool, return_type: Type, moved: std::collections::HashSet<usize>, borrows: Vec<(usize, usize, BorrowKind)>, deferred_write_conflicts: Vec<(usize, usize, String, &'static str, Option<String>)>, deferred_borrow_spawns: Vec<(usize, Vec<usize>, usize)>, call_borrows: Vec<(usize, usize)>, mut_borrows: Vec<(usize, usize)>, plus_operand_depth: usize, scopes: Vec<Vec<(usize, Type)>>, subst: HashMap<String, Type>, trait_bounds: HashMap<String, Vec<usize>>, receiver: Option<Type>, impl_self: Option<Type>, shadow_ok: bool, pending: Vec<Function> }

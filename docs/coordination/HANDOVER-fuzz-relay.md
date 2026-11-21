@@ -350,3 +350,9 @@ external signatures still use the typed token path.
 The scalar body route uses loaded public signatures to complete call names
 left open by file-local resolution. Private functions and FFI calls retain
 the existing typed path.
+
+## Resolved local arrays (2026-11-22)
+
+Local array declarations and index reads use resolved binding identities in
+the body route. Element and index type checks retain their source spans.
+Indexed stores and array parameters remain on the typed token route.
