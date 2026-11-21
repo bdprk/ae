@@ -26,11 +26,91 @@ fn scalar_type(ty: Type) -> bool {
     matches!(ty, Type::Int | Type::F64 | Type::Bool)
 }
 
+/// The compiler type of a struct slot's field: the slot's inferred spelling
+/// names a file-local struct item, whose registry entry supplies the field's
+/// type. Generic instances and imported structs have no registry entry here
+/// and stay on the typed route.
+fn struct_param_field_ty(
+    def: &ae_resolve::DefId,
+    field: &str,
+    resolution: &ae_resolve::resolve::Resolution,
+    struct_names: &HashMap<String, usize>,
+    structs: &[StructDef],
+) -> Option<Type> {
+    let entry = resolution.defs.get(def.0 as usize)?;
+    let item = definition_struct_item(entry)?;
+    let item_entry = resolution.defs.get(item.0 as usize)?;
+    if item_entry.kind != ae_resolve::DefKind::Struct {
+        return None;
+    }
+    let sid = *struct_names.get(&item_entry.name)?;
+    let defn = structs.get(sid)?;
+    defn.fields.iter().find(|(name, _)| name == field).map(|(_, ty)| *ty)
+}
+
+/// The struct item a borrowed-struct spelling names. Only an immutable
+/// borrow qualifies: by-value and `&mut` receivers carry ownership effects
+/// (moves, drop at scope exit) that stay on the typed route.
+fn definition_struct_item(entry: &ae_resolve::DefEntry) -> Option<ae_resolve::DefId> {
+    match &entry.inferred {
+        Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }) => match inner.as_ref() {
+            ae_resolve::TypeSpelling::Named { def } => Some(*def),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Every expression in the tree rooted at `expression`. `statement.expressions()`
+/// and `visit_expressions` stop at the statement's top-level values; the body
+/// route's checks need the nested ones too. Closure bodies stay opaque (the
+/// compiler owns capture inference), so their contents are not visited.
+fn visit_expression_tree(expression: &ae_syntax::expression::Expression, visit: &mut impl FnMut(&ae_syntax::expression::Expression)) {
+    use ae_syntax::expression::ExpressionKind;
+    visit(expression);
+    match &expression.kind {
+        ExpressionKind::Group(inner) | ExpressionKind::Propagate(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
+            visit_expression_tree(inner, visit);
+        }
+        ExpressionKind::PointerCast { base, .. } => visit_expression_tree(base, visit),
+        ExpressionKind::Binary { left, right, .. } => {
+            visit_expression_tree(left, visit);
+            visit_expression_tree(right, visit);
+        }
+        ExpressionKind::Array(elements) | ExpressionKind::Vector(elements) => {
+            elements.iter().for_each(|element| visit_expression_tree(element, visit));
+        }
+        ExpressionKind::Struct { target, fields } => {
+            visit_expression_tree(target, visit);
+            fields.iter().for_each(|field| visit_expression_tree(&field.value, visit));
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            visit_expression_tree(callee, visit);
+            arguments.iter().for_each(|argument| visit_expression_tree(argument, visit));
+        }
+        ExpressionKind::Index { base, index } => {
+            visit_expression_tree(base, visit);
+            visit_expression_tree(index, visit);
+        }
+        ExpressionKind::Field { base, .. } | ExpressionKind::Specialization { base, .. }
+        | ExpressionKind::BracketedCallTarget { base, .. } | ExpressionKind::Qualified { base, .. } => {
+            visit_expression_tree(base, visit);
+        }
+        _ => {}
+    }
+}
+
 fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool) -> bool {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
         ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.get(&expression.range.start)
-            .is_some_and(|id| !resolved.array_definitions.contains(id)),
+            .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)),
+        // A struct parameter's field read: marked eligible at collection
+        // time with the field's registry type (scalar fields only).
+        ExpressionKind::Field { base, .. } => {
+            matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.struct_field_reads.contains(&expression.range.start)
+        }
         ExpressionKind::Index { base, index } => {
             matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.scalar_reads.get(&base.range.start)
@@ -593,6 +673,21 @@ impl<'a> Parser<'a> {
             expressions.scalar_definitions.extend(resolution.defs.iter()
                 .filter(|definition| definition.kind.is_local())
                 .map(|definition| (definition.range.start, definition.id)));
+            // Struct parameters (file-local, non-generic) are field-read
+            // receivers for the body route: the resolver's inferred spelling
+            // names the struct item, and the compiler's registry supplies
+            // field types for the read checks. Marked before the statement
+            // walk, whose field-read checks consult this set.
+            for definition in resolution.defs.iter().filter(|entry| entry.kind == ae_resolve::DefKind::Parameter) {
+                let names_struct = definition_struct_item(definition)
+                    .and_then(|item| resolution.defs.get(item.0 as usize))
+                    .is_some_and(|item| {
+                        item.kind == ae_resolve::DefKind::Struct && self.struct_names.contains_key(&item.name)
+                    });
+                if names_struct {
+                    expressions.struct_definitions.insert(definition.id);
+                }
+            }
             let function_statements = module.functions.iter()
                 .filter_map(|function| function.body.as_ref()).flatten();
             let closure_statements = resolution.functions.iter()
@@ -641,8 +736,27 @@ impl<'a> Parser<'a> {
                             expressions.match_patterns.insert(arm.pattern.range.start, arm.pattern.clone());
                         }
                     }
-                    for expression in statement.expressions() {
-                        expressions.values.insert(expression.range.start, Rc::new(expression.clone()));
+                    for top_level in statement.expressions() {
+                        expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
+                        visit_expression_tree(top_level, &mut |expression| {
+                            // A scalar field read on a struct parameter joins the
+                            // body route: the base must resolve to a marked
+                            // struct definition and the field must carry a scalar
+                            // type in the compiler's registry.
+                            if let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind {
+                                if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) = &base.kind {
+                                    if let Some(def) = expressions.scalar_reads.get(&base.range.start) {
+                                        if expressions.struct_definitions.contains(def) {
+                                            if let Some(field_ty) = struct_param_field_ty(def, name, &resolution, self.struct_names, self.structs) {
+                                                if scalar_type(field_ty) {
+                                                    expressions.struct_field_reads.insert(expression.range.start);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
                     if let ae_syntax::statement::StatementKind::Assign { target, .. } = &statement.kind {
                         if let ae_syntax::expression::ExpressionKind::Index { index, .. } = &target.kind {
@@ -710,12 +824,17 @@ impl<'a> Parser<'a> {
         // Array parameters are borrowed views (`&[i64; N]` is the only array
         // parameter form, and `Type::Array` bakes the borrow in): their
         // element reads and stores flow through the same arms as local
-        // arrays. Borrows of the array itself (`&a`) stay typed — a borrow
-        // occurrence never lands in `scalar_reads` — and so do calls to
-        // array-taking functions, which `supports_call` excludes.
+        // arrays. File-local struct parameters join as immutable borrowed
+        // field-read receivers only — by-value and `&mut` structs carry
+        // ownership effects (moves, drop at scope exit) that stay typed.
+        // Borrows of aggregates themselves (`&a`, `&p`) stay typed too — a
+        // borrow occurrence never lands in `scalar_reads` — and so do calls
+        // to aggregate-taking functions, which `supports_call` excludes.
         if !self.subst.is_empty() || self.receiver.is_some()
             || !scalar_type(self.return_type)
-            || !self.names.values().all(|&(_, _, ty)| scalar_type(ty) || matches!(ty, Type::Array(_)))
+            || !self.names.values().all(|&(_, _, ty)| {
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_))
+            })
         {
             return None;
         }
@@ -1061,6 +1180,26 @@ impl<'a> Parser<'a> {
                 (Expr::Variable(slot, ty, line, column), ty)
             }
             ExpressionKind::Group(inner) => self.lower_scalar_body_expression(inner, slots)?,
+            ExpressionKind::Field { base, name } => {
+                // A struct parameter's scalar field read: the slot carries
+                // the struct type with its registry id, so the field type
+                // comes straight from the compiler's own table.
+                let def = self.resolved_expressions().scalar_reads[&base.range.start];
+                let (slot, struct_ty) = slots[&def];
+                let sid = match struct_ty {
+                    Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                    _ => unreachable!("resolved struct binding"),
+                };
+                self.seek_scalar_offset(base.range.start);
+                let (line, column) = self.position();
+                let fty = {
+                    let defn = &self.structs[sid];
+                    let fidx = defn.fields.iter().position(|(n, _)| n == name)
+                        .ok_or_else(|| self.fail(&format!("struct '{}' has no field '{}'", defn.name, name)))?;
+                    defn.fields[fidx].1
+                };
+                (Expr::Field(Box::new(Expr::Variable(slot, struct_ty, line, column)), name.clone(), fty), fty)
+            }
             ExpressionKind::Prefix { operator, operand } => {
                 self.seek_scalar_offset(expression.range.start);
                 let position = self.position();
@@ -2773,7 +2912,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "struct Point { x: i64, y: i64 } struct Holder { ready: bool, text: string } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -2795,7 +2934,11 @@ mod tests {
             public: false, extern_c: false,
         });
         let mut structs = Vec::new();
+        structs.push(StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
+        structs.push(StructDef { name: "Holder".into(), fields: vec![("ready".into(), Type::Bool), ("text".into(), Type::String)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
         let mut struct_names = HashMap::new();
+        struct_names.insert("Point".into(), 0);
+        struct_names.insert("Holder".into(), 1);
         let mut enums = Vec::new();
         let mut enum_names = HashMap::new();
         let mut generics = Generics::default();
@@ -2958,6 +3101,24 @@ mod tests {
         assert_eq!(error.message, "cannot assign to immutable variable 'a'");
         assert_eq!(error.secondary.len(), 1);
         parser.names.remove("a");
+
+        let p_offset = source.find("(p: &Point)").unwrap() + 1;
+        parser.names.insert("p".into(), (0, false, Type::StructRef(0)));
+        parser.binding_ranges.insert(0, p_offset..p_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return p.x").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved field reads").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Binary(lhs, Kind::Plus, rhs, ..), _)]
+            if matches!(&**lhs, Expr::Field(base, fname, fty)
+                if matches!(&**base, Expr::Variable(0, Type::StructRef(0), ..)) && fname == "x" && *fty == Type::Int)
+                && matches!(&**rhs, Expr::Field(_, fname, fty) if fname == "y" && *fty == Type::Int)));
+        parser.names.remove("p");
+
+        let h_offset = source.find("(h: &Holder)").unwrap() + 1;
+        parser.names.insert("h".into(), (0, false, Type::StructRef(1)));
+        parser.binding_ranges.insert(0, h_offset..h_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return h.text").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar field reads stay typed");
+        parser.names.remove("h");
 
         for prefix in [
             "choose[",

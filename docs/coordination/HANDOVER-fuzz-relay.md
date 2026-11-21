@@ -376,3 +376,17 @@ parameter are rejected with the typed route's exact E0103 diagnostic. Borrows
 of the array (`&a`) and calls to array-taking functions stay typed: a borrow
 occurrence never lands in `scalar_reads`, and `supports_call` excludes
 non-scalar signatures.
+
+## Resolved struct field reads (2026-11-22)
+
+Field reads on file-local struct parameters join the body route
+(ADR-0230's aggregate-access step, first slice). Only immutable borrowed
+parameters (`&Point`) qualify: by-value and `&mut` structs carry ownership
+effects — moves and drop at scope exit — that stay typed (the
+`user_defined_drop` execution test pins this). The resolver's inferred
+spelling names the struct item, the compiler's registry supplies field
+types, and only scalar fields (i64/bool/f64) mark a read eligible. Nested
+expressions are reached by a local deep walker (`visit_expression_tree`),
+because `statement.expressions()` stops at top-level values. Field stores,
+generic instances, imported structs, method calls and whole-value reads of
+the struct stay typed.
