@@ -175,12 +175,12 @@ fn lsp_preserves_compiler_code_and_full_span_after_a_surrogate_pair() {
 #[test]
 fn lsp_hover_renders_signature_from_the_def_table() {
     let mut server = LspServer::new();
-    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn area(p: &Point) -> i64 { return p.x; }\nfn main() {\n    let s = area(&Point { x: 1, y: 2 });\n}"}}}"#;
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn area(p: &Point) -> i64 { return p.x; }\nfn main() {\n    let pt = Point { x: 1, y: 2 };\n    let s = area(&pt);\n}"}}}"#;
     server.handle_message(open);
 
     // The cursor sits on `area` inside the call; the def table names the
     // function and renders its parameter and return spellings.
-    let hover_req = r#"{"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":3,"character":14}}}"#;
+    let hover_req = r#"{"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":4,"character":13}}}"#;
     let resps = server.handle_message(hover_req);
     let val = JsonValue::parse(&resps[0]).unwrap();
     let hover = val.get("result").and_then(|r| r.get("contents")).and_then(|c| c.get("value")).and_then(|v| v.as_str()).unwrap();
@@ -233,4 +233,26 @@ fn lsp_rename_is_scope_exact_via_the_def_table() {
     assert_eq!(edits.len(), 2, "scope-exact rename moved {edits:?}");
     let lines: Vec<i64> = edits.iter().filter_map(|e| e.get("range").and_then(|r| r.get("start")).and_then(|s| s.get("line")).and_then(|l| l.as_i64())).collect();
     assert!(lines.iter().all(|line| *line == 0), "edits leaked into fn b: {lines:?}");
+}
+
+#[test]
+fn lsp_completion_includes_file_defs_from_the_def_table() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn area(p: &Point) -> i64 { return p.x; }\nfn main() {\n    let width = 3;\n    \n}"}}}"#;
+    server.handle_message(open);
+
+    // Completion on the empty line inside main: the file's own defs join
+    // the candidates with their declared shapes.
+    let comp_req = r#"{"jsonrpc":"2.0","id":10,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":4,"character":4}}}"#;
+    let resps = server.handle_message(comp_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let entries: Vec<(String, String)> = items.iter().filter_map(|i| {
+        let label = i.get("label").and_then(|l| l.as_str())?.to_owned();
+        let detail = i.get("detail").and_then(|d| d.as_str()).unwrap_or("").to_owned();
+        Some((label, detail))
+    }).collect();
+    assert!(entries.iter().any(|(label, detail)| label == "area" && detail.contains("fn area(p: &Point) -> i64")), "entries: {entries:?}");
+    assert!(entries.iter().any(|(label, detail)| label == "Point" && detail.contains("struct")), "entries: {entries:?}");
+    assert!(entries.iter().any(|(label, detail)| label == "width" && detail.contains("i64")), "entries: {entries:?}");
 }

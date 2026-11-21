@@ -692,7 +692,7 @@ impl LspServer {
                 }
                 let mut returns = String::new();
                 if let Some(entry) = resolution.spellings.iter().find(|entry| {
-                    entry.owner == def.id && entry.name == "return"
+                    entry.owner == def.id && entry.role == ae_resolve::SpellingRole::Return
                 }) {
                     returns = format!(" -> {}", describe(&entry.spelled.spelling));
                 }
@@ -850,6 +850,48 @@ impl LspServer {
         ];
         for (name, kind, detail) in builtins {
             out.push((name.to_owned(), kind, Some(detail.to_owned())));
+        }
+
+        // R3d: the file's own defs join the candidates — functions and
+        // structs with their declared shapes, bindings with their inferred
+        // types. Scope-exact completion (live bindings only at the cursor)
+        // needs live-range computation and stays a later slice.
+        if let Some(resolution) = doc.resolution() {
+            for def in &resolution.defs {
+                if def.imported {
+                    continue;
+                }
+                let (kind, detail) = match def.kind {
+                    ae_resolve::DefKind::Function => {
+                        let mut params = String::new();
+                        for entry in resolution.defs.iter().filter(|entry| {
+                            entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
+                        }) {
+                            if !params.is_empty() { params.push_str(", "); }
+                            let ty = entry.inferred.as_ref()
+                                .map(|shape| describe_spelling(shape, resolution))
+                                .unwrap_or_else(|| "deferred".to_owned());
+                            params.push_str(&format!("{}: {}", entry.name, ty));
+                        }
+                        let mut returns = String::new();
+                        if let Some(entry) = resolution.spellings.iter().find(|entry| {
+                            entry.owner == def.id && entry.role == ae_resolve::SpellingRole::Return
+                        }) {
+                            returns = format!(" -> {}", describe_spelling(&entry.spelled.spelling, resolution));
+                        }
+                        (3, format!("fn {}({params}){returns}", def.name))
+                    }
+                    ae_resolve::DefKind::Struct => (7, format!("struct {}", def.name)),
+                    ae_resolve::DefKind::Binding | ae_resolve::DefKind::ForBinding | ae_resolve::DefKind::PatternBinding => {
+                        let ty = def.inferred.as_ref()
+                            .map(|shape| describe_spelling(shape, resolution))
+                            .unwrap_or_else(|| "deferred".to_owned());
+                        (6, format!("{}: {ty}", def.name))
+                    }
+                    _ => continue,
+                };
+                out.push((def.name.clone(), kind, Some(detail)));
+            }
         }
 
         let keywords = ["fn", "let", "var", "if", "else", "while", "return", "struct", "enum", "impl", "use", "pub", "true", "false"];
