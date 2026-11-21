@@ -1,8 +1,18 @@
 # ADR-0230: Lower resolved function bodies into the existing typed frontend
 
-- Status: Proposed
+- Status: Accepted — the first ladder rungs are landed (see below)
 - Date: 2026-11-22
 - Associated Milestones: R3c, M0.2.08
+
+**Landed (2026-11-22, dual-platform green per slice):** scalar bodies,
+conditionals, while loops, assignments, output statements, entry bodies,
+direct and imported calls, local arrays (declarations, reads, stores,
+parameters), drop-free struct constructions with the ownership bookkeeping
+(scopes, Frees, live_owned Returns, loop-local releases), struct field
+reads including nested chains, owned-aggregate calls with move tracking
+(E0102, close_loop_moves), and unsafe containers. The remaining rungs are
+generic and closure bodies — the recorded design boundary, reusing the
+compiler's instance and capture machinery as those bodies move.
 
 ## Context
 
