@@ -211,6 +211,17 @@ values, compound RHS, return, pointer stores), reads (locals incl.
 copy-semantics handles, map keys, array/vec indices, assert/print
 arguments, field-store keys). All dual-platform 484/0 with byte parity.
 
+**Body-route ladder status (2026-11-22 05:20, relay night):** the resolved
+scalar body route now owns complete bodies with scalar/bindable locals,
+arrays (declarations, reads, stores, parameters), drop-free struct
+constructions with ownership bookkeeping (scopes, Frees, live_owned
+Returns, loop-local releases), struct field reads incl. nested chains,
+calls consuming owned aggregates (move tracking with E0102 and
+close_loop_moves), and unsafe containers — 18 dual-platform slices since
+`2a55df9`. The ladder's next step is the recorded design boundary: generic
+and closure bodies (capture inference, instance machinery), then old-parser
+removal once the corpus no longer depends on it.
+
 **The single remaining site is by design:** the `spawn` callable
 parameter (parser.rs:196). It needs `Expr::ClosureLit(cid)` with capture
 inference from the compiler's `generics.closures` machinery; the shared
