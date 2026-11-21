@@ -389,4 +389,15 @@ types, and only scalar fields (i64/bool/f64) mark a read eligible. Nested
 expressions are reached by a local deep walker (`visit_expression_tree`),
 because `statement.expressions()` stops at top-level values. Field stores,
 generic instances, imported structs, method calls and whole-value reads of
-the struct stay typed.
+the struct stay typed. Nested chains (`o.inner.x`) lower recursively:
+struct-typed intermediates are chain-only receivers (a chain set distinct
+from the scalar reads), and the owner struct comes from the declared type
+of the field it reads.
+
+## Fleet cooldown (2026-11-22 02:30-04:30)
+
+The InstaBox free plan suspended all five sandboxes mid-segment
+("administratively prohibited ... wake again at ..."). Supervisors resumed
+on wake; the interrupted segments left no completion lines, so the
+35-segment archive stands. Certificates renewed to 2026-11-23 04:33.
+Long-fuzz sessions should schedule idle gaps to avoid the throttle.
