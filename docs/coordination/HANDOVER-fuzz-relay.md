@@ -344,3 +344,9 @@ Direct scalar function calls are the next body-level expression slice.
 Scalar bodies now lower direct calls through resolved same-module function
 signatures. Arguments lower left to right. Calls with non-scalar or
 external signatures still use the typed token path.
+
+## Resolved cross-module scalar calls (2026-11-22)
+
+The scalar body route uses loaded public signatures to complete call names
+left open by file-local resolution. Private functions and FFI calls retain
+the existing typed path.

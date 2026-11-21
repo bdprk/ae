@@ -26,7 +26,7 @@ fn scalar_type(ty: Type) -> bool {
     matches!(ty, Type::Int | Type::F64 | Type::Bool)
 }
 
-fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str) -> bool) -> bool {
+fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool) -> bool {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
         ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.contains_key(&expression.range.start),
@@ -39,7 +39,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         }
         ExpressionKind::Call { callee, arguments } => {
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
-                if resolved.direct_calls.contains(&callee.range.start) && supports_call(name))
+                if (resolved.direct_calls.contains(&callee.range.start)
+                    || resolved.unresolved_calls.contains(&callee.range.start))
+                    && supports_call(name, callee.range.start))
                 && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call))
         }
         _ => false,
@@ -57,7 +59,7 @@ fn compound_assignment_operator(operator: &Kind) -> Option<Kind> {
     }
 }
 
-fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str) -> bool) -> bool {
+fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool) -> bool {
     use ae_syntax::statement::{ElseBranch, StatementKind};
     match &statement.kind {
         StatementKind::Binding { name_range, initializer, .. } => {
@@ -520,6 +522,9 @@ impl<'a> Parser<'a> {
             let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], &self.tokens);
             for occurrence in resolution.functions.iter().flat_map(|function| &function.occurrences) {
                 let Some(definition) = occurrence.target.and_then(|id| resolution.defs.get(id.0 as usize)) else {
+                    if occurrence.role == ae_resolve::Role::Call {
+                        expressions.unresolved_calls.insert(occurrence.range.start);
+                    }
                     continue;
                 };
                 match occurrence.role {
@@ -619,7 +624,7 @@ impl<'a> Parser<'a> {
                 let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
                     continue;
                 };
-                if body.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_| true)) {
+                if body.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true)) {
                     expressions.scalar_bodies.insert(range.start, body.into());
                 }
             }
@@ -649,9 +654,16 @@ impl<'a> Parser<'a> {
         }
         let resolved = self.resolved_expressions();
         let body = resolved.scalar_bodies.get(&self.tokens[self.pos].offset)?.clone();
-        let supports_call = |name: &str| {
+        let supports_call = |name: &str, offset: usize| {
             !RESERVED.contains(&name) && self.functions.get(name).is_some_and(|signature| {
-                signature.file == self.file && !signature.extern_c && !is_unsafe_fn(signature.id)
+                // File-local resolution leaves imports open. The compiler's
+                // registry already contains the signatures of loaded modules.
+                let visible = if signature.file == self.file {
+                    resolved.direct_calls.contains(&offset)
+                } else {
+                    signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
+                };
+                visible && !signature.extern_c && !is_unsafe_fn(signature.id)
                     && scalar_type(signature.ret) && signature.params.iter().copied().all(scalar_type)
             })
         };
@@ -2623,7 +2635,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -2634,6 +2646,14 @@ mod tests {
         let mut functions = SharedFunctions::default();
         functions.insert("compute".into(), Signature {
             id: 9, params: vec![Type::Int], ret: Type::Int, file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
+        functions.insert("imported_scalar".into(), Signature {
+            id: 10, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
+            public: true, extern_c: false,
+        });
+        functions.insert("imported_private".into(), Signature {
+            id: 11, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
             public: false, extern_c: false,
         });
         let mut structs = Vec::new();
@@ -2741,6 +2761,12 @@ mod tests {
         let error = parser.lower_resolved_scalar_body().expect("resolved call error").err().unwrap();
         assert_eq!(error.message, "argument 1 to 'compute' must be i64");
         assert_eq!(*parser.current(), Kind::RParen);
+
+        parser.seek_scalar_offset(source.find("{ return imported_scalar").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved cross-module call").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(10, _, Type::Int), _)]));
+        parser.seek_scalar_offset(source.find("{ return imported_private").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none());
 
         for prefix in [
             "choose[",

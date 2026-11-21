@@ -677,6 +677,7 @@ enum IndexedStatement {
 struct ResolvedExpressions {
     local_bindings: HashMap<usize, std::ops::Range<usize>>,
     direct_calls: HashSet<usize>,
+    unresolved_calls: HashSet<usize>,
     specialization_arguments: HashMap<usize, std::sync::Arc<[std::ops::Range<usize>]>>,
     struct_constructors: HashSet<usize>,
     enum_variants: HashSet<usize>,
