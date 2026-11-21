@@ -652,6 +652,30 @@ impl<'a> Parser<'a> {
                     }
                 });
             }
+            // Array parameters are arrays for the body route too: an array
+            // type spelling starts with `[` (after the borrow amp), where
+            // vec/map/composite spellings start with an identifier. The
+            // resolver keeps the pointee opaque (`& unknown`), so the spelled
+            // tokens are the arbiter here.
+            for function in &module.functions {
+                let ae_syntax::declaration::DeclarationKind::Function { parameters, .. } = &function.declaration.kind else {
+                    continue;
+                };
+                for parameter in parameters {
+                    if parameter.ty.start == parameter.ty.end {
+                        continue;
+                    }
+                    let mut index = self.tokens.partition_point(|token| token.offset < parameter.ty.start);
+                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::Amp) {
+                        index += 1;
+                    }
+                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::LBracket) {
+                        if let Some(def) = expressions.scalar_definitions.get(&parameter.name_range.start) {
+                            expressions.array_definitions.insert(*def);
+                        }
+                    }
+                }
+            }
             for function in module.functions {
                 if function.impl_owner.is_some() || !function.declaration.type_parameters.is_empty() {
                     continue;
@@ -659,7 +683,8 @@ impl<'a> Parser<'a> {
                 let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
                     continue;
                 };
-                if body.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true)) {
+                let eligible = body.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true));
+                if eligible {
                     expressions.scalar_bodies.insert(range.start, body.into());
                 }
             }
@@ -682,8 +707,15 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn lower_resolved_scalar_body(&mut self) -> Option<Result<Vec<Statement>, ae_span::Diagnostic>> {
+        // Array parameters are borrowed views (`&[i64; N]` is the only array
+        // parameter form, and `Type::Array` bakes the borrow in): their
+        // element reads and stores flow through the same arms as local
+        // arrays. Borrows of the array itself (`&a`) stay typed — a borrow
+        // occurrence never lands in `scalar_reads` — and so do calls to
+        // array-taking functions, which `supports_call` excludes.
         if !self.subst.is_empty() || self.receiver.is_some()
-            || !scalar_type(self.return_type) || !self.names.values().all(|&(_, _, ty)| scalar_type(ty))
+            || !scalar_type(self.return_type)
+            || !self.names.values().all(|&(_, _, ty)| scalar_type(ty) || matches!(ty, Type::Array(_)))
         {
             return None;
         }
@@ -2741,7 +2773,7 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = "fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -2911,6 +2943,21 @@ mod tests {
 
         parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] += 1").unwrap());
         assert!(parser.lower_resolved_scalar_body().is_none(), "compound store stays typed");
+
+        let param_offset = source.find("(a: &[i64; 2]").unwrap() + 1;
+        parser.names.insert("a".into(), (0, false, Type::Array(2)));
+        parser.binding_ranges.insert(0, param_offset..param_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return a[1]").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved array param").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Index(slot, 2, index, ..), _)]
+            if *slot == 0 && matches!(**index, Expr::Number(1))));
+        let store_param_offset = source[param_offset + 1..].find("(a: &[i64; 2]").unwrap() + param_offset + 2;
+        parser.binding_ranges.insert(0, store_param_offset..store_param_offset + 1);
+        parser.seek_scalar_offset(source.find("{ a[0] = 3").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved param store").err().unwrap();
+        assert_eq!(error.message, "cannot assign to immutable variable 'a'");
+        assert_eq!(error.secondary.len(), 1);
+        parser.names.remove("a");
 
         for prefix in [
             "choose[",

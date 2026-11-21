@@ -362,4 +362,17 @@ the body route. Element and index type checks retain their source spans.
 `Statement::Store`, with the typed route's checks mirrored: the binding must
 be mutable (E0103), the index and the element must be i64 (E0201 for the
 index). Compound operators (`+=`) stay on the typed route, which rejects
-them for arrays. Array parameters remain on the typed token route.
+them for arrays.
+
+## Resolved array parameters (2026-11-22)
+
+Array parameters (`&[i64; N]` — the only array parameter form) flow through
+the body route: the route entry guard now accepts `Type::Array` slots, and
+the resolver's parameter definitions join `array_definitions` (an array type
+spelling starts with `[`, where vec/map/composite spellings start with an
+identifier — the resolver keeps the pointee opaque, so the spelled tokens
+decide). Element reads lower as `Expr::Index`; stores on the immutable
+parameter are rejected with the typed route's exact E0103 diagnostic. Borrows
+of the array (`&a`) and calls to array-taking functions stay typed: a borrow
+occurrence never lands in `scalar_reads`, and `supports_call` excludes
+non-scalar signatures.
