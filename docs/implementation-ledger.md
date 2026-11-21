@@ -534,6 +534,15 @@ Windows baseline segments are archived in
 | Frontend corpus | `compare_emit_c.py --frontend-corpus`: **50/50 example entry points** and **646/646 CLI fixture invocations** byte-identical (exit codes, stdout, stderr) after CRLF normalization — the normalization the platform matrix already mandates for example comparisons, now applied by the script itself (a baseline built in a CRLF checkout vs a candidate in an LF checkout differed on every line without any semantic change; the tool reported 50+122 false diffs before the fix). |
 | Result | The shared-tree consumption sweep (17 slices across statements, stores, reads and concurrent builtins) changed no generated C and no diagnostic on the whole corpus. M0.2.08's byte-parity condition holds at this revision. |
 
+## Verified 2026-11-22 — ADR-0229 body-route arrays (relay night)
+
+| Check | Evidence |
+|---|---|
+| Relay | The previous session staged a complete slice and went idle for 31 minutes; the relay re-ran both gates on the staged tree and landed it. |
+| Local arrays | `3ac9bc0`: array declarations (`Statement::Array`, 1..=4096 i64 elements) and index reads (`Expr::Index`) use resolved binding identities. Windows 484/0; ab_gate vs `2a55df9` 50 examples + 646 CLI invocations byte-identical. |
+| Element stores | `d980c37`: `a[i] = v` lowers as `Statement::Store` with the typed checks mirrored (mutable binding E0103, i64 index E0201, i64 element); compound operators stay typed. Windows 484/0; ab_gate vs `3ac9bc0` byte-identical; WSL2 484/0, sanitize+leak PASS, fuzz 40 seeds clean (`bench/results/2026-11-22-033208-wsl2`). |
+| Array parameters | `5734ff4`: `&[i64; N]` parameters join the route — the entry guard accepts `Type::Array` slots and resolver parameter definitions join `array_definitions` (an array spelling starts with `[`; vec/map/composite spellings start with an identifier). Immutable-parameter stores keep the typed route's exact E0103 diagnostic; `&a` borrows and array-taking calls stay typed. Windows 484/0; ab_gate vs `d980c37` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-035455-wsl2`). |
+
 ## Distributed regression campaign — 2026-11-21 (M2.13, post-R3b/R3c grammar fixes)
 
 | Event | Evidence |
