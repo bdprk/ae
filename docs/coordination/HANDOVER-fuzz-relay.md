@@ -431,9 +431,11 @@ builtin/prelude names fall back to the existing text heuristics. Rename is
 scope-exact through the def table (the def's name range plus every
 occurrence targeting it; documents the shared parse rejects fall back to
 text). Completion
-merges the document's own defs (functions with declared shapes, structs,
-bindings with inferred types); scope-exact completion needs live ranges
-and stays a later slice. Function return spellings are found by role
+merges the enclosing function's locals (declared before the cursor, with
+inferred types) and the file's functions/structs with their declared
+shapes; exact live-scope filtering needs scope-structured ranges and
+stays a later slice. The document cache carries the module for the
+enclosing-function lookup. Function return spellings are found by role
 (SpellingRole::Return) — the entry's name field is empty. Note: the
 shared module parse requires `-> Ret` on non-main functions (the
 language's own rule), so documents with bare `fn a() { ... }` have no
