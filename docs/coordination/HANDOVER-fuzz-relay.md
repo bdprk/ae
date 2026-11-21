@@ -416,34 +416,14 @@ on wake; the interrupted segments left no completion lines, so the
 35-segment archive stands. Certificates renewed to 2026-11-23 04:33.
 Long-fuzz sessions should schedule idle gaps to avoid the throttle.
 
-## Next slice blueprint: calls consuming owned aggregates in the body route
+## Resolved owned-aggregate calls (2026-11-22)
 
-The construction slice landed the ownership bookkeeping (scopes, Frees,
-live_owned Returns, loop-local releases). The next ADR-0230 step is calls
-(`take(g: Guard)` in a routed body). The verified map (2026-11-22 05:00):
-
-1. Key discovery: the Frees lists do NOT need move filtering in the body
-   route — the drops pass (`drops.rs` `drop_list(list, state)`) trims moved
-   slots from the raw Frees lists independently, exactly as it does for the
-   typed route. So emit the same raw `Frees`/`live_owned()` lists and let
-   the pass do its work.
-2. The body route's `moved` set is diagnostic-only, mirroring the typed
-   route's uses: `moved.insert(slot)` after a call consumes an owned value
-   (typed: parser.rs 1874); E0102 use-after-move on reads (typed: 2201
-   `moved_value_hint(self.binding_label(...))`); `close_loop_moves(base,
-   moved_before, offset)` after each loop body (typed: 2555, definition at
-   632-643) — with `let moved_before = self.moved.clone()` captured BEFORE
-   lowering the body.
-3. `supports_call` (parser.rs ~706-716) relaxes to accept signatures whose
-   params are scalar OR `Type::Struct(_)` over a registry-known struct,
-   with a scalar return. The Call arm already type-checks arguments against
-   `signature.params`.
-4. Borrowed-aggregate arguments (`&p`, `&a`) stay excluded: a borrow
-   occurrence never lands in `scalar_reads`, so those bodies stay typed.
-5. Tests to add: a body that constructs + passes an owned aggregate
-   (drop-free); a use-after-move rejection with the typed route's exact
-   E0102 text; a move inside a loop body rejection (close_loop_moves).
-   Gates as always; parity must hold on any corpus file calling
-   aggregate-taking functions — expect NO byte change (the typed route
-   already produced these MIR shapes; the route swap is invisible).
+`consume_point(q)` with `q: Point` a routed local joins the body route:
+`supports_call` accepts owned-struct parameters, the argument position
+re-admits struct idents (a move, not a value read), and the call moves the
+argument into the diagnostic-only `moved` set - later reads reject with the
+typed route's exact E0102 hint and `close_loop_moves` guards loop bodies
+against moving outer values. The Frees lists stay raw: the drops pass trims
+moved slots for both routes alike. Borrowed-aggregate arguments (`&p`) and
+bare effect-only call statements stay typed.
 
