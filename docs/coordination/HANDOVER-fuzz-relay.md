@@ -408,6 +408,14 @@ every declared field is scalar — malformed shapes and drop-carrying structs
 Local bindings of routed structs are field-read receivers, so `p.x` works
 on constructed values.
 
+## Resolved unsafe blocks (2026-11-22)
+
+`unsafe { ... }` is a scoping container: the body route wraps the lowered
+statements in `Statement::Unsafe` while mirroring the typed route's
+`unsafe_depth` tracking and the W0702 stderr note for blocks with no
+unchecked operation. Blocks containing unchecked operations keep their
+bodies ineligible, so pointer stores and extern calls stay typed.
+
 ## Fleet cooldown (2026-11-22 02:30-04:30)
 
 The InstaBox free plan suspended all five sandboxes mid-segment
