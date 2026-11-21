@@ -401,3 +401,45 @@ The InstaBox free plan suspended all five sandboxes mid-segment
 on wake; the interrupted segments left no completion lines, so the
 35-segment archive stands. Certificates renewed to 2026-11-23 04:33.
 Long-fuzz sessions should schedule idle gaps to avoid the throttle.
+
+## Next slice blueprint: no-drop struct construction in the body route
+
+`let p = Point { x: 1, y: 2 };` in the body route needs the ownership
+bookkeeping first. The verified map (2026-11-22 04:55):
+
+1. `Type::Struct(_)` is owned (`owned()` in mod.rs:207), so the typed route
+   emits `Frees` for struct slots at scope ends — a MIR-visible statement.
+   The body route's `Statement::Return(value, Vec::new())` must become
+   `live_owned()`.
+2. Mirror these three emission sites (parser.rs):
+   block exit — `Frees(scope's owned)` after all statements (typed: 489-498);
+   `Return` — `live_owned()` = every active scope flattened, owned only
+   (typed: 2481, 618-620);
+   `Break`/`Continue` — `Frees(loop_local_owned())` before the jump
+   (typed: 2708; `loop_local_owned` at 621-623 uses `loop_scopes` bases).
+3. Body-route restructure: `lower_scalar_statements` must push/pop
+   `self.scopes` around the body (typed `block()` at 486-499), pop BEFORE
+   propagating statement errors (the current `?` in the loop leaks the
+   scope), add the same 64 `block_depth` guard, and prepend the
+   Break/Continue Frees in the statement loop (the arm returns one
+   statement; the Frees goes in the loop). `lower_scalar_loop_body` pushes
+   `loop_scopes` (base = `scopes.len()`) around the body, mirroring the
+   typed loop at 2544-2556. Skip `close_loop_moves` for now: the route owns
+   no movable values until calls accept owned aggregates.
+4. Construction: extend the collection with a `drop_free_constructions`
+   set — `Struct` expressions (via `visit_expression_tree`) whose target is
+   a plain `Atom(Ident)` covered by `struct_constructors`, whose registry
+   struct has `drop_fn == None` and only scalar declared fields, and whose
+   shape is complete (no duplicates, every declared field present). The
+   shape gate matters for parity: a malformed construction must stay typed
+   so the typed route's canonical diagnostic survives. Eligibility adds the
+   `Struct` arm; lowering mirrors `lower_shared_argument`'s Struct arm
+   (parser.rs:1482-1506): sid from `struct_names`, values in declaration
+   order, `Expr::StructLit(sid, values)`.
+5. Field reads on such local bindings: only if the resolver's
+   `infer_expression` names the struct for the binding (check first; if
+   deferred, leave local field reads typed — construction alone is already
+   a complete slice).
+6. Gates as always, plus `emit-mir` parity on a corpus file that
+   constructs a local struct (the Frees statements must match the typed
+   route's output byte for byte).
