@@ -1,5 +1,7 @@
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, Write};
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
@@ -335,6 +337,10 @@ pub struct Document {
     pub version: i64,
     pub text: String,
     pub line_index: LineIndex,
+    /// The resolver's name resolution for this document's text, computed
+    /// lazily and invalidated on every update (R3d: hover and definition
+    /// read the def table instead of matching text).
+    pub resolution: OnceCell<std::sync::Arc<ae_resolve::resolve::Resolution>>,
 }
 
 impl Document {
@@ -345,19 +351,79 @@ impl Document {
             version,
             text,
             line_index,
+            resolution: OnceCell::new(),
         }
     }
 
     pub fn update(&mut self, version: i64, text: String) {
         self.version = version;
         self.line_index = LineIndex::new(&text);
+        self.resolution = OnceCell::new();
         self.text = text;
+    }
+
+    /// The document's name resolution, computed on first use from its text.
+    pub fn resolution(&self) -> Option<&std::sync::Arc<ae_resolve::resolve::Resolution>> {
+        let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
+        let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
+        let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], tokens.as_slice());
+        self.resolution.set(std::sync::Arc::new(resolution)).ok()?;
+        self.resolution.get()
     }
 }
 
 pub struct LspServer {
     documents: HashMap<String, Document>,
     cancelled_requests: HashSet<i64>,
+}
+
+/// The occurrence covering `offset`, with its resolved def. Occurrences in
+/// closure bodies are included (the resolver walked them), so cursors inside
+/// closures resolve too.
+fn occurrence_at(
+    resolution: &ae_resolve::resolve::Resolution,
+    offset: usize,
+) -> Option<(&ae_resolve::Occurrence, &ae_resolve::DefEntry)> {
+    let occurrence = resolution.functions.iter().flat_map(|function| &function.occurrences)
+        .find(|occurrence| occurrence.range.start <= offset && offset < occurrence.range.end)?;
+    let def = resolution.defs.get(occurrence.target?.0 as usize)?;
+    Some((occurrence, def))
+}
+
+/// The display form of a spelling, with named defs rendered as their item
+/// names (the bare `describe()` prints def ids, which are table internals).
+fn describe_spelling(
+    spelling: &ae_resolve::TypeSpelling,
+    resolution: &ae_resolve::resolve::Resolution,
+) -> String {
+    match spelling {
+        ae_resolve::TypeSpelling::Named { def } => {
+            resolution.defs.get(def.0 as usize).map(|entry| entry.name.clone()).unwrap_or_else(|| "unknown".to_owned())
+        }
+        ae_resolve::TypeSpelling::Borrow { mutable, inner } => {
+            format!("&{}{}", if *mutable { "mut " } else { "" }, describe_spelling(inner, resolution))
+        }
+        ae_resolve::TypeSpelling::Pointer { mutable, pointee } => {
+            format!("*{}{}", if *mutable { "mut " } else { "" }, describe_spelling(pointee, resolution))
+        }
+        other => other.describe(),
+    }
+}
+
+fn kind_label(kind: ae_resolve::DefKind) -> &'static str {
+    match kind {
+        ae_resolve::DefKind::Function => "fn",
+        ae_resolve::DefKind::Struct => "struct",
+        ae_resolve::DefKind::Enum => "enum",
+        ae_resolve::DefKind::Variant => "variant",
+        ae_resolve::DefKind::Trait => "trait",
+        ae_resolve::DefKind::Impl => "impl",
+        ae_resolve::DefKind::Parameter => "parameter",
+        ae_resolve::DefKind::ClosureParameter => "closure parameter",
+        ae_resolve::DefKind::Binding => "let",
+        ae_resolve::DefKind::ForBinding => "for binding",
+        ae_resolve::DefKind::PatternBinding => "pattern binding",
+    }
 }
 
 impl Default for LspServer {
@@ -588,9 +654,72 @@ impl LspServer {
         JsonValue::Object(notif).serialize()
     }
 
+    /// R3d: hover from the def table. The occurrence under the cursor names
+    /// its def; functions render their parameter and return spellings,
+    /// structs render their fields, bindings render their inferred type.
+    fn hover_from_defs(&self, doc: &Document, offset: usize) -> Option<String> {
+        let resolution = doc.resolution()?;
+        let (_, def) = occurrence_at(resolution, offset)?;
+        let describe = |spelling: &ae_resolve::TypeSpelling| describe_spelling(spelling, resolution);
+        match def.kind {
+            ae_resolve::DefKind::Function => {
+                let mut params = String::new();
+                for entry in resolution.defs.iter().filter(|entry| {
+                    entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
+                }) {
+                    if !params.is_empty() { params.push_str(", "); }
+                    let ty = entry.inferred.as_ref().map(&describe).unwrap_or_else(|| "deferred".to_owned());
+                    params.push_str(&format!("{}: {}", entry.name, ty));
+                }
+                let mut returns = String::new();
+                if let Some(entry) = resolution.spellings.iter().find(|entry| {
+                    entry.owner == def.id && entry.name == "return"
+                }) {
+                    returns = format!(" -> {}", describe(&entry.spelled.spelling));
+                }
+                Some(format!("```ae\nfn {}({params}){returns}\n```", def.name))
+            }
+            ae_resolve::DefKind::Struct => {
+                let mut fields = String::new();
+                for entry in resolution.spellings.iter().filter(|entry| {
+                    entry.owner == def.id && !entry.name.is_empty()
+                }) {
+                    if !fields.is_empty() { fields.push_str(", "); }
+                    fields.push_str(&format!("{}: {}", entry.name, describe(&entry.spelled.spelling)));
+                }
+                Some(format!("```ae\nstruct {} {{ {fields} }}\n```", def.name))
+            }
+            ae_resolve::DefKind::Binding | ae_resolve::DefKind::Parameter
+            | ae_resolve::DefKind::ForBinding | ae_resolve::DefKind::PatternBinding => {
+                let ty = def.inferred.as_ref().map(&describe).unwrap_or_else(|| "deferred".to_owned());
+                Some(format!("{} {}\ntype: {ty}", kind_label(def.kind), def.name))
+            }
+            _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
+        }
+    }
+
+    /// R3d: the def's own range is the definition site. Imported defs carry
+    /// ranges absolute to their own file, which this slice does not map to
+    /// document URIs yet — they fall back to the text scan.
+    fn definition_from_defs(&self, doc: &Document, offset: usize) -> Option<Location> {
+        let resolution = doc.resolution()?;
+        let (_, def) = occurrence_at(resolution, offset)?;
+        if def.imported {
+            return None;
+        }
+        let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+        let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+        Some(Location { uri: doc.uri.clone(), range: Range { start, end } })
+    }
+
     pub fn hover(&self, uri: &str, pos: Position) -> Option<String> {
         let doc = self.documents.get(uri)?;
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        // R3d: the def table answers first; the text heuristics below stay
+        // as the fallback for builtins, prelude items and unresolved names.
+        if let Some(markup) = self.hover_from_defs(doc, offset) {
+            return Some(markup);
+        }
         let ident = extract_ident_at(&doc.text, offset)?;
 
         match ident {
@@ -621,6 +750,12 @@ impl LspServer {
     pub fn definition(&self, uri: &str, pos: Position) -> Option<Location> {
         let doc = self.documents.get(uri)?;
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        // R3d: the def table's def range is the definition; the text scan
+        // below stays as the fallback for names the single-file pass does
+        // not own (builtins, prelude, imports).
+        if let Some(location) = self.definition_from_defs(doc, offset) {
+            return Some(location);
+        }
         let ident = extract_ident_at(&doc.text, offset)?;
 
         for (line_idx, line) in doc.text.lines().enumerate() {

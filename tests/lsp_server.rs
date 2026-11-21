@@ -171,3 +171,49 @@ fn lsp_preserves_compiler_code_and_full_span_after_a_surrogate_pair() {
     });
     assert_eq!(diagnostic.range.end.character, diagnostic.range.start.character + 7);
 }
+
+#[test]
+fn lsp_hover_renders_signature_from_the_def_table() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn area(p: &Point) -> i64 { return p.x; }\nfn main() {\n    let s = area(&Point { x: 1, y: 2 });\n}"}}}"#;
+    server.handle_message(open);
+
+    // The cursor sits on `area` inside the call; the def table names the
+    // function and renders its parameter and return spellings.
+    let hover_req = r#"{"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":3,"character":14}}}"#;
+    let resps = server.handle_message(hover_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let hover = val.get("result").and_then(|r| r.get("contents")).and_then(|c| c.get("value")).and_then(|v| v.as_str()).unwrap();
+    assert!(hover.contains("fn area(p: &Point) -> i64"), "hover was: {hover}");
+}
+
+#[test]
+fn lsp_hover_shows_binding_type_from_the_def_table() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn main() {\n    let count = 7;\n    print(count);\n}"}}}"#;
+    server.handle_message(open);
+
+    // The cursor sits on `count` in `print(count)`; the binding's inferred
+    // shape is i64.
+    let hover_req = r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":2,"character":11}}}"#;
+    let resps = server.handle_message(hover_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let hover = val.get("result").and_then(|r| r.get("contents")).and_then(|c| c.get("value")).and_then(|v| v.as_str()).unwrap();
+    assert!(hover.contains("i64"), "hover was: {hover}");
+}
+
+#[test]
+fn lsp_definition_lands_on_the_struct_name_range() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn main() {\n    let p = Point { x: 1, y: 2 };\n}"}}}"#;
+    server.handle_message(open);
+
+    let def_req = r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":2,"character":13}}}"#;
+    let resps = server.handle_message(def_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let start = val.get("result").and_then(|r| r.get("range")).and_then(|r| r.get("start")).unwrap();
+    assert_eq!(start.get("line").and_then(|l| l.as_i64()), Some(0));
+    let character = start.get("character").and_then(|c| c.as_i64()).unwrap();
+    // The def's range is the name itself, not the whole declaration.
+    assert_eq!(character, "struct ".encode_utf16().count() as i64);
+}
