@@ -443,38 +443,14 @@ impl Parser<'_> {
                     return Err(self.fail("only the address of a local variable can be taken; bind the value to a variable first"));
                 }
                 if let Expr::Variable(id, ..) = &operand {
-                    // A mutable borrow writes through the pointer, so the
-                    // variable must be a `var` binding — the same rule the
-                    // `&mut Struct` borrow takes (ADR-0185).
-                    if mutable_borrow {
-                        let mutable = self.names.values().find(|slot| slot.0 == *id)
-                            .map(|slot| slot.1)
-                            .ok_or_else(|| self.fail("internal: pointer operand vanished"))?;
-                        if !mutable {
-                            return Err(self.fail("cannot take a mutable pointer to an immutable binding; declare it with 'var'"));
-                        }
-                    }
+                    self.check_address_binding(*id, mutable_borrow)?;
                 }
                 if *self.current() != Kind::As {
                     return Err(self.fail("a borrow expression must be cast to a pointer; write '&expr as *const T' or '&mut expr as *mut T'"));
                 }
                 self.pos += 1;
                 let (_, pointee) = self.pointer_cast_pointee(Some(mutable_borrow))?;
-                if pointee != ty {
-                    return Err(self.fail(&format!("cannot cast &{} to *{}{}; reinterpret casts do not exist yet", ty.name(), if mutable_borrow { "mut " } else { "const " }, pointee.name())));
-                }
-                // The pointer's borrow is untracked (the borrow checker sees
-                // no registration), so the pointee must be a value that can
-                // neither move nor release: a dangling pointer may only arise
-                // inside unsafe, never from a safe cast (spec hard rule 3).
-                if ty.owned() {
-                    return Err(self.fail("a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
-                }
-                if mutable_borrow {
-                    (Expr::BorrowAs(Box::new(operand), true, line, column), Type::PtrMut(super::intern_pointee(ty)))
-                } else {
-                    (Expr::BorrowAs(Box::new(operand), false, line, column), Type::Ptr(super::intern_pointee(ty)))
-                }
+                self.lower_address_cast(operand, ty, pointee, mutable_borrow, (line, column))?
             }
             Kind::Ident(name) => {
                 let name_offset = self.tokens[self.pos].offset;
@@ -1868,6 +1844,33 @@ impl Parser<'_> {
         let parsed = self.expression(right_power, op == Kind::Plus);
         self.plus_operand_depth -= 1;
         self.lower_infix(lhs, op, parsed?, (line, column), None)
+    }
+
+    pub(super) fn check_address_binding(&self, id: usize, mutable: bool) -> Result<(), ae_span::Diagnostic> {
+        if mutable {
+            let binding = self.names.values().find(|slot| slot.0 == id)
+                .ok_or_else(|| self.fail("internal: pointer operand vanished"))?;
+            if !binding.1 {
+                return Err(self.fail("cannot take a mutable pointer to an immutable binding; declare it with 'var'"));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn lower_address_cast(
+        &self, operand: Expr, ty: Type, pointee: Type, mutable: bool, (line, column): (usize, usize),
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if pointee != ty {
+            return Err(self.fail(&format!("cannot cast &{} to *{}{}; reinterpret casts do not exist yet", ty.name(), if mutable { "mut " } else { "const " }, pointee.name())));
+        }
+        // Raw pointer borrows are untracked, so moving an owned pointee
+        // would let safe code leave the pointer dangling.
+        if ty.owned() {
+            return Err(self.fail("a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
+        }
+        let id = super::intern_pointee(ty);
+        let pointer = if mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
+        Ok((Expr::BorrowAs(Box::new(operand), mutable, line, column), pointer))
     }
 
     pub(super) fn check_array_index(

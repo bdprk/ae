@@ -191,6 +191,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False) => true,
+        ExpressionKind::AddressCast { binding_range, .. } => {
+            resolved.scalar_address_casts.contains(&expression.range.start)
+                && resolved.scalar_reads.contains_key(&binding_range.start)
+        }
         ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
             scalar_body_expression(inner, resolved, supports_call, supports_field)
         }
@@ -739,9 +743,7 @@ impl<'a> Parser<'a> {
                 match occurrence.role {
                     ae_resolve::Role::Read | ae_resolve::Role::Borrow if definition.kind.is_local() => {
                         expressions.local_bindings.insert(occurrence.range.start, definition.range.clone());
-                        if occurrence.role == ae_resolve::Role::Read {
-                            expressions.scalar_reads.insert(occurrence.range.start, definition.id);
-                        }
+                        expressions.scalar_reads.insert(occurrence.range.start, definition.id);
                     }
                     ae_resolve::Role::Write | ae_resolve::Role::DerefWrite if definition.kind.is_local() => {
                         expressions.scalar_writes.insert(occurrence.range.start, definition.id);
@@ -867,6 +869,11 @@ impl<'a> Parser<'a> {
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
                         visit_expression_tree(top_level, &mut |expression| {
                             use ae_syntax::expression::ExpressionKind;
+                            if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind {
+                                if self.source.get(pointee.clone()).and_then(super::types::scalar_type).is_some() {
+                                    expressions.scalar_address_casts.insert(expression.range.start);
+                                }
+                            }
                             if let ExpressionKind::Call { callee, arguments } = &expression.kind {
                                 if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
                                     let operand = match (name.as_str(), arguments.as_slice()) {
@@ -1489,6 +1496,25 @@ impl<'a> Parser<'a> {
                 (Expr::Variable(slot, ty, line, column), ty)
             }
             ExpressionKind::Group(inner) => self.lower_scalar_body_expression(inner, slots)?,
+            ExpressionKind::AddressCast { binding, binding_range, mutable, .. } => {
+                self.seek_scalar_offset(expression.range.start);
+                let position = self.position();
+                let def = self.resolved_expressions().scalar_reads[&binding_range.start];
+                let (slot, ty) = slots[&def];
+                self.seek_scalar_offset(binding_range.start);
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot use '{binding}' because it was moved")).with_code("E0102"), slot,
+                    )));
+                }
+                let (line, column) = self.position();
+                let operand = Expr::Variable(slot, ty, line, column);
+                self.seek_scalar_offset(binding_range.end);
+                self.check_address_binding(slot, *mutable)?;
+                self.take(Kind::As)?;
+                let (_, pointee) = self.pointer_cast_pointee(Some(*mutable))?;
+                self.lower_address_cast(operand, ty, pointee, *mutable, position)?
+            }
             ExpressionKind::Struct { target, fields } => {
                 // Validate in source order and emit in layout order.
                 let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
@@ -3527,6 +3553,7 @@ mod tests {
         let source = format!("{source} fn use_import() -> i64 {{ return imported_generic[i64](7); }}");
         let source = format!("{source} fn write_ptr(raw_param: *mut i64) -> i64 {{ unsafe {{ *raw_param = 7; }} return 0; }}");
         let source = format!("{source} fn read_ptr(read_param: *const i64) -> i64 {{ unsafe {{ return read_param.deref(); }} }}");
+        let source = format!("{source} fn local_pointer() -> i64 {{ var pointee = 1; let local_ptr = &mut pointee as *mut i64; unsafe {{ *local_ptr = 7; return local_ptr.deref(); }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3589,6 +3616,12 @@ mod tests {
             if matches!(inner.as_slice(), [Statement::Return(Expr::DerefPtr(..), _)])));
         parser.names.remove("read_param");
         parser.binding_ranges.remove(&86);
+        parser.seek_scalar_offset(source.find("{ var pointee = 1").unwrap());
+        let next_var = parser.next_var;
+        let body = parser.lower_resolved_scalar_body().expect("resolved local pointer body").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(_, Expr::Number(1)), Statement::Declare(pointer, Expr::BorrowAs(_, true, ..)), Statement::Unsafe(inner)]
+            if matches!(inner.as_slice(), [Statement::PtrStore(slot, Expr::Number(7), ..), Statement::Return(Expr::DerefPtr(..), _)] if slot == pointer)));
+        parser.next_var = next_var;
         parser.generics.names.insert("CachedBox".into(), 0);
         parser.generics.defs.push(GenericEnum {
             name: "CachedBox".into(), params: vec!["T".into()],

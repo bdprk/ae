@@ -667,3 +667,8 @@ Zero-argument `deref()` on a resolved scalar pointer binding now lowers
 directly in eligible bodies. The typed and resolved routes share the
 unsafe-context check at the method name.
 
+Eligible resolved bodies take the address of a local scalar binding by
+definition ID. Address construction shares the token route's mutability,
+pointer qualifier and pointee checks. A resolved body can now construct,
+write through and read back a scalar local pointer in the same function.
+
