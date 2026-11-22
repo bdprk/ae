@@ -436,3 +436,20 @@ fn lsp_rename_crosses_imported_files() {
     assert_eq!(utils_edits.len(), 2, "declaration + internal use edited: {utils_edits:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn lsp_completion_is_scope_exact() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn main() {\n    if true { let inner = 1; }\n    let width = 3;\n    \n}"}}}"#;
+    server.handle_message(open);
+
+    // Completion after the if-block: `width` is live, `inner` is not (its
+    // visibility ended with the block).
+    let comp_req = r#"{"jsonrpc":"2.0","id":17,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":3,"character":4}}}"#;
+    let resps = server.handle_message(comp_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let names: Vec<&str> = items.iter().filter_map(|i| i.get("label").and_then(|n| n.as_str())).collect();
+    assert!(names.contains(&"width"), "names: {names:?}");
+    assert!(!names.contains(&"inner"), "inner leaked past its scope: {names:?}");
+}
