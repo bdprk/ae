@@ -1,0 +1,28 @@
+use "../../std/std/io/reader.ae";
+
+fn main() {
+    var stream = reader_new("line\nabcdefgh", 3, 4);
+    print(reader_read_line(&mut stream));
+    let negative = reader_read_exact(&mut stream, -1);
+    match negative {
+        ReadResult::Ok(_) => { assert(false); }
+        ReadResult::Err(reason) => { print(reason); }
+    }
+    let zero = reader_read_exact(&mut stream, 0);
+    match zero {
+        ReadResult::Ok(empty) => { assert(len(empty) == 0); }
+        ReadResult::Err(_) => { assert(false); }
+    }
+    let exact = reader_read_exact(&mut stream, 5);
+    match exact {
+        ReadResult::Ok(payload) => { print(payload); }
+        ReadResult::Err(_) => { assert(false); }
+    }
+    print(reader_read(&mut stream, 1));
+    let short = reader_read_exact(&mut stream, 3);
+    match short {
+        ReadResult::Ok(_) => { assert(false); }
+        ReadResult::Err(reason) => { print(reason); }
+    }
+    assert(reader_eof(&stream));
+}

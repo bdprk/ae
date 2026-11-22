@@ -49,6 +49,24 @@ pub fn reader_read(r: &mut ByteReader, max_bytes: i64) -> string {
     return out;
 }
 
+// Read exactly count bytes across chunk boundaries. On early EOF the
+// available bytes have been consumed. Zero and negative counts leave the
+// reader's position unchanged.
+pub fn reader_read_exact(r: &mut ByteReader, count: i64) -> ReadResult {
+    if count < 0 { return ReadResult::Err("negative byte count"); }
+    if count == 0 { return ReadResult::Ok(""); }
+    var parts = strvec_new();
+    var remaining = count;
+    while remaining > 0 {
+        let part = reader_read(&mut r, remaining);
+        let bytes_read = len(part);
+        if bytes_read == 0 { return ReadResult::Err("unexpected end of input"); }
+        remaining = remaining - bytes_read;
+        push(parts, part);
+    }
+    return ReadResult::Ok(join(parts, ""));
+}
+
 // Read through the next newline (excluded) into one line. The buffer is
 // refilled chunk-by-chunk until a newline arrives or the source is drained.
 // One trailing carriage return is dropped, and EOF yields "".
