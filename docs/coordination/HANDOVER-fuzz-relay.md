@@ -713,6 +713,9 @@ R3d's textDocument/documentSymbol, textDocument/references and
 workspace/symbol all read the def table now: the outline lists
 file-local functions/structs/enums/traits with their declared name
 ranges (capability advertised in initialize), references returns
-scope-exact occurrences (includeDeclaration honored), and
-workspace/symbol scans every open document's defs case-insensitively.
+scope-exact occurrences (includeDeclaration honored),
+workspace/symbol scans every open document's defs case-insensitively,
+and rename crosses imported files (the import module's declaration and
+internal uses edit from a fresh per-module resolution alongside the
+entry's occurrences).
 
