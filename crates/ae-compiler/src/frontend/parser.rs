@@ -320,7 +320,8 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                         if name != "self" && resolved.scalar_reads.get(&argument.range.start)
                             .is_some_and(|id| resolved.owned_text_bindings.contains(id)
-                                || resolved.owned_string_bindings.contains(id))))
+                                || resolved.owned_string_bindings.contains(id)))
+                    || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }))
         }
         _ => false,
     }
@@ -1445,8 +1446,12 @@ impl<'a> Parser<'a> {
                         // moves the argument, tracked in `moved`, and the
                         // drops pass trims the Frees lists. A `&string`
                         // parameter (the resolver's `StrView`) is a read-only
-                        // view: the argument lowers as `Argument::View`.
-                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView)
+                        // view: the argument lowers as `Argument::View`. The
+                        // other borrows take the argument's address
+                        // (`Argument::Borrow`) with the typed route's own
+                        // classify rules.
+                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView
+                            | Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_))
                     })
             })
         };
@@ -1516,6 +1521,11 @@ impl<'a> Parser<'a> {
         let mut statements = Vec::with_capacity(body.len());
         let lowered: Result<(), ae_span::Diagnostic> = (|| {
             for statement in body {
+                // A call argument's borrow covered only the statement that
+                // made the call; the next statement may borrow or write the
+                // binding again (the typed route's block loop does the same).
+                self.call_borrows.clear();
+                self.mut_borrows.clear();
                 if matches!(statement.kind, StatementKind::ForRange { .. }) {
                     self.lower_scalar_range(statement, slots, &mut statements)?;
                 } else if matches!(statement.kind, StatementKind::ForIn { .. }) {
@@ -2313,6 +2323,90 @@ impl<'a> Parser<'a> {
                     }
                     let &expected = signature.params.get(index)
                         .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
+                    // The shared tree records `&x` as a borrow argument.
+                    // Only a borrow parameter consumes it; anywhere else the
+                    // typed route's expression parser rejects it (a pointer
+                    // cast is the only legal use of `&expr`).
+                    if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
+                        && !matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_))
+                    {
+                        self.seek_scalar_offset(argument.range.start);
+                        return Err(self.fail("a borrow expression must be cast to a pointer"));
+                    }
+                    // A container or struct borrow takes the binding's
+                    // address (`Argument::Borrow`); the same classify rules,
+                    // messages and statement-scoped borrow registers the typed
+                    // route uses.
+                    if matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_)) {
+                        let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
+                            self.seek_scalar_offset(argument.range.end);
+                            return Err(self.fail("expected Amp, found the argument"));
+                        };
+                        if matches!(expected, Type::StructMut(_)) && !*argument_mutability {
+                            self.seek_scalar_offset(name_range.start);
+                            return Err(self.fail("this parameter borrows mutably; write the argument as '&mut name'"));
+                        }
+                        self.seek_scalar_offset(argument.range.end);
+                        let &(slot, binding_mutable, actual) = self.names.get(borrowed).ok_or_else(|| {
+                            self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
+                        })?;
+                        let Some(borrow) = super::declarations::CallBorrow::classify(expected, actual) else {
+                            let shape = match expected {
+                                Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
+                            };
+                            return Err(self.fail(&format!("argument must be {}, found {}", shape.name(), actual.name())));
+                        };
+                        if self.moved.contains(&slot) {
+                            return Err(moved_value_hint(self.binding_label(
+                                self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
+                        }
+                        match (expected, borrow) {
+                            (Type::StructRef(_), super::declarations::CallBorrow::Struct { address }) => {
+                                if self.mut_borrows.iter().any(|&(bid, _)| bid == slot) {
+                                    return Err(self.fail(&format!("cannot borrow '{borrowed}' while it is mutably borrowed in this statement")));
+                                }
+                                // The borrow lives only as long as this call.
+                                if !self.is_borrowed(slot) {
+                                    self.call_borrows.push((slot, self.scopes.len()));
+                                }
+                                args.push(Argument::Borrow(slot, address));
+                            }
+                            (Type::StructRef(_), super::declarations::CallBorrow::Forward) => {
+                                args.push(Argument::Borrow(slot, false));
+                            }
+                            (Type::StructMut(_), super::declarations::CallBorrow::Struct { address }) => {
+                                if !binding_mutable {
+                                    return Err(self.immutable_binding_error(self.fail(&format!("cannot borrow '{borrowed}' mutably: it was declared without 'var'")).with_code("E0103"), slot));
+                                }
+                                if self.is_borrowed(slot) {
+                                    // The callee may write any field, so the
+                                    // call releases the viewed bytes at the
+                                    // call point; with only view borrows
+                                    // active the conflict defers to the
+                                    // graph's ordered adjudication.
+                                    if !self.only_view_borrows_active(slot) {
+                                        return Err(self.fail(&format!("cannot borrow '{borrowed}' mutably while it is borrowed in this statement")));
+                                    }
+                                    self.deferred_write_conflicts.push((slot, argument.range.start, borrowed.clone(), "mutate", None));
+                                }
+                                self.mut_borrows.push((slot, self.scopes.len()));
+                                args.push(Argument::Borrow(slot, address));
+                            }
+                            (Type::VecRef | Type::VecFRef | Type::StrVecRef, borrow) => {
+                                // An owned vector takes the address; a
+                                // parameter already spelled `&vec` forwards
+                                // its pointer unchanged.
+                                args.push(Argument::Borrow(slot, borrow.address()));
+                            }
+                            _ => {
+                                let shape = match expected {
+                                    Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
+                                };
+                                return Err(self.fail(&format!("argument must be {}, found {}", shape.name(), actual.name())));
+                            }
+                        }
+                        continue;
+                    }
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
                     // A `&string` parameter is a read-only view: the argument
                     // lowers as `Argument::View` and nothing moves (the typed

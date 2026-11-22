@@ -1073,3 +1073,28 @@ Still typed: `Argument::Borrow` for `&vec`/`&vec[string]`/`&struct`
 parameters (the address-taking/forwarding and the call-borrow register),
 closure-valued bindings, `match` on non-ident subjects, generic-instance
 structs, for-in over borrowed vectors, trait-method calls.
+
+## P1.1 slice 9 landed: borrow arguments
+
+- A `&vec` / `&vec[string]` / `&vec[f64]` / `&Struct` / `&mut Struct`
+  parameter joins `supports_call`. The resolved Call arm lowers `&x` /
+  `&mut x` (the shared tree's `BorrowArgument` node) as `Argument::Borrow`
+  with the typed route's own `CallBorrow::classify`, messages, positions and
+  registers: `call_borrows` (statement-scoped, for `&Struct`), `mut_borrows`
+  (for `&mut`), and the deferred view-conflict entry when only view borrows
+  are active.
+- The statement loop now clears `call_borrows`/`mut_borrows` at each
+  statement, exactly like the typed block loop. That clear was the missing
+  piece for two `&mut` calls in consecutive statements (owned_string_fields
+  errored on the second one before it).
+- `&x` handed to a by-value parameter reproduces the typed expression
+  parser's "a borrow expression must be cast to a pointer".
+- `mut_borrow_shared.ae`'s pinned message and position (14:33) still match.
+
+Coverage: 434 → **428**, files with fallbacks 127 → 125. The fake_io and
+owned_string_fields mains now route end to end (their `&mut` calls included).
+Byte parity held (50 examples + 663 CLI invocations), 510/0 Windows/WSL2.
+
+Next: closure-valued bindings and closure bodies over owned captures,
+`match` on non-ident subjects, generic-instance structs (`Cell[T]`,
+`ListNode[T]`), for-in over borrowed vectors, trait-method calls.
