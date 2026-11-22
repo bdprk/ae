@@ -14,11 +14,14 @@ representations. Local immutable bindings of indexed views also lower
 through the resolved route and register the container borrow using the
 same tracking as the typed parser. The parser regression checks that the
 resolved declaration and later read use the same local slot.
+The resolved return checker reports E0204 when a closure tries to return
+a captured string-vector element as an owned string.
 
 ## What is half-done
 
-Uses that require moving the element still use the typed parser. The next
-slice should preserve those move diagnostics before widening eligibility.
+Successful owned-string returns still use the typed parser. The next
+slice can migrate owned-string local returns with the existing move and
+drop tracking.
 
 ## Next step
 
@@ -31,10 +34,10 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `e9d084f` matched 50 examples and 646 CLI
+- The byte comparison against `ce8dd24` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for direct prints and a local view binding, and matched
-  diagnostics for mutable view bindings and attempts to move an element.
+  output for direct prints, a local view binding, and a legal owned-string
+  return. It matched diagnostics for mutable bindings and element returns.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

@@ -1177,10 +1177,11 @@ impl<'a> Parser<'a> {
         // Generic functions arrive here after the instance machinery has
         // substituted their signature. Keep non-scalar substitutions on
         // the typed route until their ownership and layout are covered.
+        let string_return = self.return_type == Type::String && !capture_starts.is_empty();
         if !self.subst.values().copied().all(scalar_type)
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
-            || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..))
+            || !(scalar_type(self.return_type) || string_return || matches!(self.return_type, Type::Enum(..))
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(slot, _, ty))| {
                 let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
@@ -1245,21 +1246,40 @@ impl<'a> Parser<'a> {
                 .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
             slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
         }
-        // An indexed view can be printed or bound locally. Other uses
-        // still need the typed path's move checks.
-        if !capture_starts.is_empty() && slots.values().any(|&(_, ty)| ty == Type::StrVecRef) {
+        let has_string_vector = slots.values().any(|&(_, ty)| ty == Type::StrVecRef);
+        if string_return && !has_string_vector {
+            return None;
+        }
+        if !capture_starts.is_empty() && has_string_vector {
             use ae_syntax::{expression::ExpressionKind, statement::{StatementKind, visit_statements}};
             let mut view_bases = std::collections::HashSet::new();
+            let mut has_view_return = false;
+            let mut has_other_return = false;
             for statement in body.iter() {
                 visit_statements(statement, &mut |statement| {
                     let value = match &statement.kind {
-                        StatementKind::Print(value) | StatementKind::Binding { initializer: value, .. } => value,
+                        StatementKind::Print(value) | StatementKind::Binding { initializer: value, .. }
+                        | StatementKind::Return(value) => value,
                         _ => return,
                     };
-                    if let ExpressionKind::Index { base, .. } = &value.kind {
-                        view_bases.insert(base.range.start);
+                    let view_base = match &value.kind {
+                        ExpressionKind::Index { base, .. }
+                            if resolved.scalar_reads.get(&base.range.start)
+                                .and_then(|def| slots.get(def))
+                                .is_some_and(|&(_, ty)| ty == Type::StrVecRef) => Some(base.range.start),
+                        _ => None,
+                    };
+                    view_bases.extend(view_base);
+                    if matches!(statement.kind, StatementKind::Return(_)) {
+                        has_view_return |= view_base.is_some();
+                        has_other_return |= view_base.is_none();
                     }
                 });
+            }
+            // Returning an element fails the return type check. Successful
+            // owned-string returns still need the typed path's move effects.
+            if string_return && (!has_view_return || has_other_return) {
+                return None;
             }
             let start = self.tokens[self.pos].offset;
             let end = body.last().map_or(start, |statement| statement.range.end);
@@ -3920,6 +3940,7 @@ mod tests {
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }} fn closure_vector() -> i64 {{ let numbers = vec[10, 20]; let get = || -> i64 {{ print(numbers[1]); return 0; }}; return get(); }}");
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
+        let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4294,6 +4315,17 @@ mod tests {
              Statement::Return(Expr::Number(0), _)] if slot == read));
         parser.next_var = next_var;
         parser.names.remove("words");
+        let return_words = source.find("let return_words =").unwrap() + 4;
+        parser.names.insert("return_words".into(), (82, false, Type::StrVecRef));
+        parser.return_type = Type::String;
+        parser.seek_scalar_offset(source.find("{ return return_words[1]").unwrap());
+        let error = parser.lower_resolved_body_with_captures(&[(82, return_words)])
+            .expect("resolved borrowed string vector return diagnostic").unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("E0204"));
+        parser.seek_scalar_offset(source.find("{ print(return_words[1])").unwrap());
+        assert!(parser.lower_resolved_body_with_captures(&[(82, return_words)]).is_none());
+        parser.return_type = Type::Int;
+        parser.names.remove("return_words");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
         for ty in [Type::Int, Type::Bool] {
