@@ -172,6 +172,9 @@ impl Parser<'_> {
         self.require_public("enum", def.name, &def.file, def.public)?;
         let (vidx, fields) = def.variant_payload(&vname)
             .ok_or_else(|| self.error_at(offset, &format!("enum '{}' has no variant '{}'", def.name, vname)))?;
+        if let Some(values) = self.lower_committed_enum_payload(fields) {
+            return Ok((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid)));
+        }
         let mut values = Vec::new();
         if *self.current() == Kind::LParen {
             self.pos += 1;

@@ -635,5 +635,10 @@ First-use generic struct construction now shares initializer lowering
 after the concrete layout is allocated. The initializer plan preserves
 source evaluation order and layout field order, and commits moves only
 after all fields pass. The original constructor still reports malformed
-fields. The next slice applies this approach to first-use enum payloads.
+fields.
+
+First-use enum constructors use the indexed argument list after variant
+and visibility checks. They share payload lowering with cached enum
+constructors, while the typed reader retains diagnostics for rejected
+lists. The next slice audits remaining fallback sites before cutover.
 

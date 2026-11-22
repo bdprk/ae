@@ -858,7 +858,10 @@ impl<'a> Parser<'a> {
                                 }
                             }
                             if let ExpressionKind::Call { callee, arguments } = &expression.kind {
-                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }) {
+                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. })
+                                    || matches!(&callee.kind, ExpressionKind::Qualified { base, .. }
+                                        if matches!(base.kind, ExpressionKind::Specialization { .. }))
+                                {
                                     let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
                                     expressions.specialized_call_arguments.insert(self.tokens[open].offset, arguments.as_slice().into());
                                 }
@@ -1778,12 +1781,24 @@ impl<'a> Parser<'a> {
         let def = self.enums.get(eid)?;
         self.require_public("enum", def.name, &def.file, def.public).ok()?;
         let (variant_id, payload) = def.variant_payload(variant)?;
+        let (enum_name, payload) = (def.name, payload.to_vec());
+        let values = self.lower_shared_enum_payload(arguments, &payload, remaining, nodes_left, effects)?;
+        Some((Expr::EnumLit(enum_name, eid, variant_id, values), Type::Enum(enum_name, eid)))
+    }
+
+    fn lower_shared_enum_payload(
+        &mut self,
+        arguments: &[ae_syntax::expression::Expression],
+        payload: &[Type],
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<Vec<Expr>> {
         if arguments.len() != payload.len() {
             return None;
         }
-        let (enum_name, payload) = (def.name, payload.to_vec());
         let mut values = Vec::with_capacity(payload.len());
-        for (argument, expected) in arguments.iter().zip(payload) {
+        for (argument, &expected) in arguments.iter().zip(payload) {
             let (value, actual) = if expected == Type::String {
                 self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?
             } else {
@@ -1794,7 +1809,7 @@ impl<'a> Parser<'a> {
             }
             values.push(value);
         }
-        Some((Expr::EnumLit(enum_name, eid, variant_id, values), Type::Enum(enum_name, eid)))
+        Some(values)
     }
 
     fn lower_shared_expression(
@@ -2126,6 +2141,18 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn lower_committed_specialized_arguments(&mut self, params: &[Type]) -> Option<Vec<Argument>> {
+        self.lower_indexed_argument_list(params, Self::lower_shared_call_arguments)
+    }
+
+    pub(super) fn lower_committed_enum_payload(&mut self, payload: &[Type]) -> Option<Vec<Expr>> {
+        self.lower_indexed_argument_list(payload, Self::lower_shared_enum_payload)
+    }
+
+    fn lower_indexed_argument_list<T>(
+        &mut self,
+        params: &[Type],
+        lower: impl FnOnce(&mut Self, &[ae_syntax::expression::Expression], &[Type], usize, &mut usize, &mut SharedExpressionEffects) -> Option<T>,
+    ) -> Option<T> {
         if *self.current() != Kind::LParen {
             return None;
         }
@@ -2154,7 +2181,7 @@ impl<'a> Parser<'a> {
         let budget = 128usize.checked_sub(self.expression_nodes)?;
         let mut nodes_left = budget;
         let mut effects = SharedExpressionEffects::default();
-        let args = self.lower_shared_call_arguments(&arguments, params, depth, &mut nodes_left, &mut effects)?;
+        let args = lower(self, &arguments, params, depth, &mut nodes_left, &mut effects)?;
         self.commit_shared_effects(effects);
         self.expression_nodes += budget - nodes_left;
         self.pos = cursor + 1;
@@ -3462,6 +3489,18 @@ mod tests {
         assert_eq!(parser.pos, start);
         assert!(!parser.moved.contains(&82));
         let eid = parser.instantiate_enum(0, vec![Type::String], variant).unwrap();
+        parser.seek_scalar_offset(variant + "CachedBox[string]::Item".len());
+        let open = parser.pos;
+        assert!(parser.lower_committed_enum_payload(&[Type::Int]).is_none());
+        assert_eq!(parser.pos, open);
+        assert!(!parser.moved.contains(&82));
+        assert!(matches!(
+            parser.lower_committed_enum_payload(&[Type::String]).as_deref(),
+            Some([Expr::Variable(82, Type::String, ..)])
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
+        assert!(parser.moved.remove(&82));
+        parser.seek_scalar_offset(variant);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
             Some((Expr::EnumLit(_, actual, 0, payload), Type::Enum(_, ty)))
