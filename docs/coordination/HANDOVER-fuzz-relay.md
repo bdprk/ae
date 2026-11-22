@@ -943,3 +943,29 @@ moves into a `string` field are not tracked), by-value struct parameters
 closure bodies' field receivers. The next slice with the best coverage per
 risk is builtins plus string-field reads inside scalar bodies — that is what
 `io_step`, `pipe_*` and much of `batch_core_*` still need.
+
+## P1.1 slice 4 landed: by-value plain-struct parameters + literal prints
+
+- The resolver spells a by-value struct parameter `Named`; the mark pass now
+  registers those (not just `Named` bindings), so the field-read walk and
+  `struct_definitions` see them like `&P` receivers.
+- The guard admits a by-value parameter of the plain shape
+  (`owned_plain_struct`): it is owned by the callee but has no release
+  surface, so no exit drop is owed — reads, constructions from its fields,
+  and moving it back out (`return s;`, passing it on) are the whole surface.
+- A literal `print` lowers as `Printed::Text`, exactly the statement the
+  typed route emits for it (byte parity).
+- `AE_ROUTE_REASONS=1` (new) prints the first statement keeping a function
+  or closure body off the route, with file:line and source text — the
+  planning aid behind slices 2-5.
+
+Coverage: 987 → **471 fallbacks**, files with fallbacks 165 → 127. The
+incremental-compiler family went to zero (`ir_query_key`, `ir_dep_graph`,
+`ir_crate_interface`, `ir_query_stats` all route now).
+`tests/run/struct_value_params.ae` pins parameter reads, a construction from
+parameter fields, `return s;`, and argument-position constructions.
+
+The reason report for `examples/closures.ae` now names the next theme:
+string expressions (`"hello " + name`, `to_string(...)`) and closure-valued
+bindings. After that: structs with owned fields (`IoReq`/`BytePipe`),
+closure bodies' field receivers, trait-method calls, nested store bases.

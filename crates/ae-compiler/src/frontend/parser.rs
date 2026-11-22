@@ -372,7 +372,13 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     if name != "self" && resolved.scalar_reads.get(&value.range.start)
                         .is_some_and(|id| resolved.owned_struct_bindings.contains(id)))
         }
-        StatementKind::Print(value) | StatementKind::Assert(value) => {
+        // A literal print is the typed route's `Printed::Text` (no expression
+        // to lower); everything else must resolve as a printable scalar.
+        StatementKind::Print(value) => {
+            matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                || scalar_body_expression(value, resolved, supports_call, supports_field)
+        }
+        StatementKind::Assert(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
         }
         StatementKind::PointerStore { pointer_range, value, .. } => {
@@ -836,6 +842,19 @@ impl<'a> Parser<'a> {
         }
     }
 
+    // Planning aid for the P1.1 slices: with AE_ROUTE_REASONS=1 the first
+    // statement that keeps a body off the route is printed with its source
+    // line. The route's gates are statement-shaped, so the line names the
+    // shape to support next.
+    fn report_route_reason(&self, label: &str, statement: &ae_syntax::statement::Statement) {
+        if std::env::var_os("AE_ROUTE_REASONS").is_none() {
+            return;
+        }
+        let text = self.source.get(statement.range.clone()).unwrap_or("").lines().next().unwrap_or("").trim();
+        let line = 1 + self.source[..statement.range.start.min(self.source.len())].matches('\n').count();
+        eprintln!("route reason {label} {}:{line}: {}", self.file, text.chars().take(80).collect::<String>());
+    }
+
     fn resolved_expressions(&self) -> &ResolvedExpressions {
         self.resolved_expressions.get_or_init(|| {
             let mut expressions = ResolvedExpressions::default();
@@ -921,13 +940,12 @@ impl<'a> Parser<'a> {
             expressions.scalar_definitions.extend(resolution.defs.iter()
                 .filter(|definition| definition.kind.is_local())
                 .map(|definition| (definition.range.start, definition.id)));
-            // Struct parameters (immutable borrows) and local bindings
-            // (owned, constructed in-route from a drop-free struct) are
-            // field-read receivers for the body route: the resolver's
-            // inferred spelling names the struct item, and the compiler's
-            // registry supplies field types for the read checks. Marked
-            // before the statement walk, whose field-read checks consult
-            // this set.
+            // Struct parameters (borrowed or by value) and local bindings (owned,
+            // constructed in-route from a drop-free struct) are field-read
+            // receivers for the body route: the resolver's inferred spelling
+            // names the struct item, and the compiler's registry supplies
+            // field types for the read checks. Marked before the statement
+            // walk, whose field-read checks consult this set.
             for definition in resolution.defs.iter().filter(|entry| {
                 entry.kind == ae_resolve::DefKind::Parameter || entry.kind == ae_resolve::DefKind::Binding
             }) {
@@ -936,7 +954,10 @@ impl<'a> Parser<'a> {
                         ae_resolve::TypeSpelling::Named { def } => Some(*def),
                         _ => None,
                     },
-                    (Some(ae_resolve::TypeSpelling::Named { def }), ae_resolve::DefKind::Binding) => Some(*def),
+                    // A by-value struct parameter is spelled `Named` like a
+                    // binding: the guard admits it only for the plain shape,
+                    // and its field reads answer exactly like `&P`'s.
+                    (Some(ae_resolve::TypeSpelling::Named { def }), ae_resolve::DefKind::Binding | ae_resolve::DefKind::Parameter) => Some(*def),
                     _ => None,
                 };
                 let names_struct = item
@@ -1187,10 +1208,17 @@ impl<'a> Parser<'a> {
                         expressions.closure_capture_reads.insert(occurrence.range.start);
                     }
                 }
-                if !body.has_binding_conflict
-                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| false))
-                {
+                let failing = body.statements.iter().position(|statement| {
+                    !scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| false)
+                });
+                if !body.has_binding_conflict && failing.is_none() {
                     expressions.scalar_bodies.insert(body.start, body.statements.clone());
+                } else if body.has_binding_conflict {
+                    if std::env::var_os("AE_ROUTE_REASONS").is_some() {
+                        eprintln!("route reason closure {}: binding conflict", self.file);
+                    }
+                } else if let Some(statement) = failing.and_then(|index| body.statements.get(index)) {
+                    self.report_route_reason("closure", statement);
                 }
             }
             for function in module.functions {
@@ -1212,11 +1240,13 @@ impl<'a> Parser<'a> {
                         _ => false,
                     }
                 };
-                let eligible = body.iter().all(|statement| {
-                    scalar_body_statement(statement, &expressions, &|_, _| true, &supports_field)
+                let failing = body.iter().position(|statement| {
+                    !scalar_body_statement(statement, &expressions, &|_, _| true, &supports_field)
                 });
-                if eligible {
+                if failing.is_none() {
                     expressions.scalar_bodies.insert(range.start, body.into());
+                } else if let Some(statement) = failing.and_then(|index| body.get(index)) {
+                    self.report_route_reason("function", statement);
                 }
             }
             expressions
@@ -1278,6 +1308,11 @@ impl<'a> Parser<'a> {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (ty == Type::StrView && captured)
+                    // A by-value plain struct parameter is owned here, but it
+                    // carries nothing a release routine walks, so the callee
+                    // needs no exit drop: reads (and moving it back out) are
+                    // the whole surface.
+                    || owned_plain_struct(ty, self.structs)
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
         {
@@ -1601,6 +1636,12 @@ impl<'a> Parser<'a> {
                 Statement::PtrStore(slot, lowered, line, column)
             }
             StatementKind::Print(argument) => {
+                // A literal prints as `Printed::Text`, the same statement
+                // the typed route emits for it (byte parity).
+                if let ae_syntax::expression::ExpressionKind::Atom(Kind::Text(text)) = &argument.kind {
+                    self.seek_scalar_offset(statement.range.end);
+                    return Ok(Statement::Print(Printed::Text(text.clone())));
+                }
                 let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
                 if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView) {
                     self.seek_scalar_offset(argument.range.end);
