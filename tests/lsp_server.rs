@@ -511,3 +511,20 @@ fn lsp_code_actions_carry_diagnostic_suggestions() {
         assert!(action.get("diagnostics").and_then(|d| d.as_array()).is_some(), "diagnostics attached");
     }
 }
+
+#[test]
+fn lsp_inlay_hints_show_inferred_binding_types() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn main() {\n    let count = 7;\n    let name = \"ae\";\n}"}}}"#;
+    server.handle_message(open);
+
+    let hint_req = r#"{"jsonrpc":"2.0","id":21,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":"file:///test.ae"},"range":{"start":{"line":0,"character":0},"end":{"line":3,"character":0}}}}"#;
+    let resps = server.handle_message(hint_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let hints = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let labelled: Vec<(i64, &str)> = hints.iter().filter_map(|h| {
+        Some((h.get("position")?.get("line")?.as_i64()?, h.get("label")?.as_str()?))
+    }).collect();
+    assert!(labelled.iter().any(|(line, label)| *line == 1 && label.contains("i64")), "count hint: {labelled:?}");
+    assert!(labelled.iter().any(|(line, label)| *line == 2 && label.contains("string")), "name hint: {labelled:?}");
+}

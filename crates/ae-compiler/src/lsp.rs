@@ -552,6 +552,7 @@ impl LspServer {
                 caps.insert("signatureHelpProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("foldingRangeProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("codeActionProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("inlayHintProvider".to_owned(), JsonValue::Bool(true));
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -641,6 +642,25 @@ impl LspServer {
                     Some(signature) => Self::make_response(id, signature),
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/inlayHint" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let hints: Vec<JsonValue> = self.inlay_hints(uri).into_iter().map(|(position, label)| {
+                    let mut hint = BTreeMap::new();
+                    hint.insert("position".to_owned(), {
+                        let mut p = BTreeMap::new();
+                        p.insert("line".to_owned(), JsonValue::Number(position.line as f64));
+                        p.insert("character".to_owned(), JsonValue::Number(position.character as f64));
+                        JsonValue::Object(p)
+                    });
+                    hint.insert("label".to_owned(), JsonValue::String(label));
+                    hint.insert("kind".to_owned(), JsonValue::Number(1.0));
+                    JsonValue::Object(hint)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(hints))
             }
             "textDocument/codeAction" => {
                 let Some(params) = params else {
@@ -882,6 +902,27 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: inlay hints — every file-local binding with a resolved type gets
+/// a `: type` hint right after its name, so the editor shows the inferred
+/// shape the def table carries. Deferred shapes stay silent.
+    fn inlay_hints(&self, uri: &str) -> Vec<(Position, String)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(cached) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &cached.2;
+        resolution.defs.iter()
+            .filter(|def| !def.imported && def.kind == ae_resolve::DefKind::Binding)
+            .filter_map(|def| {
+                let shape = def.inferred.as_ref()?;
+                let label = format!(": {}", describe_spelling(shape, resolution));
+                Some((doc.line_index.offset_to_position(&doc.text, def.range.end), label))
+            })
+            .collect()
     }
 
     /// R3d: quick fixes — each diagnostic suggestion becomes a quickfix
