@@ -255,6 +255,38 @@ fn lsp_completion_includes_file_defs_from_the_def_table() {
     assert!(entries.iter().any(|(label, detail)| label == "area" && detail.contains("fn area(p: &Point) -> i64")), "entries: {entries:?}");
     assert!(entries.iter().any(|(label, detail)| label == "Point" && detail.contains("struct")), "entries: {entries:?}");
     assert!(entries.iter().any(|(label, detail)| label == "width" && detail.contains("i64")), "entries: {entries:?}");
+
+    let source = concat!(
+        "enum Choice { Some(i64), None }\n",
+        "fn scoped(parameter: i64) -> i64 {\n",
+        "    if true { let sibling = 1; print(sibling); }\n",
+        "    else { let sibling = false; print(sibling); }\n",
+        "    for index in 0..2 { print(index); }\n",
+        "    let task = |argument: i64| -> i64 { return argument + parameter; };\n",
+        "    let choice = Choice::Some(1);\n",
+        "    match choice { Choice::Some(payload) => { print(payload); } Choice::None => {} }\n",
+        "    return task(parameter);\n",
+        "}",
+    );
+    let open = format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///scope.ae","version":1,"text":{}}}}}}}"#,
+        JsonValue::String(source.to_owned()).serialize());
+    server.handle_message(&open);
+    let index = LineIndex::new(source);
+    let complete_at = |needle: &str| {
+        server.completion("file:///scope.ae", index.offset_to_position(source, source.find(needle).unwrap()))
+    };
+    let local_names = |items: &[(String, u32, Option<String>)]| {
+        items.iter().filter(|(_, kind, _)| *kind == 6).map(|(name, _, _)| name.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(local_names(&complete_at("false; print")), ["parameter"]);
+    let sibling_items = complete_at("print(sibling); }\n    for");
+    assert!(sibling_items.iter().any(|(name, _, detail)| {
+        name == "sibling" && detail.as_deref() == Some("sibling: bool")
+    }), "sibling block entries: {sibling_items:?}");
+    assert_eq!(local_names(&complete_at("print(index)")), ["parameter", "index"]);
+    assert_eq!(local_names(&complete_at("return argument")), ["parameter", "argument"]);
+    assert_eq!(local_names(&complete_at("print(payload)")), ["parameter", "task", "choice", "payload"]);
+    assert_eq!(local_names(&complete_at("return task")), ["parameter", "task", "choice"]);
 }
 
 #[test]

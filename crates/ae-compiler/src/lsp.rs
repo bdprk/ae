@@ -371,6 +371,9 @@ impl Document {
     /// (lex or declaration diagnostics) have none: their features fall
     /// back to the text heuristics.
     pub fn resolution(&self) -> Option<&std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>> {
+        if let Some(cached) = self.resolution.get() {
+            return Some(cached);
+        }
         let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
         let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
         let imports = self.disk_imports();
@@ -929,28 +932,17 @@ impl LspServer {
             out.push((name.to_owned(), kind, Some(detail.to_owned())));
         }
 
-        // R3d: the file's own defs join the candidates — functions and
-        // structs with their declared shapes, and the enclosing function's
-        // locals (declared before the cursor) with their inferred types.
-        // Exact live-scope completion needs scope-structured ranges and
-        // stays a later slice.
+        // Locals use the resolver's visibility ranges. Module items retain
+        // their declared signatures.
         if let Some(cached) = doc.resolution() {
-            let (module, resolution) = (&cached.0, &cached.2);
-            let owner = module.functions.iter().enumerate().find(|(_, function)| {
-                matches!(&function.declaration.body, Some(body)
-                    if body.start <= offset && offset <= body.end)
-            }).and_then(|(index, _)| resolution.functions.get(index))
-                .map(|function| function.function_def);
-            if let Some(owner) = owner {
-                for def in resolution.defs.iter().filter(|def| {
-                    def.owner == Some(owner) && def.kind != ae_resolve::DefKind::Parameter
-                        && def.range.start <= offset
-                }) {
-                    let ty = def.inferred.as_ref()
-                        .map(|shape| describe_spelling(shape, resolution))
-                        .unwrap_or_else(|| "deferred".to_owned());
-                    out.push((def.name.clone(), 6, Some(format!("{}: {ty}", def.name))));
-                }
+            let resolution = &cached.2;
+            for (id, range) in resolution.functions.iter().flat_map(|function| &function.binding_visibility) {
+                if !range.contains(&offset) { continue; }
+                let def = &resolution.defs[id.0 as usize];
+                let ty = def.inferred.as_ref()
+                    .map(|shape| describe_spelling(shape, resolution))
+                    .unwrap_or_else(|| "deferred".to_owned());
+                out.push((def.name.clone(), 6, Some(format!("{}: {ty}", def.name))));
             }
             for def in &resolution.defs {
                 if def.imported {

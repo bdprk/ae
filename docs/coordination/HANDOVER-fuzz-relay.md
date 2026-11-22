@@ -544,3 +544,10 @@ candidate parameter types and binding identities qualify. Both probes still
 run in their original order, and the existing AST capture walk determines
 which hidden parameters are used, moved, or mutated.
 
+## R3d completion visibility (2026-11-22)
+
+Completion uses the resolver's binding visibility ranges for parameters,
+initialized locals, loop bindings, match payloads and closure parameters.
+Sibling scopes can reuse a name without leaking its previous definition.
+Repeated requests for the same document version reuse the cached resolution.
+

@@ -37,6 +37,8 @@ pub struct FnOccurrences {
     /// The function's own def id (locals name it as their owner).
     pub function_def: DefId,
     pub occurrences: Vec<Occurrence>,
+    /// Byte ranges where local bindings are available for lookup.
+    pub binding_visibility: Vec<(DefId, Range<usize>)>,
     /// Successfully parsed closure bodies reached during name resolution.
     pub closure_bodies: Vec<ClosureBody>,
     /// Type argument ranges for expression specializations, keyed by base-name offset.
@@ -437,6 +439,7 @@ impl<'m> Pass<'m> {
                 }
                 _ => None,
             };
+            let body_range = unit.declaration.body.clone().unwrap_or(0..0);
             let mut walker = Walker {
                 module: self.module,
                 tokens: self.tokens,
@@ -454,7 +457,8 @@ impl<'m> Pass<'m> {
                 function_def,
                 locals: Vec::new(),
                 live: HashMap::new(),
-                blocks: vec![Vec::new()],
+                blocks: vec![(body_range.clone(), Vec::new())],
+                binding_visibility: Vec::new(),
                 occurrences: Vec::new(),
                 closure_bodies: Vec::new(),
                 specialization_arguments: HashMap::new(),
@@ -502,13 +506,13 @@ impl<'m> Pass<'m> {
                     } else {
                         None
                     };
-                    walker.declare(parameter.name.clone(), DefKind::Parameter, parameter.name_range.clone(), parameter.mutable, writable_through, inferred);
+                    walker.declare(parameter.name.clone(), DefKind::Parameter, parameter.name_range.clone(), parameter.mutable, writable_through, inferred, body_range.start);
                 }
             }
             let body_end = unit.declaration.body.as_ref().map(|body| body.end);
             walker.body_end = body_end;
             if let Some(body) = &unit.body {
-                walker.block(body);
+                walker.block(body, body_range);
             }
             // A function that declares a return type must return on every
             // path; the compiler's `function may exit without returning a
@@ -529,11 +533,11 @@ impl<'m> Pass<'m> {
                     }
                 }
             }
-            let Walker { locals, occurrences, spellings, diagnostics, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, .. } = walker;
+            let Walker { locals, occurrences, binding_visibility, spellings, diagnostics, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, .. } = walker;
             self.defs.extend(locals);
             self.spellings.extend(spellings);
             self.diagnostics.extend(diagnostics);
-            self.functions.push(FnOccurrences { function: index, function_def, occurrences, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers });
+            self.functions.push(FnOccurrences { function: index, function_def, occurrences, binding_visibility, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers });
         }
     }
 }
@@ -583,7 +587,8 @@ struct Walker<'w> {
     /// removal, so a name is reusable after its block ends but never while
     /// another binding of it is live — that is `E0104`, not shadowing.
     live: HashMap<String, DefId>,
-    blocks: Vec<Vec<String>>,
+    blocks: Vec<(Range<usize>, Vec<String>)>,
+    binding_visibility: Vec<(DefId, Range<usize>)>,
     occurrences: Vec<Occurrence>,
     closure_bodies: Vec<ClosureBody>,
     specialization_arguments: HashMap<usize, Arc<[Range<usize>]>>,
@@ -593,7 +598,7 @@ struct Walker<'w> {
 }
 
 impl Walker<'_> {
-    fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>) {
+    fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>, visible_from: usize) {
         let id = DefId(self.base + self.locals.len() as u32);
         self.locals.push(DefEntry { id, name: name.clone(), kind, range: range.clone(), owner: Some(self.function_def), mutable, writable_through, inferred, imported: false });
         if self.live.contains_key(&name) {
@@ -605,8 +610,9 @@ impl Walker<'_> {
             );
         } else {
             self.live.insert(name.clone(), id);
-            if let Some(block) = self.blocks.last_mut() {
-                block.push(name);
+            if let Some((scope, bindings)) = self.blocks.last_mut() {
+                bindings.push(name);
+                self.binding_visibility.push((id, visible_from.max(scope.start)..scope.end));
             }
         }
     }
@@ -1041,28 +1047,42 @@ impl Walker<'_> {
         }
     }
 
-    fn block(&mut self, body: &[Statement]) {
-        self.blocks.push(Vec::new());
+    fn close_scope(&mut self) {
+        let (_, bindings) = self.blocks.pop().expect("open scope");
+        for name in bindings {
+            self.live.remove(&name);
+        }
+    }
+
+    fn block_range(&self, header_end: usize, body: &[Statement]) -> Range<usize> {
+        let next = self.tokens.partition_point(|token| token.offset < header_end);
+        let open = next + self.tokens[next..].iter().position(|token| token.kind == Kind::LBrace)
+            .expect("parsed block has an opening brace");
+        let close = body.last().map_or(open + 1, |last| {
+            self.tokens.partition_point(|token| token.offset < last.range.end)
+        });
+        self.tokens[open].end..self.tokens[close].end
+    }
+
+    fn block(&mut self, body: &[Statement], range: Range<usize>) {
+        self.blocks.push((range, Vec::new()));
         for statement in body {
             self.statement(statement);
         }
-        for name in self.blocks.pop().unwrap_or_default() {
-            self.live.remove(&name);
-        }
+        self.close_scope();
     }
 
     /// A loop binding lives exactly for its body: declared into the body's
     /// own block, gone when the block ends (the compiler inserts before the
     /// body and removes after the loop).
-    fn scoped_binding(&mut self, binding: &str, binding_range: Range<usize>, kind: DefKind, body: &[Statement], inferred: Option<TypeSpelling>) {
-        self.blocks.push(Vec::new());
-        self.declare(binding.to_owned(), kind, binding_range, false, false, inferred);
+    fn scoped_binding(&mut self, binding: &str, binding_range: Range<usize>, body: &[Statement], scope: Range<usize>, inferred: Option<TypeSpelling>) {
+        let visible_from = scope.start;
+        self.blocks.push((scope, Vec::new()));
+        self.declare(binding.to_owned(), DefKind::ForBinding, binding_range, false, false, inferred, visible_from);
         for statement in body {
             self.statement(statement);
         }
-        for name in self.blocks.pop().unwrap_or_default() {
-            self.live.remove(&name);
-        }
+        self.close_scope();
     }
 
     fn statement(&mut self, statement: &Statement) {
@@ -1070,7 +1090,7 @@ impl Walker<'_> {
             StatementKind::Binding { mutable, name, name_range, initializer } => {
                 self.expr(initializer, Role::Read);
                 let inferred = self.infer_expression(initializer);
-                self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred);
+                self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred, statement.range.end);
             }
             StatementKind::Assign { target, value, .. } => {
                 self.assign_target(target);
@@ -1089,9 +1109,11 @@ impl Walker<'_> {
             StatementKind::If { condition, then_body, else_body } => {
                 self.expr(condition, Role::Read);
                 self.condition_check(condition);
-                self.block(then_body);
+                let then_range = self.block_range(condition.range.end, then_body);
+                let then_end = then_range.end;
+                self.block(then_body, then_range);
                 match else_body {
-                    Some(ElseBranch::Block(body)) => self.block(body),
+                    Some(ElseBranch::Block(body)) => self.block(body, self.block_range(then_end, body)),
                     Some(ElseBranch::If(nested)) => self.statement(nested),
                     None => {}
                 }
@@ -1099,12 +1121,12 @@ impl Walker<'_> {
             StatementKind::While { condition, body } => {
                 self.expr(condition, Role::Read);
                 self.condition_check(condition);
-                self.block(body);
+                self.block(body, self.block_range(condition.range.end, body));
             }
             StatementKind::ForRange { binding, binding_range, start, end, body } => {
                 self.expr(start, Role::Read);
                 self.expr(end, Role::Read);
-                self.scoped_binding(binding, binding_range.clone(), DefKind::ForBinding, body, Some(TypeSpelling::Primitive("i64")));
+                self.scoped_binding(binding, binding_range.clone(), body, self.block_range(end.range.end, body), Some(TypeSpelling::Primitive("i64")));
             }
             StatementKind::ForIn { binding, binding_range, iterable, body } => {
                 self.expr(iterable, Role::Read);
@@ -1113,7 +1135,7 @@ impl Walker<'_> {
                     Some(TypeSpelling::Composite { family: "vec", arguments }) => arguments.into_iter().next(),
                     _ => None,
                 };
-                self.scoped_binding(binding, binding_range.clone(), DefKind::ForBinding, body, element);
+                self.scoped_binding(binding, binding_range.clone(), body, self.block_range(iterable.range.end, body), element);
             }
             StatementKind::Match { subject, arms } => {
                 self.expr(subject, Role::Read);
@@ -1121,19 +1143,17 @@ impl Walker<'_> {
                 self.match_subject_check(subject, &subject_shape);
                 self.exhaustiveness(subject, arms);
                 for arm in arms {
-                    self.blocks.push(Vec::new());
+                    self.blocks.push((self.block_range(arm.pattern.range.end, &arm.body), Vec::new()));
                     self.pattern(&arm.pattern, subject_shape.clone());
                     for statement in &arm.body {
                         self.statement(statement);
                     }
-                    for name in self.blocks.pop().unwrap_or_default() {
-                        self.live.remove(&name);
-                    }
+                    self.close_scope();
                 }
             }
             StatementKind::Unsafe(body) => {
                 self.unsafe_depth += 1;
-                self.block(body);
+                self.block(body, self.block_range(statement.range.start, body));
                 self.unsafe_depth -= 1;
             }
             StatementKind::Break | StatementKind::Continue => {}
@@ -1257,7 +1277,7 @@ impl Walker<'_> {
         match &pattern.kind {
             PatternKind::Binding(name) => {
                 // The pattern covers exactly the binding's name token.
-                self.declare(name.clone(), DefKind::PatternBinding, pattern.range.clone(), false, false, subject_shape);
+                self.declare(name.clone(), DefKind::PatternBinding, pattern.range.clone(), false, false, subject_shape, pattern.range.end);
             }
             PatternKind::Variant { enum_name, variant, variant_range, payload } => {
                 if let Some(enum_id) = self.items.get(enum_name) {
@@ -1477,7 +1497,7 @@ impl Walker<'_> {
     /// items. Capture semantics stay with the type checker (R3c).
     fn closure(&mut self, params: &[ClosureParam], body: &Range<usize>, return_type: &Range<usize>) {
         let diagnostics_start = self.diagnostics.len();
-        self.blocks.push(Vec::new());
+        self.blocks.push((body.start + 1..body.end, Vec::new()));
         for param in params {
             let shape = if param.ty.start == param.ty.end {
                 None
@@ -1491,7 +1511,7 @@ impl Walker<'_> {
                 });
                 Some(spelled.spelling)
             };
-            self.declare(param.name.clone(), DefKind::ClosureParameter, param.name_range.clone(), false, false, shape);
+            self.declare(param.name.clone(), DefKind::ClosureParameter, param.name_range.clone(), false, false, shape, body.start + 1);
         }
         // The closure's return spelling sits between the parameters and the
         // body; an empty range means the spelling carries no return type.
@@ -1520,9 +1540,7 @@ impl Walker<'_> {
                 Err(_) => {}
             }
         }
-        for name in self.blocks.pop().unwrap_or_default() {
-            self.live.remove(&name);
-        }
+        self.close_scope();
     }
 
     fn member_range(&self, name: &str, after: usize, end: usize) -> Range<usize> {
