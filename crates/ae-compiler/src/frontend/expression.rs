@@ -393,7 +393,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 let power = prefix_binding_power(&operator).expect("prefix operator");
                 let (operand, ty) = self.expression(power, false)?;
-                self.lower_prefix(operator, (operand, ty), (line, column))?
+                self.lower_prefix(operator, (operand, ty), (line, column), None)?
             }
             // A borrow expression exists only to be cast (M2.12 slice 2):
             // `&expr as *const T` takes the address of addressable storage.
@@ -1827,7 +1827,7 @@ impl Parser<'_> {
         self.plus_operand_depth += 1;
         let parsed = self.expression(right_power, op == Kind::Plus);
         self.plus_operand_depth -= 1;
-        self.lower_infix(lhs, op, parsed?, (line, column))
+        self.lower_infix(lhs, op, parsed?, (line, column), None)
     }
 
     fn operator_error(&self, error: ae_resolve::typecheck::OperatorError) -> ae_span::Diagnostic {
@@ -1835,20 +1835,34 @@ impl Parser<'_> {
         if let Some(code) = error.code() { diagnostic.with_code(code) } else { diagnostic }
     }
 
+    fn operator_type(
+        &self,
+        fact: Option<ae_resolve::resolve::ExpressionType>,
+        check: impl FnOnce() -> Result<ae_resolve::typecheck::Scalar, ae_resolve::typecheck::OperatorError>,
+    ) -> Result<Type, ae_span::Diagnostic> {
+        use ae_resolve::resolve::ExpressionType;
+        let result = match fact {
+            Some(ExpressionType::Checked(scalar)) => Ok(scalar),
+            Some(ExpressionType::Rejected(error)) => Err(error),
+            Some(ExpressionType::Deferred) | None => check(),
+        };
+        result.map(concrete_scalar).map_err(|error| self.operator_error(error))
+    }
+
     pub(super) fn lower_prefix(
         &self,
         operator: Kind,
         (operand, ty): (Expr, Type),
         (line, column): (usize, usize),
+        fact: Option<ae_resolve::resolve::ExpressionType>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let ty = ae_resolve::typecheck::prefix(&operator, operator_scalar(ty))
-            .map_err(|error| self.operator_error(error))?;
+        let ty = self.operator_type(fact, || ae_resolve::typecheck::prefix(&operator, operator_scalar(ty)))?;
         let value = if operator == Kind::Minus {
             Expr::Neg(Box::new(operand), line, column)
         } else {
             Expr::Not(Box::new(operand))
         };
-        Ok((value, concrete_scalar(ty)))
+        Ok((value, ty))
     }
 
     pub(super) fn lower_infix(
@@ -1857,6 +1871,7 @@ impl Parser<'_> {
         op: Kind,
         (rhs, rhs_ty): (Expr, Type),
         (line, column): (usize, usize),
+        fact: Option<ae_resolve::resolve::ExpressionType>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         let (lhs_expr, lhs_ty) = lhs;
         let stringlike = |ty: Type| matches!(ty, Type::String | Type::StrView);
@@ -1873,9 +1888,9 @@ impl Parser<'_> {
             }
             Type::String
         } else {
-            let ty = ae_resolve::typecheck::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
-                .map_err(|error| self.operator_error(error))?;
-            concrete_scalar(ty)
+            self.operator_type(fact, || {
+                ae_resolve::typecheck::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
+            })?
         };
         Ok((Expr::Binary(Box::new(lhs_expr), op, Box::new(rhs), line, column, ty), ty))
     }

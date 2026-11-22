@@ -571,7 +571,8 @@ Resolved function bodies now record checked scalar types, rejected operators,
 and deferred expressions by full byte range. The walk checks children before
 their parents and carries local scalar types by definition identity. Rejection
 stays at the operator that failed; enclosing operators defer. The compiler
-still owns user-facing operator diagnostics. The next slice can consume these
-facts in eligible compiler bodies and compare diagnostic locations on rejected
-inputs.
+still owns user-facing operator diagnostics. Eligible compiler bodies use
+checked and rejected scalar facts after lowering operands, with deferred
+operators checked against the compiler's concrete types. The next slice
+extends checked expression types to storage and call sites.
 

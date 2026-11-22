@@ -762,6 +762,11 @@ impl<'a> Parser<'a> {
             expressions.closure_headers.extend(resolution.functions.iter().flat_map(|function| {
                 function.closure_headers.iter().map(|(&offset, header)| (offset, header.clone()))
             }));
+            expressions.operator_types.extend(resolution.functions.iter().flat_map(|function| {
+                function.expression_types.iter().filter_map(|(range, &fact)| {
+                    (fact != ae_resolve::resolve::ExpressionType::Deferred).then(|| (range.clone(), fact))
+                })
+            }));
             expressions.scalar_definitions.extend(resolution.defs.iter()
                 .filter(|definition| definition.kind.is_local())
                 .map(|definition| (definition.range.start, definition.id)));
@@ -1497,7 +1502,8 @@ impl<'a> Parser<'a> {
                 let position = self.position();
                 let operand = self.lower_scalar_body_expression(operand, slots)?;
                 self.seek_scalar_offset(expression.range.end);
-                self.lower_prefix(operator.clone(), operand, position)?
+                let fact = self.resolved_expressions().operator_types.get(&expression.range).copied();
+                self.lower_prefix(operator.clone(), operand, position, fact)?
             }
             ExpressionKind::Binary { left, operator, right } => {
                 let lhs = self.lower_scalar_body_expression(left, slots)?;
@@ -1505,7 +1511,8 @@ impl<'a> Parser<'a> {
                 let position = self.position();
                 let rhs = self.lower_scalar_body_expression(right, slots)?;
                 self.seek_scalar_offset(expression.range.end);
-                self.lower_infix(lhs, operator.clone(), rhs, position)?
+                let fact = self.resolved_expressions().operator_types.get(&expression.range).copied();
+                self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
             ExpressionKind::Call { callee, arguments } => {
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
@@ -1958,7 +1965,7 @@ impl<'a> Parser<'a> {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < expression.range.start))?;
                 let position = (token.line, token.column);
                 let operand = self.lower_shared_expression(operand, remaining, nodes_left, effects)?;
-                self.lower_prefix(operator.clone(), operand, position).ok()
+                self.lower_prefix(operator.clone(), operand, position, None).ok()
             }
             ExpressionKind::Binary { left, operator, right } => {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < left.range.end))?;
@@ -1973,7 +1980,7 @@ impl<'a> Parser<'a> {
                 };
                 let left = lower_operand(self, left, remaining, nodes_left, effects)?;
                 let right = lower_operand(self, right, remaining, nodes_left, effects)?;
-                self.lower_infix(left, operator.clone(), right, position).ok()
+                self.lower_infix(left, operator.clone(), right, position, None).ok()
             }
             _ => None,
         }
@@ -3395,6 +3402,12 @@ mod tests {
         parser.impl_self = None;
         parser.binding_ranges.remove(&80);
         parser.return_type = Type::Bool;
+        let comparison = "local == 20";
+        let start = source.find(comparison).unwrap();
+        assert_eq!(
+            parser.resolved_expressions().operator_types.get(&(start..start + comparison.len())),
+            Some(&ae_resolve::resolve::ExpressionType::Checked(ae_resolve::typecheck::Scalar::Bool)),
+        );
         parser.seek_scalar_offset(source.find("{ let local").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved scalar route").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(0, _), Statement::Return(Expr::Binary(_, Kind::EqEq, _, _, _, Type::Bool), _)]));
