@@ -76,6 +76,15 @@ fn receiver_field_root(expression: &ae_syntax::expression::Expression) -> Option
     }
 }
 
+fn receiver_value(expression: &ae_syntax::expression::Expression) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Group(inner) => receiver_value(inner),
+        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(expression),
+        _ => None,
+    }
+}
+
 fn receiver_field_type(
     expression: &ae_syntax::expression::Expression,
     receiver: Type,
@@ -256,7 +265,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 _ => false,
             }
         }
-        StatementKind::Return(value) | StatementKind::Print(value) | StatementKind::Assert(value) => {
+        StatementKind::Return(value) => {
+            scalar_body_expression(value, resolved, supports_call, supports_field)
+                || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
+        }
+        StatementKind::Print(value) | StatementKind::Assert(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
         }
         StatementKind::If { condition, then_body, else_body } => {
@@ -964,7 +977,8 @@ impl<'a> Parser<'a> {
         if !self.subst.values().copied().all(scalar_type)
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
-            || !scalar_type(self.return_type)
+            || !(scalar_type(self.return_type)
+                || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(_, _, ty))| {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_))
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
@@ -1003,9 +1017,14 @@ impl<'a> Parser<'a> {
                     ae_resolve::Role::Write if matches!(receiver, Type::StructMut(_)) => &resolved.scalar_writes,
                     _ => return false,
                 };
-                receiver_field_root(expression).is_some_and(|offset| {
+                let resolves_to_receiver = receiver_field_root(expression).is_some_and(|offset| {
                     receiver_def.is_some() && occurrences.get(&offset) == receiver_def
-                }) && receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
+                });
+                resolves_to_receiver && if receiver_value(expression).is_some() {
+                    matches!(receiver, Type::Struct(_)) && receiver == self.return_type
+                } else {
+                    receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
+                }
             })
         };
         if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
@@ -1220,7 +1239,13 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
                 }
+                let returned_receiver = receiver_value(value);
                 let (value, ty) = self.lower_scalar_body_expression(value, slots)?;
+                if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &value) {
+                    self.seek_scalar_offset(atom.range.end);
+                    self.check_variable_move(*slot)?;
+                    self.moved.insert(*slot);
+                }
                 self.seek_scalar_offset(statement.range.end);
                 if ty != self.return_type {
                     return Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"));
@@ -1229,7 +1254,9 @@ impl<'a> Parser<'a> {
             }
             StatementKind::If { condition, then_body, else_body } => {
                 let value = self.lower_scalar_condition(condition, slots)?;
+                let before = self.moved.clone();
                 let yes = self.lower_scalar_statements(then_body, slots)?;
+                let after_yes = std::mem::replace(&mut self.moved, before);
                 let no = if let Some(branch) = else_body {
                     self.pos += 1;
                     match branch {
@@ -1239,6 +1266,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Vec::new()
                 };
+                self.moved.extend(after_yes);
                 Statement::If(value, yes, no)
             }
             StatementKind::While { condition, body } => {
@@ -3187,6 +3215,7 @@ mod tests {
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
+        let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3307,6 +3336,25 @@ mod tests {
         assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(..), owned)]
             if owned == &[(80, owned_receiver)]));
         parser.scopes.pop();
+        let transfer_binding = source.find("round_trip(self,").unwrap() + "round_trip(".len();
+        let route_binding = source.find("route:").unwrap();
+        parser.return_type = owned_receiver;
+        parser.binding_ranges.insert(80, transfer_binding..transfer_binding + "self".len());
+        parser.names.insert("route".into(), (81, false, Type::Bool));
+        parser.binding_ranges.insert(81, route_binding..route_binding + "route".len());
+        parser.scopes.push(vec![(80, owned_receiver)]);
+        parser.seek_scalar_offset(source.find("{ if route").unwrap());
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved owning transfer").unwrap();
+        let [Statement::If(_, yes, no)] = lowered.as_slice() else { panic!("expected both return branches") };
+        for branch in [yes, no] {
+            assert!(matches!(branch.as_slice(), [Statement::Return(Expr::Variable(80, ty, ..), owned)]
+                if *ty == owned_receiver && owned == &[(80, owned_receiver)]));
+        }
+        assert!(parser.moved.remove(&80));
+        parser.scopes.pop();
+        parser.names.remove("route");
+        parser.binding_ranges.remove(&81);
+        parser.return_type = Type::Int;
         parser.receiver = Some(receiver);
         parser.names.insert("self".into(), (80, false, receiver));
         parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());

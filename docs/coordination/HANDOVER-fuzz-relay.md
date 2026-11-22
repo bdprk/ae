@@ -524,3 +524,10 @@ reads. The receiver stays in the parameter cleanup scope, so early returns
 carry its drop and the existing drops pass owns cleanup. Whole-receiver
 moves, receiver stores, and non-scalar field results retain the typed path.
 
+## Resolved generic receiver returns (2026-11-22)
+
+An owned generic struct receiver can be returned directly or through a
+parenthesized expression when the return type is the same instance. The
+body route records the movement and preserves separate branch move states
+until the join. The existing drops pass handles the returned slot.
+
