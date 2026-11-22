@@ -29,7 +29,7 @@ git log -5 --oneline
 - The exact-read case produced the expected output with the native
   backend and interpreter on Windows and Ubuntu.
 - Windows and Ubuntu each passed 506 workspace tests.
-- The comparison against `7bdb1fa` matched 50 examples and 646 CLI
+- The comparison against `7bdb1fa` matched 50 examples and 650 CLI
   fixture invocations. All 21 Python tests passed.
 
 ## Files touched
