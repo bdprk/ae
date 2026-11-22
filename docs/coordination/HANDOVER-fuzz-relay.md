@@ -640,5 +640,20 @@ fields.
 First-use enum constructors use the indexed argument list after variant
 and visibility checks. They share payload lowering with cached enum
 constructors, while the typed reader retains diagnostics for rejected
-lists. The next slice audits remaining fallback sites before cutover.
+lists.
+
+## Frontend cutover audit at 8aeeae0
+
+| Area | Current route and remaining coverage |
+| --- | --- |
+| Function bodies | `scalar_body_statement` admits scalar bindings, assignments, returns, print/assert, if/while, range loops, unsafe blocks and loop control. Pointer stores, iterable loops, matches and effect statements still enter the token statement driver. |
+| Expression semantics | The shared expression path handles eligible reads, operators, calls, casts and aggregates within either body driver. Receiver dispatch, closure capture discovery and complex ownership cases still rely on the compiler's context-sensitive handlers. |
+| Explicit specialization | First use lowers indexed arguments or initializers after concrete instance allocation. Cached instances can lower speculatively. Rejected and unsupported shapes still rely on the token diagnostics. |
+| Concurrency | Task, scope and pool spawns share an indexed handle operand. The callable still enters the expression parser, which may consume indexed closure headers and bodies. Capture validation and transfer happen after parsing the whole statement. |
+| Verification | The A/B gate compares emitted C and CLI behavior. It does not establish which driver handled each input. The compiler's targeted parser test calls the resolved entry point and supplies that evidence for eligible shapes. |
+
+Keep R3c and M0.2.08 open. The next migration is the spawn callable entry.
+Reuse closure capture analysis and capture ordering, and pin inline and
+bound closures, signature rejection, and moved or borrowed captures on the
+new route before removing the existing entry.
 
