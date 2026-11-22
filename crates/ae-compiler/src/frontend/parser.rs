@@ -1155,9 +1155,7 @@ impl<'a> Parser<'a> {
                     let field = field_ty_in(sid, name, self.structs).expect("eligible receiver field");
                     let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
                     self.seek_scalar_offset(statement.range.end);
-                    if actual != field {
-                        return Err(self.fail(&format!("field '{name}' must be {}", field.name())));
-                    }
+                    self.check_field_value_type(name, field, actual, None)?;
                     return Ok(Statement::FieldStore(slot, name.clone(), field, value, receiver));
                 }
                 if let ae_syntax::expression::ExpressionKind::Index { base, index } = &target.kind {
@@ -1447,9 +1445,7 @@ impl<'a> Parser<'a> {
                     let slot = declared_fields.iter().position(|(declared, _)| declared == &field.name)
                         .expect("scalar construction field");
                     let (value, actual) = self.lower_scalar_body_expression(&field.value, slots)?;
-                    if actual != declared_fields[slot].1 {
-                        unreachable!("scalar construction field type");
-                    }
+                    self.check_field_value_type(&field.name, declared_fields[slot].1, actual, Some(&field.value.range))?;
                     values[slot] = Some(value);
                 }
                 (Expr::StructLit(sid, values.into_iter().collect::<Option<Vec<_>>>().expect("complete construction")), Type::Struct(sid))
@@ -1609,6 +1605,22 @@ impl<'a> Parser<'a> {
             self.seek_scalar_offset(range.end);
         }
         Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())))
+    }
+
+    pub(super) fn check_field_value_type(
+        &mut self,
+        name: &str,
+        expected: Type,
+        actual: Type,
+        range: Option<&std::ops::Range<usize>>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(expected, actual, range) {
+            return Ok(());
+        }
+        if let Some(range) = range {
+            self.seek_scalar_offset(range.end);
+        }
+        Err(self.fail(&format!("field '{name}' must be {}", expected.name())))
     }
 
     fn check_assignment_type(
@@ -2614,7 +2626,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                            if value_ty != fty { return Err(self.fail(&format!("field '{}' must be {}", fname, fty.name()))); }
+                            self.check_field_value_type(&fname, fty, value_ty, None)?;
                             result.push(Statement::FieldStore(id, fname, fty, value, ty));
                             continue;
                         }
@@ -2684,9 +2696,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
     None => self.expression(0, false)?,
 };
                                 self.take(Kind::Semi)?;
-                                if rhs_ty != fty {
-                                    return Err(self.fail(&format!("field '{}' must be {}", fname, fty.name())));
-                                }
+                                self.check_field_value_type(&fname, fty, rhs_ty, None)?;
                                 let base_var = Expr::Variable(id, ty, line, col);
                                 let lhs_field = Expr::Field(Box::new(base_var), fname.clone(), fty);
                                 let value = Expr::Binary(Box::new(lhs_field), op, Box::new(rhs), line, col, fty);
@@ -2700,7 +2710,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                            if value_ty != fty { return Err(self.fail(&format!("field '{}' must be {}", fname, fty.name()))); }
+                            self.check_field_value_type(&fname, fty, value_ty, None)?;
                             result.push(Statement::FieldStore(id, fname, fty, value, ty));
                             continue;
                         }
@@ -3267,6 +3277,7 @@ mod tests {
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
+        let source = format!("{source} fn bad_point() -> i64 {{ let wrong = Point {{ x: false, y: 1 }}; return wrong.y; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3648,6 +3659,11 @@ mod tests {
 
         parser.seek_scalar_offset(source.find("{ let g = Guard { id: 1").unwrap());
         assert!(parser.lower_resolved_scalar_body().is_none(), "drop-carrying constructions stay typed");
+
+        parser.seek_scalar_offset(source.find("{ let wrong = Point").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved constructor field error").err().unwrap();
+        assert_eq!(error.message, "field 'x' must be i64");
+        assert_eq!(*parser.current(), Kind::Comma);
         parser.names.remove("g");
 
         parser.seek_scalar_offset(source.find("{ let q = Point { x: 3").unwrap());

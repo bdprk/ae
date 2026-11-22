@@ -200,7 +200,7 @@ impl Parser<'_> {
             if !seen.insert(fname.clone()) { return Err(self.fail(&format!("field '{}' specified twice", fname))); }
             self.take(Kind::Colon)?;
             let (value, vty) = self.expression(0, true)?;
-            if vty != def_fields[fidx].1 { return Err(self.fail(&format!("field '{}' must be {}", fname, def_fields[fidx].1.name()))); }
+            self.check_field_value_type(&fname, def_fields[fidx].1, vty, None)?;
             slots[fidx] = Some(value);
             if *self.current() == Kind::Comma { self.pos += 1; }
         }
