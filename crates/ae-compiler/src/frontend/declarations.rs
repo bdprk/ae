@@ -1420,7 +1420,7 @@ impl Parser<'_> {
             // must not use the slot afterwards even when the
             // surrounding statement is not a move context.
             let (value, ty) = self.expression(0, true)?;
-            if ty != expected { return Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name()))); }
+            self.check_value_argument_type(name, index, expected, ty, None)?;
             Ok(Argument::Value(value))
         }
     }

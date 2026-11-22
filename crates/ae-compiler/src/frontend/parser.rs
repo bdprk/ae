@@ -1515,17 +1515,14 @@ impl<'a> Parser<'a> {
                     if index >= 64 {
                         return Err(self.fail("function argument limit exceeded (64)"));
                     }
-                    let expected = signature.params.get(index)
+                    let &expected = signature.params.get(index)
                         .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
                     if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
                         self.seek_scalar_offset(atom.range.end);
                         self.check_variable_move(*slot)?;
                     }
-                    if actual != *expected {
-                        self.seek_scalar_offset(argument.range.end);
-                        return Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())));
-                    }
+                    self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
                     // An owned aggregate passed by value moves: later uses
                     // are rejected (E0102), and the drops pass trims the
                     // Frees lists for this slot.
@@ -1595,6 +1592,23 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"))
+    }
+
+    pub(super) fn check_value_argument_type(
+        &mut self,
+        name: &str,
+        index: usize,
+        expected: Type,
+        actual: Type,
+        range: Option<&std::ops::Range<usize>>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(expected, actual, range) {
+            return Ok(());
+        }
+        if let Some(range) = range {
+            self.seek_scalar_offset(range.end);
+        }
+        Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())))
     }
 
     fn check_assignment_type(

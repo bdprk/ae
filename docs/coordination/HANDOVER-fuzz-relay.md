@@ -583,5 +583,8 @@ Plain and compound local assignments share compatibility checks. The resolved
 route uses checked RHS types by byte range, and the compiler handles string
 concatenation and ownership. Both routes also share the return type check,
 using resolved scalar facts when available and the active compiler signature
-for concrete types. The next slice covers direct call arguments.
+for concrete types. Direct by-value call arguments also share the type check.
+The resolved route reads scalar facts by argument range and uses the selected
+compiler signature for concrete types. The next slice covers borrowed call
+arguments and their effects.
 
