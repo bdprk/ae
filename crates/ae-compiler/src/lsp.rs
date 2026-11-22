@@ -555,6 +555,7 @@ impl LspServer {
                 caps.insert("inlayHintProvider".to_owned(), JsonValue::Bool(true));
                 let token_types = ["variable", "parameter", "function", "struct", "enum", "property"];
                 caps.insert("documentHighlightProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("selectionRangeProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("semanticTokensProvider".to_owned(), {
                     let mut legend = BTreeMap::new();
                     legend.insert("tokenTypes".to_owned(), JsonValue::Array(
@@ -654,6 +655,32 @@ impl LspServer {
                     Some(signature) => Self::make_response(id, signature),
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/selectionRange" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let positions: Vec<Position> = params.get("positions").and_then(|p| p.as_array()).unwrap_or(&[])
+                    .iter().filter_map(|p| Some(Position {
+                        line: p.get("line")?.as_i64()? as u32,
+                        character: p.get("character")?.as_i64()? as u32,
+                    })).collect();
+                let ranges: Vec<JsonValue> = self.selection_ranges(uri, &positions).into_iter().map(|chain| {
+                    // Chain outermost-first so each inner entry can name the
+                    // next one as its parent by index.
+                    let mut value = JsonValue::Null;
+                    for range in chain.into_iter().rev() {
+                        let mut entry = BTreeMap::new();
+                        entry.insert("range".to_owned(), Self::range_to_json(&range));
+                        if !matches!(value, JsonValue::Null) {
+                            entry.insert("parent".to_owned(), value);
+                        }
+                        value = JsonValue::Object(entry);
+                    }
+                    value
+                }).collect();
+                Self::make_response(id, JsonValue::Array(ranges))
             }
             "textDocument/documentHighlight" => {
                 let Some(params) = params else {
@@ -941,6 +968,78 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: selection ranges — innermost to outermost: the identifier under
+/// the cursor, its line, the enclosing brace block, then the whole file.
+    fn selection_ranges(&self, uri: &str, positions: &[Position]) -> Vec<Vec<Range>> {
+        let Some(doc) = self.documents.get(uri) else {
+            return positions.iter().map(|_| Vec::new()).collect();
+        };
+        let bytes = doc.text.as_bytes();
+        positions.iter().map(|&pos| {
+            let offset = doc.line_index.position_to_offset(&doc.text, pos);
+            let mut chain = Vec::new();
+            // 1. The identifier under the cursor.
+            let mut start = offset.min(bytes.len());
+            while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') { start -= 1; }
+            let mut end = offset.min(bytes.len());
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') { end += 1; }
+            chain.push(Range {
+                start: doc.line_index.offset_to_position(&doc.text, start),
+                end: doc.line_index.offset_to_position(&doc.text, end),
+            });
+            // 2. The line.
+            let line_start = doc.text[..offset.min(bytes.len())].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = doc.text[offset.min(bytes.len())..].find('\n').map_or(bytes.len(), |index| offset.min(bytes.len()) + index);
+            chain.push(Range {
+                start: doc.line_index.offset_to_position(&doc.text, line_start),
+                end: doc.line_index.offset_to_position(&doc.text, line_end),
+            });
+            // 3. The enclosing brace block, walking outwards.
+            let mut depth = 0usize;
+            let mut open = None;
+            let mut index = offset.min(bytes.len());
+            while index > 0 {
+                index -= 1;
+                match bytes[index] {
+                    b'}' => depth += 1,
+                    b'{' => {
+                        if depth == 0 { open = Some(index); break; }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(open) = open {
+                let mut depth = 0usize;
+                let mut index = open;
+                let mut close = None;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 { close = Some(index + 1); break; }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                if let Some(close) = close {
+                    chain.push(Range {
+                        start: doc.line_index.offset_to_position(&doc.text, open),
+                        end: doc.line_index.offset_to_position(&doc.text, close),
+                    });
+                }
+            }
+            // 4. The whole file.
+            chain.push(Range {
+                start: Position { line: 0, character: 0 },
+                end: doc.line_index.offset_to_position(&doc.text, bytes.len()),
+            });
+            chain
+        }).collect()
     }
 
     /// R3d: document highlights — every occurrence of the resolved def in this

@@ -564,3 +564,32 @@ fn lsp_document_highlights_are_scope_exact() {
     let kinds: Vec<i64> = items.iter().filter_map(|i| i.get("kind")?.as_i64()).collect();
     assert!(kinds.iter().all(|k| *k == 2), "reads highlight as kind 2: {kinds:?}");
 }
+
+#[test]
+fn lsp_selection_ranges_expand_identifier_to_block() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn main() {\n    let value = 7;\n    print(value);\n}"}}}"#;
+    server.handle_message(open);
+
+    let sel_req = r#"{"jsonrpc":"2.0","id":24,"method":"textDocument/selectionRange","params":{"textDocument":{"uri":"file:///test.ae"},"positions":[{"line":2,"character":11}]}}"#;
+    let resps = server.handle_message(sel_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let chain = val.get("result").and_then(|r| r.as_array()).unwrap();
+    assert_eq!(chain.len(), 1);
+    // Innermost is `value` on line 2; its parent chains cover the line, the
+    // fn block (lines 0..3) and the file.
+    let mut node = &chain[0];
+    let mut levels: Vec<(i64, i64)> = Vec::new();
+    loop {
+        let range = node.get("range").unwrap();
+        levels.push((range.get("start").unwrap().get("line").unwrap().as_i64().unwrap(),
+                     range.get("end").unwrap().get("line").unwrap().as_i64().unwrap()));
+        match node.get("parent") {
+            Some(parent) => node = parent,
+            None => break,
+        }
+    }
+    assert_eq!(levels[0], (2, 2), "innermost identifier: {levels:?}");
+    assert!(levels.contains(&(0, 3)), "fn block present: {levels:?}");
+    assert!(levels.contains(&(2, 2)), "line present: {levels:?}");
+}
