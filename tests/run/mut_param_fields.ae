@@ -1,0 +1,25 @@
+// A plain function's `&mut` struct parameter is a field receiver like
+// `self`: reads and stores lower through the body route (P1.1).
+struct Point { x: i64, y: i64 }
+
+fn shift(p: &mut Point, dx: i64, dy: i64) -> i64 {
+    p.x = p.x + dx;
+    p.y = p.y + dy;
+    return p.x + p.y;
+}
+
+fn magnitude(p: &Point) -> i64 {
+    if p.x < 0 {
+        return -p.x + p.y;
+    }
+    return p.x + p.y;
+}
+
+fn main() {
+    var p = Point { x: 1, y: 2 };
+    print(magnitude(&p));
+    print(shift(&mut p, 3, 4));
+    print(p.x);
+    print(p.y);
+    print(magnitude(&p));
+}

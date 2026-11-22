@@ -882,3 +882,33 @@ The generalization, in one slice:
 Owned struct returns are then the follow-up slice: the body constructs
 `StructLit`, the return moves it, and `Frees` must not double-release it —
 mirror what the closure-capture slices did for vectors.
+
+## P1.1 slice 2 landed (2026-11-23): field access is no longer `self`-only
+
+The blueprint above, as implemented:
+
+- `field_owner_struct` takes `&ResolvedExpressions` and resolves a bare base
+  through `scalar_reads` first, then `scalar_writes` (a store occurrence is
+  keyed by the base offset, so `r.n = v` names `r` through the write map).
+- The collection pass marks scalar store targets in `struct_field_writes`
+  when the base is a bare ident in `scalar_writes` with a
+  `Borrow { mutable: true }` spelling. Nested bases stay typed on purpose:
+  the lowering indexes `scalar_writes[&base.range.start]`, so only a
+  bare-base store is provable there today.
+- `scalar_body_statement`'s field-store arm accepts any bare root and defers
+  to `supports_field`; the per-function eligibility scan answers by the new
+  marks (plus the impl `self` clause).
+- `receiver_field_type` accepts any ident root; the lowering's
+  `supports_field` already answered by slot type.
+- `scripts/route_report.py` is the reproducible arbiter (`--details`,
+  `--max`), wired into CI as a ratchet at 1184.
+
+Measured: the fake_io program drops 24 → 16 fallbacks (the rest are the
+owned-`IoReq` returns and the closure bodies), corpus 1191 → 1184 over the
+same 165 files. `tests/run/mut_param_fields.ae` pins a `&mut` parameter's
+reads and stores end-to-end; `tests/ui/shared_borrow_field_write.ae` pins
+the shared-borrow rejection. Gates: 510/0, ab_gate 0 failed, std layering
+holds.
+
+Next slice: owned struct returns (`fn io_submit_read(...) -> IoReq` builds
+and moves the struct out of the body), then the `pipe_*` functions follow.

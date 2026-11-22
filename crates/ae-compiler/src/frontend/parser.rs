@@ -33,16 +33,19 @@ fn scalar_type(ty: Type) -> bool {
 /// the typed route.
 fn field_owner_struct(
     base: &ae_syntax::expression::Expression,
-    scalar_reads: &HashMap<usize, ae_resolve::DefId>,
-    struct_definitions: &HashSet<ae_resolve::DefId>,
+    resolved: &ResolvedExpressions,
     resolution: &ae_resolve::resolve::Resolution,
     struct_names: &HashMap<String, usize>,
     structs: &[StructDef],
 ) -> Option<usize> {
     match &base.kind {
         ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
-            let def = scalar_reads.get(&base.range.start)?;
-            if !struct_definitions.contains(def) {
+            // Reads and writes are keyed by occurrence offset, so one merged
+            // lookup answers both: a read base names its binding, a store base
+            // names the `&mut` view it writes through.
+            let def = resolved.scalar_reads.get(&base.range.start)
+                .or_else(|| resolved.scalar_writes.get(&base.range.start))?;
+            if !resolved.struct_definitions.contains(def) {
                 return None;
             }
             let entry = resolution.defs.get(def.0 as usize)?;
@@ -51,7 +54,7 @@ fn field_owner_struct(
             struct_names.get(&item_entry.name).copied()
         }
         ae_syntax::expression::ExpressionKind::Field { base: inner_base, name } => {
-            let sid = field_owner_struct(inner_base, scalar_reads, struct_definitions, resolution, struct_names, structs)?;
+            let sid = field_owner_struct(inner_base, resolved, resolution, struct_names, structs)?;
             let fty = field_ty_in(sid, name, structs)?;
             match fty {
                 Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => Some(sid),
@@ -76,6 +79,23 @@ fn receiver_field_root(expression: &ae_syntax::expression::Expression) -> Option
     }
 }
 
+/// The root identifier of any field chain (`p.x.y` -> the `p` node). The
+/// body route's field gate uses it to resolve the chain's type from the
+/// slot table, so a plain function's struct parameter works like `self`.
+fn field_chain_root(expression: &ae_syntax::expression::Expression) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Field { base, .. } => field_chain_root(base),
+        ExpressionKind::Atom(Kind::Ident(_)) => Some(expression),
+        _ => None,
+    }
+}
+
+/// Whether the expression IS the chain root (no field access on it).
+fn field_chain_is_bare(expression: &ae_syntax::expression::Expression) -> bool {
+    matches!(expression.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+}
+
 fn receiver_value(expression: &ae_syntax::expression::Expression) -> Option<&ae_syntax::expression::Expression> {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
@@ -85,6 +105,10 @@ fn receiver_value(expression: &ae_syntax::expression::Expression) -> Option<&ae_
     }
 }
 
+// The type of a field chain walked from `receiver`: the root node is the
+// chain's base ident (the caller supplies the root's type from its slot),
+// and each step resolves through the field table. `self.a.b` and `r.a.b`
+// answer the same way.
 fn receiver_field_type(
     expression: &ae_syntax::expression::Expression,
     receiver: Type,
@@ -99,17 +123,18 @@ fn receiver_field_type(
             };
             field_ty_in(sid, name, structs)
         }
-        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(receiver),
+        ExpressionKind::Atom(Kind::Ident(_)) => Some(receiver),
         _ => None,
     }
 }
 
-/// The struct item a marked slot's spelling names: an immutable borrowed
-/// parameter (`&Point`, where by-value and `&mut` receivers carry ownership
-/// effects that stay typed) or an owned local binding constructed in-route.
+/// The struct item a marked slot's spelling names: a borrowed parameter
+/// (`&Point` or `&mut Point` — a borrow moves and drops nothing) or an
+/// owned local binding constructed in-route. By-value struct parameters
+/// stay typed (their ownership effects are the typed path's job).
 fn definition_struct_item(entry: &ae_resolve::DefEntry) -> Option<ae_resolve::DefId> {
     match &entry.inferred {
-        Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }) => match inner.as_ref() {
+        Some(ae_resolve::TypeSpelling::Borrow { inner, .. }) => match inner.as_ref() {
             ae_resolve::TypeSpelling::Named { def } => Some(*def),
             _ => None,
         },
@@ -317,7 +342,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 }
                 ae_syntax::expression::ExpressionKind::Field { base, .. }
                     if *operator == Kind::Equal && matches!(&base.kind,
-                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name == "self") =>
+                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) =>
                 {
                     supports_field(target, ae_resolve::Role::Write)
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
@@ -890,7 +915,7 @@ impl<'a> Parser<'a> {
                 entry.kind == ae_resolve::DefKind::Parameter || entry.kind == ae_resolve::DefKind::Binding
             }) {
                 let item = match (&definition.inferred, definition.kind) {
-                    (Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }), _) => match inner.as_ref() {
+                    (Some(ae_resolve::TypeSpelling::Borrow { inner, .. }), _) => match inner.as_ref() {
                         ae_resolve::TypeSpelling::Named { def } => Some(*def),
                         _ => None,
                     },
@@ -1037,7 +1062,7 @@ impl<'a> Parser<'a> {
                             // fields are chain-only receivers (binding one as
                             // a value would move out of the borrowed struct).
                             if let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind {
-                                if let Some(sid) = field_owner_struct(base, &expressions.scalar_reads, &expressions.struct_definitions, &resolution, self.struct_names, self.structs) {
+                                if let Some(sid) = field_owner_struct(base, &expressions, &resolution, self.struct_names, self.structs) {
                                     if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                         if scalar_type(field_ty) {
                                             expressions.struct_field_reads.insert(expression.range.start);
@@ -1067,10 +1092,31 @@ impl<'a> Parser<'a> {
                             }
                         });
                     }
-                    if let ae_syntax::statement::StatementKind::Assign { target, .. } = &statement.kind {
+                    if let ae_syntax::statement::StatementKind::Assign { target, operator, .. } = &statement.kind {
                         if let ae_syntax::expression::ExpressionKind::Index { index, .. } = &target.kind {
                             // The typed store checks the base and operator, then lowers the index.
                             expressions.values.insert(index.range.start, Rc::new(index.as_ref().clone()));
+                        }
+                        // `r.n = v` through a `&mut` borrow writes the same
+                        // FieldStore an impl method emits for `self.n = v`:
+                        // the store needs the base itself in `scalar_writes`
+                        // (the lowering indexes that map by the base offset),
+                        // and the root's spelling must be a mutable borrow.
+                        if *operator == Kind::Equal {
+                            if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
+                                let mutable_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                                    && expressions.scalar_writes.get(&base.range.start)
+                                        .and_then(|def| resolution.defs.get(def.0 as usize))
+                                        .is_some_and(|entry| matches!(entry.inferred,
+                                            Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })));
+                                if mutable_base {
+                                    if let Some(sid) = field_owner_struct(base, &expressions, &resolution, self.struct_names, self.structs) {
+                                        if field_ty_in(sid, name, self.structs).is_some_and(scalar_type) {
+                                            expressions.struct_field_writes.insert(target.range.start);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 });
@@ -1129,11 +1175,23 @@ impl<'a> Parser<'a> {
                 let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
                     continue;
                 };
-                let receiver_field = |expression: &ae_syntax::expression::Expression, _| {
-                    function.impl_owner.is_some() && receiver_field_root(expression).is_some()
+                // An impl method keeps its self-rooted chains; any other
+                // routed struct receiver answers by the marks the walk above
+                // left — a scalar field read names the chain, and a field
+                // store names a `&mut` view's target. The lowering re-checks
+                // both against the slot types before it commits.
+                let supports_field = |expression: &ae_syntax::expression::Expression, role| {
+                    if function.impl_owner.is_some() && receiver_field_root(expression).is_some() {
+                        return true;
+                    }
+                    match role {
+                        ae_resolve::Role::Read => expressions.struct_field_reads.contains(&expression.range.start),
+                        ae_resolve::Role::Write => expressions.struct_field_writes.contains(&expression.range.start),
+                        _ => false,
+                    }
                 };
                 let eligible = body.iter().all(|statement| {
-                    scalar_body_statement(statement, &expressions, &|_, _| true, &receiver_field)
+                    scalar_body_statement(statement, &expressions, &|_, _| true, &supports_field)
                 });
                 if eligible {
                     expressions.scalar_bodies.insert(range.start, body.into());
@@ -1168,9 +1226,11 @@ impl<'a> Parser<'a> {
         // Array parameters are borrowed views (`&[i64; N]` is the only array
         // parameter form, and `Type::Array` bakes the borrow in): their
         // element reads and stores flow through the same arms as local
-        // arrays. File-local struct parameters join as immutable borrowed
-        // field-read receivers only — by-value and `&mut` structs carry
-        // ownership effects (moves, drop at scope exit) that stay typed.
+        // arrays. File-local struct parameters join as borrowed field
+        // receivers: `&P` reads its scalar fields, and `&mut P` also writes
+        // them (a FieldStore, nothing moves through the borrow). By-value
+        // struct parameters carry ownership effects (moves, drop at scope
+        // exit) and stay typed.
         // Borrows of aggregates themselves (`&a`, `&p`) stay typed too — a
         // borrow occurrence never lands in `scalar_reads` — and so do calls
         // to aggregate-taking functions, which `supports_call` excludes.
@@ -1188,10 +1248,10 @@ impl<'a> Parser<'a> {
                 // own Frees releases it after the call (the FnOnce shape),
                 // and a string vector's Frees releases its elements in the
                 // same order the typed path emits.
-                let _ = captured;
                 // A `&mut` struct parameter is a borrowed receiver: its field
-// writes are FieldStore on a StructMut slot (the Checked arm already
-// lowers them), and nothing moves or drops through the borrow.
+                // writes are FieldStore on a StructMut slot (the Checked arm
+                // already lowers them), and nothing moves or drops through
+                // the borrow.
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (ty == Type::StrView && captured)
@@ -1201,7 +1261,7 @@ impl<'a> Parser<'a> {
             return None;
         }
         let resolved = self.resolved_expressions();
-        let body = resolved.scalar_bodies.get(&self.tokens[self.pos].offset)?.clone();
+        let Some(body) = resolved.scalar_bodies.get(&self.tokens[self.pos].offset).cloned() else { return None };
         let supports_call = |name: &str, offset: usize| {
             !RESERVED.contains(&name) && self.functions.get(name).is_some_and(|signature| {
                 // File-local resolution leaves imports open. The compiler's
@@ -1221,34 +1281,40 @@ impl<'a> Parser<'a> {
                     })
             })
         };
-        let receiver_def = self.names.get("self")
-            .and_then(|&(slot, _, _)| self.binding_ranges.get(&slot))
-            .and_then(|range| resolved.scalar_definitions.get(&range.start));
-        let supports_field = |expression: &ae_syntax::expression::Expression, role| {
-            self.receiver.is_some_and(|receiver| {
-                let occurrences = match role {
-                    ae_resolve::Role::Read => &resolved.scalar_reads,
-                    ae_resolve::Role::Write if matches!(receiver, Type::StructMut(_)) => &resolved.scalar_writes,
-                    _ => return false,
-                };
-                let resolves_to_receiver = receiver_field_root(expression).is_some_and(|offset| {
-                    receiver_def.is_some() && occurrences.get(&offset) == receiver_def
-                });
-                resolves_to_receiver && if receiver_value(expression).is_some() {
-                    matches!(receiver, Type::Struct(_))
-                } else {
-                    receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
-                }
-            })
-        };
-        if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
-            return None;
-        }
+        // Slots first: the field gate below answers by slot type, not by the
+        // impl receiver.
         let mut slots = HashMap::new();
         for &(slot, _, ty) in self.names.values() {
             let start = self.binding_ranges.get(&slot).map(|range| range.start)
                 .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
             slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
+        }
+        // Any routed struct slot can root a field chain: the root ident's
+        // occurrence names the def, the def names the slot, and the slot's
+        // type drives the field walk (a `&mut` struct parameter roots its
+        // writes the same way `self` does). Reads and stores lower through
+        // the same slot lookups the impl path uses.
+        let supports_field = |expression: &ae_syntax::expression::Expression, role| {
+            let Some(root) = field_chain_root(expression) else { return false };
+            let occurrences = match role {
+                ae_resolve::Role::Read => &resolved.scalar_reads,
+                ae_resolve::Role::Write => &resolved.scalar_writes,
+                _ => return false,
+            };
+            let Some(def) = occurrences.get(&root.range.start) else { return false };
+            let Some(&(_, ty)) = slots.get(def) else { return false };
+            if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_)) {
+                return false;
+            }
+            if field_chain_is_bare(expression) {
+                // The whole value: only an owned struct moves as one.
+                matches!(ty, Type::Struct(_))
+            } else {
+                receiver_field_type(expression, ty, self.structs).is_some_and(scalar_type)
+            }
+        };
+        if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
+            return None;
         }
         Some(self.lower_scalar_statements(&body, &mut slots))
     }
@@ -1462,6 +1528,14 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(target.range.start);
                     let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
                     return Err(self.immutable_binding_error(diagnostic, slot));
+                }
+                // A `&mut` borrow is a view of the caller's storage: writing
+                // the binding itself would re-point the view. Fields are the
+                // writable surface, exactly as the typed route says.
+                if matches!(ty, Type::StructMut(_)) {
+                    // The typed route points at the `=` after the name.
+                    self.seek_scalar_offset(target.range.end);
+                    return Err(self.fail(&format!("cannot assign to '{name}' itself through a '&mut' borrow; write its fields instead")));
                 }
                 self.seek_scalar_offset(target.range.end);
                 let compound = compound_assignment_operator(operator);

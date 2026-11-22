@@ -729,6 +729,10 @@ struct ResolvedExpressions {
     struct_definitions: HashSet<ae_resolve::DefId>,
     struct_field_reads: HashSet<usize>,
     struct_field_chains: HashSet<usize>,
+    /// Field store targets on a mutable struct receiver (`r.n = v`): the
+    /// base is a `&mut` view, so the write joins the body route exactly as
+    /// an impl method's `self.n = v` does.
+    struct_field_writes: HashSet<usize>,
     drop_free_constructions: HashSet<usize>,
 }
 

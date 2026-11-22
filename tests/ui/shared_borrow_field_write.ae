@@ -1,0 +1,6 @@
+struct P { n: i64 }
+fn f(p: &P) -> i64 {
+    p.n = 1;
+    return p.n;
+}
+fn main() { var x = P { n: 0 }; print(f(&x)); }

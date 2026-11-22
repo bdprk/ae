@@ -141,7 +141,3 @@ mod tests {
     }
 
 }
-#[cfg(test)]
-mod probe {
-    use super::tests::*;
-}

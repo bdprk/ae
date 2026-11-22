@@ -37,16 +37,21 @@ def to_wsl_path(windows_path: Path) -> str:
 
 
 def run(args: list[str], cwd: Path = ROOT, check: bool = True) -> str:
-    result = subprocess.run(args, capture_output=True, text=True, check=check, cwd=cwd)
+    result = subprocess.run(args, capture_output=True, text=True, errors="replace", check=check, cwd=cwd)
     return result.stdout
 
 
 def wsl_run(distro: str, command: str, check: bool = True) -> str:
     result = subprocess.run(
         ["wsl.exe", "-d", distro, "--", "bash", "-c", command],
-        capture_output=True, text=True, check=check,
+        capture_output=True, text=True, errors="replace", check=check,
     )
-    return result.stdout
+    # wsl.exe prints localized notices (the localhost-proxy warning) on
+    # stdout before the command's own output; the gate comparisons below
+    # use exact text, so those lines are dropped.
+    return "\n".join(
+        line for line in result.stdout.splitlines() if not line.startswith("wsl: ")
+    )
 
 
 def main() -> int:
@@ -66,6 +71,13 @@ def main() -> int:
         log_lines.append(message)
 
     # 1. Export the uncommitted Windows state.
+    #    The clone's origin is the Windows checkout itself, so first move it
+    #    to the Windows HEAD: a clone left on an older commit makes every
+    #    patch generated against the current HEAD fail to apply.
+    wsl_run(options.distro, f"cd {options.clone} && git checkout -- . && (git clean -fd >/dev/null 2>&1 || true)")
+    wsl_run(options.distro, f"cd {options.clone} && git fetch --quiet origin && git reset --hard origin/main")
+    head = wsl_run(options.distro, f"cd {options.clone} && git rev-parse --short HEAD").strip()
+    log(f"clone at {head}")
     patch = run(["git", "diff"])
     untracked = [name for name in run(
         ["git", "ls-files", "--others", "--exclude-standard"],
