@@ -1125,3 +1125,28 @@ Next themes: closure-valued bindings and closure bodies over owned captures,
 generic-instance structs (`Cell[T]`, `ListNode[T]`), for-in over borrowed
 vectors, trait-method calls (`num_traits`, `default_trait`), nested store
 bases.
+
+## Tonight's P1.1 arc at a glance (2026-11-23, slices 1-10)
+
+| slice | shape | commit | fallbacks |
+|---|---|---|---|
+| 1 | guard widening for `&mut` struct params | `b36b2c5` | — |
+| 2 | field receivers from any routed slot (`&mut` writes) | `fd29ee7` | 1,191 → 1,184 |
+| 3 | owned plain-struct returns | `ff4fc3f` | 1,184 → 987 |
+| 4 | by-value plain-struct params, literal prints, reason report | `5264391` | 987 → 471 |
+| 5 | string expressions + pure value builtins | `98439a2` | 471 → 465 |
+| 6 | string field views (concat/print/args) | `6faf1ff` | 465 → 461 |
+| 7 | string params + owned-field structs (construct/store/release) | `9786192` | 461 → 435 |
+| 8 | `&string` args as View; concat consumes operands in order | `e506501` | 435 → 434 |
+| 9 | borrow arguments (`&vec`/`&Struct`/`&mut Struct`) | `6ad2444` | 434 → 428 |
+| 10 | prelude/generic enums, owned-vector args/index | `3e6623e` | 428 → 416 |
+
+Total: **1,191 → 416 fallbacks** (65% of the legacy bodies moved), files
+with fallbacks 165 → 124. Every slice landed with: `cargo test
+--workspace --locked` 510/0 on Windows and WSL2, `ab_gate.py` byte parity
+(50 examples + 663 CLI invocations), sanitize+leak PASS, fuzz 40 seeds,
+std layering, commit-id discipline. `scripts/route_report.py --max 416` is
+the CI ratchet (bump only downward).
+
+Fleet: 866,374 seeds / 91 segments, zero failures; InstaBox certificates
+were renewed 2026-11-23 00:45 (valid 24h).
