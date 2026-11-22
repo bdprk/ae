@@ -67,6 +67,34 @@ fn field_ty_in(sid: usize, field: &str, structs: &[StructDef]) -> Option<Type> {
     defn.fields.iter().find(|(name, _)| name == field).map(|(_, ty)| *ty)
 }
 
+fn receiver_field_root(expression: &ae_syntax::expression::Expression) -> Option<usize> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Field { base, .. } => receiver_field_root(base),
+        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(expression.range.start),
+        _ => None,
+    }
+}
+
+fn receiver_field_type(
+    expression: &ae_syntax::expression::Expression,
+    receiver: Type,
+    structs: &[StructDef],
+) -> Option<Type> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Field { base, name } => {
+            let sid = match receiver_field_type(base, receiver, structs)? {
+                Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                _ => return None,
+            };
+            field_ty_in(sid, name, structs)
+        }
+        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(receiver),
+        _ => None,
+    }
+}
+
 /// The struct item a marked slot's spelling names: an immutable borrowed
 /// parameter (`&Point`, where by-value and `&mut` receivers carry ownership
 /// effects that stay typed) or an owned local binding constructed in-route.
@@ -120,22 +148,25 @@ fn visit_expression_tree(expression: &ae_syntax::expression::Expression, visit: 
     }
 }
 
-fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool) -> bool {
+fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression) -> bool) -> bool {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
-        ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.get(&expression.range.start)
+        ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)),
         // A construction of a drop-free file-local struct with scalar
         // fields: marked complete at collection time.
         ExpressionKind::Struct { target, fields } => {
             matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.drop_free_constructions.contains(&expression.range.start)
-                && fields.iter().all(|field| scalar_body_expression(&field.value, resolved, supports_call))
+                && fields.iter().all(|field| scalar_body_expression(&field.value, resolved, supports_call, supports_field))
         }
         // A struct parameter's field read, possibly nested (`o.inner.x`):
         // the chain's base may be a scalar read or a struct-typed chain
         // receiver, but only a scalar field lowers as a value.
         ExpressionKind::Field { base, .. } => {
+            if receiver_field_root(expression).is_some() {
+                return supports_field(expression);
+            }
             let rooted = match &base.kind {
                 ExpressionKind::Atom(Kind::Ident(_)) => true,
                 ExpressionKind::Field { .. } => resolved.struct_field_reads.contains(&base.range.start)
@@ -148,21 +179,21 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.scalar_reads.get(&base.range.start)
                     .is_some_and(|id| resolved.array_definitions.contains(id))
-                && scalar_body_expression(index, resolved, supports_call)
+                && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False) => true,
         ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
-            scalar_body_expression(inner, resolved, supports_call)
+            scalar_body_expression(inner, resolved, supports_call, supports_field)
         }
         ExpressionKind::Binary { left, right, .. } => {
-            scalar_body_expression(left, resolved, supports_call) && scalar_body_expression(right, resolved, supports_call)
+            scalar_body_expression(left, resolved, supports_call, supports_field) && scalar_body_expression(right, resolved, supports_call, supports_field)
         }
         ExpressionKind::Call { callee, arguments } => {
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
                     || resolved.unresolved_calls.contains(&callee.range.start))
                     && supports_call(name, callee.range.start))
-                && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call)
+                && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call, supports_field)
                     // An owned aggregate passed by value is a move, not a
                     // value read: the ident eligibility excludes struct
                     // slots, so the argument position re-admits them.
@@ -185,15 +216,15 @@ fn compound_assignment_operator(operator: &Kind) -> Option<Kind> {
     }
 }
 
-fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool) -> bool {
+fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression) -> bool) -> bool {
     use ae_syntax::statement::{ElseBranch, StatementKind};
     match &statement.kind {
         StatementKind::Binding { name_range, initializer, .. } => {
             resolved.scalar_definitions.contains_key(&name_range.start)
                 && match &initializer.kind {
                     ae_syntax::expression::ExpressionKind::Array(elements) => elements.iter()
-                        .all(|element| scalar_body_expression(element, resolved, supports_call)),
-                    _ => scalar_body_expression(initializer, resolved, supports_call),
+                        .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
+                    _ => scalar_body_expression(initializer, resolved, supports_call, supports_field),
                 }
         }
         StatementKind::Assign { target, operator, value } => {
@@ -201,7 +232,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
                     resolved.scalar_writes.get(&target.range.start)
                         .is_some_and(|id| !resolved.array_definitions.contains(id))
-                        && scalar_body_expression(value, resolved, supports_call)
+                        && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
                 // the plain operator: a compound store stays on the typed
@@ -212,35 +243,35 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                         && resolved.scalar_writes.get(&base.range.start)
                             .is_some_and(|id| resolved.array_definitions.contains(id))
-                        && scalar_body_expression(index, resolved, supports_call)
-                        && scalar_body_expression(value, resolved, supports_call)
+                        && scalar_body_expression(index, resolved, supports_call, supports_field)
+                        && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 _ => false,
             }
         }
         StatementKind::Return(value) | StatementKind::Print(value) | StatementKind::Assert(value) => {
-            scalar_body_expression(value, resolved, supports_call)
+            scalar_body_expression(value, resolved, supports_call, supports_field)
         }
         StatementKind::If { condition, then_body, else_body } => {
-            scalar_body_expression(condition, resolved, supports_call)
-                && then_body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call))
+            scalar_body_expression(condition, resolved, supports_call, supports_field)
+                && then_body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
                 && match else_body {
-                    Some(ElseBranch::Block(body)) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call)),
-                    Some(ElseBranch::If(branch)) => scalar_body_statement(branch, resolved, supports_call),
+                    Some(ElseBranch::Block(body)) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
+                    Some(ElseBranch::If(branch)) => scalar_body_statement(branch, resolved, supports_call, supports_field),
                     None => true,
                 }
         }
         StatementKind::While { condition, body } => {
-            scalar_body_expression(condition, resolved, supports_call)
-                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call))
+            scalar_body_expression(condition, resolved, supports_call, supports_field)
+                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::ForRange { binding_range, start, end, body, .. } => {
             resolved.scalar_definitions.contains_key(&binding_range.start)
-                && scalar_body_expression(start, resolved, supports_call)
-                && scalar_body_expression(end, resolved, supports_call)
-                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call))
+                && scalar_body_expression(start, resolved, supports_call, supports_field)
+                && scalar_body_expression(end, resolved, supports_call, supports_field)
+                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
-        StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call)),
+        StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
         StatementKind::Break | StatementKind::Continue => true,
         _ => false,
     }
@@ -866,7 +897,7 @@ impl<'a> Parser<'a> {
             }
             for body in resolution.functions.iter().flat_map(|function| &function.closure_bodies) {
                 if !body.has_binding_conflict
-                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true))
+                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true, &|_| false))
                 {
                     expressions.scalar_bodies.insert(body.start, body.statements.clone());
                 }
@@ -875,7 +906,12 @@ impl<'a> Parser<'a> {
                 let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
                     continue;
                 };
-                let eligible = body.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true));
+                let receiver_field = |expression: &ae_syntax::expression::Expression| {
+                    function.impl_owner.is_some() && receiver_field_root(expression).is_some()
+                };
+                let eligible = body.iter().all(|statement| {
+                    scalar_body_statement(statement, &expressions, &|_, _| true, &receiver_field)
+                });
                 if eligible {
                     expressions.scalar_bodies.insert(range.start, body.into());
                 }
@@ -918,7 +954,8 @@ impl<'a> Parser<'a> {
         // Generic functions arrive here after the instance machinery has
         // substituted their signature. Keep non-scalar substitutions on
         // the typed route until their ownership and layout are covered.
-        if !self.subst.values().copied().all(scalar_type) || self.receiver.is_some()
+        if !self.subst.values().copied().all(scalar_type)
+            || self.receiver.is_some_and(|ty| !matches!(ty, Type::StructRef(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
             || !scalar_type(self.return_type)
             || !self.names.values().all(|&(_, _, ty)| {
@@ -948,7 +985,17 @@ impl<'a> Parser<'a> {
                     })
             })
         };
-        if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call)) {
+        let receiver_def = self.names.get("self")
+            .and_then(|&(slot, _, _)| self.binding_ranges.get(&slot))
+            .and_then(|range| resolved.scalar_definitions.get(&range.start));
+        let supports_field = |expression: &ae_syntax::expression::Expression| {
+            self.receiver.is_some_and(|receiver| {
+                receiver_field_root(expression).is_some_and(|offset| {
+                    receiver_def.is_some() && resolved.scalar_reads.get(&offset) == receiver_def
+                }) && receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
+            })
+        };
+        if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
             return None;
         }
         let mut slots = HashMap::new();
@@ -3113,7 +3160,7 @@ mod tests {
         let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }}");
-        let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} }}");
+        let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3186,9 +3233,30 @@ mod tests {
         parser.seek_scalar_offset(source.find("{ return method_value;").unwrap());
         let lowered = parser.lower_resolved_scalar_body().expect("resolved generic associated body").unwrap();
         assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
+        parser.names.remove("method_value");
+        let receiver_binding = source.find("get(&self)").unwrap() + "get(&".len();
+        let instance = parser.structs.len();
+        parser.structs.push(StructDef {
+            name: "ScalarBox[i64]".into(), fields: vec![("item".into(), Type::Int)],
+            file: "case.ae".into(), public: false, repr_c: false, drop_fn: None,
+        });
+        let receiver = Type::StructRef(instance);
+        parser.receiver = Some(receiver);
+        parser.names.insert("self".into(), (80, false, receiver));
+        parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());
+        let receiver_body = source.find("{ return self.item;").unwrap();
+        parser.seek_scalar_offset(receiver_body);
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver body").unwrap();
+        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(base, name, Type::Int), _)]
+            if name == "item" && matches!(**base, Expr::Variable(80, actual, ..) if actual == receiver)));
+        parser.structs[instance].fields[0].1 = Type::String;
+        parser.seek_scalar_offset(receiver_body);
+        assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar receiver field stays typed");
+        parser.structs.pop();
+        parser.receiver = None;
+        parser.names.remove("self");
         parser.subst.clear();
         parser.impl_self = None;
-        parser.names.remove("method_value");
         parser.binding_ranges.remove(&80);
         parser.return_type = Type::Bool;
         parser.seek_scalar_offset(source.find("{ let local").unwrap());

@@ -503,3 +503,10 @@ lowering after scalar substitution. Method instance allocation and caching
 stay with the compiler. Receiver methods still require field eligibility
 based on the concrete receiver layout.
 
+## Resolved generic shared receiver reads (2026-11-22)
+
+Methods with a shared struct receiver and scalar substitutions can lower
+receiver field reads using the concrete instance layout. The receiver's
+resolved definition must match its live slot, and only scalar field results
+qualify. Owned and mutable receivers retain the typed body path.
+
