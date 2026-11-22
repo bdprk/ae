@@ -451,6 +451,21 @@ fn describe_spelling(
     }
 }
 
+/// An imported function's declared signature, sliced from its own module's
+/// source (`fn name(params) -> ret`) — the entry-side def table has no
+/// parameter spellings for imported items.
+fn imported_fn_signature(
+    imports: &[(String, ae_resolve::module::Module)],
+    def: &ae_resolve::DefEntry,
+) -> Option<String> {
+    let (_, import_module) = imports.iter()
+        .find(|(_, module)| module.declarations.iter().any(|declaration| declaration.name == def.name))?;
+    let declaration = import_module.declarations.iter().find(|declaration| declaration.name == def.name)?;
+    let body_start = declaration.body.as_ref().map(|body| body.start)?;
+    let signature = import_module.source.get(declaration.range.start..body_start)?.trim().to_owned();
+    Some(format!("fn {}", signature))
+}
+
 fn kind_label(kind: ae_resolve::DefKind) -> &'static str {
     match kind {
         ae_resolve::DefKind::Function => "fn",
@@ -705,6 +720,14 @@ impl LspServer {
         let describe = |spelling: &ae_resolve::TypeSpelling| describe_spelling(spelling, resolution);
         match def.kind {
             ae_resolve::DefKind::Function => {
+                // An imported function's signature comes from its own
+                // module's declaration text; the entry-side def table has
+                // no parameter spellings for it.
+                if def.imported {
+                    if let Some(signature) = imported_fn_signature(&cached.1, def) {
+                        return Some(format!("```ae\n{signature}\n```"));
+                    }
+                }
                 let mut params = String::new();
                 for entry in resolution.defs.iter().filter(|entry| {
                     entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
@@ -931,6 +954,13 @@ impl LspServer {
             }
             for def in &resolution.defs {
                 if def.imported {
+                    // An imported function's declared shape comes from its
+                    // own module's declaration text.
+                    if def.kind == ae_resolve::DefKind::Function {
+                        if let Some(signature) = imported_fn_signature(&cached.1, def) {
+                            out.push((def.name.clone(), 3, Some(signature)));
+                        }
+                    }
                     continue;
                 }
                 let (kind, detail) = match def.kind {
