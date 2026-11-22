@@ -490,3 +490,24 @@ fn lsp_folding_ranges_cover_blocks_and_comments() {
     assert!(pairs.contains(&(3, 5)), "if body missing: {pairs:?}");
     assert!(pairs.contains(&(0, 1)), "comment run missing: {pairs:?}");
 }
+
+#[test]
+fn lsp_code_actions_carry_diagnostic_suggestions() {
+    let mut server = LspServer::new();
+    // A frozen binding's assignment carries the compiler's remedy as a
+    // suggestion.
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn main() {\n    let n = 1;\n    n = 2;\n}"}}}"#;
+    server.handle_message(open);
+
+    let action_req = r#"{"jsonrpc":"2.0","id":20,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///test.ae"},"range":{"start":{"line":2,"character":4},"end":{"line":2,"character":9}},"context":{"diagnostics":[]}}}"#;
+    let resps = server.handle_message(action_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let actions = val.get("result").and_then(|r| r.as_array()).unwrap();
+    assert!(!actions.is_empty(), "frozen assignment should offer a fix");
+    for action in actions {
+        assert_eq!(action.get("kind").and_then(|k| k.as_str()), Some("quickfix"));
+        let title = action.get("title").and_then(|t| t.as_str()).unwrap();
+        assert!(!title.is_empty(), "action title");
+        assert!(action.get("diagnostics").and_then(|d| d.as_array()).is_some(), "diagnostics attached");
+    }
+}

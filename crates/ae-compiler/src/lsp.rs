@@ -551,6 +551,7 @@ impl LspServer {
                 caps.insert("documentSymbolProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("signatureHelpProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("foldingRangeProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("codeActionProvider".to_owned(), JsonValue::Bool(true));
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -640,6 +641,27 @@ impl LspServer {
                     Some(signature) => Self::make_response(id, signature),
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/codeAction" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let fixes = self.quick_fixes(uri);
+                let actions: Vec<JsonValue> = fixes.into_iter().map(|(title, diagnostic)| {
+                    let mut action = BTreeMap::new();
+                    action.insert("title".to_owned(), JsonValue::String(title));
+                    action.insert("kind".to_owned(), JsonValue::String("quickfix".to_owned()));
+                    let mut diag = BTreeMap::new();
+                    diag.insert("range".to_owned(), Self::range_to_json(&diagnostic.range));
+                    diag.insert("message".to_owned(), JsonValue::String(diagnostic.message.clone()));
+                    if let Some(code) = &diagnostic.code {
+                        diag.insert("code".to_owned(), JsonValue::String(code.clone()));
+                    }
+                    action.insert("diagnostics".to_owned(), JsonValue::Array(vec![JsonValue::Object(diag)]));
+                    JsonValue::Object(action)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(actions))
             }
             "textDocument/foldingRange" => {
                 let Some(params) = params else {
@@ -860,6 +882,31 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: quick fixes — each diagnostic suggestion becomes a quickfix
+/// action titled with the suggestion text and carrying the diagnostic it
+/// addresses.
+    fn quick_fixes(&self, uri: &str) -> Vec<(String, Diagnostic)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Err(diagnostic) = crate::frontend::check_source_diagnostic(&doc.text) else {
+            return Vec::new();
+        };
+        let index = LineIndex::new(&doc.text);
+        let offsets = diagnostic.primary.map_or(0..0, |label| label.span.range);
+        let start = index.offset_to_position(&doc.text, offsets.start);
+        let end = index.offset_to_position(&doc.text, offsets.end);
+        let located = Diagnostic {
+            range: Range { start, end },
+            severity: 1,
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        };
+        diagnostic.suggestions.iter()
+            .map(|suggestion| (suggestion.clone(), located.clone()))
+            .collect()
     }
 
     /// R3d: folding ranges — a brace-balanced brace pair folds from its line
