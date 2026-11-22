@@ -612,3 +612,25 @@ fn lsp_member_completion_uses_the_receiver_type() {
     let x = items.iter().find(|i| i.get("label").and_then(|l| l.as_str()) == Some("x")).unwrap();
     assert_eq!(x.get("detail").and_then(|d| d.as_str()), Some("i64"));
 }
+
+#[test]
+fn lsp_shadowing_is_rejected_like_the_compiler() {
+    // AE forbids same-name shadowing in an inner block (OneWay: one way to
+    // do things). The compiler rejects it with `duplicate variable`, and
+    // the resolver's diagnostics agree, so LSP hover never has to answer
+    // for a shadowed name — M6.2.03's shadow case does not exist in this
+    // language. What must hold: both sides report the same error.
+    let mut server = LspServer::new();
+    let source = "fn main() {
+    let total = 1;
+    if true {
+        let total = \"one\";
+        print(total);
+    }
+    print(total);
+}";
+    let diagnostics = server.check_text(source);
+    assert_eq!(diagnostics.len(), 1, "one diagnostic: {diagnostics:?}");
+    let message = &diagnostics[0].message;
+    assert!(message.contains("duplicate variable 'total'"), "compiler text: {message}");
+}
