@@ -1,6 +1,14 @@
 //! Type syntax, definitions, constructors, and generic instantiation.
 use super::*;
 
+impl EnumDef {
+    pub(super) fn variant_payload(&self, name: &str) -> Option<(usize, &[Type])> {
+        self.variants.iter().enumerate().find_map(|(index, (variant, payload))| {
+            (variant == name).then_some((index, payload.as_slice()))
+        })
+    }
+}
+
 pub(super) fn scalar_type(name: &str) -> Option<Type> {
     match name {
         "i64" => Some(Type::Int),
@@ -158,16 +166,15 @@ impl Parser<'_> {
         self.pos = end;
         let def = self.enums[eid].clone();
         self.require_public("enum", def.name, &def.file, def.public)?;
-        let vidx = def.variants.iter().position(|(n, _)| *n == vname)
+        let (vidx, fields) = def.variant_payload(&vname)
             .ok_or_else(|| self.error_at(offset, &format!("enum '{}' has no variant '{}'", def.name, vname)))?;
-        let fields = def.variants[vidx].1.clone();
         let mut values = Vec::new();
         if *self.current() == Kind::LParen {
             self.pos += 1;
             for (index, field) in fields.iter().enumerate() {
                 // String payloads are moved into the variant.
                 let (value, value_ty) = self.expression(0, *field == Type::String)?;
-                if value_ty != *field {
+                if !self.matches_value_type(*field, value_ty, None) {
                     return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name())));
                 }
                 values.push(value);

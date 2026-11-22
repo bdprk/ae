@@ -594,5 +594,11 @@ Struct field initializers and stores share the same type diagnostic. A
 resolved scalar constructor now reports a mismatch at the initializer
 boundary, where the token route would report it. Eligible constructors on both
 routes validate field names and duplicates in source order, then report
-missing fields in layout order. The next slice covers enum payloads.
+missing fields in layout order.
+
+Enum constructors share variant and payload lookup on the concrete enum
+layout. Shared lowering uses checked scalar payload facts and concrete
+compiler types for other payloads. On rejection, the token route retains
+the payload ordinal, source location and diagnostic ordering. The next
+slice checks coverage for specialized constructors and their ownership.
 

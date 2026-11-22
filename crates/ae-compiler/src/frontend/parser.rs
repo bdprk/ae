@@ -1569,7 +1569,7 @@ impl<'a> Parser<'a> {
         Err(self.fail(&format!("compound assignment is not supported for type '{}'", target.name())))
     }
 
-    fn matches_value_type(&self, expected: Type, actual: Type, range: Option<&std::ops::Range<usize>>) -> bool {
+    pub(super) fn matches_value_type(&self, expected: Type, actual: Type, range: Option<&std::ops::Range<usize>>) -> bool {
         match self.checked_scalar(range) {
             Some(scalar) => super::expression::operator_scalar(expected) == Some(scalar),
             None => actual == expected,
@@ -1758,11 +1758,11 @@ impl<'a> Parser<'a> {
         let &eid = self.enum_names.get(name)?;
         let def = self.enums.get(eid)?;
         self.require_public("enum", def.name, &def.file, def.public).ok()?;
-        let (variant_id, (_, payload)) = def.variants.iter().enumerate().find(|(_, (name, _))| name == variant)?;
+        let (variant_id, payload) = def.variant_payload(variant)?;
         if arguments.len() != payload.len() {
             return None;
         }
-        let (enum_name, payload) = (def.name, payload.clone());
+        let (enum_name, payload) = (def.name, payload.to_vec());
         let mut values = Vec::with_capacity(payload.len());
         for (argument, expected) in arguments.iter().zip(payload) {
             let (value, actual) = if expected == Type::String {
@@ -1770,7 +1770,7 @@ impl<'a> Parser<'a> {
             } else {
                 self.lower_shared_expression(argument, remaining, nodes_left, effects)?
             };
-            if expected != actual {
+            if !self.matches_value_type(expected, actual, Some(&argument.range)) {
                 return None;
             }
             values.push(value);
