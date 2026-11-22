@@ -807,6 +807,12 @@ shadow clause is therefore not applicable to this language; its
 substantive content (hover shows the local type and declaration) is
 covered by the def-table hover and `lsp_hover_shows_binding_type_from_the_def_table`.
 
+M6.2.01 (sequential unsaved edits, multibyte included) is pinned by
+`lsp_sequential_edits_match_a_fresh_parse`: three successive revisions
+answer identically to a fresh parse. M6.2.07 (cancelled queries) is
+pinned by `lsp_cancelled_completion_does_not_mask_new_results`: the
+cancel error is -32800 and the next request answers from the new buffer.
+
 M6.2.05 ("complete inside a partially written member access using
 receiver type") landed as receiver-typed completion: the identifier
 before the dot resolves through the occurrence table to its inferred
