@@ -749,6 +749,9 @@ struct ResolvedExpressions {
     /// initialized from a text literal. A construction may move one into an
     /// owned field.
     owned_string_bindings: HashSet<ae_resolve::DefId>,
+    /// Local bindings and parameters whose spelling is a map (`Composite`
+    /// family "map"): map builtins and `m[key] = v` stores borrow them.
+    map_definitions: HashSet<ae_resolve::DefId>,
     /// Stores of an owned value into a `string` field through a `&mut`
     /// receiver (`p.buf = ...`): the codegen releases the old value first
     /// and consumes the right-hand side.

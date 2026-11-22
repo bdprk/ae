@@ -1238,3 +1238,23 @@ total, CI-gated).
 Next: map stores (`counts[word] = ...`), effectful `try_*`/`read_file`,
 generic-instance structs (`Cell[T]`/`ListNode[T]`), method calls on `self`,
 function-value calls, `task_yield`/`cell_load` in bodies.
+
+## P1.1 slice 15 landed: maps
+
+- `map_new`/`f64map_new`/`map_get`/`map_has`/`map_remove`/`map_inc`/`keys`
+  lower natively: `MapPlace::Var` (a map field of a struct variable too),
+  the prelude result enums (`IntResult`/`FloatResult`), the typed messages,
+  and the `MapKind` element rules.
+- A `keys(...)` binding is marked as an owned string vector (for-in works);
+  a `map_get(...)` binding as enum-typed (match works); a `map_new` binding
+  is marked as a map even when the resolver leaves its spelling `None`.
+- `m[key] = v` lowers to `MapPut` with the typed checks: mutable target,
+  borrow rejection, string key, element type.
+
+Coverage: 394 → **391**, files with fallbacks 110 → 107. Three more examples
+are legacy-free and joined the deny manifest (map_count, map_missing,
+sensor_stats — 13 files total, CI-gated).
+
+Next: effectful `try_*`/`read_file`/`env`, generic-instance structs
+(`Cell[T]`/`ListNode[T]`), method calls on `self`, function-value calls,
+concurrency builtins in bodies (`cell_load`, `task_yield`).

@@ -33,6 +33,7 @@ fn scalar_type(ty: Type) -> bool {
 const RESOLVED_BUILTINS: &[&str] = &[
     "len", "to_string", "to_f64", "to_i64", "trim", "slice", "slice_view", "split",
     "contains", "starts_with", "ends_with", "join", "parse_int", "find",
+    "map_new", "f64map_new", "map_get", "map_has", "map_remove", "map_inc", "keys",
     "json_get", "json_int", "json_bool", "json_len", "json_has",
 ];
 
@@ -40,7 +41,7 @@ const RESOLVED_BUILTINS: &[&str] = &[
 /// one is enum-typed even when the resolver leaves its spelling open.
 const ENUM_RESULT_BUILTINS: &[(&str, &str)] = &[
     ("parse_int", "IntResult"), ("to_i64", "IntResult"), ("find", "IntResult"),
-    ("json_get", "ReadResult"), ("json_int", "IntResult"),
+    ("json_get", "ReadResult"), ("json_int", "IntResult"), ("map_get", "IntResult"),
     ("json_bool", "BoolResult"), ("json_len", "IntResult"),
 ];
 
@@ -333,8 +334,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                                 || resolved.owned_string_bindings.contains(id)
                                 // An owned vector in argument position: a
                                 // builtin (`len`) or a `&vec` parameter only
-                                // borrows it.
-                                || resolved.owned_vectors.contains(id)))
+                                // borrows it. A map is borrowed the same way.
+                                || resolved.owned_vectors.contains(id)
+                                || resolved.map_definitions.contains(id)))
                     || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }))
         }
         _ => false,
@@ -435,8 +437,14 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 {
                     matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                         && resolved.scalar_writes.get(&base.range.start)
-                            .is_some_and(|id| resolved.array_definitions.contains(id))
-                        && scalar_body_expression(index, resolved, supports_call, supports_field)
+                            .or_else(|| resolved.scalar_reads.get(&base.range.start))
+                            .is_some_and(|id| resolved.array_definitions.contains(id)
+                                || resolved.map_definitions.contains(id))
+                        // A map key is a string value or view; array indices
+                        // are scalars.
+                        && (scalar_body_expression(index, resolved, supports_call, supports_field)
+                            || matches!(index.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                            || resolved.struct_field_views.contains(&index.range.start))
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 ae_syntax::expression::ExpressionKind::Field { base, .. }
@@ -1124,6 +1132,17 @@ impl<'a> Parser<'a> {
                 .filter(|entry| entry.kind.is_local()
                     && matches!(entry.inferred, Some(ae_resolve::TypeSpelling::Primitive("string"))))
                 .map(|entry| entry.id));
+            // A map binding or `&map` parameter: the map builtins and
+            // `m[key] = v` stores borrow it for the statement's duration.
+            expressions.map_definitions.extend(resolution.defs.iter().filter_map(|entry| {
+                use ae_resolve::TypeSpelling;
+                if !entry.kind.is_local() { return None }
+                let spelling = match &entry.inferred {
+                    Some(TypeSpelling::Borrow { mutable: false, inner }) => Some(inner.as_ref()),
+                    other => other.as_ref(),
+                };
+                matches!(spelling, Some(TypeSpelling::Composite { family: "map", .. })).then_some(entry.id)
+            }));
             // Struct parameters (borrowed or by value) and local bindings (owned,
             // constructed in-route from a drop-free struct) are field-read
             // receivers for the body route: the resolver's inferred spelling
@@ -1229,11 +1248,24 @@ impl<'a> Parser<'a> {
                                         // types its binding even when the
                                         // resolver leaves the spelling open;
                                         // `match` needs to know the subject
-                                        // is an enum.
+                                        // is an enum. `keys` returns an owned
+                                        // string vector.
                                         if let ExpressionKind::Call { callee, .. } = &initializer.kind {
                                             if let ExpressionKind::Atom(Kind::Ident(builtin)) = &callee.kind {
                                                 if ENUM_RESULT_BUILTINS.iter().any(|(name, _)| *name == builtin.as_str()) {
                                                     expressions.enum_bindings.insert(id);
+                                                }
+                                                if builtin == "keys" {
+                                                    expressions.vector_definitions.insert(id);
+                                                    expressions.owned_vectors.insert(id);
+                                                }
+                                                if matches!(builtin.as_str(), "map_new" | "f64map_new") {
+                                                    // The resolver leaves a
+                                                    // builtin-initialized
+                                                    // binding's spelling open;
+                                                    // the map shape comes from
+                                                    // the constructor name.
+                                                    expressions.map_definitions.insert(id);
                                                 }
                                             }
                                         }
@@ -1845,8 +1877,41 @@ impl<'a> Parser<'a> {
                     let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
                         unreachable!("scalar store eligibility");
                     };
-                    let def = self.resolved_expressions().scalar_writes[&base.range.start];
-                    let (slot, Type::Array(len)) = slots[&def] else {
+                    let def = self.resolved_expressions().scalar_writes.get(&base.range.start)
+                        .or_else(|| self.resolved_expressions().scalar_reads.get(&base.range.start))
+                        .copied().expect("resolved store base");
+                    let (slot, ty) = slots[&def];
+                    // `m[key] = v` inserts or overwrites in a map: the key is
+                    // copied by the runtime, the value must match the map's
+                    // element type, and the store is statement-scoped.
+                    if matches!(ty, Type::Map | Type::MapF) {
+                        let kind = map_kind_of(ty);
+                        if !self.names[name].1 {
+                            self.seek_scalar_offset(base.range.start);
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                            return Err(self.immutable_binding_error(diagnostic, slot));
+                        }
+                        if self.is_borrowed(slot) {
+                            self.seek_scalar_offset(base.range.end);
+                            return Err(self.fail(&format!("cannot modify '{name}' while it is borrowed")));
+                        }
+                        self.seek_scalar_offset(base.range.end);
+                        let (line, column) = self.position();
+                        let (key, key_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if !matches!(key_ty, Type::String | Type::StrView) {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("map keys must be strings"));
+                        }
+                        let (stored, value_ty) = self.lower_scalar_body_expression(value, slots)?;
+                        if value_ty != map_element_ty(kind) {
+                            self.seek_scalar_offset(value.range.end);
+                            return Err(self.fail(&format!("map values must be {}", map_element_ty(kind).name())));
+                        }
+                        self.seek_scalar_offset(value.range.end);
+                        self.take(Kind::Semi)?;
+                        return Ok(Statement::MapPut(MapPlace::Var(slot, kind), key, stored, line, column));
+                    }
+                    let Type::Array(len) = ty else {
                         unreachable!("resolved array store");
                     };
                     if !self.names[name].1 {
@@ -2812,6 +2877,67 @@ impl<'a> Parser<'a> {
                         _ => Expr::EndsWith(Box::new(first), Box::new(second)),
                     };
                     Ok((value, Type::Bool))
+                }
+                "map_new" | "f64map_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    let (kind, ty) = if name == "map_new" { (MapKind::Int, Type::Map) } else { (MapKind::Float, Type::MapF) };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::MapNew(line, column, kind), ty))
+                }
+                "map_get" | "map_has" | "map_remove" | "map_inc" | "keys" => {
+                    let expected = if matches!(name, "map_inc") { 3 } else if matches!(name, "keys") { 1 } else { 2 };
+                    self.expect_resolved_builtin_arity(expression, arguments, expected)?;
+                    // The map argument is a bare map variable, or a map field of
+                    // a struct *variable* (the borrow stays statement-scoped).
+                    let (map, map_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    let kind = map_kind_of(map_ty);
+                    let place = match (&map, map_ty) {
+                        (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::Map | Type::MapF) => MapPlace::Var(*id, kind),
+                        (Expr::Field(base, fname, t), _) if matches!(*t, Type::Map | Type::MapF) => match **base {
+                            Expr::Variable(id, ..) => MapPlace::Field(id, fname.clone(), kind),
+                            _ => {
+                                self.seek_scalar_offset(arguments[0].range.end);
+                                return Err(self.fail(&format!("{name} needs a map variable or a field of one")));
+                            }
+                        },
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail(&format!("{name} expects a map variable or a field of one")));
+                        }
+                    };
+                    if self.moved.contains(&place.slot()) {
+                        return Err(self.binding_label(self.fail(&format!("cannot use '{name}' on a moved map")).with_code("E0102"), place.slot()));
+                    }
+                    if matches!(name, "keys") {
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::MapKeys(place, line, column), Type::StrVec));
+                    }
+                    let (key, key_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(key_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        let message = if matches!(name, "map_inc") { "map_inc expects a string key".to_owned() } else { format!("{name} expects a string key") };
+                        return Err(self.fail(&message));
+                    }
+                    if matches!(name, "map_inc") {
+                        let (delta, delta_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                        if delta_ty != map_element_ty(kind) {
+                            self.seek_scalar_offset(arguments[2].range.end);
+                            return Err(self.fail(&format!("map_inc expects a {} delta", map_element_ty(kind).name())));
+                        }
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::MapInc(place, Box::new(key), Box::new(delta), line, column), map_element_ty(kind)));
+                    }
+                    let ty = match name {
+                        "map_get" => self.prelude_type(if kind == MapKind::Float { "FloatResult" } else { "IntResult" }),
+                        _ => Type::Bool,
+                    };
+                    let value = match name {
+                        "map_get" => Expr::MapGet(place, Box::new(key), ty, line, column),
+                        "map_has" => Expr::MapHas(place, Box::new(key), line, column),
+                        _ => Expr::MapRemove(place, Box::new(key), line, column),
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
                 }
                 "join" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
