@@ -339,8 +339,10 @@ pub struct Document {
     pub line_index: LineIndex,
     /// The resolver's name resolution for this document's text, computed
     /// lazily and invalidated on every update (R3d: hover and definition
-    /// read the def table instead of matching text).
-    pub resolution: OnceCell<std::sync::Arc<(ae_resolve::module::Module, ae_resolve::resolve::Resolution)>>,
+    /// read the def table instead of matching text). The imports resolve
+    /// from disk next to the document, so imported defs carry their own
+    /// file's name for cross-file definition.
+    pub resolution: OnceCell<std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>>,
 }
 
 impl Document {
@@ -362,16 +364,36 @@ impl Document {
         self.text = text;
     }
 
-    /// The document's module and name resolution, computed on first use
-    /// from its text. Documents the shared module parse rejects (lex or
-    /// declaration diagnostics) have none: their features fall back to the
-    /// text heuristics.
-    pub fn resolution(&self) -> Option<&std::sync::Arc<(ae_resolve::module::Module, ae_resolve::resolve::Resolution)>> {
+    /// The document's module, disk-loaded imports and name resolution,
+    /// computed on first use from its text. The imports come from disk next
+    /// to the document (the use headers' modules), so imported defs carry
+    /// their own file's name. Documents the shared module parse rejects
+    /// (lex or declaration diagnostics) have none: their features fall
+    /// back to the text heuristics.
+    pub fn resolution(&self) -> Option<&std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>> {
         let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
         let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
-        let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], tokens.as_slice());
-        self.resolution.set(std::sync::Arc::new((module, resolution))).ok()?;
+        let imports = self.disk_imports();
+        let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &imports, tokens.as_slice());
+        self.resolution.set(std::sync::Arc::new((module, imports, resolution))).ok()?;
         self.resolution.get()
+    }
+
+    /// The use headers' modules, loaded from disk next to this document.
+    /// A document that is not a disk file (unsaved buffer) resolves
+    /// single-file.
+    fn disk_imports(&self) -> Vec<(String, ae_resolve::module::Module)> {
+        let Some(path) = self.disk_path() else { return Vec::new() };
+        match ae_resolve::imports::load_module_transitive(&path) {
+            Ok((_, imports)) => imports,
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The disk path behind a `file:///` document URI, if any.
+    fn disk_path(&self) -> Option<std::path::PathBuf> {
+        let rest = self.uri.strip_prefix("file:///")?;
+        Some(std::path::PathBuf::from(rest))
     }
 }
 
@@ -678,7 +700,7 @@ impl LspServer {
     /// structs render their fields, bindings render their inferred type.
     fn hover_from_defs(&self, doc: &Document, offset: usize) -> Option<String> {
         let cached = doc.resolution()?;
-        let resolution = &cached.1;
+        let resolution = &cached.2;
         let def = def_at(resolution, offset)?;
         let describe = |spelling: &ae_resolve::TypeSpelling| describe_spelling(spelling, resolution);
         match def.kind {
@@ -723,14 +745,44 @@ impl LspServer {
     /// document URIs yet — they fall back to the text scan.
     fn definition_from_defs(&self, doc: &Document, offset: usize) -> Option<Location> {
         let cached = doc.resolution()?;
-        let resolution = &cached.1;
+        let resolution = &cached.2;
+        eprintln!("PROBE defs={} imports={} at={:?}", resolution.defs.len(), cached.1.len(), def_at(resolution, offset).map(|d| (d.id.0, d.name.clone(), d.imported)));
         let def = def_at(resolution, offset)?;
         if def.imported {
-            return None;
+            return self.imported_definition(doc, &cached, def);
         }
         let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
         let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
         Some(Location { uri: doc.uri.clone(), range: Range { start, end } })
+    }
+
+    /// R3d: an imported def's definition site — the owning import module's
+    /// file on disk, found by matching the def's name and its own file's
+    /// name span against each import's declarations.
+    fn imported_definition(
+        &self,
+        doc: &Document,
+        cached: &std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>,
+        def: &ae_resolve::DefEntry,
+    ) -> Option<Location> {
+        let (_, imports, _) = &**cached;
+        // An imported declaration's range spans its whole text, while the
+        // def's range is the name token (the resolver's import_name_range),
+        // so the match is by name — top-level names are unique per module.
+        let (file_name, declaration) = imports.iter().find_map(|(file, import_module)| {
+            import_module.declarations.iter()
+                .find(|declaration| declaration.name == def.name)
+                .map(|declaration| (file, declaration))
+        })?;
+        let disk_dir = doc.disk_path()?.parent()?.to_path_buf();
+        let import_path = disk_dir.join(file_name);
+        let source = std::fs::read_to_string(&import_path).ok()?;
+        let index = LineIndex::new(&source);
+        let start = index.offset_to_position(&source, declaration.range.start);
+        let end = index.offset_to_position(&source, declaration.range.end);
+        let dir = disk_dir.to_string_lossy().replace('\\', "/");
+        let uri = format!("file:///{dir}/{file_name}");
+        Some(Location { uri, range: Range { start, end } })
     }
 
     pub fn hover(&self, uri: &str, pos: Position) -> Option<String> {
@@ -860,7 +912,7 @@ impl LspServer {
         // Exact live-scope completion needs scope-structured ranges and
         // stays a later slice.
         if let Some(cached) = doc.resolution() {
-            let (module, resolution) = (&cached.0, &cached.1);
+            let (module, resolution) = (&cached.0, &cached.2);
             let owner = module.functions.iter().enumerate().find(|(_, function)| {
                 matches!(&function.declaration.body, Some(body)
                     if body.start <= offset && offset <= body.end)
@@ -922,7 +974,7 @@ impl LspServer {
     /// same-named token in the file.
     fn rename_from_defs(&self, doc: &Document, offset: usize, new_name: &str) -> Option<JsonValue> {
         let cached = doc.resolution()?;
-        let resolution = &cached.1;
+        let resolution = &cached.2;
         let def = def_at(resolution, offset)?;
         if def.imported {
             return None;

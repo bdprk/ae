@@ -208,7 +208,7 @@ fn lsp_definition_lands_on_the_struct_name_range() {
     let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn main() {\n    let p = Point { x: 1, y: 2 };\n}"}}}"#;
     server.handle_message(open);
 
-    let def_req = r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":2,"character":13}}}"#;
+    let def_req = r#"{"jsonrpc":"2.0","id":8,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":2,"character":16}}}"#;
     let resps = server.handle_message(def_req);
     let val = JsonValue::parse(&resps[0]).unwrap();
     let start = val.get("result").and_then(|r| r.get("range")).and_then(|r| r.get("start")).unwrap();
@@ -255,4 +255,35 @@ fn lsp_completion_includes_file_defs_from_the_def_table() {
     assert!(entries.iter().any(|(label, detail)| label == "area" && detail.contains("fn area(p: &Point) -> i64")), "entries: {entries:?}");
     assert!(entries.iter().any(|(label, detail)| label == "Point" && detail.contains("struct")), "entries: {entries:?}");
     assert!(entries.iter().any(|(label, detail)| label == "width" && detail.contains("i64")), "entries: {entries:?}");
+}
+
+#[test]
+fn lsp_definition_jumps_across_imported_files() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("ae-lsp-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let utils_source = "pub fn helper(x: i64) -> i64 { return x + 1; }";
+    let main_source = "use \"utils.ae\";\nfn main() {\n    let value = helper(1);\n    print(value);\n}";
+    std::fs::write(dir.join("utils.ae"), utils_source).unwrap();
+    let main_path = dir.join(format!("main-{}.ae", NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut server = LspServer::new();
+    let uri = format!("file:///{}", main_path.to_string_lossy().replace('\\', "/"));
+    let open = format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","version":1,"text":{}}}}}}}"#, JsonValue::String(main_source.to_owned()).serialize());
+    server.handle_message(open.as_str());
+
+    // The cursor sits on `helper` inside the call: the def table resolves
+    // it to the imported pub function, whose definition site is the
+    // import's own file.
+    let def_req = format!(r#"{{"jsonrpc":"2.0","id":11,"method":"textDocument/definition","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":2,"character":16}}}}}}"#);
+    let resps = server.handle_message(def_req.as_str());
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let result = val.get("result").unwrap();
+    let def_uri = result.get("uri").and_then(|u| u.as_str()).unwrap();
+    assert!(def_uri.ends_with("utils.ae"), "definition uri was: {def_uri}");
+    let start = result.get("range").and_then(|r| r.get("start")).unwrap();
+    assert_eq!(start.get("line").and_then(|l| l.as_i64()), Some(0));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
