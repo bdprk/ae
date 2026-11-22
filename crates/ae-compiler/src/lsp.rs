@@ -550,6 +550,7 @@ impl LspServer {
                 caps.insert("renameProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("documentSymbolProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("signatureHelpProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("foldingRangeProvider".to_owned(), JsonValue::Bool(true));
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -639,6 +640,22 @@ impl LspServer {
                     Some(signature) => Self::make_response(id, signature),
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/foldingRange" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let ranges: Vec<JsonValue> = self.folding_ranges(uri).into_iter().map(|(start, end, kind)| {
+                    let mut range = BTreeMap::new();
+                    range.insert("startLine".to_owned(), JsonValue::Number(start as f64));
+                    range.insert("endLine".to_owned(), JsonValue::Number(end as f64));
+                    if !kind.is_empty() {
+                        range.insert("kind".to_owned(), JsonValue::String(kind.to_owned()));
+                    }
+                    JsonValue::Object(range)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(ranges))
             }
             "textDocument/definition" => {
                 let Some(params) = params else {
@@ -843,6 +860,57 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: folding ranges — a brace-balanced brace pair folds from its line
+/// to the line of its closing brace; a run of `//` comment lines folds as
+/// one comment region. Purely lexical, no resolution needed.
+    fn folding_ranges(&self, uri: &str) -> Vec<(u32, u32, &'static str)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        let mut line_start = 0usize;
+        let mut line = 0u32;
+        let mut open: Vec<u32> = Vec::new();
+        let mut comment_block: Option<u32> = None;
+        let mut in_block_comment = false;
+        let bytes = doc.text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\n' => {
+                    let text = &doc.text[line_start..index];
+                    let trimmed = text.trim_start().starts_with("//");
+                    match (trimmed, comment_block) {
+                        (true, None) => comment_block = Some(line),
+                        (false, Some(start)) => {
+                            let end = line.saturating_sub(1);
+                            if end > start { ranges.push((start, end, "comment")); }
+                            comment_block = None;
+                        }
+                        _ => {}
+                    }
+                    line += 1;
+                    line_start = index + 1;
+                }
+                b'{' if !in_block_comment => open.push(line),
+                b'}' if !in_block_comment => {
+                    if let Some(start) = open.pop() {
+                        if line > start { ranges.push((start, line, "")); }
+                    }
+                }
+                b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => { in_block_comment = true; index += 1; }
+                b'*' if in_block_comment && index + 1 < bytes.len() && bytes[index + 1] == b'/' => { in_block_comment = false; index += 1; }
+                _ => {}
+            }
+            index += 1;
+        }
+        if let Some(start) = comment_block {
+            let end = line.saturating_sub(1);
+            if end > start { ranges.push((start, end, "comment")); }
+        }
+        ranges
     }
 
     /// R3d: signature help — when the cursor sits inside a call's argument

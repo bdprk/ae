@@ -471,3 +471,22 @@ fn lsp_signature_help_renders_the_call_signature() {
     assert!(label.contains("fn area(width: i64, height: i64) -> i64"), "label: {label}");
     assert_eq!(result.get("activeParameter").and_then(|v| v.as_i64()), Some(1));
 }
+
+#[test]
+fn lsp_folding_ranges_cover_blocks_and_comments() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"// header\n// more header\nfn main() {\n    if true {\n        print(1);\n    }\n}"}}}"#;
+    server.handle_message(open);
+
+    let fold_req = r#"{"jsonrpc":"2.0","id":19,"method":"textDocument/foldingRange","params":{"textDocument":{"uri":"file:///test.ae"}}}"#;
+    let resps = server.handle_message(fold_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let ranges = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let pairs: Vec<(i64, i64)> = ranges.iter().filter_map(|r| {
+        Some((r.get("startLine")?.as_i64()?, r.get("endLine")?.as_i64()?))
+    }).collect();
+    // The fn body folds 2..6, the if body 3..5, the comment run 0..1.
+    assert!(pairs.contains(&(2, 6)), "fn body missing: {pairs:?}");
+    assert!(pairs.contains(&(3, 5)), "if body missing: {pairs:?}");
+    assert!(pairs.contains(&(0, 1)), "comment run missing: {pairs:?}");
+}
