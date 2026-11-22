@@ -694,3 +694,8 @@ drivers share the loop setup and bind each token as a read-only view.
 Cursor construction reuses the existing tokenize checks and registers
 its base borrow at the declaring scope.
 
+Eligible matches on local enum parameters use resolved arm bodies and
+associate payload bindings with concrete compiler slots. The two drivers
+share variant, arity and exhaustiveness checks as well as the enum borrow.
+Locally constructed enum subjects are a follow-up.
+

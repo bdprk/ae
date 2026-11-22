@@ -163,6 +163,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
                 && !resolved.owned_vectors.contains(id) && !resolved.owned_text_bindings.contains(id)
+                && !resolved.enum_bindings.contains(id)
                 && !resolved.token_cursor_definitions.contains(id)),
         // A construction of a drop-free file-local struct with scalar
         // fields: the layout is known at collection time.
@@ -267,7 +268,8 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start)
                         .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_vectors.contains(id)
-                            && !resolved.owned_text_bindings.contains(id) && !resolved.token_cursor_definitions.contains(id))
+                            && !resolved.owned_text_bindings.contains(id) && !resolved.token_cursor_definitions.contains(id)
+                            && !resolved.enum_bindings.contains(id))
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
@@ -328,6 +330,14 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 && resolved.scalar_reads.get(&iterable.range.start)
                     .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id))
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
+        }
+        StatementKind::Match { subject, arms } => {
+            matches!(subject.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.scalar_reads.get(&subject.range.start)
+                    .is_some_and(|id| resolved.enum_bindings.contains(id))
+                && arms.iter().all(|arm| arm.body.iter().all(|statement| {
+                    scalar_body_statement(statement, resolved, supports_call, supports_field)
+                }))
         }
         StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
         StatementKind::Break | StatementKind::Continue => true,
@@ -757,6 +767,14 @@ impl<'a> Parser<'a> {
                 return expressions;
             };
             let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], &self.tokens);
+            expressions.enum_bindings.extend(resolution.defs.iter().filter_map(|entry| {
+                use ae_resolve::TypeSpelling;
+                if !entry.kind.is_local() { return None }
+                let (TypeSpelling::Named { def } | TypeSpelling::GenericInstance { def, .. }) = entry.inferred.as_ref()? else {
+                    return None;
+                };
+                (resolution.defs.get(def.0 as usize)?.kind == ae_resolve::DefKind::Enum).then_some(entry.id)
+            }));
             for occurrence in resolution.functions.iter().flat_map(|function| &function.occurrences) {
                 let Some(definition) = occurrence.target.and_then(|id| resolution.defs.get(id.0 as usize)) else {
                     if occurrence.role == ae_resolve::Role::Call {
@@ -1096,7 +1114,7 @@ impl<'a> Parser<'a> {
             || !(scalar_type(self.return_type)
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(_, _, ty))| {
-                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec)
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
@@ -1449,6 +1467,25 @@ impl<'a> Parser<'a> {
                     eprintln!("ae: {}:{}: warning: unnecessary unsafe block (W0702): the body contains no unchecked operation", block_line, block_column);
                 }
                 Statement::Unsafe(inner)
+            }
+            StatementKind::Match { subject, arms } => {
+                let (value, ty) = self.lower_scalar_body_expression(subject, slots)?;
+                self.seek_scalar_offset(subject.range.end);
+                self.lower_match(value, ty, |parser, index, names| {
+                    let definitions = names.iter().map(|(_, offset)| {
+                        parser.resolved_expressions().scalar_definitions.get(offset).copied()
+                    }).collect::<Option<Vec<_>>>();
+                    let (Some(arm), Some(definitions)) = (arms.get(index), definitions) else {
+                        return parser.block();
+                    };
+                    for ((name, _), &def) in names.iter().zip(&definitions) {
+                        let (slot, _, ty) = parser.names[name];
+                        slots.insert(def, (slot, ty));
+                    }
+                    let body = parser.lower_scalar_statements(&arm.body, slots);
+                    for def in definitions { slots.remove(&def); }
+                    body
+                })?
             }
             StatementKind::Break | StatementKind::Continue => {
                 let is_break = matches!(statement.kind, StatementKind::Break);
@@ -3570,6 +3607,15 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
             Some(value) => value,
             None => self.expression(0, false)?,
         };
+        self.lower_match(subject, subject_ty, |parser, _, _| parser.block())
+    }
+
+    fn lower_match(
+        &mut self,
+        subject: Expr,
+        subject_ty: Type,
+        mut lower_body: impl FnMut(&mut Self, usize, &[(String, usize)]) -> Result<Vec<Statement>, ae_span::Diagnostic>,
+    ) -> Result<Statement, ae_span::Diagnostic> {
         let (sid, eid) = match (&subject, subject_ty) {
             (Expr::Variable(id, Type::Enum(_, _), _, _), Type::Enum(_, k)) => (*id, k),
             _ => return Err(self.fail("match needs a bare enum variable as its subject")),
@@ -3643,7 +3689,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
             };
             self.scopes.push(Vec::new());
             let mut bindings = Vec::new();
-            let mut bound: Vec<String> = Vec::new();
+            let mut bound = Vec::new();
             for (index, (field, payload_pattern)) in fields.iter().copied().zip(payloads).enumerate() {
                 let bname = match payload_pattern.kind {
                     ae_syntax::pattern::PatternKind::Binding(name) => name,
@@ -3673,13 +3719,13 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                 };
                 self.names.insert(bname.clone(), (id, false, bty));
                 self.scopes.last_mut().unwrap().push((id, bty));
-                bound.push(bname);
+                bound.push((bname, name_at));
                 bindings.push((id, field, index));
             }
             self.take(Kind::FatArrow)?;
-            let body = self.block()?;
+            let body = lower_body(self, arms.len(), &bound)?;
             self.scopes.pop().unwrap();
-            for name in bound { self.names.remove(&name); }
+            for (name, _) in bound { self.names.remove(&name); }
             arms.push(MatchArm { variant: vidx, bindings, body });
         }
         self.take(Kind::RBrace)?;
@@ -3719,6 +3765,7 @@ mod tests {
         let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
         let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
         let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
+        let source = format!("{source} enum Reading {{ Value(i64), Empty }} fn read_match(input: Reading) -> i64 {{ match input {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3756,13 +3803,28 @@ mod tests {
         struct_names.insert("Inner".into(), 1);
         struct_names.insert("Outer".into(), 2);
         struct_names.insert("Guard".into(), 4);
-        let mut enums = Vec::new();
+        let mut enums = vec![EnumDef {
+            name: "Reading", variants: vec![("Value".into(), vec![Type::Int]), ("Empty".into(), vec![])],
+            file: "case.ae".into(), public: false, pattern: "Reading".into(),
+        }];
         let mut enum_names = HashMap::new();
         let mut generics = Generics::default();
         let mut parser = make_parser(
             "case.ae", source, tokens, &mut functions, &mut structs,
             &mut struct_names, &mut enums, &mut enum_names, &mut generics,
         );
+        let next_var = parser.next_var;
+        let input = source.find("input: Reading").unwrap();
+        parser.names.insert("input".into(), (89, false, Type::Enum("Reading", 0)));
+        parser.binding_ranges.insert(89, input..input + "input".len());
+        parser.seek_scalar_offset(source.find("{ match input").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved enum match").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Match(89, Type::Enum(_, 0), arms)]
+            if matches!(arms[0].body.as_slice(), [Statement::Return(Expr::Variable(slot, Type::Int, ..), _)]
+                if *slot == arms[0].bindings[0].0)));
+        parser.names.remove("input");
+        parser.binding_ranges.remove(&89);
+        parser.next_var = next_var;
         let start = source.find("raw_param:").unwrap();
         parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(intern_pointee(Type::Int))));
         parser.binding_ranges.insert(85, start..start + "raw_param".len());
