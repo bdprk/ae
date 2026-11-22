@@ -1245,17 +1245,19 @@ impl<'a> Parser<'a> {
                 .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
             slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
         }
-        // Printing an element borrows its view for the expression. Other uses
-        // still need the typed path's move checks and lifetime tracking.
+        // An indexed view can be printed or bound locally. Other uses
+        // still need the typed path's move checks.
         if !capture_starts.is_empty() && slots.values().any(|&(_, ty)| ty == Type::StrVecRef) {
             use ae_syntax::{expression::ExpressionKind, statement::{StatementKind, visit_statements}};
-            let mut print_bases = std::collections::HashSet::new();
+            let mut view_bases = std::collections::HashSet::new();
             for statement in body.iter() {
                 visit_statements(statement, &mut |statement| {
-                    if let StatementKind::Print(value) = &statement.kind
-                        && let ExpressionKind::Index { base, .. } = &value.kind
-                    {
-                        print_bases.insert(base.range.start);
+                    let value = match &statement.kind {
+                        StatementKind::Print(value) | StatementKind::Binding { initializer: value, .. } => value,
+                        _ => return,
+                    };
+                    if let ExpressionKind::Index { base, .. } = &value.kind {
+                        view_bases.insert(base.range.start);
                     }
                 });
             }
@@ -1264,7 +1266,7 @@ impl<'a> Parser<'a> {
             if resolved.scalar_reads.iter().any(|(&offset, def)| {
                 (start..end).contains(&offset)
                     && slots.get(def).is_some_and(|&(_, ty)| ty == Type::StrVecRef)
-                    && !print_bases.contains(&offset)
+                    && !view_bases.contains(&offset)
             }) {
                 return None;
             }
@@ -1420,6 +1422,9 @@ impl<'a> Parser<'a> {
                     self.check_view_binding(*mutable, ty)?;
                     self.take(Kind::Semi)?;
                     self.check_borrowed_binding(ty)?;
+                    if matches!(value, Expr::StrVecIndex(..)) {
+                        self.record_borrow_bases(&value);
+                    }
                     (Statement::Declare(slot, value), ty)
                 };
                 slots.insert(def, (slot, ty));
@@ -4280,7 +4285,14 @@ mod tests {
             [Statement::Print(Printed::Expr(Expr::StrVecIndex(82, _, _, _, true))),
              Statement::Return(Expr::Number(0), _)]));
         parser.seek_scalar_offset(source.find("{ let view = words[1]").unwrap());
-        assert!(parser.lower_resolved_body_with_captures(&[(82, words_start)]).is_none());
+        let next_var = parser.next_var;
+        let closure = parser.lower_resolved_body_with_captures(&[(82, words_start)])
+            .expect("resolved borrowed string vector view binding").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Declare(slot, Expr::StrVecIndex(82, _, _, _, true)),
+             Statement::Print(Printed::Expr(Expr::Variable(read, Type::StrView, ..))),
+             Statement::Return(Expr::Number(0), _)] if slot == read));
+        parser.next_var = next_var;
         parser.names.remove("words");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();

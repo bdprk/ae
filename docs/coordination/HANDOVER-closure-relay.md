@@ -10,14 +10,15 @@
 Direct printing of an element of a borrowed string-vector capture lowers
 through the resolved closure route as a string view. Capture inference,
 capture order, and the integer index check reuse the compiler's existing
-representations. The parser regression covers the resolved print and the
-fallback for a local view binding.
+representations. Local immutable bindings of indexed views also lower
+through the resolved route and register the container borrow using the
+same tracking as the typed parser. The parser regression checks that the
+resolved declaration and later read use the same local slot.
 
 ## What is half-done
 
-Element uses that bind or move a view still use the typed parser. The next
-slice should check the existing borrow-base tracking and diagnostics
-before admitting those uses.
+Uses that require moving the element still use the typed parser. The next
+slice should preserve those move diagnostics before widening eligibility.
 
 ## Next step
 
@@ -30,10 +31,10 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `2c529c0` matched 50 examples and 646 CLI
+- The byte comparison against `e9d084f` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for direct prints and a local view binding, and the diagnostic
-  for a non-integer index.
+  output for direct prints and a local view binding, and matched
+  diagnostics for mutable view bindings and attempts to move an element.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers
