@@ -26,6 +26,19 @@ fn scalar_type(ty: Type) -> bool {
     matches!(ty, Type::Int | Type::F64 | Type::Bool)
 }
 
+/// The pure value builtins the resolved body route lowers itself: each reads
+/// its arguments (never moves except a string `+`, which the Binary arm
+/// handles), so the body needs no borrow-argument machinery for them. Every
+/// other reserved name keeps its typed body until its surface is reviewed.
+const RESOLVED_BUILTINS: &[&str] = &[
+    "len", "to_string", "to_f64", "trim", "slice", "split",
+    "contains", "starts_with", "ends_with",
+];
+
+fn resolved_builtin(name: &str) -> bool {
+    RESOLVED_BUILTINS.contains(&name) || MATH_FNS.iter().any(|(math, _, _)| *math == name)
+}
+
 /// A struct the body route can own outright: no `Drop` impl and only scalar
 /// fields. Constructing one allocates nothing a release routine would walk,
 /// so a construction, a by-value argument, and a by-value return all move the
@@ -233,7 +246,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                             && resolved.closure_capture_reads.contains(&base.range.start)))
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
-        ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False) => true,
+        ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_)) => true,
         ExpressionKind::AddressCast { binding_range, .. } => {
             resolved.scalar_address_casts.contains(&expression.range.start)
                 && resolved.scalar_reads.contains_key(&binding_range.start)
@@ -1321,6 +1334,9 @@ impl<'a> Parser<'a> {
         let resolved = self.resolved_expressions();
         let Some(body) = resolved.scalar_bodies.get(&self.tokens[self.pos].offset).cloned() else { return None };
         let supports_call = |name: &str, offset: usize| {
+            // The pure value builtins lower natively (lower_resolved_builtin);
+            // every other reserved name keeps the typed body.
+            if resolved_builtin(name) { return true; }
             !RESERVED.contains(&name) && self.functions.get(name).is_some_and(|signature| {
                 // File-local resolution leaves imports open. The compiler's
                 // registry already contains the signatures of loaded modules.
@@ -2115,6 +2131,22 @@ impl<'a> Parser<'a> {
                 let position = self.position();
                 let rhs = self.lower_scalar_body_expression(right, slots)?;
                 self.seek_scalar_offset(expression.range.end);
+                // A string `+` consumes both owned variables, exactly as the
+                // typed postfix layer does: the left slot's move is checked
+                // before lowering (and marked by `lower_infix`), the right
+                // slot's here. Borrowed views copy.
+                let concat = *operator == Kind::Plus
+                    && matches!(lhs.1, Type::String | Type::StrView)
+                    && matches!(rhs.1, Type::String | Type::StrView);
+                if concat {
+                    if let Expr::Variable(id, Type::String, ..) = &lhs.0 {
+                        self.check_variable_move(*id)?;
+                    }
+                    if let Expr::Variable(id, Type::String, ..) = &rhs.0 {
+                        self.check_variable_move(*id)?;
+                        self.moved.insert(*id);
+                    }
+                }
                 let fact = self.resolved_expressions().scalar_expression_types.get(&expression.range).copied();
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
@@ -2129,6 +2161,11 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(expression.range.end);
                     let (line, column) = self.position();
                     return Ok((Expr::DerefPtr(Box::new(operand), line, column), super::ptr_pointee(id)));
+                }
+                if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
+                    if resolved_builtin(name) {
+                        return self.lower_resolved_builtin(name, expression, callee, arguments, slots);
+                    }
                 }
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
                     unreachable!("scalar call eligibility");
@@ -2200,6 +2237,223 @@ impl<'a> Parser<'a> {
             }
             _ => unreachable!("scalar expression eligibility"),
         })
+    }
+
+    /// The pure value builtins, lowered with the same `Expr` variants and the
+    /// same argument rules the typed route applies (positions included). The
+    /// resolved Call arm dispatches here for `resolved_builtin` names; no
+    /// `Argument::Borrow` machinery is involved because every one of these
+    /// builtins only reads its arguments.
+    fn lower_resolved_builtin(
+        &mut self,
+        name: &str,
+        expression: &ae_syntax::expression::Expression,
+        callee: &ae_syntax::expression::Expression,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        let builtin = (|| -> Result<(Expr, Type), ae_span::Diagnostic> {
+            self.seek_scalar_offset(callee.range.start);
+            let (line, column) = self.position();
+            match name {
+                "len" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    // The typed route's fast path: a bare local's array length
+                    // is a compile-time constant, and a vector or map length
+                    // borrows the slot. Either way the variable must not be
+                    // moved.
+                    if let ExpressionKind::Atom(Kind::Ident(argument_name)) = &argument.kind {
+                        if let Some(&def) = self.resolved_expressions().scalar_reads.get(&argument.range.start) {
+                            if let Some(&(slot, ty)) = slots.get(&def) {
+                                self.seek_scalar_offset(argument.range.start);
+                                if self.moved.contains(&slot) {
+                                    return Err(moved_value_hint(self.binding_label(
+                                        self.fail(&format!("cannot use '{argument_name}' because it was moved")).with_code("E0102"), slot)));
+                                }
+                                if let Type::Array(n) = ty {
+                                    self.seek_scalar_offset(expression.range.end);
+                                    return Ok((Expr::Number(n as i64), Type::Int));
+                                }
+                                if matches!(ty, Type::Vec | Type::StrVec | Type::VecRef | Type::StrVecRef | Type::Map) {
+                                    // The typed fast path stamps the operand with
+                                    // the `len` call's position, not the variable's.
+                                    let value = Expr::Variable(slot, ty, line, column);
+                                    self.seek_scalar_offset(expression.range.end);
+                                    return Ok((Expr::Len(Box::new(value), line, column), Type::Int));
+                                }
+                            }
+                        }
+                    }
+                    let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                    if ty == Type::Tokens {
+                        // The typed route consumes len's `)` before it checks
+                        // the operand type, so the cursor is one token past it.
+                        self.seek_scalar_offset(expression.range.end);
+                        return Err(self.fail("a token cursor has no len: counting would consume the stream, so use split(text, sep) when the count is needed"));
+                    }
+                    if !matches!(ty, Type::String | Type::StrView | Type::Vec | Type::StrVec | Type::StrVecRef | Type::VecF | Type::VecRef | Type::VecFRef | Type::Map | Type::MapF) {
+                        self.seek_scalar_offset(expression.range.end);
+                        return Err(self.fail("len expects a string, vec, map, or array variable"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Len(Box::new(value), line, column), Type::Int))
+                }
+                "to_string" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    let value = match actual {
+                        Type::Int => Expr::ToString(Box::new(value), line, column),
+                        Type::F64 => Expr::FloatToString(Box::new(value), line, column),
+                        _ => {
+                            self.seek_scalar_offset(argument.range.end);
+                            return Err(self.fail("to_string expects an i64 or f64"));
+                        }
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, Type::String))
+                }
+                "to_f64" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    if actual != Type::Int {
+                        self.seek_scalar_offset(argument.range.end);
+                        return Err(self.fail("to_f64 expects an i64"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ToF64(Box::new(value), line, column), Type::F64))
+                }
+                "trim" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    if !matches!(actual, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(argument.range.end);
+                        return Err(self.fail("trim expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Trim(Box::new(value), line, column), Type::String))
+                }
+                "slice" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let (text, start, end) = (&arguments[0], &arguments[1], &arguments[2]);
+                    let (first, first_ty) = self.lower_scalar_body_expression(text, slots)?;
+                    if !matches!(first_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(text.range.end);
+                        return Err(self.fail("slice expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(start.range.start);
+                    let (from, from_ty) = self.lower_scalar_body_expression(start, slots)?;
+                    if from_ty != Type::Int {
+                        self.seek_scalar_offset(start.range.end);
+                        return Err(self.fail("slice start must be i64"));
+                    }
+                    self.seek_scalar_offset(end.range.start);
+                    let (to, to_ty) = self.lower_scalar_body_expression(end, slots)?;
+                    if to_ty != Type::Int {
+                        self.seek_scalar_offset(end.range.end);
+                        return Err(self.fail("slice end must be i64"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Slice(Box::new(first), Box::new(from), Box::new(to), line, column), Type::String))
+                }
+                "split" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (text, separator) = (&arguments[0], &arguments[1]);
+                    let (first, first_ty) = self.lower_scalar_body_expression(text, slots)?;
+                    if !matches!(first_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(text.range.end);
+                        return Err(self.fail("split expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(separator.range.start);
+                    let (second, second_ty) = self.lower_scalar_body_expression(separator, slots)?;
+                    if !matches!(second_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(separator.range.end);
+                        return Err(self.fail("split expects a string or string view separator"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Split(Box::new(first), Box::new(second), line, column), Type::StrVec))
+                }
+                "contains" | "starts_with" | "ends_with" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (text, pattern) = (&arguments[0], &arguments[1]);
+                    let (first, first_ty) = self.lower_scalar_body_expression(text, slots)?;
+                    if !matches!(first_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(text.range.end);
+                        return Err(self.fail(&format!("{name} expects a string or string view argument")));
+                    }
+                    self.seek_scalar_offset(pattern.range.start);
+                    let (second, second_ty) = self.lower_scalar_body_expression(pattern, slots)?;
+                    if !matches!(second_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(pattern.range.end);
+                        return Err(self.fail(&format!("{name} expects a string or string view pattern")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    let value = match name {
+                        "contains" => Expr::Contains(Box::new(first), Box::new(second), line, column),
+                        "starts_with" => Expr::StartsWith(Box::new(first), Box::new(second)),
+                        _ => Expr::EndsWith(Box::new(first), Box::new(second)),
+                    };
+                    Ok((value, Type::Bool))
+                }
+                _ => {
+                    // A math builtin: fixed arity, every argument already f64.
+                    let Some((index, _, arity)) = MATH_FNS.iter().enumerate().find_map(|(index, (math, _, arity))| (*math == name).then_some((index, *math, *arity))) else {
+                        unreachable!("resolved builtin dispatch");
+                    };
+                    if arguments.len() < arity {
+                        self.seek_scalar_offset(expression.range.end);
+                        self.pos = self.pos.saturating_sub(1);
+                        return Err(self.fail(&format!("{name} expects {arity} f64 argument(s)")));
+                    }
+                    if arguments.len() > arity {
+                        self.seek_scalar_offset(arguments[arity - 1].range.end);
+                        return Err(self.fail(&format!("{name} takes {arity} argument(s)")));
+                    }
+                    let mut values = Vec::with_capacity(arity);
+                    for argument in arguments {
+                        self.seek_scalar_offset(argument.range.start);
+                        let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                        if ty != Type::F64 {
+                            self.seek_scalar_offset(argument.range.end);
+                            return Err(self.fail(&format!("{name} expects an f64 argument; convert integers explicitly with to_f64")));
+                        }
+                        values.push(Box::new(value));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::MathCall(index as u8, values, line, column), Type::F64))
+                }
+            }
+        })();
+        builtin
+    }
+
+    /// The typed route's own arity behaviour for a builtin that parses
+    /// `(` expression (`(, expression)*`) `)`: a missing argument produces the
+    /// Pratt parser's `expected expression` (E0011) at the closing
+    /// parenthesis, and an extra one produces `take(RParen)`'s `expected
+    /// RParen, found Comma` (E0010) at the comma before it. The pinned
+    /// diagnostics stay identical because the same rules are applied.
+    fn expect_resolved_builtin_arity(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        arguments: &[ae_syntax::expression::Expression],
+        expected: usize,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if arguments.len() < expected {
+            self.seek_scalar_offset(expression.range.end);
+            self.pos = self.pos.saturating_sub(1);
+            return Err(self.fail("expected expression").with_code("E0011"));
+        }
+        if arguments.len() > expected {
+            self.seek_scalar_offset(arguments[expected].range.start);
+            self.pos = self.pos.saturating_sub(1);
+            self.take(Kind::RParen)?;
+        }
+        Ok(())
     }
 
     fn lower_scalar_array_index(

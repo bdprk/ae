@@ -969,3 +969,30 @@ The reason report for `examples/closures.ae` now names the next theme:
 string expressions (`"hello " + name`, `to_string(...)`) and closure-valued
 bindings. After that: structs with owned fields (`IoReq`/`BytePipe`),
 closure bodies' field receivers, trait-method calls, nested store bases.
+
+## P1.1 slice 5 landed: string expressions and pure value builtins
+
+- A text literal is a scalar body operand, so `return note + "!";` and
+  `print("[" + text + "]")` route.
+- A string `+` lowers through `lower_infix` (the typed route's own function);
+  the resolved Binary arm marks both owned operands moved, matching the
+  typed postfix layer's consume rule.
+- `lower_resolved_builtin` lowers `len`, `to_string`, `to_f64`, `trim`,
+  `slice`, `split`, `contains`/`starts_with`/`ends_with` and every math
+  function natively: same `Expr` variants, same messages, same positions.
+  The arity branches reproduce the pinned parser diagnostics
+  (`expected expression` E0011, `expected RParen, found Comma` E0010, and the
+  math `takes N argument(s)`), and `len`'s variable fast path stamps the call
+  position exactly like the typed route (a one-column parity diff caught it).
+- A first attempt delegated whole builtin calls to the typed Pratt parser;
+  it over-consumed (the typed entry lowers the *statement's* whole expression
+  from the cursor), which produced wrong operand types and one miscompile.
+  Reverted; the native arms are the fix.
+
+Coverage: 471 → **465** fallbacks, files with fallbacks 127 → 126.
+Parity stayed green only after the `len` position fix; the existing trim /
+starts_with / math execution tests now run through the resolved route.
+
+Next: borrow arguments (`Argument::View`/`Borrow`) — that is what keeps
+every caller body typed (`print(label(a, 42))`), and after it string-typed
+field views in concatenation (`task.title + " w="`).

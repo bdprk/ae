@@ -44,7 +44,7 @@ jobs:
         # The resolved-body route replaces the legacy parser slice by slice.
         # The fallback total must never rise between slices; bump the ceiling
         # only in a commit that lowers it (the ledger records both numbers).
-        run: python scripts/route_report.py --max 471
+        run: python scripts/route_report.py --max 465
       - name: Robustness sweep (P0.4 audit gate)
         # 50,000 mutated sources through the real check entry: malformed
         # input must produce a diagnostic, never a panic or a stack abort.
