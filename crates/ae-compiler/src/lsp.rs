@@ -554,6 +554,7 @@ impl LspServer {
                 caps.insert("codeActionProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("inlayHintProvider".to_owned(), JsonValue::Bool(true));
                 let token_types = ["variable", "parameter", "function", "struct", "enum", "property"];
+                caps.insert("documentHighlightProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("semanticTokensProvider".to_owned(), {
                     let mut legend = BTreeMap::new();
                     legend.insert("tokenTypes".to_owned(), JsonValue::Array(
@@ -653,6 +654,22 @@ impl LspServer {
                     Some(signature) => Self::make_response(id, signature),
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/documentHighlight" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let line = params.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let character = params.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let highlights: Vec<JsonValue> = self.document_highlights(uri, Position { line, character })
+                    .into_iter().map(|(range, kind)| {
+                        let mut map = BTreeMap::new();
+                        map.insert("range".to_owned(), Self::range_to_json(&range));
+                        map.insert("kind".to_owned(), JsonValue::Number(kind as f64));
+                        JsonValue::Object(map)
+                    }).collect();
+                Self::make_response(id, JsonValue::Array(highlights))
             }
             "textDocument/semanticTokens/full" => {
                 let Some(params) = params else {
@@ -924,6 +941,38 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: document highlights — every occurrence of the resolved def in this
+/// document, kind 2 (read) or 3 (write).
+    fn document_highlights(&self, uri: &str, pos: Position) -> Vec<(Range, u32)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        let Some(cached) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &cached.2;
+        let Some(def) = def_at(resolution, offset) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target != Some(def.id) {
+                    continue;
+                }
+                let kind = match occurrence.role {
+                    ae_resolve::Role::Write | ae_resolve::Role::DerefWrite => 3,
+                    _ => 2,
+                };
+                let start = doc.line_index.offset_to_position(&doc.text, occurrence.range.start);
+                let end = doc.line_index.offset_to_position(&doc.text, occurrence.range.end);
+                out.push((Range { start, end }, kind));
+            }
+        }
+        out
     }
 
     /// R3d: semantic tokens — each resolved occurrence becomes a token whose

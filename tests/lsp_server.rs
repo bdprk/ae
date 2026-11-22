@@ -546,3 +546,21 @@ fn lsp_semantic_tokens_classify_resolved_occurrences() {
     assert!(kinds.contains(&2), "a function token is present: {kinds:?}");
     assert!(kinds.contains(&3), "a struct token is present: {kinds:?}");
 }
+
+#[test]
+fn lsp_document_highlights_are_scope_exact() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn a() -> i64 { let counter = 1; print(counter); return counter; }\nfn b() -> i64 { let counter = 2; print(counter); return counter; }"}}}"#;
+    server.handle_message(open);
+
+    // Highlights from fn a's `counter`: its two reads on line 0 only (the
+    // declaration itself is not an occurrence).
+    let hl_req = r#"{"jsonrpc":"2.0","id":23,"method":"textDocument/documentHighlight","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":0,"character":20}}}"#;
+    let resps = server.handle_message(hl_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let lines: Vec<i64> = items.iter().filter_map(|i| i.get("range")?.get("start")?.get("line")?.as_i64()).collect();
+    assert_eq!(lines, vec![0, 0], "scope-exact highlights: {lines:?}");
+    let kinds: Vec<i64> = items.iter().filter_map(|i| i.get("kind")?.as_i64()).collect();
+    assert!(kinds.iter().all(|k| *k == 2), "reads highlight as kind 2: {kinds:?}");
+}
