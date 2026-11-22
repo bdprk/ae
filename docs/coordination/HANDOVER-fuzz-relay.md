@@ -675,10 +675,15 @@ write through and read back a scalar local pointer in the same function.
 Resolved bodies now lower for-in loops over borrowed integer and floating
 point vectors. Both body drivers share vector iteration, including
 container borrows, hidden slots, element access and move checks. Token
-cursors and string vectors retain the typed path.
+cursors retain the typed path.
 
 Owning numeric vectors can now be built and iterated in resolved bodies.
 Numeric literal bindings are tracked even when empty or computed, and
 temporary loop borrows end before the owning binding is released. Ordinary
 ownership transfers still use the typed path.
+
+String vector parameters can now use the resolved vector loop path.
+Each element remains a read-only string view, and binding a borrowed
+container or a mutable view produces the same diagnostics in both drivers.
+String vector construction and token-cursor iteration are follow-ups.
 

@@ -162,7 +162,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
     match &expression.kind {
         ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
-                && !resolved.owned_numeric_vectors.contains(id)),
+                && !resolved.owned_vectors.contains(id)),
         // A construction of a drop-free file-local struct with scalar
         // fields: the layout is known at collection time.
         ExpressionKind::Struct { target, fields } => {
@@ -252,7 +252,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             match &target.kind {
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start)
-                        .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_numeric_vectors.contains(id))
+                        .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_vectors.contains(id))
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
@@ -311,7 +311,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             resolved.scalar_definitions.contains_key(&binding_range.start)
                 && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.scalar_reads.get(&iterable.range.start)
-                    .is_some_and(|id| resolved.numeric_vector_definitions.contains(id))
+                    .is_some_and(|id| resolved.vector_definitions.contains(id))
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
@@ -759,10 +759,10 @@ impl<'a> Parser<'a> {
                             spelling => spelling.as_ref(),
                         };
                         if let Some(TypeSpelling::Composite { family: "vec", arguments }) = spelling {
-                            if matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("i64" | "f64")]) {
-                                    expressions.numeric_vector_definitions.insert(definition.id);
+                            if matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("i64" | "f64" | "string")]) {
+                                expressions.vector_definitions.insert(definition.id);
                                 if matches!(definition.inferred, Some(TypeSpelling::Composite { .. })) {
-                                    expressions.owned_numeric_vectors.insert(definition.id);
+                                    expressions.owned_vectors.insert(definition.id);
                                 }
                             }
                         }
@@ -890,8 +890,8 @@ impl<'a> Parser<'a> {
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
                         if matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Vector(_)) {
                             if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
-                                expressions.numeric_vector_definitions.insert(id);
-                                expressions.owned_numeric_vectors.insert(id);
+                                expressions.vector_definitions.insert(id);
+                                expressions.owned_vectors.insert(id);
                             }
                         }
                     }
@@ -1067,7 +1067,7 @@ impl<'a> Parser<'a> {
             || !(scalar_type(self.return_type)
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(_, _, ty))| {
-                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::Vec | Type::VecF)
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec)
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
@@ -1236,6 +1236,10 @@ impl<'a> Parser<'a> {
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
                     let (value, ty) = self.lower_scalar_body_expression(initializer, slots)?;
+                    self.seek_scalar_offset(initializer.range.end);
+                    self.check_view_binding(*mutable, ty)?;
+                    self.take(Kind::Semi)?;
+                    self.check_borrowed_binding(ty)?;
                     (Statement::Declare(slot, value), ty)
                 };
                 let def = self.resolved_expressions().scalar_definitions[&name_range.start];
@@ -1331,7 +1335,11 @@ impl<'a> Parser<'a> {
                 Statement::PtrStore(slot, lowered, line, column)
             }
             StatementKind::Print(argument) => {
-                let (value, _) = self.lower_scalar_body_expression(argument, slots)?;
+                let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView) {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail(&format!("cannot print a value of type {}", ty.name())).with_code("E0206"));
+                }
                 Statement::Print(Printed::Expr(value))
             }
             StatementKind::Assert(argument) => {
@@ -1783,6 +1791,23 @@ impl<'a> Parser<'a> {
         let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
         self.check_array_index(scalar, Some(index.range.end))?;
         Ok(value)
+    }
+
+    fn check_view_binding(&self, mutable: bool, ty: Type) -> Result<(), ae_span::Diagnostic> {
+        if mutable && matches!(ty, Type::StrView | Type::Tokens) {
+            return Err(self.fail("a view binding cannot be mutable; declare it with 'let'"));
+        }
+        Ok(())
+    }
+
+    fn check_borrowed_binding(&self, ty: Type) -> Result<(), ae_span::Diagnostic> {
+        if matches!(ty, Type::VecRef | Type::StrVecRef) {
+            return Err(self.fail("cannot store a borrowed vector in a variable; pass it directly to a parameter that borrows"));
+        }
+        if matches!(ty, Type::StructRef(_) | Type::StructMut(_)) {
+            return Err(self.fail("cannot store a borrowed struct in a variable; pass it directly to a parameter that borrows"));
+        }
+        Ok(())
     }
 
     fn pointer_store_pointee(&self, name: &str, ty: Option<Type>, line: usize) -> Result<Type, ae_span::Diagnostic> {
@@ -2772,18 +2797,11 @@ impl<'a> Parser<'a> {
                         // reassignment re-point the view at different bytes
                         // with no kill in the region math, so it is rejected
                         // before it can exist.
-                        if mutable && matches!(ty, Type::StrView | Type::Tokens) {
-                            return Err(self.fail("a view binding cannot be mutable; declare it with 'let'"));
-                        }
+                        self.check_view_binding(mutable, ty)?;
                         self.take(Kind::Semi)?;
                         // A borrow has no storage of its own: it lives only as a
                         // parameter or a pattern binding, never as a variable.
-                        if matches!(ty, Type::VecRef | Type::StrVecRef) {
-                            return Err(self.fail("cannot store a borrowed vector in a variable; pass it directly to a parameter that borrows"));
-                        }
-                        if matches!(ty, Type::StructRef(_) | Type::StructMut(_)) {
-                            return Err(self.fail("cannot store a borrowed struct in a variable; pass it directly to a parameter that borrows"));
-                        }
+                        self.check_borrowed_binding(ty)?;
                         (Statement::Declare(id, value), ty)
                     };
                     self.names.insert(name.clone(), (id, mutable, ty));
@@ -3642,6 +3660,7 @@ mod tests {
         let source = format!("{source} fn vector_sum(vector_arg: &vec[f64]) -> f64 {{ var total = 0.0; for item in vector_arg {{ total += item; }} return total; }}");
         let source = format!("{source} fn owned_loop() -> i64 {{ let empty_vec = vec[]; for unused in empty_vec {{ print(unused); }} return 0; }}");
         let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = vec[]; let moved = take_vec; return 0; }}");
+        let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3728,6 +3747,16 @@ mod tests {
                 && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int))) if source == vector)));
         parser.seek_scalar_offset(source.find("{ let take_vec =").unwrap());
         assert!(parser.lower_resolved_scalar_body().is_none());
+        let start = source.find("words: &vec[string]").unwrap();
+        parser.names.insert("words".into(), (88, false, Type::StrVecRef));
+        parser.binding_ranges.insert(88, start..start + "words".len());
+        parser.seek_scalar_offset(source.find("{ for word in words").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved string vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [_, _, Statement::For(_, _, inner, ..), Statement::Return(..)]
+            if matches!(inner.as_slice(), [Statement::Declare(slot, Expr::StrVecIndex(88, _, _, _, true)),
+                Statement::Print(Printed::Expr(Expr::Variable(read, Type::StrView, ..)))] if slot == read)));
+        parser.names.remove("words");
+        parser.binding_ranges.remove(&88);
         parser.next_var = next_var;
         parser.next_label = 0;
         parser.generics.names.insert("CachedBox".into(), 0);
