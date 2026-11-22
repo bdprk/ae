@@ -9,6 +9,12 @@ pub enum Scalar {
     Bool,
 }
 
+/// Fixed-size arrays accept only i64 indices. An absent scalar here
+/// denotes a known non-scalar type.
+pub fn valid_array_index(index: Option<Scalar>) -> bool {
+    index == Some(Scalar::Int)
+}
+
 impl Scalar {
     pub fn from_spelling(name: &str) -> Option<Self> {
         match name {

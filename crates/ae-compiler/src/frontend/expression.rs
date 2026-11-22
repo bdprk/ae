@@ -1467,7 +1467,7 @@ impl Parser<'_> {
                     if let Type::Array(len) = ty {
                         let (line, col) = self.position(); self.take(Kind::LBracket)?;
                         let (index, index_ty) = self.expression(0, false)?;
-                        if index_ty != Type::Int { return Err(self.fail("array index must be an integer").with_code("E0201")); }
+                        self.check_array_index(operator_scalar(index_ty), None)?;
                         self.take(Kind::RBracket)?;
                         (Expr::Index(id, len, Box::new(index), line, col), Type::Int)
                     } else if (ty == Type::StrVec || ty == Type::StrVecRef) && *self.current() == Kind::LBracket {
@@ -1830,6 +1830,20 @@ impl Parser<'_> {
         self.lower_infix(lhs, op, parsed?, (line, column), None)
     }
 
+    pub(super) fn check_array_index(
+        &mut self,
+        scalar: Option<ae_resolve::typecheck::Scalar>,
+        end: Option<usize>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if !ae_resolve::typecheck::valid_array_index(scalar) {
+            if let Some(end) = end {
+                self.seek_scalar_offset(end);
+            }
+            return Err(self.fail("array index must be an integer").with_code("E0201"));
+        }
+        Ok(())
+    }
+
     fn operator_error(&self, error: ae_resolve::typecheck::OperatorError) -> ae_span::Diagnostic {
         let diagnostic = self.fail(error.message());
         if let Some(code) = error.code() { diagnostic.with_code(code) } else { diagnostic }
@@ -1896,7 +1910,7 @@ impl Parser<'_> {
     }
 }
 
-fn operator_scalar(ty: Type) -> Option<ae_resolve::typecheck::Scalar> {
+pub(super) fn operator_scalar(ty: Type) -> Option<ae_resolve::typecheck::Scalar> {
     use ae_resolve::typecheck::Scalar;
     match ty {
         Type::Int => Some(Scalar::Int),

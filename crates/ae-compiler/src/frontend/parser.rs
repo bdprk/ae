@@ -762,7 +762,7 @@ impl<'a> Parser<'a> {
             expressions.closure_headers.extend(resolution.functions.iter().flat_map(|function| {
                 function.closure_headers.iter().map(|(&offset, header)| (offset, header.clone()))
             }));
-            expressions.operator_types.extend(resolution.functions.iter().flat_map(|function| {
+            expressions.scalar_expression_types.extend(resolution.functions.iter().flat_map(|function| {
                 function.expression_types.iter().filter_map(|(range, &fact)| {
                     (fact != ae_resolve::resolve::ExpressionType::Deferred).then(|| (range.clone(), fact))
                 })
@@ -1180,11 +1180,7 @@ impl<'a> Parser<'a> {
                     }
                     self.seek_scalar_offset(base.range.end);
                     let (line, column) = self.position();
-                    let (element_index, index_ty) = self.lower_scalar_body_expression(index, slots)?;
-                    if index_ty != Type::Int {
-                        self.seek_scalar_offset(index.range.end);
-                        return Err(self.fail("array index must be an integer").with_code("E0201"));
-                    }
+                    let element_index = self.lower_scalar_array_index(index, slots)?;
                     self.seek_scalar_offset(value.range.start);
                     let (element, element_ty) = self.lower_scalar_body_expression(value, slots)?;
                     if element_ty != Type::Int {
@@ -1405,7 +1401,7 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    fn seek_scalar_offset(&mut self, offset: usize) {
+    pub(super) fn seek_scalar_offset(&mut self, offset: usize) {
         self.pos = self.tokens.partition_point(|token| token.offset < offset);
     }
 
@@ -1502,7 +1498,7 @@ impl<'a> Parser<'a> {
                 let position = self.position();
                 let operand = self.lower_scalar_body_expression(operand, slots)?;
                 self.seek_scalar_offset(expression.range.end);
-                let fact = self.resolved_expressions().operator_types.get(&expression.range).copied();
+                let fact = self.resolved_expressions().scalar_expression_types.get(&expression.range).copied();
                 self.lower_prefix(operator.clone(), operand, position, fact)?
             }
             ExpressionKind::Binary { left, operator, right } => {
@@ -1511,7 +1507,7 @@ impl<'a> Parser<'a> {
                 let position = self.position();
                 let rhs = self.lower_scalar_body_expression(right, slots)?;
                 self.seek_scalar_offset(expression.range.end);
-                let fact = self.resolved_expressions().operator_types.get(&expression.range).copied();
+                let fact = self.resolved_expressions().scalar_expression_types.get(&expression.range).copied();
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
             ExpressionKind::Call { callee, arguments } => {
@@ -1559,15 +1555,26 @@ impl<'a> Parser<'a> {
                 };
                 self.seek_scalar_offset(base.range.end);
                 let (line, column) = self.position();
-                let (value, ty) = self.lower_scalar_body_expression(index, slots)?;
-                if ty != Type::Int {
-                    self.seek_scalar_offset(index.range.end);
-                    return Err(self.fail("array index must be an integer").with_code("E0201"));
-                }
+                let value = self.lower_scalar_array_index(index, slots)?;
                 (Expr::Index(slot, len, Box::new(value), line, column), Type::Int)
             }
             _ => unreachable!("scalar expression eligibility"),
         })
+    }
+
+    fn lower_scalar_array_index(
+        &mut self,
+        index: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Expr, ae_span::Diagnostic> {
+        let (value, ty) = self.lower_scalar_body_expression(index, slots)?;
+        let fact = self.resolved_expressions().scalar_expression_types.get(&index.range);
+        let scalar = match fact {
+            Some(ae_resolve::resolve::ExpressionType::Checked(scalar)) => Some(*scalar),
+            _ => super::expression::operator_scalar(ty),
+        };
+        self.check_array_index(scalar, Some(index.range.end))?;
+        Ok(value)
     }
 
     fn lower_resolved_local(&mut self, name: &str, offset: usize) -> Option<(Expr, Type)> {
@@ -2468,7 +2475,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, false)?,
                         };
-                        if index_ty != Type::Int { return Err(self.fail("array index must be an integer").with_code("E0201")); }
+                        self.check_array_index(super::expression::operator_scalar(index_ty), None)?;
                         self.take(Kind::RBracket)?; self.take(Kind::Equal)?;
                         let (value, value_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
@@ -3405,7 +3412,7 @@ mod tests {
         let comparison = "local == 20";
         let start = source.find(comparison).unwrap();
         assert_eq!(
-            parser.resolved_expressions().operator_types.get(&(start..start + comparison.len())),
+            parser.resolved_expressions().scalar_expression_types.get(&(start..start + comparison.len())),
             Some(&ae_resolve::resolve::ExpressionType::Checked(ae_resolve::typecheck::Scalar::Bool)),
         );
         parser.seek_scalar_offset(source.find("{ let local").unwrap());

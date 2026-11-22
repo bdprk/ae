@@ -573,6 +573,10 @@ their parents and carries local scalar types by definition identity. Rejection
 stays at the operator that failed; enclosing operators defer. The compiler
 still owns user-facing operator diagnostics. Eligible compiler bodies use
 checked and rejected scalar facts after lowering operands, with deferred
-operators checked against the compiler's concrete types. The next slice
-extends checked expression types to storage and call sites.
+operators checked against the compiler's concrete types.
+
+Fixed-array reads and writes share the integer index rule across both parser
+routes. The resolved route uses checked index types when available and retains
+the compiler's E0201 location. The next slice extends shared checks to
+assignments, returns and direct call arguments.
 
