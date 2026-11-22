@@ -25,12 +25,14 @@ capture inference selects the by-value slot and the closure remains
 callable once.
 Direct prints of the owned capture, including parenthesized reads, now
 use the resolved body without moving the capture before the return.
+Capture classification also recognizes a binding initialized by a
+resolved file-local function call returning `string`.
 
 ## What is half-done
 
 Captured strings from other initializers and other uses of an owned
-capture still use the typed parser. The next slice can extend capture
-classification to resolved string-returning call initializers.
+capture still use the typed parser. The next slice can migrate local
+returns initialized by a direct call inside the closure.
 
 ## Next step
 
@@ -43,11 +45,10 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `2413230` matched 50 examples and 646 CLI
+- The byte comparison against `7d1ea4f` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for a closure that reads its capture twice before returning it.
-  It matched diagnostics for calling an owning closure twice and for
-  reads after moving the captured string to a local binding.
+  output for borrowed and owned captures of a call result, and matched
+  the diagnostic when the outer binding is read after an owning call.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

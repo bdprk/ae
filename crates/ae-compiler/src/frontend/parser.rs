@@ -966,6 +966,15 @@ impl<'a> Parser<'a> {
                                 ExpressionKind::Atom(Kind::Text(_)) => {
                                     expressions.owned_text_bindings.insert(id);
                                 }
+                                ExpressionKind::Call { callee, .. }
+                                    if matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
+                                        if !RESERVED.contains(&name.as_str()))
+                                        && expressions.direct_calls.contains(&callee.range.start)
+                                        && matches!(resolution.defs[id.0 as usize].inferred,
+                                            Some(ae_resolve::TypeSpelling::Primitive("string"))) =>
+                                {
+                                    expressions.owned_text_bindings.insert(id);
+                                }
                                 _ => match iterator_constructor(initializer) {
                                     Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
                                     Some(Type::StrVec) => {
@@ -3986,6 +3995,7 @@ mod tests {
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
         let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; return 0; }}");
+        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return call_text; }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4403,6 +4413,16 @@ mod tests {
         parser.seek_scalar_offset(source.find("{ let copy = captured_text;").unwrap());
         assert!(parser.lower_resolved_body_with_captures(&[(82, text_start)]).is_none());
         parser.names.remove("captured_text");
+        let call_text = source.find("let call_text =").unwrap() + 4;
+        parser.names.insert("call_text".into(), (82, false, Type::String));
+        parser.seek_scalar_offset(source.find("{ print(call_text);").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(82, call_text)])
+            .expect("resolved capture of a string returned by a call").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(Printed::Expr(Expr::Variable(82, Type::String, ..))),
+             Statement::Return(Expr::Variable(82, Type::String, ..), _)]));
+        assert!(parser.moved.remove(&82));
+        parser.names.remove("call_text");
         parser.return_type = Type::Int;
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
