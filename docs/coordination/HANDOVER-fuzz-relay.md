@@ -912,3 +912,34 @@ holds.
 
 Next slice: owned struct returns (`fn io_submit_read(...) -> IoReq` builds
 and moves the struct out of the body), then the `pipe_*` functions follow.
+
+## P1.1 slice 3 landed: owned plain-struct returns
+
+`owned_plain_struct(ty, structs)` — no `Drop` impl, scalar fields only — is
+the shape the body route can own outright. On that shape:
+
+- `supports_call` admits a struct-returning callee (the construction
+  allocates nothing a release routine would walk), so `return make(...);`
+  lowers through the resolved route.
+- The guard admits a `Type::Struct` return type (the receiver-equality rule
+  for `return self;` stays).
+- Bindings of call results are ordinary `Declare`s whose owned type enters
+  the scope's Frees list, exactly like a drop-free construction.
+- `return binding;` moves the slot out: the lowering marks it moved (drops
+  pass trims its Frees), while `s = take(s)` still fails with the typed
+  route's E0102, its position, and its hint (the resolved Assign arm now
+  carries the same same-statement move check and re-initialization clear).
+- New set `owned_struct_bindings` (spelled `Named`, not borrowed) admits the
+  `return binding;` statement at scan time.
+
+Coverage: 1184 → **987** fallbacks (the `batch_core_*` families dropped most:
+semver/mvs/version-request helpers and friends). `tests/run/owned_struct_return.ae`
+pins construction, `let` binding, and `return binding;` end to end.
+
+Still typed: structs with owned fields (`IoReq`, `BytePipe` — construction
+moves into a `string` field are not tracked), by-value struct parameters
+(their exit drop is the typed path's), field reads on temporaries
+(`f().field`), builtin calls in scalar bodies (`len`/`slice`/`+`), and
+closure bodies' field receivers. The next slice with the best coverage per
+risk is builtins plus string-field reads inside scalar bodies — that is what
+`io_step`, `pipe_*` and much of `batch_core_*` still need.

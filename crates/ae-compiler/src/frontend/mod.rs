@@ -727,6 +727,9 @@ struct ResolvedExpressions {
     closure_capture_reads: HashSet<usize>,
     array_definitions: HashSet<ae_resolve::DefId>,
     struct_definitions: HashSet<ae_resolve::DefId>,
+    /// Struct-typed bindings that hold the struct by value (spelled `Named`,
+    /// not borrowed). `return binding;` moves one out of the body.
+    owned_struct_bindings: HashSet<ae_resolve::DefId>,
     struct_field_reads: HashSet<usize>,
     struct_field_chains: HashSet<usize>,
     /// Field store targets on a mutable struct receiver (`r.n = v`): the

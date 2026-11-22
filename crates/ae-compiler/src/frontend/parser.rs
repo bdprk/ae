@@ -26,6 +26,17 @@ fn scalar_type(ty: Type) -> bool {
     matches!(ty, Type::Int | Type::F64 | Type::Bool)
 }
 
+/// A struct the body route can own outright: no `Drop` impl and only scalar
+/// fields. Constructing one allocates nothing a release routine would walk,
+/// so a construction, a by-value argument, and a by-value return all move the
+/// value without an ownership hook — the same shape the drop-free
+/// construction collection marks. Structs with owned fields (`string`,
+/// vectors) stay on the typed route until construction moves are tracked.
+fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
+    let Type::Struct(sid) = ty else { return false };
+    structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none() && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)))
+}
+
 /// The registry struct a field expression reads from: a parameter's
 /// immutable borrowed spelling names a file-local struct item; a nested
 /// field's struct is the declared type of the field it reads. Generic
@@ -354,6 +365,12 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             scalar_body_expression(value, resolved, supports_call, supports_field)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
+                // `return binding;` moves an owned struct out of the body;
+                // the lowering marks the slot moved, so the drops pass trims
+                // its Frees instead of releasing a value the caller owns.
+                || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                    if name != "self" && resolved.scalar_reads.get(&value.range.start)
+                        .is_some_and(|id| resolved.owned_struct_bindings.contains(id)))
         }
         StatementKind::Print(value) | StatementKind::Assert(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
@@ -929,6 +946,11 @@ impl<'a> Parser<'a> {
                     });
                 if names_struct {
                     expressions.struct_definitions.insert(definition.id);
+                    // A value binding (spelled `Named`) owns its struct; a
+                    // borrowed parameter (`&P`, `&mut P`) only views one.
+                    if matches!(definition.inferred, Some(ae_resolve::TypeSpelling::Named { .. })) {
+                        expressions.owned_struct_bindings.insert(definition.id);
+                    }
                 }
             }
             let function_statements = module.functions.iter()
@@ -1241,7 +1263,8 @@ impl<'a> Parser<'a> {
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
             || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..))
-                || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
+                || (matches!(self.return_type, Type::Struct(_))
+                    && (self.receiver == Some(self.return_type) || owned_plain_struct(self.return_type, self.structs))))
             || !self.names.iter().all(|(name, &(slot, _, ty))| {
                 let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
                 // A value capture moves into the closure's slot; the body's
@@ -1272,7 +1295,7 @@ impl<'a> Parser<'a> {
                     signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
-                    && scalar_type(signature.ret)
+                    && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
                         // moves the argument, tracked in `moved`, and the
@@ -1544,9 +1567,18 @@ impl<'a> Parser<'a> {
                 }
                 self.seek_scalar_offset(value.range.start);
                 let (line, column) = self.position();
+                // The right-hand side may not consume the target itself.
+                // Assigning to an already-moved variable is a legal
+                // re-initialization, so the flag clears either way.
+                let moved_before = self.moved.contains(&slot);
                 let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
                 self.seek_scalar_offset(statement.range.end);
                 self.check_assignment_type(name, ty, rhs_ty, Some(&value.range))?;
+                if self.moved.contains(&slot) && !moved_before {
+                    return Err(moved_self_assignment_hint(self.binding_label(
+                        self.error_at(target.range.start, &format!("cannot assign to '{name}' because it was moved in the same statement")).with_code("E0102"), slot)));
+                }
+                self.moved.remove(&slot);
                 let value = if let Some(op) = compound {
                     let lhs = Expr::Variable(slot, ty, line, column);
                     Expr::Binary(Box::new(lhs), op, Box::new(rhs), line, column, ty)
@@ -1591,7 +1623,6 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
                 }
-                let returned_receiver = receiver_value(value);
                 let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
                     self.seek_scalar_offset(value.range.start);
                     let result = self.expression(0, true)?;
@@ -1600,10 +1631,17 @@ impl<'a> Parser<'a> {
                 } else {
                     self.lower_scalar_body_expression(value, slots)?
                 };
-                if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &lowered) {
-                    self.seek_scalar_offset(atom.range.end);
-                    self.check_variable_move(*slot)?;
-                    self.moved.insert(*slot);
+                // Returning an owned value moves it out of the body: the
+                // caller owns it, so the drops pass must trim this slot's
+                // Frees and later reads are rejected (E0102). This covers
+                // `return self;` and `return binding;` for structs, strings
+                // and vectors alike.
+                if let Expr::Variable(slot, ty, ..) = &lowered {
+                    if ty.owned() {
+                        self.seek_scalar_offset(value.range.end);
+                        self.check_variable_move(*slot)?;
+                        self.moved.insert(*slot);
+                    }
                 }
                 self.seek_scalar_offset(statement.range.end);
                 self.check_return_type(ty, Some(&value.range))?;
