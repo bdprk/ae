@@ -6,3 +6,6 @@
 10124 seeds, 0 failures, 3602.9s (2.81 seeds/s, 3 jobs)
 10569 seeds, 0 failures, 3602.5s (2.93 seeds/s, 3 jobs)
 10196 seeds, 0 failures, 3603.3s (2.83 seeds/s, 3 jobs)
+10304 seeds, 0 failures, 3603.0s (2.86 seeds/s, 3 jobs)
+9971 seeds, 0 failures, 3602.4s (2.77 seeds/s, 3 jobs)
+10213 seeds, 0 failures, 3602.2s (2.84 seeds/s, 3 jobs)
