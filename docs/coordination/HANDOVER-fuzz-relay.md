@@ -795,3 +795,20 @@ The resolved closure route also lowers indexed reads of captured numeric
 vectors through the concrete read-only capture slots. Integer and float
 elements use the same vector-index expressions as the typed parser.
 Owning and string-vector captures still use the typed path.
+
+## M6.2 checklist adjudication note (2026-11-22 19:30)
+
+M6.2.03 asks for "hover a shadowed name and show its local type and
+declaration". AE does not allow same-name shadowing in an inner block —
+the compiler reports `duplicate variable` (E0104) and the resolver's
+diagnostics agree verbatim (pinned by
+`lsp_shadowing_is_rejected_like_the_compiler`). The checklist item's
+shadow clause is therefore not applicable to this language; its
+substantive content (hover shows the local type and declaration) is
+covered by the def-table hover and `lsp_hover_shows_binding_type_from_the_def_table`.
+
+M6.2.05 ("complete inside a partially written member access using
+receiver type") landed as receiver-typed completion: the identifier
+before the dot resolves through the occurrence table to its inferred
+struct, and that struct's declared fields answer (with a declaration-
+driven fallback for incomplete `p.` text that does not parse).
