@@ -1184,15 +1184,11 @@ impl<'a> Parser<'a> {
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(slot, _, ty))| {
                 let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
-                // A value capture of a numeric vector moves into the
-                // closure's slot; the body's own Frees releases it after
-                // the call, which is the FnOnce shape. A borrowed string
-                // vector's element reads are views, so they join too; a
-                // value-captured string vector stays on the typed path
-                // (its elements own drops).
-                if captured && matches!(ty, Type::StrVec) {
-                    return false;
-                }
+                // A value capture moves into the closure's slot; the body's
+                // own Frees releases it after the call (the FnOnce shape),
+                // and a string vector's Frees releases its elements in the
+                // same order the typed path emits.
+                let _ = captured;
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (ty == Type::StrView && captured)
@@ -4276,6 +4272,18 @@ mod tests {
             .expect("resolved borrowed string-vector capture").unwrap();
         assert!(matches!(closure.as_slice(),
             [Statement::Print(Printed::Expr(Expr::StrVecIndex(83, _, _, _, true))),
+             Statement::Return(Expr::Number(0), _)]), "{closure:?}");
+        parser.names.remove("labels");
+        // An owning string-vector capture: the element read comes from the
+        // closure's own slot (by_ref=false). The caller (closure_body)
+        // appends the scope's Frees, which releases the vector and its
+        // elements after the call.
+        parser.names.insert("labels".into(), (84, false, Type::StrVec));
+        parser.seek_scalar_offset(source.find("{ print(labels[0])").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(84, labels_start)])
+            .expect("resolved owning string-vector capture").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(Printed::Expr(Expr::StrVecIndex(84, _, _, _, false))),
              Statement::Return(Expr::Number(0), _)]), "{closure:?}");
         parser.names.remove("labels");
         let generic_binding = source.find("generic_value:").unwrap();

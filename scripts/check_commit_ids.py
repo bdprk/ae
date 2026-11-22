@@ -46,6 +46,18 @@ def commits(base: str) -> list[tuple[str, str]]:
     return out
 
 
+def docs_only(commit_hash: str) -> bool:
+    """Whether the commit changes nothing outside `docs/`.
+
+    A docs commit's title may describe state in passing ("handoff: R4.1
+    done") — that is a summary of the ledger, not a claim of completed work
+    that must edit it in the same commit. Code commits keep the strict rule.
+    """
+    listing = run_git(["show", "--format=", "--name-only", commit_hash])
+    files = [name for name in listing.splitlines() if name.strip()]
+    return bool(files) and all(name.startswith("docs/") for name in files)
+
+
 def touches_ledger(commit_hash: str) -> bool:
     """Whether the commit changed the ledger file at all."""
     files = run_git(["show", "--format=", "--name-only", commit_hash, "--", LEDGER.relative_to(ROOT).as_posix()])
@@ -82,6 +94,8 @@ def main() -> int:
     for commit_hash, title in commits(options.base):
         claimed = set(ID.findall(title))
         if not claimed:
+            continue
+        if docs_only(commit_hash):
             continue
         if touches_ledger(commit_hash):
             flipped = flipped_ids(commit_hash)
