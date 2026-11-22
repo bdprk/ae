@@ -849,6 +849,14 @@ impl<'a> Parser<'a> {
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
                         visit_expression_tree(top_level, &mut |expression| {
                             use ae_syntax::expression::ExpressionKind;
+                            if let ExpressionKind::Struct { target, fields } = &expression.kind {
+                                if matches!(target.kind, ExpressionKind::Specialization { .. }) {
+                                    let open = self.tokens.partition_point(|token| token.offset < target.range.end);
+                                    expressions.specialized_struct_fields.insert(
+                                        self.tokens[open].offset, (expression.range.end, fields.as_slice().into()),
+                                    );
+                                }
+                            }
                             if let ExpressionKind::Call { callee, arguments } = &expression.kind {
                                 if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }) {
                                     let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
@@ -1869,26 +1877,7 @@ impl<'a> Parser<'a> {
                     }
                     _ => return None,
                 };
-                let def = self.structs.get(sid)?;
-                self.require_public("struct", &def.name, &def.file, def.public).ok()?;
-                if fields.len() != def.fields.len() {
-                    return None;
-                }
-                let declared_fields = def.fields.clone();
-                let mut values: Vec<_> = (0..fields.len()).map(|_| None).collect();
-                for field in fields {
-                    let slot = declared_fields.iter().position(|(name, _)| name == &field.name)?;
-                    if values[slot].is_some() {
-                        return None;
-                    }
-                    let expected = declared_fields[slot].1;
-                    let (value, actual) = self.lower_shared_argument(&field.value, expected, remaining, nodes_left, effects)?;
-                    if !self.matches_value_type(expected, actual, Some(&field.value.range)) {
-                        return None;
-                    }
-                    values[slot] = Some(value);
-                }
-                Some((Expr::StructLit(sid, values.into_iter().collect::<Option<_>>()?), Type::Struct(sid)))
+                self.lower_shared_struct_fields(sid, fields, remaining, nodes_left, effects)
             }
             ExpressionKind::Vector(elements) => {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < expression.range.start))?;
@@ -2018,6 +2007,58 @@ impl<'a> Parser<'a> {
             }
             _ => None,
         }
+    }
+
+    fn lower_shared_struct_fields(
+        &mut self,
+        sid: usize,
+        fields: &[ae_syntax::expression::FieldInitializer],
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<(Expr, Type)> {
+        let def = self.structs.get(sid)?;
+        self.require_public("struct", &def.name, &def.file, def.public).ok()?;
+        if fields.len() != def.fields.len() {
+            return None;
+        }
+        let declared_fields = def.fields.clone();
+        let mut values: Vec<_> = (0..fields.len()).map(|_| None).collect();
+        for field in fields {
+            let slot = declared_fields.iter().position(|(name, _)| name == &field.name)?;
+            if values[slot].is_some() {
+                return None;
+            }
+            let expected = declared_fields[slot].1;
+            let (value, actual) = self.lower_shared_argument(&field.value, expected, remaining, nodes_left, effects)?;
+            if !self.matches_value_type(expected, actual, Some(&field.value.range)) {
+                return None;
+            }
+            values[slot] = Some(value);
+        }
+        Some((Expr::StructLit(sid, values.into_iter().collect::<Option<_>>()?), Type::Struct(sid)))
+    }
+
+    pub(super) fn lower_committed_specialized_struct(&mut self, sid: usize) -> Option<(Expr, Type)> {
+        if *self.current() != Kind::LBrace || std::env::var_os("AE_DEBUG_MIR").is_some() {
+            return None;
+        }
+        let offset = self.tokens[self.pos].offset;
+        let (end, fields) = self.resolved_expressions().specialized_struct_fields.get(&offset)?.clone();
+        let cursor = self.tokens.partition_point(|token| token.offset < end);
+        let close = self.tokens.get(cursor.checked_sub(1)?)?;
+        if close.kind != Kind::RBrace || close.end != end {
+            return None;
+        }
+        let depth = 128usize.checked_sub(self.expression_depth)?.min(64);
+        let budget = 128usize.checked_sub(self.expression_nodes)?;
+        let mut nodes_left = budget;
+        let mut effects = SharedExpressionEffects::default();
+        let value = self.lower_shared_struct_fields(sid, &fields, depth, &mut nodes_left, &mut effects)?;
+        self.commit_shared_effects(effects);
+        self.expression_nodes += budget - nodes_left;
+        self.pos = cursor;
+        Some(value)
     }
 
     fn lower_shared_call_arguments(
@@ -3445,6 +3486,21 @@ mod tests {
         assert_eq!(parser.pos, start);
         assert!(!parser.moved.contains(&83));
         let sid = parser.instantiate_struct(0, vec![Type::String], constructor).unwrap();
+        let mismatched = parser.instantiate_struct(0, vec![Type::Int], constructor).unwrap();
+        parser.seek_scalar_offset(constructor + "CachedRecord[string] ".len());
+        let brace = parser.pos;
+        assert!(parser.lower_committed_specialized_struct(mismatched).is_none());
+        assert_eq!(parser.pos, brace);
+        assert!(!parser.moved.contains(&83));
+        assert!(matches!(
+            parser.lower_committed_specialized_struct(sid),
+            Some((Expr::StructLit(actual, fields), Type::Struct(ty)))
+                if actual == sid && ty == sid
+                    && matches!(fields.as_slice(), [Expr::Variable(83, Type::String, ..), Expr::Number(2)])
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
+        assert!(parser.moved.remove(&83));
+        parser.seek_scalar_offset(constructor);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
             Some((Expr::StructLit(actual, fields), Type::Struct(ty)))

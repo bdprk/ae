@@ -680,7 +680,10 @@ impl Parser<'_> {
                         // still owns chaining (Pair[string, i64]::new(..).m()).
                         (Expr::Call(id, call_args, ret), ret)
                     } else if *self.current() == Kind::LBrace {
-                        self.struct_literal(sid, name_offset)?
+                        match self.lower_committed_specialized_struct(sid) {
+                            Some(value) => value,
+                            None => self.struct_literal(sid, name_offset)?,
+                        }
                     } else {
                         return Err(self.error_at(name_offset, &format!("'{}' is a struct; construct it with '{}{{ ... }}'", self.structs[sid].name.clone(), self.structs[sid].name.clone())));
                     }

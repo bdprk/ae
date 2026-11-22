@@ -631,3 +631,9 @@ argument planner commits ownership changes only after the complete list
 passes. Unsupported syntax and rejected arguments are parsed by the typed
 argument reader at the original cursor.
 
+First-use generic struct construction now shares initializer lowering
+after the concrete layout is allocated. The initializer plan preserves
+source evaluation order and layout field order, and commits moves only
+after all fields pass. The original constructor still reports malformed
+fields. The next slice applies this approach to first-use enum payloads.
+
