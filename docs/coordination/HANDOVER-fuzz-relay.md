@@ -723,6 +723,17 @@ internal uses edit from a fresh per-module resolution alongside the
 entry's occurrences).
 
 
+## Closure bodies landed (2026-11-22 09:23, `895ee85`)
+
+The first closure rung is in: `lower_resolved_body_with_captures` lowers
+eligible closure bodies from the resolver's `ClosureBody` trees (the
+resolver records capture starts per closure and flags duplicate-binding
+conflicts), with the closures driver trying the resolved route before the
+typed walker. The guard accepts scalar/aggregate/enum params and capture
+forms; generic substitutions stay deferred. The next rungs widen the
+capture-type guard (String/Map captures carry ownership effects) — see
+the blueprint below.
+
 ## Next arc blueprint: no-capture closures through the body route
 
 The ladder's final rung (generic and closure bodies) starts with the
