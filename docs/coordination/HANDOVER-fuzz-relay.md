@@ -831,3 +831,54 @@ receiver type") landed as receiver-typed completion: the identifier
 before the dot resolves through the occurrence table to its inferred
 struct, and that struct's declared fields answer (with a declaration-
 driven fallback for incomplete `p.` text that does not parse).
+
+## P1.1 next slice blueprint: generalize field access beyond `self`
+
+Baseline (2026-11-23 01:00): `AE_ROUTE_REPORT=1` reports **1,186 legacy
+fallbacks across 163 of 171 corpus files**. The two largest causes:
+
+1. **Owned struct returns** (`fn io_submit_read(...) -> IoReq`): the guard
+   admits a `Type::Struct(_)` return only when it equals the method
+   receiver. A plain function returning a constructed struct needs the
+   ownership path (the value is built in the body and moved to the
+   caller) — a slice of its own.
+2. **Field access on non-`self` roots.** `supports_field` (parser.rs
+   ~1225) answers only for an impl method's `self`; `receiver_field_root`
+   (parser.rs:70) matches the literal spelling `self`, and `receiver_value`
+   (parser.rs:79) the same. So `fn io_step(r: &mut IoReq)` falls back at
+   its first `r.state` read even though the guard now admits the `&mut`
+   parameter.
+
+The generalization, in one slice:
+
+- Replace `receiver_field_root(expression) -> Option<usize>` with
+  `field_chain_root(expression) -> Option<&Expression>` that returns the
+  **root identifier node** of any field chain (walk `Field { base }` until
+  an `Atom(Ident)`). Keep the old behaviour as a caller-side
+  `is_self` check where the impl-receiver rule must stay (line 1133's
+  `function.impl_owner.is_some()` gate).
+- `receiver_field_type(expression, receiver: Type, structs)` already takes
+  the receiver type as a parameter: it needs no change, only a different
+  caller-supplied type.
+- In `lower_resolved_body_with_captures`, **build `slots` before**
+  `supports_field` (it currently builds after), then answer:
+  root ident offset -> `scalar_reads`/`scalar_writes` -> def -> `slots` ->
+  `(slot, ty)`; `supports_field` succeeds when
+  `field_chain_type(expression, ty, structs)` is scalar (field reads and
+  stores), or when the expression is the bare root and `ty` is
+  `Type::Struct(_)` (a whole-value receiver read).
+- Update the four sibling gates that consult `receiver_value` /
+  `receiver_field_root` (parser.rs lines 181, 222, 331, 1133) to the same
+  root rule, keeping the impl-receiver restriction only where the typed
+  path requires it.
+- In the lowering arms, `Field` and `FieldStore` already look the slot up
+  by `scalar_reads`/`scalar_writes` def; verify they no longer assume
+  `self` (they read `self.receiver` in a few places).
+- Gate: `fake_io.ae`'s 24 fallbacks (offset map: `io_submit_read`,
+  `io_submit_write`, `io_step`, `io_cancel`, ...) drop to only the
+  owned-struct-return functions; `AE_ROUTE_REPORT` total falls several
+  hundred; tests stay 510/0 and `ab_gate.py` stays byte-identical.
+
+Owned struct returns are then the follow-up slice: the body constructs
+`StructLit`, the return moves it, and `Frees` must not double-release it —
+mirror what the closure-capture slices did for vectors.
