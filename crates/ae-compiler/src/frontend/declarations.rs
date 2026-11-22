@@ -1118,6 +1118,16 @@ impl Parser<'_> {
         self.adjudicate_deferred_conflicts(&function)?;
         Ok(function)
     }
+    pub(super) fn cached_function_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<&Instance> {
+        let &gid = self.generics.fn_names.get(name)?;
+        let def = self.generics.fn_defs.get(gid)?;
+        if def.file != self.file || ranges.len() != def.params.len() || ranges.len() > 8 {
+            return None;
+        }
+        let arguments = self.shared_specialization_types(ranges)?;
+        self.generics.fn_done.get(&super::types::specialization_key(gid, &arguments))
+    }
+
     // Parse a generic function's own tokens once per argument list. The
     // sub-parser shares this program's maps and id space, so a nested
     // instantiation behaves exactly like one written at the top level.
@@ -1146,7 +1156,7 @@ impl Parser<'_> {
                 }
             }
         }
-        let key = format!("{gid}:{}", args.iter().map(|t| t.name()).collect::<Vec<_>>().join(","));
+        let key = super::types::specialization_key(gid, &args);
         if let Some(instance) = self.generics.fn_done.get(&key) { return Ok(instance.clone()); }
         if self.generics.fn_in_progress.contains(&key) {
             let trace = self.instantiation_trace(&self.instantiation_display(&def.name, &args));

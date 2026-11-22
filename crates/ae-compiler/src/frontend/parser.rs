@@ -1945,26 +1945,38 @@ impl<'a> Parser<'a> {
                     }
                     return self.lower_shared_variant(callee, arguments, remaining, nodes_left, effects);
                 }
-                let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
+                let (base, types) = match &callee.kind {
+                    ExpressionKind::BracketedCallTarget { base, arguments } => (base.as_ref(), Some(arguments.as_slice())),
+                    _ => (callee.as_ref(), None),
+                };
+                let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
                     return None;
                 };
                 if self.names.contains_key(name) || RESERVED.contains(&name.as_str())
-                    || !self.resolved_expressions().direct_calls.contains(&callee.range.start)
+                    || !self.resolved_expressions().direct_calls.contains(&base.range.start)
                 {
                     return None;
                 }
-                let signature = self.functions.get(name)?;
-                if signature.file != self.file || signature.extern_c || is_unsafe_fn(signature.id)
-                    || arguments.len() != signature.params.len() || arguments.len() > 64
-                    || !signature.params.iter().all(|ty| {
+                let (id, params, ret) = if let Some(types) = types {
+                    let (id, params, ret) = self.cached_function_specialization(name, types)?;
+                    (*id, params, *ret)
+                } else {
+                    let signature = self.functions.get(name)?;
+                    if signature.file != self.file || signature.extern_c {
+                        return None;
+                    }
+                    (signature.id, &signature.params, signature.ret)
+                };
+                if is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
+                    || !params.iter().all(|ty| {
                         matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView
                             | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
                     })
-                    || !matches!(signature.ret, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
+                    || !matches!(ret, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
                 {
                     return None;
                 }
-                let (id, params, ret) = (signature.id, signature.params.clone(), signature.ret);
+                let params = params.clone();
                 let mut args = Vec::with_capacity(arguments.len());
                 for (argument, expected) in arguments.iter().zip(params) {
                     if matches!(expected, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
@@ -2013,7 +2025,7 @@ impl<'a> Parser<'a> {
                     let value = self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?;
                     args.push(match (expected, value) {
                         (Type::StrView, (value, Type::String | Type::StrView)) => Argument::View(value),
-                        (expected, (value, actual)) if expected == actual => Argument::Value(value),
+                        (expected, (value, actual)) if self.matches_value_type(expected, actual, Some(&argument.range)) => Argument::Value(value),
                         _ => return None,
                     });
                 }
@@ -3283,6 +3295,7 @@ mod tests {
         let source = source.as_str();
         let source = format!("{source} enum CachedBox[T] {{ Item(T) }} fn pack(specialized_text: string) -> CachedBox[string] {{ return CachedBox[string]::Item(specialized_text); }}");
         let source = format!("{source} struct CachedRecord[T] {{ value: T, count: i64 }} fn record(record_text: string) -> CachedRecord[string] {{ return CachedRecord[string] {{ count: 2, value: record_text }}; }}");
+        let source = format!("{source} fn relay(call_text: string) -> string {{ return generic_scalar[string](call_text); }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3376,6 +3389,33 @@ mod tests {
         assert!(parser.moved.remove(&83));
         parser.names.remove("record_text");
         parser.binding_ranges.remove(&83);
+        let definition = source.find("(generic_value: T)").unwrap();
+        parser.generics.fn_names.insert("generic_scalar".into(), 0);
+        parser.generics.fn_defs.push(GenericFn {
+            name: "generic_scalar".into(), bindings: None, params: vec!["T".into()],
+            bounds: vec![vec![]], trait_bounds: vec![vec![]],
+            start: parser.tokens.partition_point(|token| token.offset < definition),
+            tokens: Rc::clone(&parser.tokens), source: Rc::clone(&parser.shared_source),
+            file: "case.ae".into(), public: false,
+        });
+        let payload = source.find("call_text:").unwrap();
+        parser.names.insert("call_text".into(), (84, false, Type::String));
+        parser.binding_ranges.insert(84, payload..payload + "call_text".len());
+        let call = source.find("generic_scalar[string](call_text)").unwrap();
+        parser.seek_scalar_offset(call);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
+        assert_eq!(parser.pos, start);
+        assert!(!parser.moved.contains(&84));
+        let (id, _, _) = parser.instantiate_fn(0, vec![Type::String], call).unwrap();
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), true),
+            Some((Expr::Call(actual, arguments, Type::String), Type::String))
+                if actual == id && matches!(arguments.as_slice(), [Argument::Value(Expr::Variable(84, Type::String, ..))])
+        ));
+        assert!(parser.moved.remove(&84));
+        parser.names.remove("call_text");
+        parser.binding_ranges.remove(&84);
         let capture_start = source.find("captured_scalar:").unwrap();
         parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
         parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());

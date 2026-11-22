@@ -9,7 +9,7 @@ impl EnumDef {
     }
 }
 
-fn aggregate_instance_key(gid: usize, arguments: &[Type]) -> String {
+pub(super) fn specialization_key(gid: usize, arguments: &[Type]) -> String {
     format!("{gid}:{}", arguments.iter().map(|ty| ty.name()).collect::<Vec<_>>().join(","))
 }
 
@@ -400,7 +400,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = aggregate_instance_key(gid, &args);
+        let key = specialization_key(gid, &args);
         if let Some(&eid) = self.generics.done.get(&key) { return Ok(eid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "enum" && *active == key) {
@@ -441,17 +441,17 @@ impl Parser<'_> {
     /// changing the token cursor during speculative lowering.
     pub(super) fn cached_enum_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
         let &gid = self.generics.names.get(name)?;
-        let arguments = self.shared_aggregate_arguments(ranges)?;
-        self.generics.done.get(&aggregate_instance_key(gid, &arguments)).copied()
+        let arguments = self.shared_specialization_types(ranges)?;
+        self.generics.done.get(&specialization_key(gid, &arguments)).copied()
     }
 
     pub(super) fn cached_struct_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
         let &gid = self.generics.struct_names.get(name)?;
-        let arguments = self.shared_aggregate_arguments(ranges)?;
-        self.generics.struct_done.get(&aggregate_instance_key(gid, &arguments)).copied()
+        let arguments = self.shared_specialization_types(ranges)?;
+        self.generics.struct_done.get(&specialization_key(gid, &arguments)).copied()
     }
 
-    fn shared_aggregate_arguments(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<Type>> {
+    pub(super) fn shared_specialization_types(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<Type>> {
         ranges.iter().map(|range| {
             let start = self.tokens.partition_point(|token| token.offset < range.start);
             let end = self.tokens.partition_point(|token| token.offset < range.end);
@@ -567,7 +567,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = aggregate_instance_key(gid, &args);
+        let key = specialization_key(gid, &args);
         if let Some(&sid) = self.generics.struct_done.get(&key) { return Ok(sid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "struct" && *active == key) {

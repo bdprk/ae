@@ -604,6 +604,12 @@ specializations can also use shared lowering when their concrete layouts
 are already cached. Cache misses leave instance allocation and diagnostics
 to the committed token route. Cached struct specializations now use the
 same lookup rules and share field checks while lowering initializers in
-source order and emitting fields in layout order. The next slice extends
-cached concrete signature lookup to specialized direct calls.
+source order and emitting fields in layout order.
+
+Explicit generic calls can reuse a cached file-local function signature
+through shared lowering. Cache misses stay on the committed route, which
+instantiates the body and checks constraints. Shared lowering validates
+arguments against the cached concrete signature and commits ownership
+effects only after the call is accepted. The next slice can extend this
+lookup to eligible imported specializations.
 
