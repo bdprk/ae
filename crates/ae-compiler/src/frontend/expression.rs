@@ -474,14 +474,7 @@ impl Parser<'_> {
                                 // `vec`, all f64 is `vec[f64]` (ADR-61). Mixing
                                 // them is an error — the language has no implicit
                                 // conversion, including inside a literal.
-                                match element_ty {
-                                    None => {
-                                        if ty == Type::Int || ty == Type::F64 { element_ty = Some(ty); }
-                                        else { return Err(parser.fail(&format!("vector elements must be i64 or f64, found {}", ty.name()))); }
-                                    }
-                                    Some(same) if ty == same => {}
-                                    Some(same) => return Err(parser.fail(&format!("vector elements must all be {}; {} does not convert implicitly", same.name(), ty.name()))),
-                                }
+                                element_ty = Some(parser.check_numeric_vector_element(element_ty, ty)?);
                                 Ok(element)
                             },
                             |parser| {
@@ -1844,6 +1837,15 @@ impl Parser<'_> {
         let parsed = self.expression(right_power, op == Kind::Plus);
         self.plus_operand_depth -= 1;
         self.lower_infix(lhs, op, parsed?, (line, column), None)
+    }
+
+    pub(super) fn check_numeric_vector_element(&self, previous: Option<Type>, actual: Type) -> Result<Type, ae_span::Diagnostic> {
+        match previous {
+            Some(expected) if expected == actual => Ok(actual),
+            Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(), actual.name()))),
+            None if matches!(actual, Type::Int | Type::F64) => Ok(actual),
+            None => Err(self.fail(&format!("vector elements must be i64 or f64, found {}", actual.name()))),
+        }
     }
 
     pub(super) fn check_address_binding(&self, id: usize, mutable: bool) -> Result<(), ae_span::Diagnostic> {
