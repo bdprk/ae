@@ -198,6 +198,11 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             scalar_body_expression(left, resolved, supports_call, supports_field) && scalar_body_expression(right, resolved, supports_call, supports_field)
         }
         ExpressionKind::Call { callee, arguments } => {
+            if let ExpressionKind::Field { base, name } = &callee.kind {
+                return name == "deref" && arguments.is_empty()
+                    && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                    && resolved.scalar_pointer_receivers.contains(&base.range.start);
+            }
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
                     || resolved.unresolved_calls.contains(&callee.range.start))
@@ -745,6 +750,15 @@ impl<'a> Parser<'a> {
                         && definition.owner.is_none() && definition.name == occurrence.name =>
                     {
                         expressions.direct_calls.insert(occurrence.range.start);
+                    }
+                    ae_resolve::Role::Call if definition.kind.is_local() => {
+                        if matches!(definition.inferred.as_ref(),
+                            Some(ae_resolve::TypeSpelling::Pointer { pointee, .. })
+                                if matches!(pointee.as_ref(), ae_resolve::TypeSpelling::Primitive("i64" | "f64" | "bool")))
+                        {
+                            expressions.scalar_pointer_receivers.insert(occurrence.range.start);
+                            expressions.scalar_reads.insert(occurrence.range.start, definition.id);
+                        }
                     }
                     ae_resolve::Role::Construct if definition.kind == ae_resolve::DefKind::Struct
                         && definition.name == occurrence.name =>
@@ -1542,6 +1556,17 @@ impl<'a> Parser<'a> {
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
             ExpressionKind::Call { callee, arguments } => {
+                if let ExpressionKind::Field { base, .. } = &callee.kind {
+                    let (operand, ty) = self.lower_scalar_body_expression(base, slots)?;
+                    let (Type::Ptr(id) | Type::PtrMut(id)) = ty else {
+                        return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
+                    };
+                    let method = self.tokens.partition_point(|token| token.offset < callee.range.end) - 1;
+                    self.check_pointer_deref(self.tokens[method].offset)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    let (line, column) = self.position();
+                    return Ok((Expr::DerefPtr(Box::new(operand), line, column), super::ptr_pointee(id)));
+                }
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
                     unreachable!("scalar call eligibility");
                 };
@@ -1609,6 +1634,13 @@ impl<'a> Parser<'a> {
             return Err(self.error_at(line, "writing through a raw pointer requires 'unsafe'").with_code("E0700"));
         }
         Ok(super::ptr_pointee(id))
+    }
+
+    pub(super) fn check_pointer_deref(&self, offset: usize) -> Result<(), ae_span::Diagnostic> {
+        if self.unsafe_depth == 0 {
+            return Err(self.error_at(offset, "dereferencing a raw pointer requires 'unsafe'").with_code("E0700"));
+        }
+        Ok(())
     }
 
     fn check_pointer_store_value(&self, actual: Type, pointee: Type) -> Result<(), ae_span::Diagnostic> {
@@ -3494,6 +3526,7 @@ mod tests {
         let source = format!("{source} fn relay(call_text: string) -> string {{ return generic_scalar[string](call_text); }}");
         let source = format!("{source} fn use_import() -> i64 {{ return imported_generic[i64](7); }}");
         let source = format!("{source} fn write_ptr(raw_param: *mut i64) -> i64 {{ unsafe {{ *raw_param = 7; }} return 0; }}");
+        let source = format!("{source} fn read_ptr(read_param: *const i64) -> i64 {{ unsafe {{ return read_param.deref(); }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3547,6 +3580,15 @@ mod tests {
             if matches!(inner.as_slice(), [Statement::PtrStore(85, Expr::Number(7), ..)])));
         parser.names.remove("raw_param");
         parser.binding_ranges.remove(&85);
+        let start = source.find("read_param:").unwrap();
+        parser.names.insert("read_param".into(), (86, false, Type::Ptr(intern_pointee(Type::Int))));
+        parser.binding_ranges.insert(86, start..start + "read_param".len());
+        parser.seek_scalar_offset(source.find("{ unsafe { return read_param").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved pointer read").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Unsafe(inner)]
+            if matches!(inner.as_slice(), [Statement::Return(Expr::DerefPtr(..), _)])));
+        parser.names.remove("read_param");
+        parser.binding_ranges.remove(&86);
         parser.generics.names.insert("CachedBox".into(), 0);
         parser.generics.defs.push(GenericEnum {
             name: "CachedBox".into(), params: vec!["T".into()],

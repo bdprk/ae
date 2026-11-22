@@ -663,3 +663,7 @@ pointee. Both body routes use the same mutability, unsafe-context and
 value-type checks. Pointer-producing expressions still determine body
 eligibility independently.
 
+Zero-argument `deref()` on a resolved scalar pointer binding now lowers
+directly in eligible bodies. The typed and resolved routes share the
+unsafe-context check at the method name.
+

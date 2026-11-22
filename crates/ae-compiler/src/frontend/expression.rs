@@ -1593,9 +1593,7 @@ impl Parser<'_> {
                 if fname != "deref" {
                     return Err(self.fail(&format!("pointers have no method '{fname}'")));
                 }
-                if self.unsafe_depth == 0 {
-                    return Err(self.error_at(self.tokens[self.pos - 1].offset, "dereferencing a raw pointer requires 'unsafe'").with_code("E0700"));
-                }
+                self.check_pointer_deref(self.tokens[self.pos - 1].offset)?;
                 self.take(Kind::LParen)?;
                 self.take(Kind::RParen)?;
                 let (line, column) = self.position();

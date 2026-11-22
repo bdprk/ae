@@ -692,6 +692,7 @@ struct ResolvedExpressions {
     scalar_bodies: HashMap<usize, std::sync::Arc<[ae_syntax::statement::Statement]>>,
     scalar_definitions: HashMap<usize, ae_resolve::DefId>,
     scalar_reads: HashMap<usize, ae_resolve::DefId>,
+    scalar_pointer_receivers: HashSet<usize>,
     scalar_expression_types: HashMap<std::ops::Range<usize>, ae_resolve::resolve::ExpressionType>,
     scalar_writes: HashMap<usize, ae_resolve::DefId>,
     array_definitions: HashSet<ae_resolve::DefId>,
