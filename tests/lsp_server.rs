@@ -266,6 +266,10 @@ fn lsp_completion_includes_file_defs_from_the_def_table() {
         "    let choice = Choice::Some(1);\n",
         "    match choice { Choice::Some(payload) => { print(payload); } Choice::None => {} }\n",
         "    return task(parameter);\n",
+        "}\n",
+        "fn shadow(outer_value: i64) -> i64 {\n",
+        "    let inner = |outer_value: bool| -> bool { return outer_value; };\n",
+        "    return outer_value;\n",
         "}",
     );
     let open = format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///scope.ae","version":1,"text":{}}}}}}}"#,
@@ -287,6 +291,21 @@ fn lsp_completion_includes_file_defs_from_the_def_table() {
     assert_eq!(local_names(&complete_at("return argument")), ["parameter", "argument"]);
     assert_eq!(local_names(&complete_at("print(payload)")), ["parameter", "task", "choice", "payload"]);
     assert_eq!(local_names(&complete_at("return task")), ["parameter", "task", "choice"]);
+
+    for (needle, expected) in [
+        ("outer_value; };", "outer_value: bool"),
+        ("outer_value;\n}", "outer_value: i64"),
+    ] {
+        let items = complete_at(needle);
+        let matching: Vec<_> = items.iter().filter(|(name, _, _)| name == "outer_value").collect();
+        assert_eq!(matching.len(), 1, "visible shadow: {items:?}");
+        assert_eq!(matching[0].2.as_deref(), Some(expected));
+    }
+    let outer_return = index.offset_to_position(source, source.find("outer_value;\n}").unwrap());
+    let inner_return = index.offset_to_position(source, source.find("outer_value; };").unwrap());
+    let outer = server.definition("file:///scope.ae", outer_return).unwrap();
+    let inner = server.definition("file:///scope.ae", inner_return).unwrap();
+    assert!(outer.range.start.line < inner.range.start.line);
 }
 
 #[test]

@@ -37,7 +37,8 @@ pub struct FnOccurrences {
     /// The function's own def id (locals name it as their owner).
     pub function_def: DefId,
     pub occurrences: Vec<Occurrence>,
-    /// Byte ranges where local bindings are available for lookup.
+    /// Scope ranges of local bindings, in declaration order. A later
+    /// closure parameter can shadow an earlier binding within its range.
     pub binding_visibility: Vec<(DefId, Range<usize>)>,
     /// Successfully parsed closure bodies reached during name resolution.
     pub closure_bodies: Vec<ClosureBody>,
@@ -583,11 +584,10 @@ struct Walker<'w> {
     base: u32,
     function_def: DefId,
     locals: Vec<DefEntry>,
-    /// Live bindings: the compiler keeps a flat live-name map with per-block
-    /// removal, so a name is reusable after its block ends but never while
-    /// another binding of it is live — that is `E0104`, not shadowing.
+    /// Live bindings use the compiler's flat name map. Closure parameters
+    /// can replace a name temporarily; other live duplicates are E0104.
     live: HashMap<String, DefId>,
-    blocks: Vec<(Range<usize>, Vec<String>)>,
+    blocks: Vec<(Range<usize>, Vec<(String, Option<DefId>)>)>,
     binding_visibility: Vec<(DefId, Range<usize>)>,
     occurrences: Vec<Occurrence>,
     closure_bodies: Vec<ClosureBody>,
@@ -601,7 +601,7 @@ impl Walker<'_> {
     fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>, visible_from: usize) {
         let id = DefId(self.base + self.locals.len() as u32);
         self.locals.push(DefEntry { id, name: name.clone(), kind, range: range.clone(), owner: Some(self.function_def), mutable, writable_through, inferred, imported: false });
-        if self.live.contains_key(&name) {
+        if kind != DefKind::ClosureParameter && self.live.contains_key(&name) {
             self.diagnostics.push(
                 ae_syntax::diagnostic_range(
                     &self.module.file, &self.module.source, range,
@@ -609,9 +609,9 @@ impl Walker<'_> {
                 ).with_code("E0104"),
             );
         } else {
-            self.live.insert(name.clone(), id);
+            let previous = self.live.insert(name.clone(), id);
             if let Some((scope, bindings)) = self.blocks.last_mut() {
-                bindings.push(name);
+                bindings.push((name, previous));
                 self.binding_visibility.push((id, visible_from.max(scope.start)..scope.end));
             }
         }
@@ -1049,8 +1049,12 @@ impl Walker<'_> {
 
     fn close_scope(&mut self) {
         let (_, bindings) = self.blocks.pop().expect("open scope");
-        for name in bindings {
-            self.live.remove(&name);
+        for (name, previous) in bindings.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.live.insert(name, previous);
+            } else {
+                self.live.remove(&name);
+            }
         }
     }
 

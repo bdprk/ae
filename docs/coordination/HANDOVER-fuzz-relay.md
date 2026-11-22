@@ -551,3 +551,11 @@ initialized locals, loop bindings, match payloads and closure parameters.
 Sibling scopes can reuse a name without leaking its previous definition.
 Repeated requests for the same document version reuse the cached resolution.
 
+## R3d closure parameter shadowing (2026-11-22)
+
+Closure parameters can shadow enclosing bindings, matching the compiler.
+Resolver lookup restores the outer definition on closure exit. Completion
+shows only the most recent binding visible at the cursor, and definition
+jumps distinguish the inner and outer names. Duplicate ordinary locals
+still produce E0104.
+

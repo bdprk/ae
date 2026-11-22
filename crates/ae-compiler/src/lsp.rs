@@ -936,9 +936,12 @@ impl LspServer {
         // their declared signatures.
         if let Some(cached) = doc.resolution() {
             let resolution = &cached.2;
-            for (id, range) in resolution.functions.iter().flat_map(|function| &function.binding_visibility) {
-                if !range.contains(&offset) { continue; }
-                let def = &resolution.defs[id.0 as usize];
+            let mut seen = std::collections::HashSet::new();
+            let visible: Vec<_> = resolution.functions.iter().flat_map(|function| &function.binding_visibility)
+                .rev().filter(|(_, range)| range.contains(&offset))
+                .map(|(id, _)| &resolution.defs[id.0 as usize])
+                .filter(|def| seen.insert(&def.name)).collect();
+            for def in visible.into_iter().rev() {
                 let ty = def.inferred.as_ref()
                     .map(|shape| describe_spelling(shape, resolution))
                     .unwrap_or_else(|| "deferred".to_owned());
