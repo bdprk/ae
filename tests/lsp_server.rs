@@ -338,3 +338,24 @@ fn lsp_definition_jumps_across_imported_files() {
     assert_eq!(start.get("line").and_then(|l| l.as_i64()), Some(0));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn lsp_document_symbols_from_the_def_table() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nfn area(p: &Point) -> i64 { return p.x; }\nfn main() { let pt = Point { x: 1, y: 2 }; let s = area(&pt); }"}}}"#;
+    server.handle_message(open);
+
+    let sym_req = r#"{"jsonrpc":"2.0","id":12,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///test.ae"}}}"#;
+    let resps = server.handle_message(sym_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let names: Vec<&str> = items.iter().filter_map(|i| i.get("name").and_then(|n| n.as_str())).collect();
+    assert!(names.contains(&"Point"), "symbols: {names:?}");
+    assert!(names.contains(&"area"), "symbols: {names:?}");
+    assert!(names.contains(&"main"), "symbols: {names:?}");
+    let area = items.iter().find(|i| i.get("name").and_then(|n| n.as_str()) == Some("area")).unwrap();
+    let kind = area.get("kind").and_then(|k| k.as_i64()).unwrap();
+    assert_eq!(kind, 12, "function symbol kind");
+    let line = area.get("location").and_then(|l| l.get("range")).and_then(|r| r.get("start")).and_then(|s| s.get("line")).and_then(|l| l.as_i64()).unwrap();
+    assert_eq!(line, 1);
+}

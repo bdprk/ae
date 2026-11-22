@@ -535,6 +535,7 @@ impl LspServer {
                 comp.insert("triggerCharacters".to_owned(), JsonValue::Array(triggers));
                 caps.insert("completionProvider".to_owned(), JsonValue::Object(comp));
                 caps.insert("renameProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("documentSymbolProvider".to_owned(), JsonValue::Bool(true));
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -560,6 +561,24 @@ impl LspServer {
                     }
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/documentSymbol" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("").to_owned();
+                let symbols = self.document_symbols(&uri);
+                let items: Vec<JsonValue> = symbols.into_iter().map(|(name, kind, range)| {
+                    let mut location = BTreeMap::new();
+                    location.insert("uri".to_owned(), JsonValue::String(uri.clone()));
+                    location.insert("range".to_owned(), Self::range_to_json(&range));
+                    let mut symbol = BTreeMap::new();
+                    symbol.insert("name".to_owned(), JsonValue::String(name));
+                    symbol.insert("kind".to_owned(), JsonValue::Number(kind as f64));
+                    symbol.insert("location".to_owned(), JsonValue::Object(location));
+                    JsonValue::Object(symbol)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(items))
             }
             "textDocument/definition" => {
                 let Some(params) = params else {
@@ -764,6 +783,35 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: the document outline from the def table — every file-local
+    /// function, struct, enum and trait with its declared name range.
+    fn document_symbols(&self, uri: &str) -> Vec<(String, u32, Range)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(resolution) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &resolution.2;
+        let kind_number = |kind: ae_resolve::DefKind| -> u32 {
+            match kind {
+                ae_resolve::DefKind::Function => 12,
+                ae_resolve::DefKind::Struct => 23,
+                ae_resolve::DefKind::Enum => 10,
+                ae_resolve::DefKind::Trait => 11,
+                ae_resolve::DefKind::Impl => 2,
+                _ => 13,
+            }
+        };
+        resolution.defs.iter().filter(|def| {
+            !def.imported && !def.kind.is_local()
+        }).map(|def| {
+            let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+            (def.name.clone(), kind_number(def.kind), Range { start, end })
+        }).collect()
     }
 
     /// R3d: the def's own range is the definition site. Imported defs carry
