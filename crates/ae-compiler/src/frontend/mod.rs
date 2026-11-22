@@ -732,6 +732,10 @@ struct ResolvedExpressions {
     owned_struct_bindings: HashSet<ae_resolve::DefId>,
     struct_field_reads: HashSet<usize>,
     struct_field_chains: HashSet<usize>,
+    /// String-typed field reads: a view, never a move. Lowered in concat
+    /// operands, print arguments, and call arguments (a builtin or a
+    /// `&string` parameter only borrows it).
+    struct_field_views: HashSet<usize>,
     /// Field store targets on a mutable struct receiver (`r.n = v`): the
     /// base is a `&mut` view, so the write joins the body route exactly as
     /// an impl method's `self.n = v` does.

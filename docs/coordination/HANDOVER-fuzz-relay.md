@@ -996,3 +996,26 @@ starts_with / math execution tests now run through the resolved route.
 Next: borrow arguments (`Argument::View`/`Borrow`) — that is what keeps
 every caller body typed (`print(label(a, 42))`), and after it string-typed
 field views in concatenation (`task.title + " w="`).
+
+## P1.1 slice 6 landed: string field views
+
+A `string`-typed field is marked in `struct_field_views` (never a move). The
+view is admissible exactly where the typed route borrows it:
+
+- a `+` operand (`task.title + " w="`), where `lower_infix` emits the concat
+  and no move is marked (the `Expr` is a field, not a variable);
+- a `print` argument (`print(p.label)`);
+- a call argument — a value builtin (`len(r.buf)`, `slice(r.buf, 0, r.pos)`)
+  or a `&string` parameter.
+
+`let s = p.buf;` and `return p.buf;` remain typed: those would move a string
+out of a borrowed struct.
+
+Coverage: 465 → **461** fallbacks. `examples/closures.ae`'s captured-struct
+concat now routes, and `io_step` / `io_transferred` / `pipe_recv` in the
+fake_io program do too.
+
+What remains in fake_io is the owned-field struct slice: constructing
+`IoReq { buf: src, .. }`/`BytePipe { buf: "", .. }` (a string moves into a
+field) and storing an owned string through a field (`p.buf = p.buf +
+slice(...)`), plus borrow arguments in callers.

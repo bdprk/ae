@@ -254,8 +254,16 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
             scalar_body_expression(inner, resolved, supports_call, supports_field)
         }
-        ExpressionKind::Binary { left, right, .. } => {
-            scalar_body_expression(left, resolved, supports_call, supports_field) && scalar_body_expression(right, resolved, supports_call, supports_field)
+        ExpressionKind::Binary { left, right, operator } => {
+            // A string-typed field reads as a borrowed view inside a `+`
+            // (the typed route's plus-operand rule): the field itself never
+            // moves, so the concat may use it even though a bare read of the
+            // field is not a value.
+            let view = |expression: &ae_syntax::expression::Expression| {
+                *operator == Kind::Plus && resolved.struct_field_views.contains(&expression.range.start)
+            };
+            (scalar_body_expression(left, resolved, supports_call, supports_field) || view(left))
+                && (scalar_body_expression(right, resolved, supports_call, supports_field) || view(right))
         }
         ExpressionKind::Call { callee, arguments } => {
             if let ExpressionKind::Field { base, name } = &callee.kind {
@@ -274,7 +282,11 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     // slots, so the argument position re-admits them.
                     || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                         if name != "self" && resolved.scalar_reads.get(&argument.range.start)
-                            .is_some_and(|id| resolved.struct_definitions.contains(id))))
+                            .is_some_and(|id| resolved.struct_definitions.contains(id)))
+                    // A string-typed field in argument position reads as its
+                    // view (builtins and `&string` parameters only ever
+                    // borrow it).
+                    || resolved.struct_field_views.contains(&argument.range.start))
         }
         _ => false,
     }
@@ -386,9 +398,12 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                         .is_some_and(|id| resolved.owned_struct_bindings.contains(id)))
         }
         // A literal print is the typed route's `Printed::Text` (no expression
-        // to lower); everything else must resolve as a printable scalar.
+        // to lower); a string field prints as its view; everything else must
+        // resolve as a printable scalar.
         StatementKind::Print(value) => {
             matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                || (matches!(value.kind, ae_syntax::expression::ExpressionKind::Field { .. })
+                    && resolved.struct_field_views.contains(&value.range.start))
                 || scalar_body_expression(value, resolved, supports_call, supports_field)
         }
         StatementKind::Assert(value) => {
@@ -1124,6 +1139,8 @@ impl<'a> Parser<'a> {
                                             expressions.struct_field_reads.insert(expression.range.start);
                                         } else if matches!(field_ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)) {
                                             expressions.struct_field_chains.insert(expression.range.start);
+                                        } else if matches!(field_ty, Type::String | Type::StrView) {
+                                            expressions.struct_field_views.insert(expression.range.start);
                                         }
                                     }
                                 }
