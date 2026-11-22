@@ -602,6 +602,8 @@ compiler types for other payloads. On rejection, the token route retains
 the payload ordinal, source location and diagnostic ordering. Explicit enum
 specializations can also use shared lowering when their concrete layouts
 are already cached. Cache misses leave instance allocation and diagnostics
-to the committed token route. The next slice covers cached specialized
-struct constructors.
+to the committed token route. Cached struct specializations now use the
+same lookup rules and share field checks while lowering initializers in
+source order and emitting fields in layout order. The next slice extends
+cached concrete signature lookup to specialized direct calls.
 

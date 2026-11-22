@@ -1849,15 +1849,19 @@ impl<'a> Parser<'a> {
                 }
             }
             ExpressionKind::Struct { target, fields } => {
-                let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
-                    return None;
-                };
                 if std::env::var_os("AE_DEBUG_MIR").is_some()
                     || !self.resolved_expressions().struct_constructors.contains(&target.range.start)
                 {
                     return None;
                 }
-                let &sid = self.struct_names.get(name)?;
+                let sid = match &target.kind {
+                    ExpressionKind::Atom(Kind::Ident(name)) => *self.struct_names.get(name)?,
+                    ExpressionKind::Specialization { base, arguments } => {
+                        let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return None };
+                        self.cached_struct_specialization(name, arguments)?
+                    }
+                    _ => return None,
+                };
                 let def = self.structs.get(sid)?;
                 self.require_public("struct", &def.name, &def.file, def.public).ok()?;
                 if fields.len() != def.fields.len() {
@@ -1872,7 +1876,7 @@ impl<'a> Parser<'a> {
                     }
                     let expected = declared_fields[slot].1;
                     let (value, actual) = self.lower_shared_argument(&field.value, expected, remaining, nodes_left, effects)?;
-                    if actual != expected {
+                    if !self.matches_value_type(expected, actual, Some(&field.value.range)) {
                         return None;
                     }
                     values[slot] = Some(value);
@@ -3278,6 +3282,7 @@ mod tests {
         let source = format!("{source} fn bad_fields() -> i64 {{ let extra = Point {{ z: 1 }}; return 0; }} fn dup_fields() -> i64 {{ let dup = Point {{ x: 1, x: false }}; return 0; }} fn missing_fields() -> i64 {{ let missing = Point {{ x: 1 }}; return 0; }}");
         let source = source.as_str();
         let source = format!("{source} enum CachedBox[T] {{ Item(T) }} fn pack(specialized_text: string) -> CachedBox[string] {{ return CachedBox[string]::Item(specialized_text); }}");
+        let source = format!("{source} struct CachedRecord[T] {{ value: T, count: i64 }} fn record(record_text: string) -> CachedRecord[string] {{ return CachedRecord[string] {{ count: 2, value: record_text }}; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3346,6 +3351,31 @@ mod tests {
         assert!(parser.moved.remove(&82));
         parser.names.remove("specialized_text");
         parser.binding_ranges.remove(&82);
+        parser.generics.struct_names.insert("CachedRecord".into(), 0);
+        parser.generics.struct_defs.push(GenericStruct {
+            name: "CachedRecord".into(), params: vec!["T".into()],
+            fields: vec![("value".into(), Payload::Param(0)), ("count".into(), Payload::Concrete(Type::Int))],
+            file: "case.ae".into(), public: false,
+        });
+        let payload = source.find("record_text:").unwrap();
+        parser.names.insert("record_text".into(), (83, false, Type::String));
+        parser.binding_ranges.insert(83, payload..payload + "record_text".len());
+        let constructor = source.find("CachedRecord[string] { count").unwrap();
+        parser.seek_scalar_offset(constructor);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
+        assert_eq!(parser.pos, start);
+        assert!(!parser.moved.contains(&83));
+        let sid = parser.instantiate_struct(0, vec![Type::String], constructor).unwrap();
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), true),
+            Some((Expr::StructLit(actual, fields), Type::Struct(ty)))
+                if actual == sid && ty == sid
+                    && matches!(fields.as_slice(), [Expr::Variable(83, Type::String, ..), Expr::Number(2)])
+        ));
+        assert!(parser.moved.remove(&83));
+        parser.names.remove("record_text");
+        parser.binding_ranges.remove(&83);
         let capture_start = source.find("captured_scalar:").unwrap();
         parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
         parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());
