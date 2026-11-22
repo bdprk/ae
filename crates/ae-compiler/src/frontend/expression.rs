@@ -972,7 +972,7 @@ impl Parser<'_> {
                     let (line, col) = (vline, vcol);
                     let at = self.tokens[self.pos - 1].offset;
                     self.take(Kind::LParen)?;
-                    let (callable, callable_ty) = self.expression(0, false)?;
+                    let (callable, callable_ty) = self.spawn_callable()?;
                     self.take(Kind::RParen)?;
                     // The thread runs the callable once with no arguments: the
                     // data it needs travels in its owned captures

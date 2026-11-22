@@ -652,8 +652,9 @@ lists.
 | Concurrency | Task, scope and pool spawns share an indexed handle operand. The callable still enters the expression parser, which may consume indexed closure headers and bodies. Capture validation and transfer happen after parsing the whole statement. |
 | Verification | The A/B gate compares emitted C and CLI behavior. It does not establish which driver handled each input. The compiler's targeted parser test calls the resolved entry point and supplies that evidence for eligible shapes. |
 
-Keep R3c and M0.2.08 open. The next migration is the spawn callable entry.
-Reuse closure capture analysis and capture ordering, and pin inline and
-bound closures, signature rejection, and moved or borrowed captures on the
-new route before removing the existing entry.
+Keep R3c and M0.2.08 open. Spawn callables now use the indexed operand for
+thread, task, scope and pool spawns. A complete indexed inline closure enters
+the existing capture analysis directly. Bound closures can use the
+indexed local read. Both routes still apply the same signature and capture
+checks at the spawn site. Other callable expressions retain the Pratt path.
 

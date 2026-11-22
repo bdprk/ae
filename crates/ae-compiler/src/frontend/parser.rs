@@ -470,7 +470,7 @@ impl<'a> Parser<'a> {
                 return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name())));
             }
             self.take(Kind::Comma)?;
-            let (callable, callable_ty) = self.expression(0, false)?;
+            let (callable, callable_ty) = self.spawn_callable()?;
             self.take(Kind::RParen)?;
             self.take(Kind::Semi)?;
             let mut slots = Vec::new();
@@ -849,6 +849,18 @@ impl<'a> Parser<'a> {
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
                         visit_expression_tree(top_level, &mut |expression| {
                             use ae_syntax::expression::ExpressionKind;
+                            if let ExpressionKind::Call { callee, arguments } = &expression.kind {
+                                if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
+                                    let operand = match (name.as_str(), arguments.as_slice()) {
+                                        ("spawn", [callable]) => Some(callable),
+                                        ("task_spawn" | "scope_spawn" | "pool_spawn", [_, callable]) => Some(callable),
+                                        _ => None,
+                                    };
+                                    if let Some(operand) = operand {
+                                        expressions.values.insert(operand.range.start, Rc::new(operand.clone()));
+                                    }
+                                }
+                            }
                             if let ExpressionKind::Struct { target, fields } = &expression.kind {
                                 if matches!(target.kind, ExpressionKind::Specialization { .. }) {
                                     let open = self.tokens.partition_point(|token| token.offset < target.range.end);
@@ -2262,6 +2274,29 @@ impl<'a> Parser<'a> {
         }
         self.pos = end;
         Some(value)
+    }
+
+    pub(super) fn spawn_callable(&mut self) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if let Some(header) = self.shared_closure_header() {
+            let end = self.tokens.partition_point(|token| token.offset < header.range.end);
+            if self.tokens.get(end).is_some_and(|token| token.kind == Kind::RParen)
+                && self.expression_depth < 128
+            {
+                if self.expression_depth == 0 {
+                    self.expression_nodes = 0;
+                }
+                self.expression_depth += 1;
+                self.expression_nodes += 1;
+                let result = if self.expression_nodes > 128 {
+                    Err(self.fail("expression complexity limit exceeded (128)"))
+                } else {
+                    self.closure_literal()
+                };
+                self.expression_depth -= 1;
+                return result;
+            }
+        }
+        self.expression(0, false)
     }
 
     fn lower_shared_array(&mut self) -> Option<Vec<Expr>> {
@@ -4030,6 +4065,10 @@ mod tests {
                 assert!(params.is_empty());
             }
         }
+        let inline = source.find("task_spawn(ex, ||").unwrap() + "task_spawn(ex, ".len();
+        parser.seek_scalar_offset(inline);
+        assert!(matches!(parser.spawn_callable(), Ok((Expr::ClosureLit(id), Type::Closure(ty))) if id == ty));
+        assert_eq!(*parser.current(), Kind::RParen);
 
         parser.names.insert("flag".into(), (7, false, Type::Bool));
         parser.binding_ranges.insert(7, binding..binding + 4);
