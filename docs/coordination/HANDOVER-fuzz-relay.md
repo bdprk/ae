@@ -531,3 +531,9 @@ parenthesized expression when the return type is the same instance. The
 body route records the movement and preserves separate branch move states
 until the join. The existing drops pass handles the returned slot.
 
+## Resolved generic receiver call arguments (2026-11-22)
+
+An owned generic struct receiver may move into a direct function call on
+the resolved body route. The argument preserves the original slot and
+move check, and later receiver reads retain the moved-value diagnostic.
+

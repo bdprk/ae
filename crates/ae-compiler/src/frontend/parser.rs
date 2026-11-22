@@ -203,6 +203,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     || resolved.unresolved_calls.contains(&callee.range.start))
                     && supports_call(name, callee.range.start))
                 && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call, supports_field)
+                    || receiver_value(argument).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
                     // An owned aggregate passed by value is a move, not a
                     // value read: the ident eligibility excludes struct
                     // slots, so the argument position re-admits them.
@@ -1021,7 +1022,7 @@ impl<'a> Parser<'a> {
                     receiver_def.is_some() && occurrences.get(&offset) == receiver_def
                 });
                 resolves_to_receiver && if receiver_value(expression).is_some() {
-                    matches!(receiver, Type::Struct(_)) && receiver == self.return_type
+                    matches!(receiver, Type::Struct(_))
                 } else {
                     receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
                 }
@@ -1520,6 +1521,10 @@ impl<'a> Parser<'a> {
                     let expected = signature.params.get(index)
                         .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
+                        self.seek_scalar_offset(atom.range.end);
+                        self.check_variable_move(*slot)?;
+                    }
                     if actual != *expected {
                         self.seek_scalar_offset(argument.range.end);
                         return Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())));
@@ -3216,6 +3221,7 @@ mod tests {
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
+        let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3355,6 +3361,27 @@ mod tests {
         parser.names.remove("route");
         parser.binding_ranges.remove(&81);
         parser.return_type = Type::Int;
+        parser.functions.insert("take_box".into(), Signature {
+            id: 13, params: vec![owned_receiver], ret: Type::Int, file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
+        let send_binding = source.find("send(self)").unwrap() + "send(".len();
+        parser.binding_ranges.insert(80, send_binding..send_binding + "self".len());
+        parser.seek_scalar_offset(source.find("{ return take_box((self));").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved receiver argument").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(13, args, Type::Int), _)]
+            if matches!(args.as_slice(), [Argument::Value(Expr::Variable(80, ty, ..))] if *ty == owned_receiver)));
+        assert!(parser.moved.remove(&80));
+        let twice_binding = source.find("send_twice(self)").unwrap() + "send_twice(".len();
+        let next_slot = parser.next_var;
+        parser.binding_ranges.insert(80, twice_binding..twice_binding + "self".len());
+        parser.seek_scalar_offset(source.find("{ let sent = take_box(self)").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved moved receiver").err().unwrap();
+        assert_eq!(error.code.as_deref(), Some("E0102"));
+        parser.moved.remove(&80);
+        parser.names.remove("sent");
+        parser.binding_ranges.remove(&next_slot);
+        parser.next_var = next_slot;
         parser.receiver = Some(receiver);
         parser.names.insert("self".into(), (80, false, receiver));
         parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());
