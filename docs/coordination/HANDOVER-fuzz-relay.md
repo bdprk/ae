@@ -672,3 +672,8 @@ definition ID. Address construction shares the token route's mutability,
 pointer qualifier and pointee checks. A resolved body can now construct,
 write through and read back a scalar local pointer in the same function.
 
+Resolved bodies now lower for-in loops over borrowed integer and floating
+point vectors. Both body drivers share vector iteration, including
+container borrows, hidden slots, element access and move checks. Token
+cursors, string vectors and owning iterator sources retain the typed path.
+

@@ -305,6 +305,12 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 && scalar_body_expression(end, resolved, supports_call, supports_field)
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
+        StatementKind::ForIn { binding_range, iterable, body, .. } => {
+            resolved.scalar_definitions.contains_key(&binding_range.start)
+                && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.numeric_vector_reads.contains(&iterable.range.start)
+                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
+        }
         StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
         StatementKind::Break | StatementKind::Continue => true,
         _ => false,
@@ -744,6 +750,14 @@ impl<'a> Parser<'a> {
                     ae_resolve::Role::Read | ae_resolve::Role::Borrow if definition.kind.is_local() => {
                         expressions.local_bindings.insert(occurrence.range.start, definition.range.clone());
                         expressions.scalar_reads.insert(occurrence.range.start, definition.id);
+                        use ae_resolve::TypeSpelling;
+                        if let Some(TypeSpelling::Borrow { mutable: false, inner }) = &definition.inferred {
+                            if let TypeSpelling::Composite { family: "vec", arguments } = inner.as_ref() {
+                                if matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("f64")]) {
+                                    expressions.numeric_vector_reads.insert(occurrence.range.start);
+                                }
+                            }
+                        }
                     }
                     ae_resolve::Role::Write | ae_resolve::Role::DerefWrite if definition.kind.is_local() => {
                         expressions.scalar_writes.insert(occurrence.range.start, definition.id);
@@ -1037,7 +1051,7 @@ impl<'a> Parser<'a> {
             || !(scalar_type(self.return_type)
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(_, _, ty))| {
-                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_))
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef)
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
@@ -1112,6 +1126,8 @@ impl<'a> Parser<'a> {
             for statement in body {
                 if matches!(statement.kind, StatementKind::ForRange { .. }) {
                     self.lower_scalar_range(statement, slots, &mut statements)?;
+                } else if matches!(statement.kind, StatementKind::ForIn { .. }) {
+                    self.lower_scalar_for_in(statement, slots, &mut statements)?;
                 } else {
                     let statement = self.lower_scalar_statement(statement, slots)?;
                     if matches!(statement, Statement::Break | Statement::Continue(_)) {
@@ -1412,6 +1428,90 @@ impl<'a> Parser<'a> {
         statements.push(Statement::Declare(slot, start));
         statements.push(Statement::Declare(end_slot, end));
         statements.push(Statement::For(slot, end_slot, body, label, line, column));
+        Ok(())
+    }
+
+    fn lower_scalar_for_in(
+        &mut self,
+        statement: &ae_syntax::statement::Statement,
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+        result: &mut Vec<Statement>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        let ae_syntax::statement::StatementKind::ForIn { binding, binding_range, iterable, body } = &statement.kind else {
+            unreachable!("resolved for-in eligibility");
+        };
+        self.seek_scalar_offset(binding_range.end);
+        if RESERVED.contains(&binding.as_str()) {
+            return Err(self.fail(&format!("'{binding}' is a built-in name and cannot be a loop variable")));
+        }
+        if self.names.contains_key(binding) {
+            return Err(self.duplicate_binding_error(binding));
+        }
+        let (iterable_value, ty) = self.lower_scalar_body_expression(iterable, slots)?;
+        self.seek_scalar_offset(iterable.range.end);
+        let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
+        self.lower_vector_loop(binding, iterable_value, ty, statement.range.start, result, |parser, slot, elem_ty| {
+            slots.insert(def, (slot, elem_ty));
+            let result = parser.lower_scalar_statements(body, slots);
+            slots.remove(&def);
+            result
+        })
+    }
+
+    fn lower_vector_loop(
+        &mut self, var_name: &str, first: Expr, first_ty: Type, loop_offset: usize,
+        result: &mut Vec<Statement>,
+        lower_body: impl FnOnce(&mut Self, usize, Type) -> Result<Vec<Statement>, ae_span::Diagnostic>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        // `for x in vec-variable` iterates owned elements by
+        // value: desugars to a hidden range loop plus an
+        // immutable element declaration per iteration.
+        // Borrowed string vectors iterate the same way, with
+        // element access going through the pointer.
+        let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
+            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int, false),
+            (Expr::Variable(id, Type::StrVec, _, _), Type::StrVec) => (*id, Type::StrView, false),
+            (Expr::Variable(id, Type::StrVecRef, _, _), Type::StrVecRef) => (*id, Type::StrView, true),
+            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int, false),
+            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::F64, false),
+            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::F64, false),
+            _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
+        };
+        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
+        let (line, col) = self.position();
+        let end_var = self.next_var; self.next_var += 1;
+        let counter = self.next_var; self.next_var += 1;
+        let var = self.next_var; self.next_var += 1;
+        let label = self.next_label; self.next_label += 1;
+        self.loop_depth += 1;
+        let base = self.scopes.len();
+        let moved_before = self.moved.clone();
+        self.scopes.push(vec![(var, elem_ty), (counter, Type::Int), (end_var, Type::Int)]);
+        self.loop_scopes.push(self.scopes.len());
+        self.loop_labels.push(Some(label));
+        self.names.insert(var_name.to_owned(), (var, false, elem_ty));
+        // The container is borrowed for the whole loop.
+        let container_depth = self.scopes.len();
+        self.borrows.push((v_id, container_depth, BorrowKind::Container));
+        let body = lower_body(self, var, elem_ty);
+        self.loop_labels.pop();
+        self.loop_scopes.pop();
+        self.scopes.pop().unwrap();
+        self.loop_depth -= 1;
+        self.names.remove(var_name);
+        self.borrows.retain(|&(id, _, _)| id != v_id);
+        let mut body = body?;
+        if self.moved.contains(&v_id) { return Err(self.fail(&format!("cannot move the vector being iterated (a move of it happens in this loop)"))); }
+        self.close_loop_moves(base, moved_before, loop_offset)?;
+        // Per-iteration element binding, then the user's body.
+        let element = match elem_ty {
+            Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, by_ref),
+            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
+        };
+        body.insert(0, Statement::Declare(var, element));
+        result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));
+        result.push(Statement::Declare(counter, Expr::Number(0)));
+        result.push(Statement::For(counter, end_var, body, label, line, col));
         Ok(())
     }
 
@@ -3191,55 +3291,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         continue;
                     }
                     if *self.current() != Kind::DotDot {
-                        // `for x in vec-variable` iterates owned elements by
-                        // value: desugars to a hidden range loop plus an
-                        // immutable element declaration per iteration.
-                        // Borrowed string vectors iterate the same way, with
-                        // element access going through the pointer.
-                        let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
-                            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int, false),
-                            (Expr::Variable(id, Type::StrVec, _, _), Type::StrVec) => (*id, Type::StrView, false),
-                            (Expr::Variable(id, Type::StrVecRef, _, _), Type::StrVecRef) => (*id, Type::StrView, true),
-                            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int, false),
-                            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::F64, false),
-                            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::F64, false),
-                            _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
-                        };
-                        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
-                        let (line, col) = self.position();
-                        let end_var = self.next_var; self.next_var += 1;
-                        let counter = self.next_var; self.next_var += 1;
-                        let var = self.next_var; self.next_var += 1;
-                        let label = self.next_label; self.next_label += 1;
-                        self.loop_depth += 1;
-                        let base = self.scopes.len();
-                        let moved_before = self.moved.clone();
-                        self.scopes.push(vec![(var, elem_ty), (counter, Type::Int), (end_var, Type::Int)]);
-                        self.loop_scopes.push(self.scopes.len());
-                        self.loop_labels.push(Some(label));
-                        self.names.insert(var_name.clone(), (var, false, elem_ty));
-                        // The container is borrowed for the whole loop.
-                        let container_depth = self.scopes.len();
-                        self.borrows.push((v_id, container_depth, BorrowKind::Container));
-                        let body = self.block();
-                        self.loop_labels.pop();
-                        self.loop_scopes.pop();
-                        self.scopes.pop().unwrap();
-                        self.loop_depth -= 1;
-                        self.names.remove(&var_name);
-                        self.borrows.retain(|&(id, _, _)| id != v_id);
-                        let mut body = body?;
-                        if self.moved.contains(&v_id) { return Err(self.fail(&format!("cannot move the vector being iterated (a move of it happens in this loop)"))); }
-                        self.close_loop_moves(base, moved_before, loop_offset)?;
-                        // Per-iteration element binding, then the user's body.
-                        let element = match elem_ty {
-                            Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, by_ref),
-                            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
-                        };
-                        body.insert(0, Statement::Declare(var, element));
-                        result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));
-                        result.push(Statement::Declare(counter, Expr::Number(0)));
-                        result.push(Statement::For(counter, end_var, body, label, line, col));
+                        self.lower_vector_loop(&var_name, first, first_ty, loop_offset, &mut result, |parser, _, _| parser.block())?;
                         continue;
                     }
                     if first_ty != Type::Int { return Err(self.fail("range bounds must be i64")); }
@@ -3554,6 +3606,7 @@ mod tests {
         let source = format!("{source} fn write_ptr(raw_param: *mut i64) -> i64 {{ unsafe {{ *raw_param = 7; }} return 0; }}");
         let source = format!("{source} fn read_ptr(read_param: *const i64) -> i64 {{ unsafe {{ return read_param.deref(); }} }}");
         let source = format!("{source} fn local_pointer() -> i64 {{ var pointee = 1; let local_ptr = &mut pointee as *mut i64; unsafe {{ *local_ptr = 7; return local_ptr.deref(); }} }}");
+        let source = format!("{source} fn vector_sum(vector_arg: &vec[f64]) -> f64 {{ var total = 0.0; for item in vector_arg {{ total += item; }} return total; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3622,6 +3675,19 @@ mod tests {
         assert!(matches!(body.as_slice(), [Statement::Declare(_, Expr::Number(1)), Statement::Declare(pointer, Expr::BorrowAs(_, true, ..)), Statement::Unsafe(inner)]
             if matches!(inner.as_slice(), [Statement::PtrStore(slot, Expr::Number(7), ..), Statement::Return(Expr::DerefPtr(..), _)] if slot == pointer)));
         parser.next_var = next_var;
+        let start = source.find("vector_arg:").unwrap();
+        parser.names.insert("vector_arg".into(), (87, false, Type::VecFRef));
+        parser.binding_ranges.insert(87, start..start + "vector_arg".len());
+        parser.return_type = Type::F64;
+        parser.seek_scalar_offset(source.find("{ var total = 0.0").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [_, _, _, Statement::For(_, _, inner, ..), Statement::Return(..)]
+            if matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(87, _, _, _, true, Type::F64))))));
+        parser.return_type = Type::Int;
+        parser.names.remove("vector_arg");
+        parser.binding_ranges.remove(&87);
+        parser.next_var = next_var;
+        parser.next_label = 0;
         parser.generics.names.insert("CachedBox".into(), 0);
         parser.generics.defs.push(GenericEnum {
             name: "CachedBox".into(), params: vec!["T".into()],
