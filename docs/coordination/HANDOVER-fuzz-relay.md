@@ -496,3 +496,10 @@ bodies use the resolved body route. Capture probes retain their existing path.
 The emitted body maps capture definitions to their assigned slots. Closure
 shadowing conflicts and unsupported capture types retain the typed path.
 
+## Resolved generic associated bodies (2026-11-22)
+
+Receiver-free associated functions on generic impls can use resolved body
+lowering after scalar substitution. Method instance allocation and caching
+stay with the compiler. Receiver methods still require field eligibility
+based on the concrete receiver layout.
+
