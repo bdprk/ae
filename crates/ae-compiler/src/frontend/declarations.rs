@@ -3,6 +3,37 @@ use super::*;
 use ae_syntax::declaration::{parse_declaration_attribute, parse_extern_function_prefix, Declaration, DeclarationAttribute, DeclarationKind, TypedName, MAX_FUNCTION_PARAMETERS};
 use super::parser::moved_value_hint;
 
+/// How a borrowed argument is passed and whether it needs a call-scoped
+/// struct borrow. Classification uses concrete compiler type identities.
+#[derive(Clone, Copy)]
+pub(super) enum CallBorrow {
+    Forward,
+    Address,
+    Struct { address: bool },
+}
+
+impl CallBorrow {
+    pub(super) fn classify(expected: Type, actual: Type) -> Option<Self> {
+        match (expected, actual) {
+            (Type::VecRef, Type::Vec) | (Type::VecFRef, Type::VecF) |
+            (Type::StrVecRef, Type::StrVec) => Some(Self::Address),
+            (Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_), actual)
+                if expected == actual => Some(Self::Forward),
+            (Type::StructRef(wanted) | Type::StructMut(wanted), Type::Struct(found) | Type::StructMut(found))
+                if wanted == found => Some(Self::Struct { address: matches!(actual, Type::Struct(_)) }),
+            _ => None,
+        }
+    }
+
+    pub(super) fn address(self) -> bool {
+        match self {
+            Self::Forward => false,
+            Self::Address => true,
+            Self::Struct { address } => address,
+        }
+    }
+}
+
 impl Parser<'_> {
     // `pub` marks an item as importable from other files. It is consumed by the
     // declaration passes, never by expression parsing.
@@ -1332,35 +1363,32 @@ impl Parser<'_> {
                 Type::StrVecRef => Type::StrVec,
                 _ => Type::VecF,
             };
-            let borrowed_shape = match expected {
-                Type::VecRef => Type::VecRef,
-                Type::StrVecRef => Type::StrVecRef,
-                _ => Type::VecFRef,
-            };
-            if actual != owned_shape && actual != borrowed_shape {
+            let Some(borrow) = CallBorrow::classify(expected, actual) else {
                 return Err(self.fail(&format!("argument must be {}, found {}", owned_shape.name(), actual.name())));
-            }
+            };
             if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
             // An owned vector needs its address taken; a parameter that
             // is already `const ae_vec *` is forwarded unchanged.
             // The flag means "take the address", not "is a vector".
-            Ok(Argument::Borrow(var, actual == owned_shape))
+            Ok(Argument::Borrow(var, borrow.address()))
         } else if let Type::Array(len) = expected {
             let arg = self.borrowed_argument_name(false)?;
             let (var, _, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown array '{arg}'")))?;
-            if actual != Type::Array(len) { return Err(self.fail(&format!("argument requires array of length {len}"))); }
-            Ok(Argument::Borrow(var, false))
+            let Some(borrow) = CallBorrow::classify(expected, actual) else {
+                return Err(self.fail(&format!("argument requires array of length {len}")));
+            };
+            Ok(Argument::Borrow(var, borrow.address()))
         } else if let Type::Fn(sig) = expected {
             self.function_value_argument(name, index + 1, sig)
-        } else if let Type::StructRef(sid) = expected {
+        } else if matches!(expected, Type::StructRef(_)) {
             // `&Struct` (ADR-0184) borrows a bare struct variable for
             // the duration of the call, exactly like the container
             // borrows: no move, no copy, and the caller may not write
             // or move the struct while the borrow can be read.
             let arg = self.borrowed_argument_name(false)?;
             let (var, _, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown variable '{arg}'")).with_code("E0101"))?;
-            match actual {
-                Type::Struct(actual_sid) | Type::StructMut(actual_sid) if actual_sid == sid => {
+            match CallBorrow::classify(expected, actual) {
+                Some(CallBorrow::Struct { address }) => {
                     if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
                     if self.mut_borrows.iter().any(|&(bid, _)| bid == var) {
                         return Err(self.fail(&format!("cannot borrow '{arg}' while it is mutably borrowed in this statement")));
@@ -1371,26 +1399,26 @@ impl Parser<'_> {
                     if !self.is_borrowed(var) {
                         self.call_borrows.push((var, self.scopes.len()));
                     }
-                    Ok(Argument::Borrow(var, matches!(actual, Type::Struct(_))))
+                    Ok(Argument::Borrow(var, address))
                 }
                 // A borrow parameter forwards its pointer unchanged:
                 // the callee's reads are already covered by the borrow
                 // the caller received. A mutable borrow may shrink to
                 // a read-only one; the reverse is not allowed.
-                Type::StructRef(forwarded_sid) if forwarded_sid == sid => {
+                Some(CallBorrow::Forward) => {
                     Ok(Argument::Borrow(var, false))
                 }
-                other => return Err(self.fail(&format!("argument must be {}, found {}", expected.name(), other.name()))),
+                _ => return Err(self.fail(&format!("argument must be {}, found {}", expected.name(), actual.name()))),
             }
-        } else if let Type::StructMut(sid) = expected {
+        } else if matches!(expected, Type::StructMut(_)) {
             // `&mut Struct` (ADR-0185) lends the struct for writing:
             // spelled `&mut value` at the call site, exclusive for the
             // duration of the call, and the lender must own a mutable
             // variable — the callee writes what the caller owns.
             let arg = self.borrowed_argument_name(true)?;
             let (var, mutable, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown variable '{arg}'")).with_code("E0101"))?;
-            match actual {
-                Type::Struct(actual_sid) | Type::StructMut(actual_sid) if actual_sid == sid => {
+            match CallBorrow::classify(expected, actual) {
+                Some(CallBorrow::Struct { address }) => {
                     if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
                     if !mutable {
                         return Err(self.immutable_binding_error(self.fail(&format!("cannot borrow '{arg}' mutably: it was declared without 'var'")).with_code("E0103"), var));
@@ -1410,9 +1438,9 @@ impl Parser<'_> {
                         self.deferred_write_conflicts.push((var, offset, arg.clone(), "mutate", None));
                     }
                     self.mut_borrows.push((var, self.scopes.len()));
-                    Ok(Argument::Borrow(var, matches!(actual, Type::Struct(_))))
+                    Ok(Argument::Borrow(var, address))
                 }
-                other => return Err(self.fail(&format!("argument must be {}, found {}", expected.name(), other.name()))),
+                _ => return Err(self.fail(&format!("argument must be {}, found {}", expected.name(), actual.name()))),
             }
         } else {
             // By-value arguments always consume their value:

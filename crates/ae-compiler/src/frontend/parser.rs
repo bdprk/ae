@@ -1967,11 +1967,10 @@ impl<'a> Parser<'a> {
                         if effects.moves.contains(&slot) {
                             return None;
                         }
-                        let address = match (expected, actual) {
-                            (expected, actual) if expected == actual && !*mutable => false,
-                            (Type::StructRef(wanted), Type::Struct(actual_id) | Type::StructMut(actual_id))
-                                if wanted == actual_id =>
-                            {
+                        use super::declarations::CallBorrow;
+                        let borrow = CallBorrow::classify(expected, actual)?;
+                        if let CallBorrow::Struct { .. } = borrow {
+                            if !*mutable {
                                 if effects.mut_borrows.contains(&slot)
                                     || self.mut_borrows.iter().any(|&(borrowed, _)| borrowed == slot)
                                 {
@@ -1980,11 +1979,7 @@ impl<'a> Parser<'a> {
                                 if !self.is_borrowed(slot) && !effects.call_borrows.contains(&slot) {
                                     effects.call_borrows.push(slot);
                                 }
-                                matches!(actual, Type::Struct(_))
-                            }
-                            (Type::StructMut(wanted), Type::Struct(actual_id) | Type::StructMut(actual_id))
-                                if wanted == actual_id =>
-                            {
+                            } else {
                                 if !self.names.get(name)?.1 || effects.call_borrows.contains(&slot)
                                     || effects.mut_borrows.contains(&slot)
                                 {
@@ -1997,13 +1992,9 @@ impl<'a> Parser<'a> {
                                     effects.conflicts.push((slot, name_range.start, name.clone(), "mutate", None));
                                 }
                                 effects.mut_borrows.push(slot);
-                                matches!(actual, Type::Struct(_))
                             }
-                            (Type::VecRef, Type::Vec) | (Type::VecFRef, Type::VecF)
-                            | (Type::StrVecRef, Type::StrVec) => true,
-                            _ => return None,
-                        };
-                        args.push(Argument::Borrow(slot, address));
+                        }
+                        args.push(Argument::Borrow(slot, borrow.address()));
                         continue;
                     }
                     let value = self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?;

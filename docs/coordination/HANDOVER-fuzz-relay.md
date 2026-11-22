@@ -585,6 +585,9 @@ concatenation and ownership. Both routes also share the return type check,
 using resolved scalar facts when available and the active compiler signature
 for concrete types. Direct by-value call arguments also share the type check.
 The resolved route reads scalar facts by argument range and uses the selected
-compiler signature for concrete types. The next slice covers borrowed call
-arguments and their effects.
+compiler signature for concrete types. Borrowed call arguments share
+compatibility and address selection based on concrete array lengths, vector
+kinds, and struct instance IDs. Confirmed and speculative lowering still
+record their effects at their respective commit points. The next slice
+extends shared checks to aggregate fields.
 
