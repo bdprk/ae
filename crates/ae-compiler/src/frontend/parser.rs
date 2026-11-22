@@ -1186,9 +1186,11 @@ impl<'a> Parser<'a> {
                 let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
                 // A value capture of a numeric vector moves into the
                 // closure's slot; the body's own Frees releases it after
-                // the call, which is the FnOnce shape. String vectors stay
-                // on the typed path (their elements own drops).
-                if captured && matches!(ty, Type::StrVec | Type::StrVecRef) {
+                // the call, which is the FnOnce shape. A borrowed string
+                // vector's element reads are views, so they join too; a
+                // value-captured string vector stays on the typed path
+                // (its elements own drops).
+                if captured && matches!(ty, Type::StrVec) {
                     return false;
                 }
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
@@ -2030,7 +2032,18 @@ impl<'a> Parser<'a> {
                         let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
                         (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
                     }
-                    _ => unreachable!("resolved array, borrowed or owned numeric vector binding"),
+                    Type::StrVecRef | Type::StrVec => {
+                        // A borrowed string vector's element is a view; an
+                        // owned one hands the element's view too.
+                        let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if index_ty != Type::Int {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        let by_ref = matches!(ty, Type::StrVecRef);
+                        (Expr::StrVecIndex(slot, Box::new(value), line, column, by_ref), Type::StrView)
+                    }
+                    _ => unreachable!("resolved array, borrowed or owned numeric/string vector binding"),
                 }
             }
             _ => unreachable!("scalar expression eligibility"),
@@ -3891,7 +3904,7 @@ mod tests {
     fn scalar_output_matches_resolver_definition_to_live_slot() {
         let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
-        let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }} fn closure_vector() -> i64 {{ let numbers = vec[10, 20]; let get = || -> i64 {{ print(numbers[1]); return 0; }}; return get(); }}");
+        let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }} fn closure_vector() -> i64 {{ let numbers = vec[10, 20]; let get = || -> i64 {{ print(numbers[1]); return 0; }}; return get(); }} fn closure_words() -> i64 {{ let labels = vec[\"aa\", \"bb\"]; let pick = || -> i64 {{ print(labels[0]); return 0; }}; return pick(); }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4255,6 +4268,16 @@ mod tests {
             [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, false, Type::Int))),
              Statement::Return(Expr::Number(0), _)]), "{closure:?}");
         parser.names.remove("numbers");
+        // A borrowed string-vector capture: its element read is a view.
+        let labels_start = source.find("let labels = vec[").unwrap() + 4;
+        parser.names.insert("labels".into(), (83, false, Type::StrVecRef));
+        parser.seek_scalar_offset(source.find("{ print(labels[0])").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(83, labels_start)])
+            .expect("resolved borrowed string-vector capture").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(Printed::Expr(Expr::StrVecIndex(83, _, _, _, true))),
+             Statement::Return(Expr::Number(0), _)]), "{closure:?}");
+        parser.names.remove("labels");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
         for ty in [Type::Int, Type::Bool] {
