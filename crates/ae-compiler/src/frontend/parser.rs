@@ -865,7 +865,7 @@ impl<'a> Parser<'a> {
                 }
             }
             for function in module.functions {
-                if function.impl_owner.is_some() || !function.declaration.type_parameters.is_empty() {
+                if function.impl_owner.is_some() {
                     continue;
                 }
                 let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
@@ -904,7 +904,10 @@ impl<'a> Parser<'a> {
         // Borrows of aggregates themselves (`&a`, `&p`) stay typed too — a
         // borrow occurrence never lands in `scalar_reads` — and so do calls
         // to aggregate-taking functions, which `supports_call` excludes.
-        if !self.subst.is_empty() || self.receiver.is_some()
+        // Generic functions arrive here after the instance machinery has
+        // substituted their signature. Keep non-scalar substitutions on
+        // the typed route until their ownership and layout are covered.
+        if !self.subst.values().copied().all(scalar_type) || self.receiver.is_some()
             || !scalar_type(self.return_type)
             || !self.names.values().all(|&(_, _, ty)| {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_))
@@ -3095,6 +3098,8 @@ mod tests {
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
         let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
+        let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -3138,6 +3143,20 @@ mod tests {
             "case.ae", source, tokens, &mut functions, &mut structs,
             &mut struct_names, &mut enums, &mut enum_names, &mut generics,
         );
+        let generic_binding = source.find("generic_value:").unwrap();
+        let body = source.find("{ return generic_value;").unwrap();
+        for ty in [Type::Int, Type::Bool] {
+            parser.subst.insert("T".into(), ty);
+            parser.return_type = ty;
+            parser.names.insert("generic_value".into(), (80, false, ty));
+            parser.binding_ranges.insert(80, generic_binding..generic_binding + "generic_value".len());
+            parser.seek_scalar_offset(body);
+            let lowered = parser.lower_resolved_scalar_body().expect("resolved generic instance").unwrap();
+            assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Variable(80, actual, ..), _)] if *actual == ty));
+        }
+        parser.subst.clear();
+        parser.names.remove("generic_value");
+        parser.binding_ranges.remove(&80);
         parser.return_type = Type::Bool;
         parser.seek_scalar_offset(source.find("{ let local").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved scalar route").unwrap();

@@ -481,3 +481,11 @@ against moving outer values. The Frees lists stay raw: the drops pass trims
 moved slots for both routes alike. Borrowed-aggregate arguments (`&p`) and
 bare effect-only call statements stay typed.
 
+## Resolved scalar generic instances (2026-11-22)
+
+Generic function bodies now enter resolved lowering when their concrete
+substitutions are scalar and the body satisfies the existing eligibility
+checks. The compiler allocates and caches instances before and after body
+lowering as before. Non-scalar substitutions and generic methods still use
+the typed path. Closure bodies are the next instance-boundary slice.
+
