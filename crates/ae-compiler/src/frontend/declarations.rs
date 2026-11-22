@@ -1107,7 +1107,17 @@ impl Parser<'_> {
         self.scopes.push(params.iter().map(|&(var_id, ty)| (var_id, ty)).collect());
         let body = match self.lower_resolved_scalar_body() {
             Some(body) => body,
-            None => self.block(),
+            None => {
+                // Route-coverage report (P1.1): with AE_ROUTE_REPORT=1 the
+                // legacy fallback names each function it takes, so a corpus
+                // run measures how much of the front end still depends on
+                // the old body parser. Behaviour is unchanged.
+                if std::env::var_os("AE_ROUTE_REPORT").is_some() {
+                    let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                    eprintln!("route legacy function id={id} at {offset}");
+                }
+                self.block()
+            }
         };
         let params_scope = self.scopes.pop().unwrap();
         let mut body = body?;

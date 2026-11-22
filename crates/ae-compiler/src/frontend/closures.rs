@@ -319,7 +319,13 @@ impl Parser<'_> {
         self.scopes.push(params.iter().map(|&(var_id, ty)| (var_id, ty)).collect());
         let body = match self.lower_resolved_body_with_captures(&resolved_captures) {
             Some(body) => body,
-            None => self.block(),
+            None => {
+                if std::env::var_os("AE_ROUTE_REPORT").is_some() {
+                    let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                    eprintln!("route legacy closure id={id} at {offset}");
+                }
+                self.block()
+            }
         };
         let scope = self.scopes.pop().unwrap();
         let mut body = body?;
