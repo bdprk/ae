@@ -327,6 +327,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Return(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
+                || resolved.closure_local_string_returns.contains(&value.range.start)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
         }
@@ -1102,6 +1103,28 @@ impl<'a> Parser<'a> {
             for (function, body) in resolution.functions.iter().flat_map(|function| {
                 function.closure_bodies.iter().map(move |body| (function, body))
             }) {
+                use ae_syntax::{expression::ExpressionKind, statement::{StatementKind, visit_statements}};
+                let mut local_strings = HashSet::new();
+                for statement in body.statements.iter() {
+                    visit_statements(statement, &mut |statement| match &statement.kind {
+                        StatementKind::Binding { name_range, initializer, .. }
+                            if matches!(initializer.kind, ExpressionKind::Atom(Kind::Text(_))) =>
+                        {
+                            if let Some(&def) = expressions.scalar_definitions.get(&name_range.start) {
+                                local_strings.insert(def);
+                                expressions.owned_text_bindings.insert(def);
+                            }
+                        }
+                        StatementKind::Return(value)
+                            if matches!(value.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                                && expressions.scalar_reads.get(&value.range.start)
+                                    .is_some_and(|def| local_strings.contains(def)) =>
+                        {
+                            expressions.closure_local_string_returns.insert(value.range.start);
+                        }
+                        _ => {}
+                    });
+                }
                 // A captured outer read is legal inside the closure body:
                 // the compiler hands the value through a capture slot, so
                 // the route re-admits reads whose target is one of this
@@ -1177,7 +1200,7 @@ impl<'a> Parser<'a> {
         // Generic functions arrive here after the instance machinery has
         // substituted their signature. Keep non-scalar substitutions on
         // the typed route until their ownership and layout are covered.
-        let string_return = self.return_type == Type::String && !capture_starts.is_empty();
+        let string_return = self.return_type == Type::String;
         if !self.subst.values().copied().all(scalar_type)
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
@@ -1247,14 +1270,11 @@ impl<'a> Parser<'a> {
             slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
         }
         let has_string_vector = slots.values().any(|&(_, ty)| ty == Type::StrVecRef);
-        if string_return && !has_string_vector {
-            return None;
-        }
-        if !capture_starts.is_empty() && has_string_vector {
+        if string_return || (!capture_starts.is_empty() && has_string_vector) {
             use ae_syntax::{expression::ExpressionKind, statement::{StatementKind, visit_statements}};
             let mut view_bases = std::collections::HashSet::new();
-            let mut has_view_return = false;
-            let mut has_other_return = false;
+            let mut has_string_return = false;
+            let mut has_unsupported_return = false;
             for statement in body.iter() {
                 visit_statements(statement, &mut |statement| {
                     let value = match &statement.kind {
@@ -1271,14 +1291,14 @@ impl<'a> Parser<'a> {
                     };
                     view_bases.extend(view_base);
                     if matches!(statement.kind, StatementKind::Return(_)) {
-                        has_view_return |= view_base.is_some();
-                        has_other_return |= view_base.is_none();
+                        let supported = view_base.is_some()
+                            || resolved.closure_local_string_returns.contains(&value.range.start);
+                        has_string_return |= supported;
+                        has_unsupported_return |= !supported;
                     }
                 });
             }
-            // Returning an element fails the return type check. Successful
-            // owned-string returns still need the typed path's move effects.
-            if string_return && (!has_view_return || has_other_return) {
+            if string_return && (!has_string_return || has_unsupported_return) {
                 return None;
             }
             let start = self.tokens[self.pos].offset;
@@ -1561,7 +1581,8 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
                 }
-                let returned_receiver = receiver_value(value);
+                let moved_atom = receiver_value(value).or_else(|| self.resolved_expressions()
+                    .closure_local_string_returns.contains(&value.range.start).then_some(value));
                 let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
                     self.seek_scalar_offset(value.range.start);
                     let result = self.expression(0, true)?;
@@ -1570,7 +1591,7 @@ impl<'a> Parser<'a> {
                 } else {
                     self.lower_scalar_body_expression(value, slots)?
                 };
-                if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &lowered) {
+                if let (Some(atom), Expr::Variable(slot, ..)) = (moved_atom, &lowered) {
                     self.seek_scalar_offset(atom.range.end);
                     self.check_variable_move(*slot)?;
                     self.moved.insert(*slot);
@@ -4323,7 +4344,15 @@ mod tests {
             .expect("resolved borrowed string vector return diagnostic").unwrap_err();
         assert_eq!(error.code.as_deref(), Some("E0204"));
         parser.seek_scalar_offset(source.find("{ print(return_words[1])").unwrap());
-        assert!(parser.lower_resolved_body_with_captures(&[(82, return_words)]).is_none());
+        let next_var = parser.next_var;
+        let closure = parser.lower_resolved_body_with_captures(&[(82, return_words)])
+            .expect("resolved owned string return").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(_), Statement::Declare(slot, Expr::StrLit(..)),
+             Statement::Return(Expr::Variable(read, Type::String, ..), owned), Statement::Frees(_)]
+            if slot == read && owned.contains(&(*slot, Type::String)) && parser.moved.contains(slot)));
+        parser.moved.remove(&next_var);
+        parser.next_var = next_var;
         parser.return_type = Type::Int;
         parser.names.remove("return_words");
         let generic_binding = source.find("generic_value:").unwrap();

@@ -16,12 +16,15 @@ same tracking as the typed parser. The parser regression checks that the
 resolved declaration and later read use the same local slot.
 The resolved return checker reports E0204 when a closure tries to return
 a captured string-vector element as an owned string.
+Returning a local initialized from a string literal uses the resolved
+closure route. The compiler checks the move and records it before the
+existing drop pass trims the return's cleanup list.
 
 ## What is half-done
 
-Successful owned-string returns still use the typed parser. The next
-slice can migrate owned-string local returns with the existing move and
-drop tracking.
+Returning captured owned strings and returning strings from other
+initializers still use the typed parser. The next slice can admit
+captured owned returns while retaining capture inference and call order.
 
 ## Next step
 
@@ -34,10 +37,11 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `ce8dd24` matched 50 examples and 646 CLI
+- The byte comparison against `0d3a197` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for direct prints, a local view binding, and a legal owned-string
-  return. It matched diagnostics for mutable bindings and element returns.
+  output for local owned-string returns with a borrowed capture, branch
+  returns, and cleanup of another owned local. It matched diagnostics for
+  mutable bindings and element returns.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

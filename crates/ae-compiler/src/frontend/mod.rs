@@ -704,6 +704,7 @@ struct ResolvedExpressions {
     scalar_writes: HashMap<usize, ae_resolve::DefId>,
     /// Reads of an owned string through a closure capture slot.
     closure_capture_reads: HashSet<usize>,
+    closure_local_string_returns: HashSet<usize>,
     array_definitions: HashSet<ae_resolve::DefId>,
     struct_definitions: HashSet<ae_resolve::DefId>,
     struct_field_reads: HashSet<usize>,
