@@ -663,3 +663,32 @@ fn lsp_sequential_edits_match_a_fresh_parse() {
     let diagnostics = edited.check_text(final_text);
     assert!(diagnostics.is_empty(), "final text is clean: {diagnostics:?}");
 }
+
+#[test]
+fn lsp_cancelled_completion_does_not_mask_new_results() {
+    // M6.2.07: a cancelled completion request is answered with the cancel
+    // error, and the next request after a new edit answers from the NEW
+    // buffer - stale work never overwrites fresh results.
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///c.ae","version":1,"text":"fn main() {\n    let alpha = 1;\n    \n}"}}}"#;
+    server.handle_message(open);
+
+    // Ask for completion with id 40, then cancel it.
+    let comp_old = r#"{"jsonrpc":"2.0","id":40,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///c.ae"},"position":{"line":2,"character":4}}}"#;
+    let _ = server.handle_message(comp_old);
+    let cancel = r#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":41}}"#;
+    server.handle_message(cancel);
+    let stale = r#"{"jsonrpc":"2.0","id":41,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///c.ae"},"position":{"line":2,"character":4}}}"#;
+    let stale_val = JsonValue::parse(&server.handle_message(stale)[0]).unwrap();
+    assert_eq!(stale_val.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_i64()), Some(-32800), "cancel error");
+
+    // Edit the buffer and complete again: the new binding appears.
+    let change = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///c.ae","version":2},"contentChanges":[{"text":"fn main() {\n    let alpha = 1;\n    let beta = 2;\n    \n}"}]}}"#;
+    server.handle_message(change);
+    let comp_new = r#"{"jsonrpc":"2.0","id":42,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///c.ae"},"position":{"line":3,"character":4}}}"#;
+    let fresh = JsonValue::parse(&server.handle_message(comp_new)[0]).unwrap();
+    let labels: Vec<&str> = fresh.get("result").and_then(|r| r.as_array()).unwrap().iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    assert!(labels.contains(&"beta"), "new binding after the edit: {labels:?}");
+    assert!(labels.contains(&"alpha"), "earlier binding stays live: {labels:?}");
+}
