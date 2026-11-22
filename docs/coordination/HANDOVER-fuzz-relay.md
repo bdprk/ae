@@ -708,7 +708,10 @@ owned values for cleanup.
 Bare direct-call propagation can now be lowered from a resolved body.
 Both drivers use the same result-shape and enclosing-return checks. Enum
 constructor returns still use the existing ownership-aware operand path.
-Propagation that binds the success payload remains a follow-up.
+Propagation that binds the success payload landed too: `let value =
+step()?;` joins the body route's Binding arm (the Propagate(Call)
+initializer lowers through lower_shared_value's boundary unwrap, and
+propagate_statement binds the payload with the canonical checks).
 R3d's textDocument/documentSymbol, textDocument/references and
 workspace/symbol all read the def table now: the outline lists
 file-local functions/structs/enums/traits with their declared name
