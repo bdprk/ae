@@ -772,3 +772,16 @@ Verification questions to answer while implementing:
   no new arms, only a new driver entry in parse_closure_body's final parse.
 
 Gates as always; a corpus closure example pins byte parity.
+
+**Probed blocker (2026-11-22 15:40):** string captures are blocked in the
+ELIGIBILITY, not the guard. A text binding's def sits in
+`owned_text_bindings`, and the eligibility's Ident arm excludes reads
+targeting it — including the reads INSIDE a closure that captures the
+string (the resolver's closure walk resolves those to the outer binding's
+def, since hidden capture params are compiler-side). Widening the route's
+type guard alone changes nothing. The fix needs the resolver's
+ClosureBody to record the captured outer defs, and the eligibility's
+Ident arm to re-admit reads whose target is a capture of the enclosing
+closure (offset-scoped to that closure's body range — ClosureBody needs
+an `end` field too). The lowering side needs no change: a StrView
+capture read lowers as a plain Variable through the capture slot.
