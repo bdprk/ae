@@ -278,6 +278,13 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     | ae_syntax::expression::ExpressionKind::Vector(elements) => elements.iter()
                         .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
                     ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
+                    // `let x = foo()?;` — a direct-call propagation binding;
+                    // RESERVED callees stay on the typed route.
+                    ae_syntax::expression::ExpressionKind::Propagate(operand) => {
+                        matches!(&operand.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
+                            if matches!(&callee.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                                if !RESERVED.contains(&name.as_str())))
+                    }
                     _ => iterator_constructor(initializer).is_some()
                         || resolved.enum_constructors.contains(&initializer.range.start)
                         || scalar_body_expression(initializer, resolved, supports_call, supports_field),
@@ -1286,7 +1293,31 @@ impl<'a> Parser<'a> {
                 let slot = self.next_var;
                 self.next_var += 1;
                 let def = self.resolved_expressions().scalar_definitions[&name_range.start];
-                let (statement, ty) = if let ae_syntax::expression::ExpressionKind::Array(elements) = &initializer.kind {
+                let (statement, ty) = if let ae_syntax::expression::ExpressionKind::Propagate(operand) = &initializer.kind {
+                    // `let x = foo()?;` binds the Ok payload and hands the
+                    // failure on, mirroring the typed route's binding
+                    // propagation.
+                    let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &operand.kind else {
+                        unreachable!("resolved propagation eligibility");
+                    };
+                    let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(call_name)) = &callee.kind else {
+                        unreachable!("resolved propagation eligibility");
+                    };
+                    let _ = call_name;
+                    self.seek_scalar_offset(operand.range.start);
+                    let (value, call_ty) = match self.lower_shared_value(Some(Kind::Question), true) {
+                        Some(pair) => pair,
+                        None => self.expression(0, true)?,
+                    };
+                    if *self.current() != Kind::Question {
+                        return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+                    }
+                    let (statement, bound_ty) = self.propagate_statement(value, call_ty, Some(slot))?;
+                    self.pos += 1;
+                    self.take(Kind::Semi)?;
+                    let bound_ty = bound_ty.expect("a binding propagation always produces a payload type");
+                    (statement, bound_ty)
+                } else if let ae_syntax::expression::ExpressionKind::Array(elements) = &initializer.kind {
                     if elements.is_empty() {
                         self.seek_scalar_offset(initializer.range.start);
                         self.pos += 1;
@@ -3838,7 +3869,7 @@ mod tests {
         let source = format!("{source} enum Reading {{ Value(i64), Empty }} fn read_match(input: Reading) -> i64 {{ match input {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = format!("{source} fn local_match() -> i64 {{ let reading = Reading::Value(42); match reading {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = format!("{source} fn exits() -> i64 {{ exit(7); return 0; }} fn bad_exit() -> i64 {{ exit(false); return 0; }}");
-        let source = format!("{source} enum Maybe {{ Some(i64), None }} fn step() -> Maybe {{ return Maybe::None; }} fn propagate() -> Maybe {{ step()?; return Maybe::Some(7); }}");
+        let source = format!("{source} enum Maybe {{ Some(i64), None }} fn step() -> Maybe {{ return Maybe::None; }} fn propagate() -> Maybe {{ step()?; return Maybe::Some(7); }} fn bind() -> Maybe {{ let value = step()?; return Maybe::Some(value); }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3919,6 +3950,20 @@ mod tests {
         let body = parser.lower_resolved_scalar_body().expect("resolved bare propagation").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Propagate(Expr::Call(19, _, Type::Enum(_, 1)), Type::Enum(_, 1), _, None, _),
             Statement::Return(Expr::EnumLit(_, 1, 0, _), _)]));
+        parser.seek_scalar_offset(source.find("{ let value = step").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved binding propagation").unwrap();
+        let [Statement::Propagate(prop_value, prop_ty, prop_fields, prop_bound, _), Statement::Return(ret_expr, _)] = body.as_slice() else {
+            panic!("unexpected binding-propagation body: {body:?}");
+        };
+        assert!(matches!(prop_value, Expr::Call(19, args, Type::Enum(_, 1)) if args.is_empty()), "{prop_value:?}");
+        assert_eq!(prop_ty, &Type::Enum("Maybe", 1));
+        assert_eq!(prop_fields, &[Type::Int]);
+        let Some((payload_slot, payload_ty)) = prop_bound else {
+            panic!("payload binding missing: {prop_bound:?}");
+        };
+        assert_eq!(payload_ty, &Type::Int);
+        assert!(matches!(ret_expr, Expr::EnumLit(_, _, 0, vals)
+            if matches!(&**vals, [Expr::Variable(vs, Type::Int, ..)] if vs == payload_slot)), "{ret_expr:?}");
         parser.return_type = Type::Int;
         parser.seek_scalar_offset(source.find("{ let reading =").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local enum match").unwrap();
