@@ -454,6 +454,19 @@ fn describe_spelling(
     }
 }
 
+/// The LSP SymbolKind number for a def kind (12 function, 23 struct,
+/// 10 enum, 11 trait, 2 module-ish impl, 13 variable fallback).
+fn symbol_kind_number(kind: ae_resolve::DefKind) -> u32 {
+    match kind {
+        ae_resolve::DefKind::Function => 12,
+        ae_resolve::DefKind::Struct => 23,
+        ae_resolve::DefKind::Enum => 10,
+        ae_resolve::DefKind::Trait => 11,
+        ae_resolve::DefKind::Impl => 2,
+        _ => 13,
+    }
+}
+
 /// An imported function's declared signature, sliced from its own module's
 /// source (`fn name(params) -> ret`) — the entry-side def table has no
 /// parameter spellings for imported items.
@@ -597,6 +610,20 @@ impl LspServer {
                     map.insert("uri".to_owned(), JsonValue::String(location.uri));
                     map.insert("range".to_owned(), Self::range_to_json(&location.range));
                     JsonValue::Object(map)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(items))
+            }
+            "workspace/symbol" => {
+                let query = params.and_then(|p| p.get("query")).and_then(|q| q.as_str()).unwrap_or("").to_lowercase();
+                let items: Vec<JsonValue> = self.workspace_symbols(&query).into_iter().map(|(uri, name, kind, range)| {
+                    let mut location = BTreeMap::new();
+                    location.insert("uri".to_owned(), JsonValue::String(uri));
+                    location.insert("range".to_owned(), Self::range_to_json(&range));
+                    let mut symbol = BTreeMap::new();
+                    symbol.insert("name".to_owned(), JsonValue::String(name));
+                    symbol.insert("kind".to_owned(), JsonValue::Number(kind as f64));
+                    symbol.insert("location".to_owned(), JsonValue::Object(location));
+                    JsonValue::Object(symbol)
                 }).collect();
                 Self::make_response(id, JsonValue::Array(items))
             }
@@ -815,22 +842,12 @@ impl LspServer {
             return Vec::new();
         };
         let resolution = &resolution.2;
-        let kind_number = |kind: ae_resolve::DefKind| -> u32 {
-            match kind {
-                ae_resolve::DefKind::Function => 12,
-                ae_resolve::DefKind::Struct => 23,
-                ae_resolve::DefKind::Enum => 10,
-                ae_resolve::DefKind::Trait => 11,
-                ae_resolve::DefKind::Impl => 2,
-                _ => 13,
-            }
-        };
         resolution.defs.iter().filter(|def| {
             !def.imported && !def.kind.is_local()
         }).map(|def| {
             let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
             let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
-            (def.name.clone(), kind_number(def.kind), Range { start, end })
+            (def.name.clone(), symbol_kind_number(def.kind), Range { start, end })
         }).collect()
     }
 
@@ -869,6 +886,28 @@ impl LspServer {
             }
         }
         locations
+    }
+
+    /// R3d: workspace-wide symbol search over every open document's def
+    /// table — file-local items whose name contains the query
+    /// (case-insensitive), each with its own document's URI and name range.
+    fn workspace_symbols(&self, query: &str) -> Vec<(String, String, u32, Range)> {
+        let mut out = Vec::new();
+        for (uri, doc) in &self.documents {
+            let Some(resolution) = doc.resolution() else { continue };
+            let resolution = &resolution.2;
+            for def in &resolution.defs {
+                if def.imported || def.kind.is_local() {
+                    continue;
+                }
+                if def.name.to_lowercase().contains(query) {
+                    let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+                    let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+                    out.push((uri.clone(), def.name.clone(), symbol_kind_number(def.kind), Range { start, end }));
+                }
+            }
+        }
+        out
     }
 
     /// R3d: the def's own range is the definition site. Imported defs carry

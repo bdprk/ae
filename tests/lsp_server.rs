@@ -381,3 +381,21 @@ fn lsp_references_from_the_def_table() {
     let items = val.get("result").and_then(|r| r.as_array()).unwrap();
     assert_eq!(items.len(), 2, "declaration excluded");
 }
+
+#[test]
+fn lsp_workspace_symbol_searches_open_documents() {
+    let mut server = LspServer::new();
+    let open_a = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.ae","version":1,"text":"fn area(p: &Point) -> i64 { return p.x; }"}}}"#;
+    server.handle_message(open_a);
+    let open_b = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///b.ae","version":1,"text":"fn perimeter(p: &Point) -> i64 { return p.x * 4; }"}}}"#;
+    server.handle_message(open_b);
+
+    let sym_req = r#"{"jsonrpc":"2.0","id":15,"method":"workspace/symbol","params":{"query":"PERIM"}}"#;
+    let resps = server.handle_message(sym_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let hits: Vec<&str> = items.iter().filter_map(|i| i.get("name").and_then(|n| n.as_str())).collect();
+    assert_eq!(hits, vec!["perimeter"], "case-insensitive query hit: {hits:?}");
+    let uri = items[0].get("location").and_then(|l| l.get("uri")).and_then(|u| u.as_str()).unwrap();
+    assert_eq!(uri, "file:///b.ae");
+}
