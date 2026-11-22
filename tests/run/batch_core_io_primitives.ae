@@ -1,7 +1,7 @@
 use "../../std/core/stream_chunk.ae";
-use "../../std/core/io_error_kind.ae";
-use "../../std/core/io_mode.ae";
-use "../../std/core/io_seek.ae";
+use "../../std/std/io_error_kind.ae";
+use "../../std/std/io_mode.ae";
+use "../../std/std/io_seek.ae";
 
 fn main() {
     let c0 = stream_chunk_new(0, 1024, false);

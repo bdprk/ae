@@ -1,5 +1,5 @@
 use "../../std/core/ascii_case.ae";
-use "../../std/core/tokenizer_state.ae";
+use "../../std/compiler/tokenizer_state.ae";
 use "../../std/core/path_parser.ae";
 use "../../std/core/leb128_decode.ae";
 

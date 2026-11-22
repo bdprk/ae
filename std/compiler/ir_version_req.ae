@@ -1,0 +1,105 @@
+// std/compiler/ir_version_req.ae
+// The three dependency requirement forms a manifest needs (exact, caret,
+// tilde) and their matching rules. A caret requirement follows SemVer's
+// special case for pre-1.0 versions: ^0.2.3 stops at 0.3.0, ^0.0.3 is exact.
+
+use "ir_semver_order.ae";
+
+pub fn req_kind_exact() -> i64 {
+    return 1;
+}
+
+pub fn req_kind_caret() -> i64 {
+    return 2;
+}
+
+pub fn req_kind_tilde() -> i64 {
+    return 3;
+}
+
+pub fn req_kind_is_known(kind: i64) -> bool {
+    return kind >= req_kind_exact() && kind <= req_kind_tilde();
+}
+
+pub fn req_exact_allows(base: SemVerOrder, candidate: SemVerOrder) -> bool {
+    return semver_cmp_fields(base.major, base.minor, base.patch, base.pre, candidate.major, candidate.minor, candidate.patch, candidate.pre) == 0;
+}
+
+pub fn req_caret_allows(base: SemVerOrder, candidate: SemVerOrder) -> bool {
+    if base.major > 0 {
+        // ^1.2.3 := >=1.2.3 <2.0.0
+        if candidate.major != base.major {
+            return false;
+        }
+        return semver_cmp_fields(candidate.major, candidate.minor, candidate.patch, candidate.pre, base.major, base.minor, base.patch, base.pre) >= 0;
+    }
+    if base.minor > 0 {
+        // ^0.2.3 := >=0.2.3 <0.3.0
+        if candidate.major != 0 {
+            return false;
+        }
+        if candidate.minor != base.minor {
+            return false;
+        }
+        return semver_cmp_fields(candidate.major, candidate.minor, candidate.patch, candidate.pre, base.major, base.minor, base.patch, base.pre) >= 0;
+    }
+    // ^0.0.3 := exactly 0.0.3
+    return candidate.major == 0 && candidate.minor == 0 && candidate.patch == base.patch;
+}
+
+pub fn req_tilde_allows(base: SemVerOrder, candidate: SemVerOrder) -> bool {
+    // ~1.2.3 := >=1.2.3 <1.3.0
+    if candidate.major != base.major {
+        return false;
+    }
+    if candidate.minor != base.minor {
+        return false;
+    }
+    return semver_cmp_fields(candidate.major, candidate.minor, candidate.patch, candidate.pre, base.major, base.minor, base.patch, base.pre) >= 0;
+}
+
+pub fn req_matches(kind: i64, base: SemVerOrder, candidate: SemVerOrder) -> bool {
+    // An unknown requirement kind matches nothing: failing closed is the only
+    // safe default when the manifest carries a form this compiler cannot read.
+    // The operands are copied out first because each branch would otherwise move
+    // a value the next branch still names.
+    let bm = base.major;
+    let bn = base.minor;
+    let bp = base.patch;
+    let br = base.pre;
+    let cm = candidate.major;
+    let cn = candidate.minor;
+    let cp = candidate.patch;
+    let cr = candidate.pre;
+    if kind == req_kind_exact() {
+        return req_exact_allows(semver_order(bm, bn, bp, br), semver_order(cm, cn, cp, cr));
+    }
+    if kind == req_kind_caret() {
+        return req_caret_allows(semver_order(bm, bn, bp, br), semver_order(cm, cn, cp, cr));
+    }
+    if kind == req_kind_tilde() {
+        return req_tilde_allows(semver_order(bm, bn, bp, br), semver_order(cm, cn, cp, cr));
+    }
+    return false;
+}
+
+pub fn req_allows_prerelease(base: SemVerOrder, candidate: SemVerOrder) -> bool {
+    // A prerelease only satisfies a requirement that itself names a prerelease;
+    // otherwise 1.0.0-rc.1 would silently satisfy ^1.0.0.
+    if !semver_is_prerelease(candidate) {
+        return true;
+    }
+    return semver_is_prerelease(base);
+}
+
+pub fn req_caret_upper_bound_ok(base: SemVerOrder, candidate: SemVerOrder) -> bool {
+    // Reports only the upper bound half of the caret rule, which is what a
+    // resolver needs when it already knows the candidate is >= base.
+    if base.major > 0 {
+        return candidate.major == base.major;
+    }
+    if base.minor > 0 {
+        return candidate.major == 0 && candidate.minor == base.minor;
+    }
+    return candidate.major == 0 && candidate.minor == 0 && candidate.patch == base.patch;
+}

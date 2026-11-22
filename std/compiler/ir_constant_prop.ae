@@ -1,0 +1,48 @@
+// std/compiler/ir_constant_prop.ae
+// Compiler lattice value representation for sparse conditional constant propagation (SCCP).
+
+pub struct LatticeValue {
+    tag: i64,      // 0=Top (Uninitialized), 1=Constant, 2=Bottom (Variable/Overdefined)
+    constant_val: i64,
+}
+
+pub fn lattice_top() -> LatticeValue {
+    return LatticeValue { tag: 0, constant_val: 0 };
+}
+
+pub fn lattice_constant(val: i64) -> LatticeValue {
+    return LatticeValue { tag: 1, constant_val: val };
+}
+
+pub fn lattice_bottom() -> LatticeValue {
+    return LatticeValue { tag: 2, constant_val: 0 };
+}
+
+pub fn lattice_is_constant(l: LatticeValue) -> bool {
+    return l.tag == 1;
+}
+
+pub fn lattice_get_constant(l: LatticeValue) -> i64 {
+    return l.constant_val;
+}
+
+pub fn lattice_meet(l1: LatticeValue, l2: LatticeValue) -> LatticeValue {
+    let t1 = l1.tag;
+    let v1 = l1.constant_val;
+    let t2 = l2.tag;
+    let v2 = l2.constant_val;
+
+    if t1 == 0 {
+        return LatticeValue { tag: t2, constant_val: v2 };
+    }
+    if t2 == 0 {
+        return LatticeValue { tag: t1, constant_val: v1 };
+    }
+    if t1 == 1 && t2 == 1 {
+        if v1 == v2 {
+            return LatticeValue { tag: 1, constant_val: v1 };
+        }
+        return LatticeValue { tag: 2, constant_val: 0 };
+    }
+    return LatticeValue { tag: 2, constant_val: 0 };
+}

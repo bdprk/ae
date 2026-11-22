@@ -296,6 +296,92 @@ impl Parser<'_> {
             .unwrap_or_else(|| { self.generics.threads.push(ret); self.generics.threads.len() - 1 })
     }
 
+    fn specialization_type_arguments(
+        &mut self,
+        name_offset: usize,
+        limit: usize,
+        parse_argument: impl Fn(&mut Self, usize) -> Result<Type, ae_span::Diagnostic>,
+    ) -> Result<Vec<Type>, ae_span::Diagnostic> {
+        let shared = self.shared_specialization_arguments(name_offset);
+        if let Some(ranges) = shared.as_deref() {
+            if ranges.len() <= limit {
+                if let Some(end) = self.resolved_specialization_end(ranges) {
+                    if let Some(arguments) = self.shared_specialization_types(ranges) {
+                        self.pos = end;
+                        return Ok(arguments);
+                    }
+                }
+            }
+        }
+        self.pos += 1;
+        let mut arguments = Vec::new();
+        if let Some(ranges) = shared {
+            // Use the shared argument boundaries while the compiler resolves types.
+            // If a type ends earlier in the typed grammar, finish at that cursor
+            // with the same delimiter and diagnostics as the token path.
+            for (index, range) in ranges.iter().enumerate() {
+                if self.tokens[self.pos].offset != range.start {
+                    break;
+                }
+                arguments.push(parse_argument(self, index)?);
+                let last = index + 1 == ranges.len();
+                let delimiter = if last { Kind::RBracket } else { Kind::Comma };
+                if self.tokens[self.pos - 1].end == range.end && *self.current() == delimiter {
+                    self.pos += 1;
+                    if last {
+                        return Ok(arguments);
+                    }
+                    continue;
+                }
+                if *self.current() != Kind::Comma {
+                    self.take(Kind::RBracket)?;
+                    return Ok(arguments);
+                }
+                self.pos += 1;
+                break;
+            }
+        }
+        loop {
+            arguments.push(parse_argument(self, arguments.len())?);
+            if *self.current() != Kind::Comma {
+                break;
+            }
+            self.pos += 1;
+        }
+        self.take(Kind::RBracket)?;
+        Ok(arguments)
+    }
+
+    // Verify the exact token boundaries before trusting the indexed types.
+    // The caller remains at the committed specialization site.
+    fn resolved_specialization_end(&self, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
+        if ranges.is_empty() || *self.current() != Kind::LBracket {
+            return None;
+        }
+        let mut cursor = self.pos + 1;
+        for (index, range) in ranges.iter().enumerate() {
+            if self.tokens.get(cursor)?.offset != range.start {
+                return None;
+            }
+            let end = self.tokens.partition_point(|token| token.offset < range.end);
+            let delimiter = if index + 1 == ranges.len() { Kind::RBracket } else { Kind::Comma };
+            if end <= cursor || self.tokens[end - 1].end != range.end || self.tokens.get(end)?.kind != delimiter {
+                return None;
+            }
+            cursor = end + 1;
+        }
+        Some(cursor)
+    }
+
+    const MAX_GENERIC_CALL_TYPE_ARGUMENTS: usize = 8;
+
+    fn generic_call_type_argument(&mut self, count: usize) -> Result<Type, ae_span::Diagnostic> {
+        if count >= Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS {
+            return Err(self.fail("type argument limit exceeded (8)"));
+        }
+        self.named_type()
+    }
+
     pub(super) fn expression(&mut self, min: u8, moving: bool) -> Result<(Expr, Type), ae_span::Diagnostic> {
         if self.expression_depth == 0 {
             self.expression_nodes = 0;
@@ -341,7 +427,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 let power = prefix_binding_power(&operator).expect("prefix operator");
                 let (operand, ty) = self.expression(power, false)?;
-                self.lower_prefix(operator, (operand, ty), (line, column))?
+                self.lower_prefix(operator, (operand, ty), (line, column), None)?
             }
             // A borrow expression exists only to be cast (M2.12 slice 2):
             // `&expr as *const T` takes the address of addressable storage.
@@ -357,45 +443,14 @@ impl Parser<'_> {
                     return Err(self.fail("only the address of a local variable can be taken; bind the value to a variable first"));
                 }
                 if let Expr::Variable(id, ..) = &operand {
-                    // A mutable borrow writes through the pointer, so the
-                    // variable must be a `var` binding — the same rule the
-                    // `&mut Struct` borrow takes (ADR-0185).
-                    if mutable_borrow {
-                        let mutable = self.names.values().find(|slot| slot.0 == *id)
-                            .map(|slot| slot.1)
-                            .ok_or_else(|| self.fail("internal: pointer operand vanished"))?;
-                        if !mutable {
-                            return Err(self.fail("cannot take a mutable pointer to an immutable binding; declare it with 'var'"));
-                        }
-                    }
+                    self.check_address_binding(*id, mutable_borrow)?;
                 }
                 if *self.current() != Kind::As {
                     return Err(self.fail("a borrow expression must be cast to a pointer; write '&expr as *const T' or '&mut expr as *mut T'"));
                 }
                 self.pos += 1;
-                self.take(Kind::Star)?;
-                let pointee = if mutable_borrow {
-                    self.take(Kind::Mut)?;
-                    self.named_type()?
-                } else {
-                    self.take(Kind::Const)?;
-                    self.named_type()?
-                };
-                if pointee != ty {
-                    return Err(self.fail(&format!("cannot cast &{} to *{}{}; reinterpret casts do not exist yet", ty.name(), if mutable_borrow { "mut " } else { "const " }, pointee.name())));
-                }
-                // The pointer's borrow is untracked (the borrow checker sees
-                // no registration), so the pointee must be a value that can
-                // neither move nor release: a dangling pointer may only arise
-                // inside unsafe, never from a safe cast (spec hard rule 3).
-                if ty.owned() {
-                    return Err(self.fail("a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
-                }
-                if mutable_borrow {
-                    (Expr::BorrowAs(Box::new(operand), true, line, column), Type::PtrMut(super::intern_pointee(ty)))
-                } else {
-                    (Expr::BorrowAs(Box::new(operand), false, line, column), Type::Ptr(super::intern_pointee(ty)))
-                }
+                let (_, pointee) = self.pointer_cast_pointee(Some(mutable_borrow))?;
+                self.lower_address_cast(operand, ty, pointee, mutable_borrow, (line, column))?
             }
             Kind::Ident(name) => {
                 let name_offset = self.tokens[self.pos].offset;
@@ -419,14 +474,7 @@ impl Parser<'_> {
                                 // `vec`, all f64 is `vec[f64]` (ADR-61). Mixing
                                 // them is an error — the language has no implicit
                                 // conversion, including inside a literal.
-                                match element_ty {
-                                    None => {
-                                        if ty == Type::Int || ty == Type::F64 { element_ty = Some(ty); }
-                                        else { return Err(parser.fail(&format!("vector elements must be i64 or f64, found {}", ty.name()))); }
-                                    }
-                                    Some(same) if ty == same => {}
-                                    Some(same) => return Err(parser.fail(&format!("vector elements must all be {}; {} does not convert implicitly", same.name(), ty.name()))),
-                                }
+                                element_ty = Some(parser.check_numeric_vector_element(element_ty, ty)?);
                                 Ok(element)
                             },
                             |parser| {
@@ -525,9 +573,7 @@ impl Parser<'_> {
                     // Option[string]::Some and Option[i64]::Some are different
                     // variants of different types (ADR-21).
                     let gid = self.generics.names[&name];
-                    self.pos += 1;
-                    let args = self.read_type_arguments(Self::type_argument)?;
-                    self.take(Kind::RBracket)?;
+                    let args = self.specialization_type_arguments(name_offset, usize::MAX, |parser, _| parser.type_argument())?;
                     let eid = self.instantiate_enum(gid, args.clone(), name_offset)?;
                     // `::` after the arguments: a variant name stays a variant
                     // path (enum_literal consumes `::` itself); anything else
@@ -572,9 +618,7 @@ impl Parser<'_> {
                     // Generic struct literal: the arguments pick the layout, so
                     // Pair[string, i64] and Pair[i64, i64] are different types.
                     let gid = self.generics.struct_names[&name];
-                    self.pos += 1;
-                    let args = self.read_type_arguments(Self::named_type)?;
-                    self.take(Kind::RBracket)?;
+                    let args = self.specialization_type_arguments(name_offset, usize::MAX, |parser, _| parser.named_type())?;
                     let sid = self.instantiate_struct(gid, args, name_offset)?;
                     self.require_public("struct", &self.structs[sid].name.clone(), &self.structs[sid].file.clone(), self.structs[sid].public)?;
                     if *self.current() == Kind::ColonColon {
@@ -605,7 +649,10 @@ impl Parser<'_> {
                         // still owns chaining (Pair[string, i64]::new(..).m()).
                         (Expr::Call(id, call_args, ret), ret)
                     } else if *self.current() == Kind::LBrace {
-                        self.struct_literal(sid, name_offset)?
+                        match self.lower_committed_specialized_struct(sid) {
+                            Some(value) => value,
+                            None => self.struct_literal(sid, name_offset)?,
+                        }
                     } else {
                         return Err(self.error_at(name_offset, &format!("'{}' is a struct; construct it with '{}{{ ... }}'", self.structs[sid].name.clone(), self.structs[sid].name.clone())));
                     }
@@ -894,7 +941,7 @@ impl Parser<'_> {
                     let (line, col) = (vline, vcol);
                     let at = self.tokens[self.pos - 1].offset;
                     self.take(Kind::LParen)?;
-                    let (callable, callable_ty) = self.expression(0, false)?;
+                    let (callable, callable_ty) = self.spawn_callable()?;
                     self.take(Kind::RParen)?;
                     // The thread runs the callable once with no arguments: the
                     // data it needs travels in its owned captures
@@ -1374,26 +1421,14 @@ impl Parser<'_> {
                     if *self.current() != Kind::LBracket {
                         return Err(self.error_at(name_offset, &format!("'{name}' is a generic function; write its type arguments, e.g. {name}[i64](...)")));
                     }
-                    self.pos += 1;
-                    let type_args = ae_syntax::parse_comma_list(
-                        self,
-                        |parser, count| {
-                            if count >= 8 {
-                                return Err(parser.fail("type argument limit exceeded (8)"));
-                            }
-                            parser.named_type()
-                        },
-                        |parser| {
-                            if *parser.current() != Kind::Comma {
-                                return false;
-                            }
-                            parser.pos += 1;
-                            true
-                        },
+                    let type_args = self.specialization_type_arguments(
+                        name_offset, Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS, Self::generic_call_type_argument,
                     )?;
-                    self.take(Kind::RBracket)?;
                     let (id, types, ret) = self.instantiate_fn(gid, type_args, name_offset)?;
-                    let args = self.call_arguments(&name, &types)?;
+                    let args = match self.lower_committed_specialized_arguments(&types) {
+                        Some(args) => args,
+                        None => self.call_arguments(&name, &types)?,
+                    };
                     (Expr::Call(id, args, ret), ret)
                 } else if matches!(self.names.get(&name), Some((_, _, Type::Closure(_)))) && *self.current() == Kind::LParen {
                     // A closure value is a name for its generated function:
@@ -1443,7 +1478,7 @@ impl Parser<'_> {
                     if let Type::Array(len) = ty {
                         let (line, col) = self.position(); self.take(Kind::LBracket)?;
                         let (index, index_ty) = self.expression(0, false)?;
-                        if index_ty != Type::Int { return Err(self.fail("array index must be an integer").with_code("E0201")); }
+                        self.check_array_index(operator_scalar(index_ty), None)?;
                         self.take(Kind::RBracket)?;
                         (Expr::Index(id, len, Box::new(index), line, col), Type::Int)
                     } else if (ty == Type::StrVec || ty == Type::StrVecRef) && *self.current() == Kind::LBracket {
@@ -1477,8 +1512,7 @@ impl Parser<'_> {
             // cast form. The operand must already be a pointer — value
             // conversions are to_f64/to_i64's territory — and the retag keeps
             // the address, so it is safe by itself; what the new view enables
-            // is the caller's business, and the U11 owned-pointee guard
-            // applies to the RESULT exactly as it does at a declaration.
+            // is the caller's business.
             if *self.current() == Kind::As {
                 if !matches!(&lhs.1, Type::Ptr(_) | Type::PtrMut(_)) {
                     // Not a pointer: leave the `as` for the enclosing borrow
@@ -1489,23 +1523,11 @@ impl Parser<'_> {
                     // keep `lhs` intact for whatever follows the loop.)
                     break;
                 }
-                let as_offset = self.tokens[self.pos].offset;
-                let (base, base_ty) = lhs;
+                let (base, _) = lhs;
                 self.pos += 1;
-                let target = self.pointer_type()?;
-                if !matches!(base_ty, Type::Ptr(_) | Type::PtrMut(_)) {
-                    if let Type::Ptr(pid) | Type::PtrMut(pid) = &target {
-                        let pointee = super::ptr_pointee(*pid);
-                        if pointee.owned() {
-                            return Err(self.error_at(as_offset, "a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
-                        }
-                    }
-                }
-                let mutable = matches!(target, Type::PtrMut(_));
-                let pointee_id = match &target {
-                    Type::Ptr(id) | Type::PtrMut(id) => *id,
-                    _ => unreachable!("pointer_type returns a pointer"),
-                };
+                let (mutable, pointee) = self.pointer_cast_pointee(None)?;
+                let pointee_id = super::intern_pointee(pointee);
+                let target = if mutable { Type::PtrMut(pointee_id) } else { Type::Ptr(pointee_id) };
                 let (line, column) = self.position();
                 lhs = (Expr::PtrCast(Box::new(base), mutable, pointee_id, line, column), target);
                 continue;
@@ -1540,9 +1562,7 @@ impl Parser<'_> {
                 if fname != "deref" {
                     return Err(self.fail(&format!("pointers have no method '{fname}'")));
                 }
-                if self.unsafe_depth == 0 {
-                    return Err(self.error_at(self.tokens[self.pos - 1].offset, "dereferencing a raw pointer requires 'unsafe'").with_code("E0700"));
-                }
+                self.check_pointer_deref(self.tokens[self.pos - 1].offset)?;
                 self.take(Kind::LParen)?;
                 self.take(Kind::RParen)?;
                 let (line, column) = self.position();
@@ -1816,7 +1836,76 @@ impl Parser<'_> {
         self.plus_operand_depth += 1;
         let parsed = self.expression(right_power, op == Kind::Plus);
         self.plus_operand_depth -= 1;
-        self.lower_infix(lhs, op, parsed?, (line, column))
+        self.lower_infix(lhs, op, parsed?, (line, column), None)
+    }
+
+    pub(super) fn check_numeric_vector_element(&self, previous: Option<Type>, actual: Type) -> Result<Type, ae_span::Diagnostic> {
+        match previous {
+            Some(expected) if expected == actual => Ok(actual),
+            Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(), actual.name()))),
+            None if matches!(actual, Type::Int | Type::F64) => Ok(actual),
+            None => Err(self.fail(&format!("vector elements must be i64 or f64, found {}", actual.name()))),
+        }
+    }
+
+    pub(super) fn check_address_binding(&self, id: usize, mutable: bool) -> Result<(), ae_span::Diagnostic> {
+        if mutable {
+            let binding = self.names.values().find(|slot| slot.0 == id)
+                .ok_or_else(|| self.fail("internal: pointer operand vanished"))?;
+            if !binding.1 {
+                return Err(self.fail("cannot take a mutable pointer to an immutable binding; declare it with 'var'"));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn lower_address_cast(
+        &self, operand: Expr, ty: Type, pointee: Type, mutable: bool, (line, column): (usize, usize),
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if pointee != ty {
+            return Err(self.fail(&format!("cannot cast &{} to *{}{}; reinterpret casts do not exist yet", ty.name(), if mutable { "mut " } else { "const " }, pointee.name())));
+        }
+        // Raw pointer borrows are untracked, so moving an owned pointee
+        // would let safe code leave the pointer dangling.
+        if ty.owned() {
+            return Err(self.fail("a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
+        }
+        let id = super::intern_pointee(ty);
+        let pointer = if mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
+        Ok((Expr::BorrowAs(Box::new(operand), mutable, line, column), pointer))
+    }
+
+    pub(super) fn check_array_index(
+        &mut self,
+        scalar: Option<ae_resolve::typecheck::Scalar>,
+        end: Option<usize>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if !ae_resolve::typecheck::valid_array_index(scalar) {
+            if let Some(end) = end {
+                self.seek_scalar_offset(end);
+            }
+            return Err(self.fail("array index must be an integer").with_code("E0201"));
+        }
+        Ok(())
+    }
+
+    fn operator_error(&self, error: ae_resolve::typecheck::OperatorError) -> ae_span::Diagnostic {
+        let diagnostic = self.fail(error.message());
+        if let Some(code) = error.code() { diagnostic.with_code(code) } else { diagnostic }
+    }
+
+    fn operator_type(
+        &self,
+        fact: Option<ae_resolve::resolve::ExpressionType>,
+        check: impl FnOnce() -> Result<ae_resolve::typecheck::Scalar, ae_resolve::typecheck::OperatorError>,
+    ) -> Result<Type, ae_span::Diagnostic> {
+        use ae_resolve::resolve::ExpressionType;
+        let result = match fact {
+            Some(ExpressionType::Checked(scalar)) => Ok(scalar),
+            Some(ExpressionType::Rejected(error)) => Err(error),
+            Some(ExpressionType::Deferred) | None => check(),
+        };
+        result.map(concrete_scalar).map_err(|error| self.operator_error(error))
     }
 
     pub(super) fn lower_prefix(
@@ -1824,14 +1913,15 @@ impl Parser<'_> {
         operator: Kind,
         (operand, ty): (Expr, Type),
         (line, column): (usize, usize),
+        fact: Option<ae_resolve::resolve::ExpressionType>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        if operator == Kind::Minus {
-            if !matches!(ty, Type::Int | Type::F64) { return Err(self.fail("unary '-' requires an i64 or f64 operand").with_code("E0203")); }
-            Ok((Expr::Neg(Box::new(operand), line, column), ty))
+        let ty = self.operator_type(fact, || ae_resolve::typecheck::prefix(&operator, operator_scalar(ty)))?;
+        let value = if operator == Kind::Minus {
+            Expr::Neg(Box::new(operand), line, column)
         } else {
-            if ty != Type::Bool { return Err(self.fail("'!' requires a boolean operand")); }
-            Ok((Expr::Not(Box::new(operand)), Type::Bool))
-        }
+            Expr::Not(Box::new(operand))
+        };
+        Ok((value, ty))
     }
 
     pub(super) fn lower_infix(
@@ -1840,67 +1930,46 @@ impl Parser<'_> {
         op: Kind,
         (rhs, rhs_ty): (Expr, Type),
         (line, column): (usize, usize),
+        fact: Option<ae_resolve::resolve::ExpressionType>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         let (lhs_expr, lhs_ty) = lhs;
-        let ty = match op {
-            Kind::And | Kind::Or => {
-                if lhs_ty != Type::Bool || rhs_ty != Type::Bool { return Err(self.fail(&format!("'{}' requires boolean operands", if op == Kind::And { "&&" } else { "||" }))); }
-                Type::Bool
+        let stringlike = |ty: Type| matches!(ty, Type::String | Type::StrView);
+        if matches!(op, Kind::EqEq | Kind::NotEq) && stringlike(lhs_ty) && stringlike(rhs_ty) {
+            return Ok((Expr::StrEq(Box::new(lhs_expr), Box::new(rhs), op == Kind::NotEq), Type::Bool));
+        }
+        let ty = if op == Kind::Plus && (stringlike(lhs_ty) || stringlike(rhs_ty)) {
+            if !stringlike(lhs_ty) || !stringlike(rhs_ty) {
+                return Err(self.fail("'+' requires two strings, two string views, or two integers"));
             }
-            Kind::Pipe | Kind::Caret | Kind::Amp | Kind::Shl | Kind::Shr => {
-                if lhs_ty != Type::Int || rhs_ty != Type::Int { return Err(self.fail("bitwise operator requires i64 operands")); }
-                Type::Int
+            // Concatenation consumes owned variables and copies borrowed views.
+            if let Expr::Variable(id, Type::String, ..) = &lhs_expr {
+                self.moved.insert(*id);
             }
-            Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq => {
-                let comparable = match (lhs_ty, rhs_ty) {
-                    (Type::Int, Type::Int) => true,
-                    (Type::F64, Type::F64) => true,
-                    (Type::Bool, Type::Bool) => op == Kind::EqEq || op == Kind::NotEq,
-                    (Type::String | Type::StrView, Type::String | Type::StrView) => op == Kind::EqEq || op == Kind::NotEq,
-                    _ => false,
-                };
-                if !comparable {
-                    return Err(self.fail("comparison requires two i64, two f64, or two strings/views with == or !=").with_code("E0202"));
-                }
-                // String/view equality gets a dedicated node so emission
-                // never confuses it with C pointer comparison.
-                if (op == Kind::EqEq || op == Kind::NotEq) && matches!(lhs_ty, Type::String | Type::StrView) {
-                    return Ok((Expr::StrEq(Box::new(lhs_expr), Box::new(rhs), op == Kind::NotEq), Type::Bool));
-                }
-                Type::Bool
-            }
-            Kind::Plus if matches!(lhs_ty, Type::String | Type::StrView) || matches!(rhs_ty, Type::String | Type::StrView) => {
-                // `+` builds a new owned string. Two views are read only and
-                // copied into the result, so no view can be consumed.
-                let stringlike = |ty: Type| matches!(ty, Type::String | Type::StrView);
-                if !stringlike(lhs_ty) || !stringlike(rhs_ty) { return Err(self.fail("'+' requires two strings, two string views, or two integers")); }
-                // The left operand was parsed in the caller's mode; using it
-                // here consumes it, so retroactively record the move. Only a
-                // plain owned variable is consumed: fields, vector elements
-                // and views are borrowed and get copied by the emitter. The
-                // right operand follows the same rule.
-                if lhs_ty == Type::String {
-                    if let Expr::Variable(id, ty, _, _) = &lhs_expr {
-                        if ty.owned() && !self.moved.contains(id) { self.moved.insert(*id); }
-                    }
-                }
-                Type::String
-            }
-            _ => {
-                if lhs_ty == Type::F64 || rhs_ty == Type::F64 {
-                    if lhs_ty != Type::F64 || rhs_ty != Type::F64 {
-                        return Err(self.fail("mixed i64/f64 arithmetic is not allowed; convert one side explicitly with to_f64 or to_i64"));
-                    }
-                    if op == Kind::Percent {
-                        return Err(self.fail("'%' is defined for i64 operands only"));
-                    }
-                    Type::F64
-                } else {
-                    if lhs_ty != Type::Int || rhs_ty != Type::Int { return Err(self.fail("arithmetic requires integer operands").with_code("E0203")); }
-                    Type::Int
-                }
-            }
+            Type::String
+        } else {
+            self.operator_type(fact, || {
+                ae_resolve::typecheck::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
+            })?
         };
         Ok((Expr::Binary(Box::new(lhs_expr), op, Box::new(rhs), line, column, ty), ty))
+    }
+}
+
+pub(super) fn operator_scalar(ty: Type) -> Option<ae_resolve::typecheck::Scalar> {
+    use ae_resolve::typecheck::Scalar;
+    match ty {
+        Type::Int => Some(Scalar::Int),
+        Type::F64 => Some(Scalar::Float),
+        Type::Bool => Some(Scalar::Bool),
+        _ => None,
+    }
+}
+
+fn concrete_scalar(ty: ae_resolve::typecheck::Scalar) -> Type {
+    use ae_resolve::typecheck::Scalar;
+    match ty {
+        Scalar::Int => Type::Int,
+        Scalar::Float => Type::F64,
+        Scalar::Bool => Type::Bool,
     }
 }

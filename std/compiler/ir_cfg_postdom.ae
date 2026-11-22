@@ -1,0 +1,28 @@
+// std/compiler/ir_cfg_postdom.ae
+// Compiler post-dominator tree and control dependence calculator primitives.
+
+pub struct PostDomNode {
+    block_id: i64,
+    ipostdom_id: i64,
+    postdom_depth: i64,
+}
+
+pub fn postdom_node_new(block: i64, ipostdom: i64, depth: i64) -> PostDomNode {
+    return PostDomNode {
+        block_id: block,
+        ipostdom_id: ipostdom,
+        postdom_depth: depth,
+    };
+}
+
+pub fn postdom_is_exit(n: PostDomNode) -> bool {
+    return n.ipostdom_id == n.block_id;
+}
+
+pub fn postdom_depth(n: PostDomNode) -> i64 {
+    return n.postdom_depth;
+}
+
+pub fn postdom_ipostdom(n: PostDomNode) -> i64 {
+    return n.ipostdom_id;
+}

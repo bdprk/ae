@@ -1,7 +1,7 @@
-use "../../std/core/ir_eh_pe.ae";
-use "../../std/core/ir_cfi.ae";
-use "../../std/core/ir_cfi_state.ae";
-use "../../std/core/ir_lsda.ae";
+use "../../std/compiler/ir_eh_pe.ae";
+use "../../std/compiler/ir_cfi.ae";
+use "../../std/compiler/ir_cfi_state.ae";
+use "../../std/compiler/ir_lsda.ae";
 
 fn main() {
     // Pointer encodings: format nibble, pcrel bit, indirect bit, field width.

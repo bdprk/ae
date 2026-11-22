@@ -1,0 +1,26 @@
+// std/compiler/keyword_matcher.ae
+// Compiler keyword prefix matching primitives for lexers.
+
+pub fn is_keyword_byte_match(b: i64, expected: i64) -> bool {
+    return b == expected;
+}
+
+pub fn keyword_len_fn() -> i64 {
+    // "fn" has length 2
+    return 2;
+}
+
+pub fn keyword_len_let() -> i64 {
+    // "let" has length 3
+    return 3;
+}
+
+pub fn keyword_len_struct() -> i64 {
+    // "struct" has length 6
+    return 6;
+}
+
+pub fn keyword_len_match() -> i64 {
+    // "match" has length 5
+    return 5;
+}

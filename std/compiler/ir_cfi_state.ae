@@ -1,0 +1,68 @@
+// std/compiler/ir_cfi_state.ae
+// The unwinder's CFA state machine: one row per address range, advanced by the
+// CFI opcodes. This models the CFA register and offset plus the
+// remember/restore stack depth that DW_CFA_remember_state and
+// DW_CFA_restore_state drive; per-register rules are not modelled.
+
+pub struct CfaRow {
+    cfa_reg: i64,
+    cfa_offset: i64,
+    has_cfa: bool,
+    remembered: i64,
+}
+
+pub fn cfa_row_init() -> CfaRow {
+    // x86-64 System V: at function entry the CFA is the stack pointer plus the
+    // eight bytes of return address.
+    return CfaRow { cfa_reg: 7, cfa_offset: 8, has_cfa: true, remembered: 0 };
+}
+
+pub fn cfa_row_def_cfa(row: CfaRow, reg: i64, offset: i64) -> CfaRow {
+    return CfaRow { cfa_reg: reg, cfa_offset: offset, has_cfa: true, remembered: row.remembered };
+}
+
+pub fn cfa_row_def_cfa_register(row: CfaRow, reg: i64) -> CfaRow {
+    // Keeps the offset: only the base register moves.
+    return CfaRow { cfa_reg: reg, cfa_offset: row.cfa_offset, has_cfa: row.has_cfa, remembered: row.remembered };
+}
+
+pub fn cfa_row_def_cfa_offset(row: CfaRow, offset: i64) -> CfaRow {
+    // Keeps the register: only the offset moves.
+    return CfaRow { cfa_reg: row.cfa_reg, cfa_offset: offset, has_cfa: row.has_cfa, remembered: row.remembered };
+}
+
+pub fn cfa_row_remember(row: CfaRow) -> CfaRow {
+    return CfaRow { cfa_reg: row.cfa_reg, cfa_offset: row.cfa_offset, has_cfa: row.has_cfa, remembered: row.remembered + 1 };
+}
+
+pub fn cfa_row_restore(row: CfaRow) -> CfaRow {
+    // A restore with an empty stack is malformed input, not a crash: the depth
+    // floors at zero and the unwind continues with the current row.
+    if row.remembered <= 0 {
+        return CfaRow { cfa_reg: row.cfa_reg, cfa_offset: row.cfa_offset, has_cfa: row.has_cfa, remembered: 0 };
+    }
+    return CfaRow { cfa_reg: row.cfa_reg, cfa_offset: row.cfa_offset, has_cfa: row.has_cfa, remembered: row.remembered - 1 };
+}
+
+pub fn cfa_row_is_usable(row: CfaRow) -> bool {
+    // Without a defined CFA the unwinder cannot continue past this frame.
+    return row.has_cfa && row.cfa_reg >= 0 && row.cfa_offset >= 0;
+}
+
+pub fn cfa_row_canonical_address(row: CfaRow, stack_pointer: i64) -> i64 {
+    // CFA = stack pointer + offset, the definition the row is named after.
+    return stack_pointer + row.cfa_offset;
+}
+
+pub fn cfa_row_same_state(a: CfaRow, b: CfaRow) -> bool {
+    // The remember stack is bookkeeping, not part of the frame state a caller
+    // observes, so two rows with the same CFA are the same row.
+    return a.cfa_reg == b.cfa_reg && a.cfa_offset == b.cfa_offset && a.has_cfa == b.has_cfa;
+}
+
+pub fn cfa_row_max_depth(row: CfaRow, limit: i64) -> bool {
+    if limit <= 0 {
+        return false;
+    }
+    return row.remembered > limit;
+}

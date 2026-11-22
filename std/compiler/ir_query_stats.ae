@@ -1,0 +1,71 @@
+// std/compiler/ir_query_stats.ae
+// Accounting for one compilation session: how many queries were recomputed and
+// how many were reused, plus the red/green node split. The permille helpers keep
+// the rates in integer arithmetic so a report never depends on float formatting.
+
+pub struct QueryStats {
+    recomputed: i64,
+    reused: i64,
+    red_nodes: i64,
+    green_nodes: i64,
+}
+
+pub fn make_query_stats() -> QueryStats {
+    return QueryStats { recomputed: 0, reused: 0, red_nodes: 0, green_nodes: 0 };
+}
+
+pub fn stats_note_recompute(stats: QueryStats) -> QueryStats {
+    return QueryStats {
+        recomputed: stats.recomputed + 1,
+        reused: stats.reused,
+        red_nodes: stats.red_nodes + 1,
+        green_nodes: stats.green_nodes,
+    };
+}
+
+pub fn stats_note_reuse(stats: QueryStats) -> QueryStats {
+    return QueryStats {
+        recomputed: stats.recomputed,
+        reused: stats.reused + 1,
+        red_nodes: stats.red_nodes,
+        green_nodes: stats.green_nodes + 1,
+    };
+}
+
+pub fn stats_total(stats: QueryStats) -> i64 {
+    return stats.recomputed + stats.reused;
+}
+
+pub fn stats_reuse_permille(stats: QueryStats) -> i64 {
+    let total = stats.recomputed + stats.reused;
+    if total <= 0 {
+        return 0;
+    }
+    return stats.reused * 1000 / total;
+}
+
+pub fn stats_recompute_permille(stats: QueryStats) -> i64 {
+    let total = stats.recomputed + stats.reused;
+    if total <= 0 {
+        return 0;
+    }
+    return stats.recomputed * 1000 / total;
+}
+
+pub fn stats_exceeds_budget(stats: QueryStats, budget_permille: i64) -> bool {
+    // Budgets are expressed as a maximum share of recomputed queries, so a
+    // negative budget is treated as "no room" rather than ignored.
+    if budget_permille < 0 {
+        return true;
+    }
+    return stats_recompute_permille(stats) > budget_permille;
+}
+
+pub fn stats_merge(a: QueryStats, b: QueryStats) -> QueryStats {
+    return QueryStats {
+        recomputed: a.recomputed + b.recomputed,
+        reused: a.reused + b.reused,
+        red_nodes: a.red_nodes + b.red_nodes,
+        green_nodes: a.green_nodes + b.green_nodes,
+    };
+}

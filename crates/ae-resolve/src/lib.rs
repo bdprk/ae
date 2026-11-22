@@ -34,6 +34,7 @@
 pub mod dump;
 pub mod imports;
 pub mod module;
+pub mod typecheck;
 pub mod resolve;
 pub mod types;
 
@@ -305,6 +306,36 @@ fn main() {
             ("flagged".to_owned(), "bool".to_owned()),
             ("negated".to_owned(), "i64".to_owned()),
         ], "literals, copies, calls, struct literals, field reads, arithmetic, comparisons, logic and unary minus bind");
+
+        let operators = resolve_source(
+            "fn main() {\n    let bits = 1 & 3;\n    let equal = true == false;\n    let product = 1.5 * 2.0;\n    let remainder = 1.5 % 2.0;\n    let ordered = true < false;\n    let mixed = 1 + 2.0;\n}\n",
+        );
+        let inferred: Vec<_> = operators.defs.iter()
+            .filter(|entry| entry.kind == crate::DefKind::Binding)
+            .map(|entry| entry.inferred.as_ref().map(|ty| ty.describe()))
+            .collect();
+        assert_eq!(inferred, vec![
+            Some("i64".to_owned()), Some("bool".to_owned()), Some("f64".to_owned()),
+            None, None, None,
+        ]);
+
+        use crate::resolve::ExpressionType::{Checked, Deferred, Rejected};
+        use crate::typecheck::{OperatorError, Scalar};
+
+        let source = "fn scale(x: i64) -> i64 {\n    let n = x + 2;\n    let good = -(n * 3);\n    let bad = (1.5 % 2.0) + 3.0;\n    let later = scale(9) + 1;\n    return good;\n}\n";
+        let resolution = resolve_source(source);
+        let facts = &resolution.functions[0].expression_types;
+        let fact = |fragment: &str| {
+            let start = source.find(fragment).unwrap();
+            facts.get(&(start..start + fragment.len())).copied()
+        };
+        assert_eq!(fact("x + 2"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("n * 3"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("-(n * 3)"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("1.5 % 2.0"), Some(Rejected(OperatorError::FloatRemainder)));
+        assert_eq!(fact("(1.5 % 2.0) + 3.0"), Some(Deferred));
+        assert_eq!(fact("scale(9) + 1"), Some(Deferred));
+        assert!(resolution.diagnostics.is_empty());
     }
 
     #[test]

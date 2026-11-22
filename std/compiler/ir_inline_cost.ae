@@ -1,0 +1,30 @@
+// std/compiler/ir_inline_cost.ae
+// Compiler function inlining threshold and call-site cost calculator.
+
+pub struct InlineCandidate {
+    instruction_count: i64,
+    has_loops: bool,
+    call_depth: i64,
+}
+
+pub fn inline_candidate_new(insts: i64, loops: bool, depth: i64) -> InlineCandidate {
+    return InlineCandidate {
+        instruction_count: insts,
+        has_loops: loops,
+        call_depth: depth,
+    };
+}
+
+pub fn inline_cost_score(c: InlineCandidate) -> i64 {
+    var cost = c.instruction_count;
+    if c.has_loops {
+        cost = cost + 50; // heavy penalty for loops
+    }
+    cost = cost + c.call_depth * 10;
+    return cost;
+}
+
+pub fn inline_should_inline(c: InlineCandidate, budget: i64) -> bool {
+    let cost = inline_cost_score(c);
+    return cost <= budget;
+}

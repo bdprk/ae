@@ -1,7 +1,7 @@
-use "../../std/core/ast_node_kind.ae";
-use "../../std/core/scope_tree.ae";
-use "../../std/core/symbol_table.ae";
-use "../../std/core/type_unify.ae";
+use "../../std/compiler/ast_node_kind.ae";
+use "../../std/compiler/scope_tree.ae";
+use "../../std/compiler/symbol_table.ae";
+use "../../std/compiler/type_unify.ae";
 
 fn main() {
     assert(ast_node_kind_id(AstNodeKind::NodeFunction) == 1);

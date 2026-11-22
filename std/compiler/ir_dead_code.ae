@@ -1,0 +1,42 @@
+// std/compiler/ir_dead_code.ae
+// Compiler dead basic block and unreachable code elimination state primitives.
+
+pub struct ReachabilityMap {
+    reached_mask: i64,
+}
+
+pub fn reachability_map_new() -> ReachabilityMap {
+    return ReachabilityMap { reached_mask: 1 }; // entry block 0 is reachable
+}
+
+pub fn reachability_map_is_reached(m: ReachabilityMap, block_id: i64) -> bool {
+    if block_id < 0 || block_id >= 60 {
+        return false;
+    }
+    var mask = 1;
+    var i = 0;
+    while i < block_id {
+        mask = mask * 2;
+        i = i + 1;
+    }
+    let bit = (m.reached_mask / mask) % 2;
+    return bit == 1;
+}
+
+pub fn reachability_map_mark_reached(m: ReachabilityMap, block_id: i64) -> ReachabilityMap {
+    let cur_mask = m.reached_mask;
+    if block_id < 0 || block_id >= 60 {
+        return ReachabilityMap { reached_mask: cur_mask };
+    }
+    var mask = 1;
+    var i = 0;
+    while i < block_id {
+        mask = mask * 2;
+        i = i + 1;
+    }
+    let bit = (cur_mask / mask) % 2;
+    if bit == 0 {
+        return ReachabilityMap { reached_mask: cur_mask + mask };
+    }
+    return ReachabilityMap { reached_mask: cur_mask };
+}

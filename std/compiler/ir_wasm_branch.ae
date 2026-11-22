@@ -1,0 +1,22 @@
+// std/compiler/ir_wasm_branch.ae
+// Compiler WebAssembly structured control flow block/loop branch depth calculator.
+
+pub struct WasmBranchTarget {
+    label_relative_depth: i64,
+    is_loop_backedge: bool,
+}
+
+pub fn wasm_branch_new(depth: i64, is_loop: bool) -> WasmBranchTarget {
+    return WasmBranchTarget {
+        label_relative_depth: depth,
+        is_loop_backedge: is_loop,
+    };
+}
+
+pub fn wasm_branch_depth(b: WasmBranchTarget) -> i64 {
+    return b.label_relative_depth;
+}
+
+pub fn wasm_branch_is_loop(b: WasmBranchTarget) -> bool {
+    return b.is_loop_backedge;
+}

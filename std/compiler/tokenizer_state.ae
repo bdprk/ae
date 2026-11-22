@@ -1,0 +1,43 @@
+// std/compiler/tokenizer_state.ae
+// Lexer / Tokenizer cursor and peek state primitives for ae core.
+
+pub struct TokenizerState {
+    offset: i64,
+    line: i64,
+    col: i64,
+}
+
+pub fn tokenizer_new() -> TokenizerState {
+    return TokenizerState {
+        offset: 0,
+        line: 1,
+        col: 1,
+    };
+}
+
+pub fn tokenizer_offset(t: TokenizerState) -> i64 {
+    return t.offset;
+}
+
+pub fn tokenizer_line(t: TokenizerState) -> i64 {
+    return t.line;
+}
+
+pub fn tokenizer_col(t: TokenizerState) -> i64 {
+    return t.col;
+}
+
+pub fn tokenizer_advance_char(t: TokenizerState, is_newline: bool) -> TokenizerState {
+    if is_newline {
+        return TokenizerState {
+            offset: t.offset + 1,
+            line: t.line + 1,
+            col: 1,
+        };
+    }
+    return TokenizerState {
+        offset: t.offset + 1,
+        line: t.line,
+        col: t.col + 1,
+    };
+}

@@ -1,0 +1,17 @@
+// std/compiler/ir_asm_intel.ae
+// Compiler x86_64 Intel syntax text formatting and register naming lookup.
+
+pub fn asm_x64_reg_name(reg_idx: i64) -> i64 {
+    // 0=RAX, 1=RCX, 2=RDX, 3=RBX, 4=RSP, 5=RBP, 6=RSI, 7=RDI, 8=R8..15
+    return reg_idx;
+}
+
+pub fn asm_x64_is_callee_saved(reg_idx: i64) -> bool {
+    // RBX (3), RBP (5), R12 (12), R13 (13), R14 (14), R15 (15)
+    return reg_idx == 3 || reg_idx == 5 || (reg_idx >= 12 && reg_idx <= 15);
+}
+
+pub fn asm_x64_is_param_reg(reg_idx: i64) -> bool {
+    // SysV 6 params: RDI (7), RSI (6), RDX (2), RCX (1), R8 (8), R9 (9)
+    return reg_idx == 7 || reg_idx == 6 || reg_idx == 2 || reg_idx == 1 || reg_idx == 8 || reg_idx == 9;
+}

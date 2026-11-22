@@ -1,0 +1,22 @@
+// std/compiler/ir_asm_comment.ae
+// Compiler assembly comment emission and verbose IR annotation manager.
+
+pub struct AsmCommentState {
+    emit_comments: bool,
+    indent_level: i64,
+}
+
+pub fn asm_comment_new(enabled: bool, indent: i64) -> AsmCommentState {
+    return AsmCommentState {
+        emit_comments: enabled,
+        indent_level: indent,
+    };
+}
+
+pub fn asm_comment_should_emit(s: AsmCommentState) -> bool {
+    return s.emit_comments;
+}
+
+pub fn asm_comment_indent_spaces(s: AsmCommentState) -> i64 {
+    return s.indent_level * 4;
+}

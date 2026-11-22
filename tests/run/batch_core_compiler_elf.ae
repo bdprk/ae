@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_elf.ae
 // Verification of ELF64Header, SectionDescriptor, StrtabBuilder, and BranchRelaxation.
 
-use "../../std/core/ir_elf_header.ae";
-use "../../std/core/ir_section.ae";
-use "../../std/core/ir_strtab.ae";
-use "../../std/core/ir_branch_relax.ae";
+use "../../std/compiler/ir_elf_header.ae";
+use "../../std/compiler/ir_section.ae";
+use "../../std/compiler/ir_strtab.ae";
+use "../../std/compiler/ir_branch_relax.ae";
 
 fn main() {
     print("--- batch_core_compiler_elf test start ---");

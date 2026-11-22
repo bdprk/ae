@@ -310,3 +310,6 @@
 - 2026-11-21 20:55 战役收尾：完整段三台收数——evaluate-2 12100 seeds/0、evaluate-1 11599/0、eva 6536/0（合计 30235 seeds 零失败，时长 3600s 每台）；evaluate-3/WSL/Windows 收集时仍在跑且全程零失败（WSL 终值因树对齐时 git clean 误删打开中的日志而不可恢复——教训：树对齐前的 clean 要避开打开中的日志句柄）。机读记录 bench/results/2026-11-21-distributed-campaign/summary.json。全部已提交（自动推送）。
 
 - 2026-11-21 21:05 evaluate-3 链式段收集：start722356 = 11895 seeds / 0 failures（3.30 seeds/s，3 jobs）——700000 区间链合计 ~20k seeds 零失败（该盒自有 chainer 在我方段后续跑）。战役总计（完整段+链）42k+ seeds / 0 failures。已提交（自动推送）。
+
+
+- 2026-11-22 00:35 (+08:00): Completed R4.1 based on af717c9. Moved 146 std modules, leaving 115 core modules, 7 allocation modules, 126 compiler modules, and 13 hosted modules. Windows and Ubuntu each passed 484 workspace tests. Windows also passed 21 Python tests and byte parity for 50 C examples and 646 CLI invocations. The isolated Ubuntu sync passed layering, commit-ID, and generated-C sanitizer/leak checks.

@@ -1,7 +1,7 @@
 use "../../std/core/char_escape.ae";
-use "../../std/core/literal_num.ae";
-use "../../std/core/keyword_matcher.ae";
-use "../../std/core/operator_kind.ae";
+use "../../std/compiler/literal_num.ae";
+use "../../std/compiler/keyword_matcher.ae";
+use "../../std/compiler/operator_kind.ae";
 
 fn main() {
     assert(escape_char_to_byte(110) == 10); // 'n' -> '\n'

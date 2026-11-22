@@ -1,0 +1,26 @@
+// std/compiler/ir_block_order.ae
+// Compiler basic block layout and fall-through ordering heuristics.
+
+pub struct BlockOrderDecision {
+    current_block: i64,
+    next_fallthrough: i64,
+    branch_target: i64,
+    is_loop_header: bool,
+}
+
+pub fn block_order_new(cur: i64, fallthrough: i64, target: i64, loop_header: bool) -> BlockOrderDecision {
+    return BlockOrderDecision {
+        current_block: cur,
+        next_fallthrough: fallthrough,
+        branch_target: target,
+        is_loop_header: loop_header,
+    };
+}
+
+pub fn block_order_has_fallthrough(d: BlockOrderDecision) -> bool {
+    return d.next_fallthrough >= 0;
+}
+
+pub fn block_order_needs_jump(d: BlockOrderDecision) -> bool {
+    return d.branch_target >= 0 && d.branch_target != d.next_fallthrough;
+}

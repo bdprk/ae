@@ -1,0 +1,73 @@
+// std/compiler/ir_link_resolve.ae
+// Resolving references at link time: what a second definition does to a name,
+// what an unresolved name means at the end, and when an archive owes a member.
+
+use "ir_link_sym.ae";
+
+pub fn link_ok() -> i64 { return 0; }
+pub fn link_duplicate() -> i64 { return 1; }
+pub fn link_undefined() -> i64 { return 2; }
+
+pub struct LinkResolution {
+    code: i64,          // 0=ok, 1=duplicate definition, 2=undefined reference.
+    winner_obj: i64,    // Object whose definition stands, -1 when there is none.
+    winner_value: i64,
+}
+
+fn link_resolution(code: i64, winner_obj: i64, winner_value: i64) -> LinkResolution {
+    return LinkResolution { code: code, winner_obj: winner_obj, winner_value: winner_value };
+}
+
+/// Resolves one incoming symbol against the record already held for its name.
+pub fn link_resolve_pair(existing: LinkSymbol, incoming: LinkSymbol) -> LinkResolution {
+    // Copied out before the table call consumes both arguments.
+    let e_obj = existing.obj;
+    let e_value = existing.value;
+    let i_obj = incoming.obj;
+    let i_value = incoming.value;
+    let decision = link_sym_merge_decision(existing, incoming);
+    if decision == link_merge_conflict() {
+        // No winner is reported: naming one would invite a caller to link it.
+        return link_resolution(link_duplicate(), -1, 0);
+    }
+    if decision == link_merge_replace() {
+        return link_resolution(link_ok(), i_obj, i_value);
+    }
+    return link_resolution(link_ok(), e_obj, e_value);
+}
+
+/// The state of a name once every object has been offered. An undefined weak
+/// reference is legal and takes the value zero; everything else unresolved is a
+/// hard error.
+pub fn link_final_status(sym: LinkSymbol) -> i64 {
+    let defined = sym.obj >= 0;
+    let binding = sym.binding;
+    if defined {
+        return link_ok();
+    }
+    if binding == link_binding_weak() {
+        return link_ok();
+    }
+    return link_undefined();
+}
+
+/// True when a reference will be bound to address zero rather than to a
+/// definition. Callers that fold an address into a value must keep this apart
+/// from a genuine definition at offset zero.
+pub fn link_ref_is_zero(sym: LinkSymbol) -> bool {
+    return sym.obj < 0 && sym.binding == link_binding_weak();
+}
+
+/// Whether this reference obliges the link to pull a member out of an archive.
+/// Only an undefined strong global asks; a weak reference may stay zero, and a
+/// defined symbol has already been satisfied.
+pub fn link_pull_archive_member(sym: LinkSymbol) -> bool {
+    return sym.obj < 0 && sym.binding == link_binding_global();
+}
+
+/// A duplicate or undefined name is a link failure; the resolution code is what
+/// a driver turns into a diagnostic, so this exists to keep that decision in one
+/// place instead of at every call site.
+pub fn link_code_is_error(code: i64) -> bool {
+    return code == link_duplicate() || code == link_undefined();
+}

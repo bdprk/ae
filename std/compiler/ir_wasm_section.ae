@@ -1,0 +1,26 @@
+// std/compiler/ir_wasm_section.ae
+// Compiler WebAssembly section ID and payload length encoder.
+
+pub struct WasmSection {
+    section_id: i64,     // 0=Custom, 1=Type, 2=Import, 3=Function, 4=Table, 5=Memory, 6=Global, 7=Export, 10=Code, 11=Data
+    payload_len: i64,
+}
+
+pub fn wasm_section_new(sec_id: i64, length: i64) -> WasmSection {
+    return WasmSection {
+        section_id: sec_id,
+        payload_len: length,
+    };
+}
+
+pub fn wasm_section_is_code(s: WasmSection) -> bool {
+    return s.section_id == 10;
+}
+
+pub fn wasm_section_is_type(s: WasmSection) -> bool {
+    return s.section_id == 1;
+}
+
+pub fn wasm_section_payload_len(s: WasmSection) -> i64 {
+    return s.payload_len;
+}

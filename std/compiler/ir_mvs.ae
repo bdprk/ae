@@ -1,0 +1,70 @@
+// std/compiler/ir_mvs.ae
+// Minimal Version Selection over one package's requirements. MVS does not
+// search: it takes the maximum of the minimum versions every requirement names,
+// which is deterministic and needs no solver. The floor starts at 0.0.0 and
+// only ever rises, so the order requirements arrive in cannot change the pick.
+
+use "ir_semver_order.ae";
+
+pub struct MvsFloor {
+    pkg: i64,
+    req_count: i64,
+    major: i64,
+    minor: i64,
+    patch: i64,
+}
+
+pub struct MvsPick {
+    pkg: i64,
+    major: i64,
+    minor: i64,
+    patch: i64,
+    req_count: i64,
+}
+
+pub fn mvs_new_floor(pkg: i64) -> MvsFloor {
+    return MvsFloor { pkg: pkg, req_count: 0, major: 0, minor: 0, patch: 0 };
+}
+
+pub fn mvs_require(state: MvsFloor, major: i64, minor: i64, patch: i64) -> MvsFloor {
+    let candidate = semver_release(major, minor, patch);
+    let current = semver_release(state.major, state.minor, state.patch);
+    if semver_gt(candidate, current) {
+        return MvsFloor { pkg: state.pkg, req_count: state.req_count + 1, major: major, minor: minor, patch: patch };
+    }
+    return MvsFloor { pkg: state.pkg, req_count: state.req_count + 1, major: state.major, minor: state.minor, patch: state.patch };
+}
+
+pub fn mvs_would_raise(state: MvsFloor, major: i64, minor: i64, patch: i64) -> bool {
+    return semver_gt(semver_release(major, minor, patch), semver_release(state.major, state.minor, state.patch));
+}
+
+pub fn mvs_resolve(state: MvsFloor) -> MvsPick {
+    return MvsPick {
+        pkg: state.pkg,
+        major: state.major,
+        minor: state.minor,
+        patch: state.patch,
+        req_count: state.req_count,
+    };
+}
+
+pub fn mvs_pick_matches(pick: MvsPick, pkg: i64, major: i64, minor: i64, patch: i64) -> bool {
+    return pick.pkg == pkg && pick.major == major && pick.minor == minor && pick.patch == patch;
+}
+
+pub fn mvs_floor_has_requirements(state: MvsFloor) -> bool {
+    return state.req_count > 0;
+}
+
+pub fn mvs_pick_is_exact(pick: MvsPick, major: i64, minor: i64, patch: i64) -> bool {
+    // A pick that equals some requirement exactly means the resolver did not
+    // have to raise the floor above that requirement's own minimum.
+    return semver_same(semver_release(pick.major, pick.minor, pick.patch), semver_release(major, minor, patch));
+}
+
+pub fn mvs_same_pick(a: MvsPick, b: MvsPick) -> bool {
+    return a.pkg == b.pkg && semver_same(
+        semver_release(a.major, a.minor, a.patch),
+        semver_release(b.major, b.minor, b.patch));
+}

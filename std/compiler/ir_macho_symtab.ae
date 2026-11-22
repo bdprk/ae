@@ -1,0 +1,27 @@
+// std/compiler/ir_macho_symtab.ae
+// Compiler Mach-O LC_SYMTAB and nlist_64 symbol table entry descriptor.
+
+pub struct MachONlist64 {
+    n_strx: i64,      // String table index
+    n_type: i64,      // 0x01=N_EXT (external), 0x0e=N_SECT (defined in section)
+    n_sect: i64,      // 1-based section index
+    n_value: i64,     // Symbol address or offset
+}
+
+pub fn macho_nlist_new(strx: i64, n_type: i64, sect: i64, val: i64) -> MachONlist64 {
+    return MachONlist64 {
+        n_strx: strx,
+        n_type: n_type,
+        n_sect: sect,
+        n_value: val,
+    };
+}
+
+pub fn macho_nlist_is_external(n: MachONlist64) -> bool {
+    // 0x01 is N_EXT
+    return (n.n_type % 2) == 1;
+}
+
+pub fn macho_nlist_is_defined(n: MachONlist64) -> bool {
+    return n.n_sect > 0;
+}

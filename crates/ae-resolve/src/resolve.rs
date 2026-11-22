@@ -14,6 +14,7 @@ use ae_syntax::statement::{parse_statements_until_close, ElseBranch, Statement, 
 use ae_syntax::{Kind, Token};
 
 use crate::module::Module;
+use crate::typecheck::{self, OperatorError, Scalar};
 use crate::types::{classify, SpellingEntry, SpellingRole, TypeSpelling};
 use crate::{DefEntry, DefId, DefKind, Occurrence, Role};
 
@@ -37,8 +38,41 @@ pub struct FnOccurrences {
     /// The function's own def id (locals name it as their owner).
     pub function_def: DefId,
     pub occurrences: Vec<Occurrence>,
+    /// Scope ranges of local bindings, in declaration order. A later
+    /// closure parameter can shadow an earlier binding within its range.
+    pub binding_visibility: Vec<(DefId, Range<usize>)>,
     /// Successfully parsed closure bodies reached during name resolution.
-    pub closure_bodies: Vec<Arc<[Statement]>>,
+    pub closure_bodies: Vec<ClosureBody>,
+    /// Type argument ranges for expression specializations, keyed by base-name offset.
+    pub specialization_arguments: HashMap<usize, Arc<[Range<usize>]>>,
+    /// The pointer qualifier for each cast, keyed by the pointee type offset.
+    pub pointer_cast_targets: HashMap<usize, bool>,
+    /// Closure syntax keyed by the opening pipe token offset.
+    pub closure_headers: HashMap<usize, Arc<Expression>>,
+    /// Scalar type-check results, indexed by full expression byte range.
+    pub expression_types: HashMap<Range<usize>, ExpressionType>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionType {
+    Checked(Scalar),
+    Rejected(OperatorError),
+    Deferred,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosureBody {
+    pub start: usize,
+    /// The body's closing brace end, so a consumer can scope it precisely.
+    pub end: usize,
+    pub statements: Arc<[Statement]>,
+    /// A duplicate could denote valid shadowing in the compiler's closure scope.
+    pub has_binding_conflict: bool,
+    /// The outer defs the body reads — the closure's captures. The compiler
+    /// decides the capture MODE (borrow vs value); this is the name
+    /// resolution fact a body route needs to re-admit reads of outer
+    /// bindings from inside the closure.
+    pub captures: Vec<DefId>,
 }
 
 pub fn resolve(module: &Module) -> Resolution {
@@ -423,6 +457,7 @@ impl<'m> Pass<'m> {
                 }
                 _ => None,
             };
+            let body_range = unit.declaration.body.clone().unwrap_or(0..0);
             let mut walker = Walker {
                 module: self.module,
                 tokens: self.tokens,
@@ -440,9 +475,15 @@ impl<'m> Pass<'m> {
                 function_def,
                 locals: Vec::new(),
                 live: HashMap::new(),
-                blocks: vec![Vec::new()],
+                blocks: vec![(body_range.clone(), Vec::new())],
+                binding_visibility: Vec::new(),
                 occurrences: Vec::new(),
                 closure_bodies: Vec::new(),
+                specialization_arguments: HashMap::new(),
+                pointer_cast_targets: HashMap::new(),
+                closure_headers: HashMap::new(),
+                expression_types: HashMap::new(),
+                scalar_bindings: HashMap::new(),
                 diagnostics: Vec::new(),
             };
             if let DeclarationKind::Function { parameters, .. } = &unit.declaration.kind {
@@ -485,13 +526,13 @@ impl<'m> Pass<'m> {
                     } else {
                         None
                     };
-                    walker.declare(parameter.name.clone(), DefKind::Parameter, parameter.name_range.clone(), parameter.mutable, writable_through, inferred);
+                    walker.declare(parameter.name.clone(), DefKind::Parameter, parameter.name_range.clone(), parameter.mutable, writable_through, inferred, body_range.start);
                 }
             }
             let body_end = unit.declaration.body.as_ref().map(|body| body.end);
             walker.body_end = body_end;
             if let Some(body) = &unit.body {
-                walker.block(body);
+                walker.block(body, body_range);
             }
             // A function that declares a return type must return on every
             // path; the compiler's `function may exit without returning a
@@ -512,11 +553,11 @@ impl<'m> Pass<'m> {
                     }
                 }
             }
-            let Walker { locals, occurrences, spellings, diagnostics, closure_bodies, .. } = walker;
+            let Walker { locals, occurrences, binding_visibility, spellings, diagnostics, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, expression_types, .. } = walker;
             self.defs.extend(locals);
             self.spellings.extend(spellings);
             self.diagnostics.extend(diagnostics);
-            self.functions.push(FnOccurrences { function: index, function_def, occurrences, closure_bodies });
+            self.functions.push(FnOccurrences { function: index, function_def, occurrences, binding_visibility, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, expression_types });
         }
     }
 }
@@ -562,21 +603,26 @@ struct Walker<'w> {
     base: u32,
     function_def: DefId,
     locals: Vec<DefEntry>,
-    /// Live bindings: the compiler keeps a flat live-name map with per-block
-    /// removal, so a name is reusable after its block ends but never while
-    /// another binding of it is live — that is `E0104`, not shadowing.
+    /// Live bindings use the compiler's flat name map. Closure parameters
+    /// can replace a name temporarily; other live duplicates are E0104.
     live: HashMap<String, DefId>,
-    blocks: Vec<Vec<String>>,
+    blocks: Vec<(Range<usize>, Vec<(String, Option<DefId>)>)>,
+    binding_visibility: Vec<(DefId, Range<usize>)>,
     occurrences: Vec<Occurrence>,
-    closure_bodies: Vec<Arc<[Statement]>>,
+    closure_bodies: Vec<ClosureBody>,
+    specialization_arguments: HashMap<usize, Arc<[Range<usize>]>>,
+    pointer_cast_targets: HashMap<usize, bool>,
+    closure_headers: HashMap<usize, Arc<Expression>>,
+    expression_types: HashMap<Range<usize>, ExpressionType>,
+    scalar_bindings: HashMap<DefId, Scalar>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl Walker<'_> {
-    fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>) {
+    fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>, visible_from: usize) -> DefId {
         let id = DefId(self.base + self.locals.len() as u32);
         self.locals.push(DefEntry { id, name: name.clone(), kind, range: range.clone(), owner: Some(self.function_def), mutable, writable_through, inferred, imported: false });
-        if self.live.contains_key(&name) {
+        if kind != DefKind::ClosureParameter && self.live.contains_key(&name) {
             self.diagnostics.push(
                 ae_syntax::diagnostic_range(
                     &self.module.file, &self.module.source, range,
@@ -584,11 +630,13 @@ impl Walker<'_> {
                 ).with_code("E0104"),
             );
         } else {
-            self.live.insert(name.clone(), id);
-            if let Some(block) = self.blocks.last_mut() {
-                block.push(name);
+            let previous = self.live.insert(name.clone(), id);
+            if let Some((scope, bindings)) = self.blocks.last_mut() {
+                bindings.push((name, previous));
+                self.binding_visibility.push((id, visible_from.max(scope.start)..scope.end));
             }
         }
+        id
     }
 
     fn occurrence(&mut self, name: &str, range: Range<usize>, role: Role, mode: Lookup) -> Option<DefId> {
@@ -636,13 +684,11 @@ impl Walker<'_> {
                 }
                 None
             }
-            ExpressionKind::Prefix { operator: Kind::Bang, operand } => {
-                let shape = self.infer_expression(operand)?;
-                matches!(shape, TypeSpelling::Primitive("bool")).then_some(TypeSpelling::Primitive("bool"))
-            }
-            ExpressionKind::Prefix { operator: Kind::Minus, operand } => {
-                let shape = self.infer_expression(operand)?;
-                matches!(shape, TypeSpelling::Primitive("i64") | TypeSpelling::Primitive("f64")).then_some(shape)
+            ExpressionKind::Prefix { operator, operand } if matches!(operator, Kind::Bang | Kind::Minus) => {
+                let TypeSpelling::Primitive(name) = self.infer_expression(operand)? else { return None };
+                let scalar = crate::typecheck::Scalar::from_spelling(name)?;
+                let result = crate::typecheck::prefix(operator, Some(scalar)).ok()?;
+                Some(TypeSpelling::Primitive(result.spelling()))
             }
             ExpressionKind::Propagate(inner) | ExpressionKind::Group(inner) => self.infer_expression(inner),
             ExpressionKind::Binary { left, operator, right } => self.infer_binary(left, operator, right),
@@ -753,37 +799,17 @@ impl Walker<'_> {
         }
     }
 
-    /// Arithmetic keeps the operand's primitive (`+ - * / %` never mix:
-    /// the compiler rejects implicit conversions); comparisons and logic
-    /// yield bool when their operands infer.
     fn infer_binary(&mut self, left: &Expression, operator: &Kind, right: &Expression) -> Option<TypeSpelling> {
-        let arithmetic = matches!(operator, Kind::Plus | Kind::Minus | Kind::Star | Kind::Slash | Kind::Percent);
-        let comparison = matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq);
-        let logic = matches!(operator, Kind::And | Kind::Or);
-        if logic {
-            let left_shape = self.infer_expression(left);
-            let right_shape = self.infer_expression(right);
-            let both_bool = matches!(left_shape, Some(TypeSpelling::Primitive("bool")))
-                && matches!(right_shape, Some(TypeSpelling::Primitive("bool")));
-            return both_bool.then_some(TypeSpelling::Primitive("bool"));
+        use crate::typecheck::{Scalar, infix};
+        let (TypeSpelling::Primitive(left), TypeSpelling::Primitive(right)) =
+            (self.infer_expression(left)?, self.infer_expression(right)?) else { return None };
+        if left == "string" && right == "string"
+            && matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq)
+        {
+            return Some(TypeSpelling::Primitive("bool"));
         }
-        if comparison {
-            let left_shape = self.infer_expression(left);
-            let right_shape = self.infer_expression(right);
-            let same = matches!((&left_shape, &right_shape),
-                (Some(a), Some(b)) if a == b && matches!(a, TypeSpelling::Primitive(_)));
-            return same.then_some(TypeSpelling::Primitive("bool"));
-        }
-        if arithmetic {
-            let left_shape = self.infer_expression(left)?;
-            let right_shape = self.infer_expression(right)?;
-            return match (&left_shape, &right_shape) {
-                (TypeSpelling::Primitive("i64"), TypeSpelling::Primitive("i64")) => Some(TypeSpelling::Primitive("i64")),
-                (TypeSpelling::Primitive("f64"), TypeSpelling::Primitive("f64")) => Some(TypeSpelling::Primitive("f64")),
-                _ => None,
-            };
-        }
-        None
+        let result = infix(operator, Some(Scalar::from_spelling(left)?), Some(Scalar::from_spelling(right)?)).ok()?;
+        Some(TypeSpelling::Primitive(result.spelling()))
     }
 
     /// The shape of a field read through a base shape: named structs look
@@ -1021,47 +1047,46 @@ impl Walker<'_> {
         }
     }
 
-    /// Byte range of `name` inside `window` (for shapes whose grammar keeps
-    /// the name as a bare string without its own range).
-    fn name_range(&self, name: &str, window: Range<usize>) -> Range<usize> {
-        for token in self.tokens {
-            if token.offset < window.start {
-                continue;
-            }
-            if token.end > window.end {
-                break;
-            }
-            if let Kind::Ident(spelled) = &token.kind {
-                if spelled == name {
-                    return token.offset..token.end;
-                }
+    fn close_scope(&mut self) {
+        let (_, bindings) = self.blocks.pop().expect("open scope");
+        for (name, previous) in bindings.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.live.insert(name, previous);
+            } else {
+                self.live.remove(&name);
             }
         }
-        window
     }
 
-    fn block(&mut self, body: &[Statement]) {
-        self.blocks.push(Vec::new());
+    fn block_range(&self, header_end: usize, body: &[Statement]) -> Range<usize> {
+        let next = self.tokens.partition_point(|token| token.offset < header_end);
+        let open = next + self.tokens[next..].iter().position(|token| token.kind == Kind::LBrace)
+            .expect("parsed block has an opening brace");
+        let close = body.last().map_or(open + 1, |last| {
+            self.tokens.partition_point(|token| token.offset < last.range.end)
+        });
+        self.tokens[open].end..self.tokens[close].end
+    }
+
+    fn block(&mut self, body: &[Statement], range: Range<usize>) {
+        self.blocks.push((range, Vec::new()));
         for statement in body {
             self.statement(statement);
         }
-        for name in self.blocks.pop().unwrap_or_default() {
-            self.live.remove(&name);
-        }
+        self.close_scope();
     }
 
     /// A loop binding lives exactly for its body: declared into the body's
     /// own block, gone when the block ends (the compiler inserts before the
     /// body and removes after the loop).
-    fn scoped_binding(&mut self, binding: &str, binding_range: Range<usize>, kind: DefKind, body: &[Statement], inferred: Option<TypeSpelling>) {
-        self.blocks.push(Vec::new());
-        self.declare(binding.to_owned(), kind, binding_range, false, false, inferred);
+    fn scoped_binding(&mut self, binding: &str, binding_range: Range<usize>, body: &[Statement], scope: Range<usize>, inferred: Option<TypeSpelling>) {
+        let visible_from = scope.start;
+        self.blocks.push((scope, Vec::new()));
+        self.declare(binding.to_owned(), DefKind::ForBinding, binding_range, false, false, inferred, visible_from);
         for statement in body {
             self.statement(statement);
         }
-        for name in self.blocks.pop().unwrap_or_default() {
-            self.live.remove(&name);
-        }
+        self.close_scope();
     }
 
     fn statement(&mut self, statement: &Statement) {
@@ -1069,7 +1094,10 @@ impl Walker<'_> {
             StatementKind::Binding { mutable, name, name_range, initializer } => {
                 self.expr(initializer, Role::Read);
                 let inferred = self.infer_expression(initializer);
-                self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred);
+                let binding = self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred, statement.range.end);
+                if let Some(ExpressionType::Checked(scalar)) = self.expression_types.get(&initializer.range) {
+                    self.scalar_bindings.insert(binding, *scalar);
+                }
             }
             StatementKind::Assign { target, value, .. } => {
                 self.assign_target(target);
@@ -1088,9 +1116,11 @@ impl Walker<'_> {
             StatementKind::If { condition, then_body, else_body } => {
                 self.expr(condition, Role::Read);
                 self.condition_check(condition);
-                self.block(then_body);
+                let then_range = self.block_range(condition.range.end, then_body);
+                let then_end = then_range.end;
+                self.block(then_body, then_range);
                 match else_body {
-                    Some(ElseBranch::Block(body)) => self.block(body),
+                    Some(ElseBranch::Block(body)) => self.block(body, self.block_range(then_end, body)),
                     Some(ElseBranch::If(nested)) => self.statement(nested),
                     None => {}
                 }
@@ -1098,12 +1128,12 @@ impl Walker<'_> {
             StatementKind::While { condition, body } => {
                 self.expr(condition, Role::Read);
                 self.condition_check(condition);
-                self.block(body);
+                self.block(body, self.block_range(condition.range.end, body));
             }
             StatementKind::ForRange { binding, binding_range, start, end, body } => {
                 self.expr(start, Role::Read);
                 self.expr(end, Role::Read);
-                self.scoped_binding(binding, binding_range.clone(), DefKind::ForBinding, body, Some(TypeSpelling::Primitive("i64")));
+                self.scoped_binding(binding, binding_range.clone(), body, self.block_range(end.range.end, body), Some(TypeSpelling::Primitive("i64")));
             }
             StatementKind::ForIn { binding, binding_range, iterable, body } => {
                 self.expr(iterable, Role::Read);
@@ -1112,7 +1142,7 @@ impl Walker<'_> {
                     Some(TypeSpelling::Composite { family: "vec", arguments }) => arguments.into_iter().next(),
                     _ => None,
                 };
-                self.scoped_binding(binding, binding_range.clone(), DefKind::ForBinding, body, element);
+                self.scoped_binding(binding, binding_range.clone(), body, self.block_range(iterable.range.end, body), element);
             }
             StatementKind::Match { subject, arms } => {
                 self.expr(subject, Role::Read);
@@ -1120,19 +1150,17 @@ impl Walker<'_> {
                 self.match_subject_check(subject, &subject_shape);
                 self.exhaustiveness(subject, arms);
                 for arm in arms {
-                    self.blocks.push(Vec::new());
+                    self.blocks.push((self.block_range(arm.pattern.range.end, &arm.body), Vec::new()));
                     self.pattern(&arm.pattern, subject_shape.clone());
                     for statement in &arm.body {
                         self.statement(statement);
                     }
-                    for name in self.blocks.pop().unwrap_or_default() {
-                        self.live.remove(&name);
-                    }
+                    self.close_scope();
                 }
             }
             StatementKind::Unsafe(body) => {
                 self.unsafe_depth += 1;
-                self.block(body);
+                self.block(body, self.block_range(statement.range.start, body));
                 self.unsafe_depth -= 1;
             }
             StatementKind::Break | StatementKind::Continue => {}
@@ -1256,7 +1284,7 @@ impl Walker<'_> {
         match &pattern.kind {
             PatternKind::Binding(name) => {
                 // The pattern covers exactly the binding's name token.
-                self.declare(name.clone(), DefKind::PatternBinding, pattern.range.clone(), false, false, subject_shape);
+                self.declare(name.clone(), DefKind::PatternBinding, pattern.range.clone(), false, false, subject_shape, pattern.range.end);
             }
             PatternKind::Variant { enum_name, variant, variant_range, payload } => {
                 if let Some(enum_id) = self.items.get(enum_name) {
@@ -1333,6 +1361,52 @@ impl Walker<'_> {
     /// `Qualified` member can look up its qualifier. Only name-rooted shapes
     /// forward a target; composites return `None`.
     fn expr(&mut self, expression: &Expression, role: Role) -> Option<DefId> {
+        let target = self.walk_expression(expression, role);
+        let checked = self.check_scalar_expression(expression, target);
+        self.expression_types.insert(expression.range.clone(), checked);
+        target
+    }
+
+    fn check_scalar_expression(&self, expression: &Expression, target: Option<DefId>) -> ExpressionType {
+        use ExpressionType::{Checked, Deferred, Rejected};
+        let checked_child = |child: &Expression| match self.expression_types.get(&child.range) {
+            Some(Checked(scalar)) => Some(*scalar),
+            _ => None,
+        };
+        let result = match &expression.kind {
+            ExpressionKind::Atom(Kind::Number(_)) => return Checked(Scalar::Int),
+            ExpressionKind::Atom(Kind::Float(_)) => return Checked(Scalar::Float),
+            ExpressionKind::Atom(Kind::True | Kind::False) => return Checked(Scalar::Bool),
+            ExpressionKind::Atom(Kind::Ident(_)) => {
+                let scalar = target.and_then(|id| {
+                    if let Some(scalar) = self.scalar_bindings.get(&id) {
+                        return Some(*scalar);
+                    }
+                    let entry = self.defs_local(id)?;
+                    let Some(TypeSpelling::Primitive(name)) = entry.inferred.as_ref() else { return None };
+                    if matches!(entry.kind, DefKind::Parameter | DefKind::ClosureParameter) {
+                        Scalar::from_spelling(name)
+                    } else {
+                        None
+                    }
+                });
+                return scalar.map_or(Deferred, Checked);
+            }
+            ExpressionKind::Group(inner) => return checked_child(inner).map_or(Deferred, Checked),
+            ExpressionKind::Prefix { operator, operand } if matches!(operator, Kind::Bang | Kind::Minus) => {
+                let Some(operand) = checked_child(operand) else { return Deferred };
+                typecheck::prefix(operator, Some(operand))
+            }
+            ExpressionKind::Binary { left, operator, right } => {
+                let (Some(left), Some(right)) = (checked_child(left), checked_child(right)) else { return Deferred };
+                typecheck::infix(operator, Some(left), Some(right))
+            }
+            _ => return Deferred,
+        };
+        result.map_or_else(Rejected, Checked)
+    }
+
+    fn walk_expression(&mut self, expression: &Expression, role: Role) -> Option<DefId> {
         match &expression.kind {
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 let mode = match role {
@@ -1343,8 +1417,9 @@ impl Walker<'_> {
             }
             ExpressionKind::Atom(_) => None,
             ExpressionKind::Group(inner) | ExpressionKind::Propagate(inner) => self.expr(inner, role),
-            ExpressionKind::AddressCast { binding, mutable, .. } => {
-                let range = self.name_range(binding, expression.range.clone());
+            ExpressionKind::AddressCast { binding, binding_range, mutable, pointee } => {
+                self.pointer_cast_targets.insert(pointee.start, *mutable);
+                let range = binding_range.clone();
                 let mutable = *mutable;
                 let target = self.occurrence(binding, range.clone(), Role::Borrow, Lookup::LocalOnly);
                 if mutable {
@@ -1352,7 +1427,10 @@ impl Walker<'_> {
                 }
                 None
             }
-            ExpressionKind::PointerCast { base, .. } => self.expr(base, role),
+            ExpressionKind::PointerCast { base, mutable, pointee } => {
+                self.pointer_cast_targets.insert(pointee.start, *mutable);
+                self.expr(base, role)
+            }
             ExpressionKind::BorrowArgument { name, name_range, mutable, .. } => {
                 let mutable = *mutable;
                 let target = self.occurrence(name, name_range.clone(), Role::Borrow, Lookup::LocalOnly);
@@ -1415,14 +1493,16 @@ impl Walker<'_> {
             // `Name[Types]` behind a call or standalone: the grammar kept
             // the argument ranges precisely so the resolver could decide by
             // the base name (local index vs generic item).
-            ExpressionKind::Specialization { base, arguments, .. } => {
+            ExpressionKind::Specialization { base, arguments } => {
+                self.specialization_arguments.insert(base.range.start, arguments.as_slice().into());
                 let base_target = self.expr(base, role);
                 if let Some(def) = base_target {
                     self.type_argument_arity(def, arguments.len(), base.range.clone());
                 }
                 base_target
             }
-            ExpressionKind::BracketedCallTarget { base, .. } => {
+            ExpressionKind::BracketedCallTarget { base, arguments } => {
+                self.specialization_arguments.insert(base.range.start, arguments.as_slice().into());
                 self.expr(base, role)
             }
             ExpressionKind::Qualified { base, name } => {
@@ -1430,6 +1510,7 @@ impl Walker<'_> {
                 self.qualified_member(base_target, name, role, expression.range.clone(), base.range.end)
             }
             ExpressionKind::Closure { params, body, return_type } => {
+                self.closure_headers.insert(expression.range.start, Arc::new(expression.clone()));
                 self.closure(params, body, return_type);
                 None
             }
@@ -1468,7 +1549,8 @@ impl Walker<'_> {
     /// occurrences inside resolve against parameters, enclosing locals and
     /// items. Capture semantics stay with the type checker (R3c).
     fn closure(&mut self, params: &[ClosureParam], body: &Range<usize>, return_type: &Range<usize>) {
-        self.blocks.push(Vec::new());
+        let diagnostics_start = self.diagnostics.len();
+        self.blocks.push((body.start + 1..body.end, Vec::new()));
         for param in params {
             let shape = if param.ty.start == param.ty.end {
                 None
@@ -1482,7 +1564,7 @@ impl Walker<'_> {
                 });
                 Some(spelled.spelling)
             };
-            self.declare(param.name.clone(), DefKind::ClosureParameter, param.name_range.clone(), false, false, shape);
+            self.declare(param.name.clone(), DefKind::ClosureParameter, param.name_range.clone(), false, false, shape, body.start + 1);
         }
         // The closure's return spelling sits between the parameters and the
         // body; an empty range means the spelling carries no return type.
@@ -1495,21 +1577,39 @@ impl Walker<'_> {
             });
         }
         if let Some(open) = self.tokens.iter().position(|token| token.offset == body.start) {
+            let occurrences_start = self.occurrences.len();
+            let locals_start = self.locals.len();
             match parse_statements_until_close(&self.module.file, &self.module.source, self.tokens, open + 1) {
                 Ok((statements, _)) => {
                     for statement in &statements {
                         self.statement(statement);
                     }
-                    self.closure_bodies.push(statements.into());
+                    let has_binding_conflict = self.diagnostics[diagnostics_start..].iter()
+                        .any(|diagnostic| diagnostic.code.as_deref() == Some("E0104"));
+                    // Captures: reads inside the body whose target is an
+                    // outer def (declared before this closure's locals
+                    // began). The compiler owns the capture mode.
+                    let mut captures: Vec<DefId> = Vec::new();
+                    for occurrence in &self.occurrences[occurrences_start..] {
+                        if occurrence.role != Role::Read { continue; }
+                        let Some(target) = occurrence.target else { continue };
+                        let outer = (self.base as usize..self.base as usize + locals_start)
+                            .contains(&(target.0 as usize));
+                        if outer && !captures.contains(&target) {
+                            captures.push(target);
+                        }
+                    }
+                    self.closure_bodies.push(ClosureBody {
+                        start: body.start, end: body.end, statements: statements.into(),
+                        has_binding_conflict, captures,
+                    });
                 }
                 // The grammar accepted the literal's header; a body that does
                 // not parse stays opaque rather than inventing diagnostics.
                 Err(_) => {}
             }
         }
-        for name in self.blocks.pop().unwrap_or_default() {
-            self.live.remove(&name);
-        }
+        self.close_scope();
     }
 
     fn member_range(&self, name: &str, after: usize, end: usize) -> Range<usize> {

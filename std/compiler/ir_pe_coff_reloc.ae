@@ -1,0 +1,30 @@
+// std/compiler/ir_pe_coff_reloc.ae
+// Compiler Windows PE/COFF relocation record descriptor (IMAGE_REL_AMD64_*).
+
+pub struct CoffRelocEntry {
+    virtual_address: i64,
+    symbol_table_index: i64,
+    reloc_type: i64,     // 1=ADDR64, 2=ADDR32, 4=REL32, 5=REL32_1, 9=SECREL
+}
+
+pub fn coff_reloc_new(v_addr: i64, sym_idx: i64, r_type: i64) -> CoffRelocEntry {
+    return CoffRelocEntry {
+        virtual_address: v_addr,
+        symbol_table_index: sym_idx,
+        reloc_type: r_type,
+    };
+}
+
+pub fn coff_reloc_is_rel32(r: CoffRelocEntry) -> bool {
+    // IMAGE_REL_AMD64_REL32 (4) is PC-relative 32-bit call/jump
+    return r.reloc_type == 4;
+}
+
+pub fn coff_reloc_is_addr64(r: CoffRelocEntry) -> bool {
+    // IMAGE_REL_AMD64_ADDR64 (1) is absolute 64-bit pointer
+    return r.reloc_type == 1;
+}
+
+pub fn coff_reloc_addr(r: CoffRelocEntry) -> i64 {
+    return r.virtual_address;
+}

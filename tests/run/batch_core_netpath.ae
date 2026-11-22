@@ -1,7 +1,7 @@
 use "../../std/core/ip.ae";
-use "../../std/core/socket.ae";
+use "../../std/std/socket.ae";
 use "../../std/core/path_utils.ae";
-use "../../std/core/env_utils.ae";
+use "../../std/std/env_utils.ae";
 
 fn main() {
     let local = ipv4_new(127, 0, 0, 1);

@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_abi2.ae
 // Verification of AbiParamSlot, AbiReturnSlot (sret), AbiVarargsArea, and AbiAlloca.
 
-use "../../std/core/ir_abi_param.ae";
-use "../../std/core/ir_abi_ret.ae";
-use "../../std/core/ir_abi_varargs.ae";
-use "../../std/core/ir_abi_alloca.ae";
+use "../../std/compiler/ir_abi_param.ae";
+use "../../std/compiler/ir_abi_ret.ae";
+use "../../std/compiler/ir_abi_varargs.ae";
+use "../../std/compiler/ir_abi_alloca.ae";
 
 fn main() {
     print("--- batch_core_compiler_abi2 test start ---");

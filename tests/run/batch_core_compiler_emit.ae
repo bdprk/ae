@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_emit.ae
 // Verification of TargetOp, Peephole heuristics, BlockOrdering, and Relocation calculation.
 
-use "../../std/core/ir_lower.ae";
-use "../../std/core/ir_peep.ae";
-use "../../std/core/ir_block_order.ae";
-use "../../std/core/ir_reloc.ae";
+use "../../std/compiler/ir_lower.ae";
+use "../../std/compiler/ir_peep.ae";
+use "../../std/compiler/ir_block_order.ae";
+use "../../std/compiler/ir_reloc.ae";
 
 fn main() {
     print("--- batch_core_compiler_emit test start ---");

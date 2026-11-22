@@ -1,6 +1,6 @@
 use "../../std/core/search.ae";
 use "../../std/core/sort.ae";
-use "../../std/core/span.ae";
+use "../../std/compiler/span.ae";
 use "../../std/core/utf8.ae";
 
 fn main() {

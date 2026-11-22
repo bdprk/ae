@@ -1,0 +1,127 @@
+// std/std/test/fake_io.ae
+// Deterministic in-memory readiness/completion model used by tests (ADR-0224 R2.1).
+// This replaces the former `adapter_*` / `stream_*` compiler builtins. It is a
+// fake: no sockets, no epoll, no IOCP. Real network I/O belongs in std/net (M4.4).
+//
+// Request states: 0 pending / would-block, 1 completed, 2 cancelled, 3 disconnected.
+
+pub struct IoReq {
+    buf: string,
+    chunk: i64,
+    pos: i64,
+    state: i64,
+    rearmed: bool,
+}
+
+pub fn io_submit_read(src: string, chunk: i64) -> IoReq {
+    var state = 0;
+    var size = chunk;
+    if chunk <= 0 {
+        state = 3;
+        size = 0;
+    }
+    return IoReq { buf: src, chunk: size, pos: 0, state: state, rearmed: true };
+}
+
+pub fn io_submit_write(data: string, frag: i64) -> IoReq {
+    var size = frag;
+    if size < 1 {
+        size = 1;
+    }
+    return IoReq { buf: data, chunk: size, pos: 0, state: 0, rearmed: true };
+}
+
+// Advance one readiness event. A pending request that has not been rearmed
+// reports would-block without progress (edge-triggered epoll semantics).
+pub fn io_step(r: &mut IoReq) -> i64 {
+    if r.state != 0 {
+        return r.state;
+    }
+    if !r.rearmed {
+        return 0;
+    }
+    r.pos = r.pos + r.chunk;
+    if r.pos >= len(r.buf) {
+        r.pos = len(r.buf);
+        r.state = 1;
+        return 1;
+    }
+    r.rearmed = false;
+    return 0;
+}
+
+// Cancel a pending request. The buffer stays owned by the request value until
+// it is dropped, which models IOCP buffer retention after cancellation.
+pub fn io_cancel(r: &mut IoReq) -> bool {
+    if r.state != 0 {
+        return false;
+    }
+    r.state = 2;
+    return true;
+}
+
+pub fn io_rearm(r: &mut IoReq) -> bool {
+    if r.state != 0 {
+        return false;
+    }
+    r.rearmed = true;
+    return true;
+}
+
+pub fn io_transferred(r: &mut IoReq) -> string {
+    return "" + slice(r.buf, 0, r.pos);
+}
+
+// Bounded byte pipe with backpressure.
+pub struct BytePipe {
+    cap: i64,
+    buf: string,
+    closed: bool,
+}
+
+pub fn pipe_new(cap: i64) -> BytePipe {
+    var c = cap;
+    if c < 1 {
+        c = 1;
+    }
+    return BytePipe { cap: c, buf: "", closed: false };
+}
+
+// Accept as many bytes as fit; returns the count, or -1 once closed.
+pub fn pipe_send(p: &mut BytePipe, data: string) -> i64 {
+    if p.closed {
+        return -1;
+    }
+    var n = p.cap - len(p.buf);
+    if len(data) < n {
+        n = len(data);
+    }
+    p.buf = p.buf + slice(data, 0, n);
+    return n;
+}
+
+pub fn pipe_recv(p: &mut BytePipe, limit: i64) -> string {
+    var n = limit;
+    if n < 0 {
+        n = 0;
+    }
+    if len(p.buf) < n {
+        n = len(p.buf);
+    }
+    let out = "" + slice(p.buf, 0, n);
+    p.buf = "" + slice(p.buf, n, len(p.buf));
+    return out;
+}
+
+pub fn pipe_close(p: &mut BytePipe) -> i64 {
+    p.closed = true;
+    return 0;
+}
+
+pub fn pipe_is_drained(p: &mut BytePipe) -> bool {
+    return p.closed && len(p.buf) == 0;
+}
+
+pub fn pipe_buffered(p: &mut BytePipe) -> i64 {
+    return len(p.buf);
+}

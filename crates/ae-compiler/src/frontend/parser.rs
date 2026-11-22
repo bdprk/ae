@@ -22,6 +22,363 @@ pub(super) fn moved_self_assignment_hint(diagnostic: ae_span::Diagnostic) -> ae_
     diagnostic.with_suggestion("This call consumes the value being assigned to; bind the result to a new name, or read its fields into locals first.")
 }
 
+fn scalar_type(ty: Type) -> bool {
+    matches!(ty, Type::Int | Type::F64 | Type::Bool)
+}
+
+/// The registry struct a field expression reads from: a parameter's
+/// immutable borrowed spelling names a file-local struct item; a nested
+/// field's struct is the declared type of the field it reads. Generic
+/// instances and imported structs have no registry entry here and stay on
+/// the typed route.
+fn field_owner_struct(
+    base: &ae_syntax::expression::Expression,
+    scalar_reads: &HashMap<usize, ae_resolve::DefId>,
+    struct_definitions: &HashSet<ae_resolve::DefId>,
+    resolution: &ae_resolve::resolve::Resolution,
+    struct_names: &HashMap<String, usize>,
+    structs: &[StructDef],
+) -> Option<usize> {
+    match &base.kind {
+        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
+            let def = scalar_reads.get(&base.range.start)?;
+            if !struct_definitions.contains(def) {
+                return None;
+            }
+            let entry = resolution.defs.get(def.0 as usize)?;
+            let item = definition_struct_item(entry)?;
+            let item_entry = resolution.defs.get(item.0 as usize)?;
+            struct_names.get(&item_entry.name).copied()
+        }
+        ae_syntax::expression::ExpressionKind::Field { base: inner_base, name } => {
+            let sid = field_owner_struct(inner_base, scalar_reads, struct_definitions, resolution, struct_names, structs)?;
+            let fty = field_ty_in(sid, name, structs)?;
+            match fty {
+                Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => Some(sid),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn field_ty_in(sid: usize, field: &str, structs: &[StructDef]) -> Option<Type> {
+    let defn = structs.get(sid)?;
+    defn.fields.iter().find(|(name, _)| name == field).map(|(_, ty)| *ty)
+}
+
+fn receiver_field_root(expression: &ae_syntax::expression::Expression) -> Option<usize> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Field { base, .. } => receiver_field_root(base),
+        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(expression.range.start),
+        _ => None,
+    }
+}
+
+fn receiver_value(expression: &ae_syntax::expression::Expression) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Group(inner) => receiver_value(inner),
+        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(expression),
+        _ => None,
+    }
+}
+
+fn receiver_field_type(
+    expression: &ae_syntax::expression::Expression,
+    receiver: Type,
+    structs: &[StructDef],
+) -> Option<Type> {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Field { base, name } => {
+            let sid = match receiver_field_type(base, receiver, structs)? {
+                Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                _ => return None,
+            };
+            field_ty_in(sid, name, structs)
+        }
+        ExpressionKind::Atom(Kind::Ident(name)) if name == "self" => Some(receiver),
+        _ => None,
+    }
+}
+
+/// The struct item a marked slot's spelling names: an immutable borrowed
+/// parameter (`&Point`, where by-value and `&mut` receivers carry ownership
+/// effects that stay typed) or an owned local binding constructed in-route.
+fn definition_struct_item(entry: &ae_resolve::DefEntry) -> Option<ae_resolve::DefId> {
+    match &entry.inferred {
+        Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }) => match inner.as_ref() {
+            ae_resolve::TypeSpelling::Named { def } => Some(*def),
+            _ => None,
+        },
+        Some(ae_resolve::TypeSpelling::Named { def }) => Some(*def),
+        _ => None,
+    }
+}
+
+/// Every expression in the tree rooted at `expression`. `statement.expressions()`
+/// and `visit_expressions` stop at the statement's top-level values; the body
+/// route's checks need the nested ones too. Closure bodies stay opaque (the
+/// compiler owns capture inference), so their contents are not visited.
+fn visit_expression_tree(expression: &ae_syntax::expression::Expression, visit: &mut impl FnMut(&ae_syntax::expression::Expression)) {
+    use ae_syntax::expression::ExpressionKind;
+    visit(expression);
+    match &expression.kind {
+        ExpressionKind::Group(inner) | ExpressionKind::Propagate(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
+            visit_expression_tree(inner, visit);
+        }
+        ExpressionKind::PointerCast { base, .. } => visit_expression_tree(base, visit),
+        ExpressionKind::Binary { left, right, .. } => {
+            visit_expression_tree(left, visit);
+            visit_expression_tree(right, visit);
+        }
+        ExpressionKind::Array(elements) | ExpressionKind::Vector(elements) => {
+            elements.iter().for_each(|element| visit_expression_tree(element, visit));
+        }
+        ExpressionKind::Struct { target, fields } => {
+            visit_expression_tree(target, visit);
+            fields.iter().for_each(|field| visit_expression_tree(&field.value, visit));
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            visit_expression_tree(callee, visit);
+            arguments.iter().for_each(|argument| visit_expression_tree(argument, visit));
+        }
+        ExpressionKind::Index { base, index } => {
+            visit_expression_tree(base, visit);
+            visit_expression_tree(index, visit);
+        }
+        ExpressionKind::Field { base, .. } | ExpressionKind::Specialization { base, .. }
+        | ExpressionKind::BracketedCallTarget { base, .. } | ExpressionKind::Qualified { base, .. } => {
+            visit_expression_tree(base, visit);
+        }
+        _ => {}
+    }
+}
+
+fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression, ae_resolve::Role) -> bool) -> bool {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
+            .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
+                && !resolved.owned_vectors.contains(id) && !resolved.owned_text_bindings.contains(id)
+                && !resolved.enum_bindings.contains(id)
+                && !resolved.token_cursor_definitions.contains(id)
+                || (resolved.owned_text_bindings.contains(id)
+                    && resolved.closure_capture_reads.contains(&expression.range.start))),
+        // A construction of a drop-free file-local struct with scalar
+        // fields: the layout is known at collection time.
+        ExpressionKind::Struct { target, fields } => {
+            matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.drop_free_constructions.contains(&expression.range.start)
+                && fields.iter().all(|field| scalar_body_expression(&field.value, resolved, supports_call, supports_field))
+        }
+        // A struct parameter's field read, possibly nested (`o.inner.x`):
+        // the chain's base may be a scalar read or a struct-typed chain
+        // receiver, but only a scalar field lowers as a value.
+        ExpressionKind::Field { base, .. } => {
+            if receiver_field_root(expression).is_some() {
+                return supports_field(expression, ae_resolve::Role::Read);
+            }
+            let rooted = match &base.kind {
+                ExpressionKind::Atom(Kind::Ident(_)) => true,
+                ExpressionKind::Field { .. } => resolved.struct_field_reads.contains(&base.range.start)
+                    || resolved.struct_field_chains.contains(&base.range.start),
+                _ => false,
+            };
+            rooted && resolved.struct_field_reads.contains(&expression.range.start)
+        }
+        ExpressionKind::Index { base, index } => {
+            matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.scalar_reads.get(&base.range.start)
+                    .is_some_and(|id| resolved.array_definitions.contains(id)
+                        || (resolved.owned_vectors.contains(id)
+                            && resolved.closure_capture_reads.contains(&base.range.start)))
+                && scalar_body_expression(index, resolved, supports_call, supports_field)
+        }
+        ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False) => true,
+        ExpressionKind::AddressCast { binding_range, .. } => {
+            resolved.scalar_address_casts.contains(&expression.range.start)
+                && resolved.scalar_reads.contains_key(&binding_range.start)
+        }
+        ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
+            scalar_body_expression(inner, resolved, supports_call, supports_field)
+        }
+        ExpressionKind::Binary { left, right, .. } => {
+            scalar_body_expression(left, resolved, supports_call, supports_field) && scalar_body_expression(right, resolved, supports_call, supports_field)
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            if let ExpressionKind::Field { base, name } = &callee.kind {
+                return name == "deref" && arguments.is_empty()
+                    && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                    && resolved.scalar_pointer_receivers.contains(&base.range.start);
+            }
+            matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
+                if (resolved.direct_calls.contains(&callee.range.start)
+                    || resolved.unresolved_calls.contains(&callee.range.start))
+                    && supports_call(name, callee.range.start))
+                && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call, supports_field)
+                    || receiver_value(argument).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
+                    // An owned aggregate passed by value is a move, not a
+                    // value read: the ident eligibility excludes struct
+                    // slots, so the argument position re-admits them.
+                    || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                        if name != "self" && resolved.scalar_reads.get(&argument.range.start)
+                            .is_some_and(|id| resolved.struct_definitions.contains(id))))
+        }
+        _ => false,
+    }
+}
+
+fn compound_assignment_operator(operator: &Kind) -> Option<Kind> {
+    match operator {
+        Kind::PlusEqual => Some(Kind::Plus),
+        Kind::MinusEqual => Some(Kind::Minus),
+        Kind::StarEqual => Some(Kind::Star),
+        Kind::SlashEqual => Some(Kind::Slash),
+        Kind::PercentEqual => Some(Kind::Percent),
+        _ => None,
+    }
+}
+
+fn exit_status_operand(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: false } = &statement.kind else { return None };
+    let ExpressionKind::Call { callee, arguments } = &value.kind else { return None };
+    let [status] = arguments.as_slice() else { return None };
+    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "exit").then_some(status)
+}
+
+fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: true } = &statement.kind else { return None };
+    let ExpressionKind::Propagate(operand) = &value.kind else { return None };
+    let ExpressionKind::Call { callee, .. } = &operand.kind else { return None };
+    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if !RESERVED.contains(&name.as_str()))
+        .then_some(operand)
+}
+
+fn iterator_constructor(expression: &ae_syntax::expression::Expression) -> Option<Type> {
+    use ae_syntax::expression::ExpressionKind;
+    let ExpressionKind::Call { callee, arguments } = &expression.kind else { return None };
+    let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
+    match (name.as_str(), arguments.len()) {
+        ("tokenize", 2) => Some(Type::Tokens),
+        ("strvec_new", 0) | ("lines", 1) | ("split", 2) => Some(Type::StrVec),
+        _ => None,
+    }
+}
+
+fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression, ae_resolve::Role) -> bool) -> bool {
+    use ae_syntax::statement::{ElseBranch, StatementKind};
+    match &statement.kind {
+        StatementKind::Binding { name_range, initializer, .. } => {
+            resolved.scalar_definitions.contains_key(&name_range.start)
+                && match &initializer.kind {
+                    ae_syntax::expression::ExpressionKind::Array(elements)
+                    | ae_syntax::expression::ExpressionKind::Vector(elements) => elements.iter()
+                        .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
+                    ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
+                    // `let x = foo()?;` — a direct-call propagation binding;
+                    // RESERVED callees stay on the typed route.
+                    ae_syntax::expression::ExpressionKind::Propagate(operand) => {
+                        matches!(&operand.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
+                            if matches!(&callee.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                                if !RESERVED.contains(&name.as_str())))
+                    }
+                    _ => iterator_constructor(initializer).is_some()
+                        || resolved.enum_constructors.contains(&initializer.range.start)
+                        || scalar_body_expression(initializer, resolved, supports_call, supports_field),
+                }
+        }
+        StatementKind::Assign { target, operator, value } => {
+            match &target.kind {
+                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
+                    resolved.scalar_writes.get(&target.range.start)
+                        .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_vectors.contains(id)
+                            && !resolved.owned_text_bindings.contains(id) && !resolved.token_cursor_definitions.contains(id)
+                            && !resolved.enum_bindings.contains(id))
+                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                }
+                // `a[i] = v` stores through a resolved array binding. Only
+                // the plain operator: a compound store stays on the typed
+                // route, which rejects it for arrays.
+                ae_syntax::expression::ExpressionKind::Index { base, index }
+                    if *operator == Kind::Equal =>
+                {
+                    matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                        && resolved.scalar_writes.get(&base.range.start)
+                            .is_some_and(|id| resolved.array_definitions.contains(id))
+                        && scalar_body_expression(index, resolved, supports_call, supports_field)
+                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                }
+                ae_syntax::expression::ExpressionKind::Field { base, .. }
+                    if *operator == Kind::Equal && matches!(&base.kind,
+                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name == "self") =>
+                {
+                    supports_field(target, ae_resolve::Role::Write)
+                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                }
+                _ => false,
+            }
+        }
+        StatementKind::Return(value) => {
+            scalar_body_expression(value, resolved, supports_call, supports_field)
+                || resolved.enum_constructors.contains(&value.range.start)
+                || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
+        }
+        StatementKind::Print(value) | StatementKind::Assert(value) => {
+            scalar_body_expression(value, resolved, supports_call, supports_field)
+        }
+        StatementKind::PointerStore { pointer_range, value, .. } => {
+            resolved.scalar_writes.contains_key(&pointer_range.start)
+                && scalar_body_expression(value, resolved, supports_call, supports_field)
+        }
+        StatementKind::If { condition, then_body, else_body } => {
+            scalar_body_expression(condition, resolved, supports_call, supports_field)
+                && then_body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
+                && match else_body {
+                    Some(ElseBranch::Block(body)) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
+                    Some(ElseBranch::If(branch)) => scalar_body_statement(branch, resolved, supports_call, supports_field),
+                    None => true,
+                }
+        }
+        StatementKind::While { condition, body } => {
+            scalar_body_expression(condition, resolved, supports_call, supports_field)
+                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
+        }
+        StatementKind::ForRange { binding_range, start, end, body, .. } => {
+            resolved.scalar_definitions.contains_key(&binding_range.start)
+                && scalar_body_expression(start, resolved, supports_call, supports_field)
+                && scalar_body_expression(end, resolved, supports_call, supports_field)
+                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
+        }
+        StatementKind::ForIn { binding_range, iterable, body, .. } => {
+            resolved.scalar_definitions.contains_key(&binding_range.start)
+                && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.scalar_reads.get(&iterable.range.start)
+                    .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id))
+                && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
+        }
+        StatementKind::Match { subject, arms } => {
+            matches!(subject.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.scalar_reads.get(&subject.range.start)
+                    .is_some_and(|id| resolved.enum_bindings.contains(id))
+                && arms.iter().all(|arm| arm.body.iter().all(|statement| {
+                    scalar_body_statement(statement, resolved, supports_call, supports_field)
+                }))
+        }
+        StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
+        StatementKind::Break | StatementKind::Continue => true,
+        StatementKind::Expr { .. } => exit_status_operand(statement)
+            .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field))
+            || propagation_call(statement).is_some(),
+    }
+}
+
 impl<'a> Parser<'a> {
     pub(super) fn current(&self) -> &Kind { &self.tokens[self.pos].kind }
     pub(super) fn fail(&self, message: &str) -> ae_span::Diagnostic {
@@ -194,7 +551,7 @@ impl<'a> Parser<'a> {
                 return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name())));
             }
             self.take(Kind::Comma)?;
-            let (callable, callable_ty) = self.expression(0, false)?;
+            let (callable, callable_ty) = self.spawn_callable()?;
             self.take(Kind::RParen)?;
             self.take(Kind::Semi)?;
             let mut slots = Vec::new();
@@ -444,18 +801,55 @@ impl<'a> Parser<'a> {
                 return expressions;
             };
             let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], &self.tokens);
+            expressions.enum_bindings.extend(resolution.defs.iter().filter_map(|entry| {
+                use ae_resolve::TypeSpelling;
+                if !entry.kind.is_local() { return None }
+                let (TypeSpelling::Named { def } | TypeSpelling::GenericInstance { def, .. }) = entry.inferred.as_ref()? else {
+                    return None;
+                };
+                (resolution.defs.get(def.0 as usize)?.kind == ae_resolve::DefKind::Enum).then_some(entry.id)
+            }));
             for occurrence in resolution.functions.iter().flat_map(|function| &function.occurrences) {
                 let Some(definition) = occurrence.target.and_then(|id| resolution.defs.get(id.0 as usize)) else {
+                    if occurrence.role == ae_resolve::Role::Call {
+                        expressions.unresolved_calls.insert(occurrence.range.start);
+                    }
                     continue;
                 };
                 match occurrence.role {
                     ae_resolve::Role::Read | ae_resolve::Role::Borrow if definition.kind.is_local() => {
                         expressions.local_bindings.insert(occurrence.range.start, definition.range.clone());
+                        expressions.scalar_reads.insert(occurrence.range.start, definition.id);
+                        use ae_resolve::TypeSpelling;
+                        let spelling = match &definition.inferred {
+                            Some(TypeSpelling::Borrow { mutable: false, inner }) => Some(inner.as_ref()),
+                            spelling => spelling.as_ref(),
+                        };
+                        if let Some(TypeSpelling::Composite { family: "vec", arguments }) = spelling {
+                            if matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("i64" | "f64" | "string")]) {
+                                expressions.vector_definitions.insert(definition.id);
+                                if matches!(definition.inferred, Some(TypeSpelling::Composite { .. })) {
+                                    expressions.owned_vectors.insert(definition.id);
+                                }
+                            }
+                        }
+                    }
+                    ae_resolve::Role::Write | ae_resolve::Role::DerefWrite if definition.kind.is_local() => {
+                        expressions.scalar_writes.insert(occurrence.range.start, definition.id);
                     }
                     ae_resolve::Role::Call if definition.kind == ae_resolve::DefKind::Function
                         && definition.owner.is_none() && definition.name == occurrence.name =>
                     {
                         expressions.direct_calls.insert(occurrence.range.start);
+                    }
+                    ae_resolve::Role::Call if definition.kind.is_local() => {
+                        if matches!(definition.inferred.as_ref(),
+                            Some(ae_resolve::TypeSpelling::Pointer { pointee, .. })
+                                if matches!(pointee.as_ref(), ae_resolve::TypeSpelling::Primitive("i64" | "f64" | "bool")))
+                        {
+                            expressions.scalar_pointer_receivers.insert(occurrence.range.start);
+                            expressions.scalar_reads.insert(occurrence.range.start, definition.id);
+                        }
                     }
                     ae_resolve::Role::Construct if definition.kind == ae_resolve::DefKind::Struct
                         && definition.name == occurrence.name =>
@@ -468,14 +862,65 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
+            expressions.specialization_arguments.extend(resolution.functions.iter().flat_map(|function| {
+                function.specialization_arguments.iter().map(|(&offset, arguments)| (offset, arguments.clone()))
+            }));
+            expressions.pointer_cast_targets.extend(resolution.functions.iter().flat_map(|function| {
+                function.pointer_cast_targets.iter().map(|(&offset, &mutable)| (offset, mutable))
+            }));
+            expressions.closure_headers.extend(resolution.functions.iter().flat_map(|function| {
+                function.closure_headers.iter().map(|(&offset, header)| (offset, header.clone()))
+            }));
+            expressions.scalar_expression_types.extend(resolution.functions.iter().flat_map(|function| {
+                function.expression_types.iter().filter_map(|(range, &fact)| {
+                    (fact != ae_resolve::resolve::ExpressionType::Deferred).then(|| (range.clone(), fact))
+                })
+            }));
+            expressions.scalar_definitions.extend(resolution.defs.iter()
+                .filter(|definition| definition.kind.is_local())
+                .map(|definition| (definition.range.start, definition.id)));
+            // Struct parameters (immutable borrows) and local bindings
+            // (owned, constructed in-route from a drop-free struct) are
+            // field-read receivers for the body route: the resolver's
+            // inferred spelling names the struct item, and the compiler's
+            // registry supplies field types for the read checks. Marked
+            // before the statement walk, whose field-read checks consult
+            // this set.
+            for definition in resolution.defs.iter().filter(|entry| {
+                entry.kind == ae_resolve::DefKind::Parameter || entry.kind == ae_resolve::DefKind::Binding
+            }) {
+                let item = match (&definition.inferred, definition.kind) {
+                    (Some(ae_resolve::TypeSpelling::Borrow { mutable: false, inner }), _) => match inner.as_ref() {
+                        ae_resolve::TypeSpelling::Named { def } => Some(*def),
+                        _ => None,
+                    },
+                    (Some(ae_resolve::TypeSpelling::Named { def }), ae_resolve::DefKind::Binding) => Some(*def),
+                    _ => None,
+                };
+                let names_struct = item
+                    .and_then(|item| resolution.defs.get(item.0 as usize))
+                    .is_some_and(|item| {
+                        item.kind == ae_resolve::DefKind::Struct && self.struct_names.contains_key(&item.name)
+                    });
+                if names_struct {
+                    expressions.struct_definitions.insert(definition.id);
+                }
+            }
             let function_statements = module.functions.iter()
                 .filter_map(|function| function.body.as_ref()).flatten();
             let closure_statements = resolution.functions.iter()
                 .flat_map(|function| function.closure_bodies.iter())
-                .flat_map(|body| body.iter());
+                .flat_map(|body| body.statements.iter());
             for statement in function_statements.chain(closure_statements) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
+                    if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
+                        if matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Array(_)) {
+                            if let Some(def) = expressions.scalar_definitions.get(&name_range.start) {
+                                expressions.array_definitions.insert(*def);
+                            }
+                        }
+                    }
                     let kind = match &statement.kind {
                         StatementKind::Binding { name_range, mutable, .. } => Some(IndexedStatement::Binding {
                             name_start: name_range.start,
@@ -509,8 +954,118 @@ impl<'a> Parser<'a> {
                             expressions.match_patterns.insert(arm.pattern.range.start, arm.pattern.clone());
                         }
                     }
-                    for expression in statement.expressions() {
-                        expressions.values.insert(expression.range.start, Rc::new(expression.clone()));
+                    if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
+                        use ae_syntax::expression::ExpressionKind;
+                        if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                            match &initializer.kind {
+                                ExpressionKind::Vector(_) => {
+                                    expressions.vector_definitions.insert(id);
+                                    expressions.owned_vectors.insert(id);
+                                }
+                                ExpressionKind::Atom(Kind::Text(_)) => {
+                                    expressions.owned_text_bindings.insert(id);
+                                }
+                                _ => match iterator_constructor(initializer) {
+                                    Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
+                                    Some(Type::StrVec) => {
+                                        expressions.vector_definitions.insert(id);
+                                        expressions.owned_vectors.insert(id);
+                                    }
+                                    _ => {}
+                                },
+                            }
+                        }
+                    }
+                    for top_level in statement.expressions() {
+                        use ae_syntax::expression::ExpressionKind;
+                        let target = match &top_level.kind {
+                            ExpressionKind::Call { callee, .. } => callee.as_ref(),
+                            _ => top_level,
+                        };
+                        if matches!(&target.kind, ExpressionKind::Qualified { .. }) {
+                            let end = self.tokens.partition_point(|token| token.offset < target.range.end);
+                            if end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset) {
+                                expressions.enum_constructors.insert(top_level.range.start);
+                                if let StatementKind::Binding { name_range, .. } = &statement.kind {
+                                    if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                                        expressions.enum_bindings.insert(id);
+                                    }
+                                }
+                            }
+                        }
+                        expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
+                        visit_expression_tree(top_level, &mut |expression| {
+                            use ae_syntax::expression::ExpressionKind;
+                            if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind {
+                                if self.source.get(pointee.clone()).and_then(super::types::scalar_type).is_some() {
+                                    expressions.scalar_address_casts.insert(expression.range.start);
+                                }
+                            }
+                            if let ExpressionKind::Call { callee, arguments } = &expression.kind {
+                                if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
+                                    let operand = match (name.as_str(), arguments.as_slice()) {
+                                        ("spawn", [callable]) => Some(callable),
+                                        ("task_spawn" | "scope_spawn" | "pool_spawn", [_, callable]) => Some(callable),
+                                        _ => None,
+                                    };
+                                    if let Some(operand) = operand {
+                                        expressions.values.insert(operand.range.start, Rc::new(operand.clone()));
+                                    }
+                                }
+                            }
+                            if let ExpressionKind::Struct { target, fields } = &expression.kind {
+                                if matches!(target.kind, ExpressionKind::Specialization { .. }) {
+                                    let open = self.tokens.partition_point(|token| token.offset < target.range.end);
+                                    expressions.specialized_struct_fields.insert(
+                                        self.tokens[open].offset, (expression.range.end, fields.as_slice().into()),
+                                    );
+                                }
+                            }
+                            if let ExpressionKind::Call { callee, arguments } = &expression.kind {
+                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. })
+                                    || matches!(&callee.kind, ExpressionKind::Qualified { base, .. }
+                                        if matches!(base.kind, ExpressionKind::Specialization { .. }))
+                                {
+                                    let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
+                                    expressions.specialized_call_arguments.insert(self.tokens[open].offset, arguments.as_slice().into());
+                                }
+                            }
+                            // A field read on a struct parameter joins the
+                            // body route: the owner struct comes from the
+                            // parameter's spelling or a nested marked field.
+                            // Scalar fields are value-eligible; struct-typed
+                            // fields are chain-only receivers (binding one as
+                            // a value would move out of the borrowed struct).
+                            if let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind {
+                                if let Some(sid) = field_owner_struct(base, &expressions.scalar_reads, &expressions.struct_definitions, &resolution, self.struct_names, self.structs) {
+                                    if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
+                                        if scalar_type(field_ty) {
+                                            expressions.struct_field_reads.insert(expression.range.start);
+                                        } else if matches!(field_ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)) {
+                                            expressions.struct_field_chains.insert(expression.range.start);
+                                        }
+                                    }
+                                }
+                            }
+                            // A construction of a file-local, non-generic,
+                            // drop-free struct with only scalar fields joins
+                            // the body route. Initializers are validated in
+                            // source order when the expression is lowered.
+                            if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &expression.kind {
+                                if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
+                                    if expressions.struct_constructors.contains(&target.range.start) {
+                                        if let Some(&sid) = self.struct_names.get(name) {
+                                            let defn = &self.structs[sid];
+                                            if (defn.file == self.file || defn.public) && defn.drop_fn.is_none()
+                                                && defn.fields.iter().all(|(_, ty)| scalar_type(*ty))
+                                            {
+                                                expressions.drop_free_constructions.insert(expression.range.start);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
                     if let ae_syntax::statement::StatementKind::Assign { target, .. } = &statement.kind {
                         if let ae_syntax::expression::ExpressionKind::Index { index, .. } = &target.kind {
@@ -520,8 +1075,1133 @@ impl<'a> Parser<'a> {
                     }
                 });
             }
+            // Array parameters are arrays for the body route too: an array
+            // type spelling starts with `[` (after the borrow amp), where
+            // vec/map/composite spellings start with an identifier. The
+            // resolver keeps the pointee opaque (`& unknown`), so the spelled
+            // tokens are the arbiter here.
+            for function in &module.functions {
+                let ae_syntax::declaration::DeclarationKind::Function { parameters, .. } = &function.declaration.kind else {
+                    continue;
+                };
+                for parameter in parameters {
+                    if parameter.ty.start == parameter.ty.end {
+                        continue;
+                    }
+                    let mut index = self.tokens.partition_point(|token| token.offset < parameter.ty.start);
+                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::Amp) {
+                        index += 1;
+                    }
+                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::LBracket) {
+                        if let Some(def) = expressions.scalar_definitions.get(&parameter.name_range.start) {
+                            expressions.array_definitions.insert(*def);
+                        }
+                    }
+                }
+            }
+            for (function, body) in resolution.functions.iter().flat_map(|function| {
+                function.closure_bodies.iter().map(move |body| (function, body))
+            }) {
+                // A captured outer read is legal inside the closure body:
+                // the compiler hands the value through a capture slot, so
+                // the route re-admits reads whose target is one of this
+                // body's captures.
+                for occurrence in &function.occurrences {
+                    if occurrence.role == ae_resolve::Role::Read
+                        && occurrence.range.start >= body.start
+                        && occurrence.range.end <= body.end
+                        && occurrence.target.is_some_and(|target| {
+                            body.captures.contains(&target)
+                                && (expressions.owned_text_bindings.contains(&target)
+                                    || expressions.owned_vectors.contains(&target))
+                        })
+                    {
+                        expressions.closure_capture_reads.insert(occurrence.range.start);
+                    }
+                }
+                if !body.has_binding_conflict
+                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| false))
+                {
+                    expressions.scalar_bodies.insert(body.start, body.statements.clone());
+                }
+            }
+            for function in module.functions {
+                let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
+                    continue;
+                };
+                let receiver_field = |expression: &ae_syntax::expression::Expression, _| {
+                    function.impl_owner.is_some() && receiver_field_root(expression).is_some()
+                };
+                let eligible = body.iter().all(|statement| {
+                    scalar_body_statement(statement, &expressions, &|_, _| true, &receiver_field)
+                });
+                if eligible {
+                    expressions.scalar_bodies.insert(range.start, body.into());
+                }
+            }
             expressions
         })
+    }
+
+    pub(super) fn shared_specialization_arguments(&self, offset: usize) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
+        self.resolved_expressions().specialization_arguments.get(&offset).cloned()
+    }
+
+    pub(super) fn shared_pointer_cast_qualifier(&self) -> Option<bool> {
+        let offset = self.tokens.get(self.pos + 2)?.offset;
+        self.resolved_expressions().pointer_cast_targets.get(&offset).copied()
+    }
+
+    pub(super) fn shared_closure_header(&self) -> Option<std::sync::Arc<ae_syntax::expression::Expression>> {
+        let offset = self.tokens.get(self.pos)?.offset;
+        self.resolved_expressions().closure_headers.get(&offset).cloned()
+    }
+
+    pub(super) fn lower_resolved_scalar_body(&mut self) -> Option<Result<Vec<Statement>, ae_span::Diagnostic>> {
+        self.lower_resolved_body_with_captures(&[])
+    }
+
+    pub(super) fn lower_resolved_body_with_captures(
+        &mut self,
+        capture_starts: &[(usize, usize)],
+    ) -> Option<Result<Vec<Statement>, ae_span::Diagnostic>> {
+        // Array parameters are borrowed views (`&[i64; N]` is the only array
+        // parameter form, and `Type::Array` bakes the borrow in): their
+        // element reads and stores flow through the same arms as local
+        // arrays. File-local struct parameters join as immutable borrowed
+        // field-read receivers only — by-value and `&mut` structs carry
+        // ownership effects (moves, drop at scope exit) that stay typed.
+        // Borrows of aggregates themselves (`&a`, `&p`) stay typed too — a
+        // borrow occurrence never lands in `scalar_reads` — and so do calls
+        // to aggregate-taking functions, which `supports_call` excludes.
+        // Generic functions arrive here after the instance machinery has
+        // substituted their signature. Keep non-scalar substitutions on
+        // the typed route until their ownership and layout are covered.
+        if !self.subst.values().copied().all(scalar_type)
+            || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
+            || (self.impl_self.is_some() && self.subst.is_empty())
+            || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..))
+                || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
+            || !self.names.iter().all(|(name, &(slot, _, ty))| {
+                let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
+                // A value capture of a numeric vector moves into the
+                // closure's slot; the body's own Frees releases it after
+                // the call, which is the FnOnce shape. A borrowed string
+                // vector's element reads are views, so they join too; a
+                // value-captured string vector stays on the typed path
+                // (its elements own drops).
+                if captured && matches!(ty, Type::StrVec) {
+                    return false;
+                }
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
+                    || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
+                    || (ty == Type::StrView && captured)
+                    || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
+            })
+        {
+            return None;
+        }
+        let resolved = self.resolved_expressions();
+        let body = resolved.scalar_bodies.get(&self.tokens[self.pos].offset)?.clone();
+        let supports_call = |name: &str, offset: usize| {
+            !RESERVED.contains(&name) && self.functions.get(name).is_some_and(|signature| {
+                // File-local resolution leaves imports open. The compiler's
+                // registry already contains the signatures of loaded modules.
+                let visible = if signature.file == self.file {
+                    resolved.direct_calls.contains(&offset)
+                } else {
+                    signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
+                };
+                visible && !signature.extern_c && !is_unsafe_fn(signature.id)
+                    && scalar_type(signature.ret)
+                    && signature.params.iter().copied().all(|ty| {
+                        // Owned-aggregate parameters join the route: the call
+                        // moves the argument, tracked in `moved`, and the
+                        // drops pass trims the Frees lists.
+                        scalar_type(ty) || matches!(ty, Type::Struct(_))
+                    })
+            })
+        };
+        let receiver_def = self.names.get("self")
+            .and_then(|&(slot, _, _)| self.binding_ranges.get(&slot))
+            .and_then(|range| resolved.scalar_definitions.get(&range.start));
+        let supports_field = |expression: &ae_syntax::expression::Expression, role| {
+            self.receiver.is_some_and(|receiver| {
+                let occurrences = match role {
+                    ae_resolve::Role::Read => &resolved.scalar_reads,
+                    ae_resolve::Role::Write if matches!(receiver, Type::StructMut(_)) => &resolved.scalar_writes,
+                    _ => return false,
+                };
+                let resolves_to_receiver = receiver_field_root(expression).is_some_and(|offset| {
+                    receiver_def.is_some() && occurrences.get(&offset) == receiver_def
+                });
+                resolves_to_receiver && if receiver_value(expression).is_some() {
+                    matches!(receiver, Type::Struct(_))
+                } else {
+                    receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
+                }
+            })
+        };
+        if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
+            return None;
+        }
+        let mut slots = HashMap::new();
+        for &(slot, _, ty) in self.names.values() {
+            let start = self.binding_ranges.get(&slot).map(|range| range.start)
+                .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
+            slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
+        }
+        Some(self.lower_scalar_statements(&body, &mut slots))
+    }
+
+    fn lower_scalar_statements(
+        &mut self,
+        body: &[ae_syntax::statement::Statement],
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Vec<Statement>, ae_span::Diagnostic> {
+        use ae_syntax::statement::StatementKind;
+        self.take(Kind::LBrace)?;
+        if self.block_depth >= 64 { return Err(self.fail("block nesting limit exceeded (64)")); }
+        self.block_depth += 1;
+        self.scopes.push(Vec::new());
+        let mut statements = Vec::with_capacity(body.len());
+        let lowered: Result<(), ae_span::Diagnostic> = (|| {
+            for statement in body {
+                if matches!(statement.kind, StatementKind::ForRange { .. }) {
+                    self.lower_scalar_range(statement, slots, &mut statements)?;
+                } else if matches!(statement.kind, StatementKind::ForIn { .. }) {
+                    self.lower_scalar_for_in(statement, slots, &mut statements)?;
+                } else {
+                    let statement = self.lower_scalar_statement(statement, slots)?;
+                    if matches!(statement, Statement::Break | Statement::Continue(_)) {
+                        // Owned values declared inside the loop body die at
+                        // the jump; releases are idempotent.
+                        let owned = self.loop_local_owned();
+                        if !owned.is_empty() { statements.push(Statement::Frees(owned)); }
+                    }
+                    statements.push(statement);
+                }
+            }
+            Ok(())
+        })();
+        let scope = self.scopes.pop().unwrap();
+        self.block_depth -= 1;
+        lowered?;
+        self.take(Kind::RBrace)?;
+        for statement in body {
+            if let StatementKind::Binding { name, name_range, .. } = &statement.kind {
+                self.names.remove(name);
+                slots.remove(&self.resolved_expressions().scalar_definitions[&name_range.start]);
+            }
+        }
+        let depth = self.scopes.len();
+        self.borrows.retain(|&(_, borrow_depth, _)| borrow_depth <= depth);
+        // Owned values declared in this block are released at its end,
+        // mirroring the typed route's block exit.
+        let owned: Vec<(usize, Type)> = scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
+        if !owned.is_empty() { statements.push(Statement::Frees(owned)); }
+        Ok(statements)
+    }
+
+    fn lower_scalar_statement(
+        &mut self,
+        statement: &ae_syntax::statement::Statement,
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Statement, ae_span::Diagnostic> {
+        use ae_syntax::statement::{ElseBranch, StatementKind};
+        let lowered = match &statement.kind {
+            StatementKind::Binding { name, name_range, mutable, initializer } => {
+                self.seek_scalar_offset(name_range.end);
+                if RESERVED.contains(&name.as_str()) {
+                    return Err(self.fail(&format!("'{name}' is a built-in name and cannot be a variable")));
+                }
+                if self.struct_names.contains_key(name) {
+                    return Err(self.fail(&format!("'{name}' names a struct and cannot be a variable")));
+                }
+                if self.enum_names.contains_key(name) {
+                    return Err(self.fail(&format!("'{name}' names an enum and cannot be a variable")));
+                }
+                if self.names.contains_key(name) {
+                    return Err(self.duplicate_binding_error(name));
+                }
+                let slot = self.next_var;
+                self.next_var += 1;
+                let def = self.resolved_expressions().scalar_definitions[&name_range.start];
+                let (statement, ty) = if let ae_syntax::expression::ExpressionKind::Propagate(operand) = &initializer.kind {
+                    // `let x = foo()?;` binds the Ok payload and hands the
+                    // failure on, mirroring the typed route's binding
+                    // propagation.
+                    let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &operand.kind else {
+                        unreachable!("resolved propagation eligibility");
+                    };
+                    let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(call_name)) = &callee.kind else {
+                        unreachable!("resolved propagation eligibility");
+                    };
+                    let _ = call_name;
+                    self.seek_scalar_offset(operand.range.start);
+                    let (value, call_ty) = match self.lower_shared_value(Some(Kind::Question), true) {
+                        Some(pair) => pair,
+                        None => self.expression(0, true)?,
+                    };
+                    if *self.current() != Kind::Question {
+                        return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+                    }
+                    let (statement, bound_ty) = self.propagate_statement(value, call_ty, Some(slot))?;
+                    self.pos += 1;
+                    self.take(Kind::Semi)?;
+                    let bound_ty = bound_ty.expect("a binding propagation always produces a payload type");
+                    (statement, bound_ty)
+                } else if let ae_syntax::expression::ExpressionKind::Array(elements) = &initializer.kind {
+                    if elements.is_empty() {
+                        self.seek_scalar_offset(initializer.range.start);
+                        self.pos += 1;
+                        return Err(self.fail("array must contain at least one element"));
+                    }
+                    let mut values = Vec::with_capacity(elements.len());
+                    for (index, element) in elements.iter().enumerate() {
+                        if index == 4096 {
+                            self.seek_scalar_offset(element.range.start);
+                            return Err(self.fail("array element limit exceeded (4096)"));
+                        }
+                        let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
+                        if ty != Type::Int {
+                            self.seek_scalar_offset(element.range.end);
+                            return Err(self.fail("array elements must be i64"));
+                        }
+                        values.push(value);
+                    }
+                    (Statement::Array(slot, values), Type::Array(elements.len()))
+                } else if let ae_syntax::expression::ExpressionKind::Vector(elements) = &initializer.kind {
+                    self.seek_scalar_offset(initializer.range.start);
+                    let (line, column) = self.position();
+                    let mut values = Vec::with_capacity(elements.len());
+                    let mut element_type = None;
+                    for (index, element) in elements.iter().enumerate() {
+                        if index >= 65536 {
+                            self.seek_scalar_offset(element.range.start);
+                            return Err(self.fail("vector element limit exceeded (65536)"));
+                        }
+                        let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
+                        self.seek_scalar_offset(element.range.end);
+                        element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
+                        values.push(value);
+                    }
+                    let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
+                    (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
+                } else {
+                    let (value, ty) = if iterator_constructor(initializer).is_some()
+                        || self.resolved_expressions().enum_constructors.contains(&initializer.range.start)
+                    {
+                        self.seek_scalar_offset(initializer.range.start);
+                        self.expression(0, false)?
+                    } else {
+                        let lowered = self.lower_scalar_body_expression(initializer, slots)?;
+                        self.seek_scalar_offset(initializer.range.end);
+                        lowered
+                    };
+                    self.check_view_binding(*mutable, ty)?;
+                    self.take(Kind::Semi)?;
+                    self.check_borrowed_binding(ty)?;
+                    (Statement::Declare(slot, value), ty)
+                };
+                slots.insert(def, (slot, ty));
+                self.names.insert(name.clone(), (slot, *mutable, ty));
+                self.binding_ranges.insert(slot, name_range.clone());
+                if ty.owned() {
+                    self.scopes.last_mut().expect("block scope").push((slot, ty));
+                }
+                statement
+            }
+            StatementKind::Assign { target, operator, value } => {
+                if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
+                    let def = self.resolved_expressions().scalar_writes[&base.range.start];
+                    let (slot, receiver @ Type::StructMut(sid)) = slots[&def] else {
+                        unreachable!("resolved mutable receiver field");
+                    };
+                    let field = field_ty_in(sid, name, self.structs).expect("eligible receiver field");
+                    let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
+                    self.seek_scalar_offset(statement.range.end);
+                    self.check_field_value_type(name, field, actual, None)?;
+                    return Ok(Statement::FieldStore(slot, name.clone(), field, value, receiver));
+                }
+                if let ae_syntax::expression::ExpressionKind::Index { base, index } = &target.kind {
+                    // An array element store (`a[i] = v`): eligibility
+                    // confirmed a resolved array binding and the plain
+                    // operator. The checks mirror the typed store: the
+                    // binding must be mutable (E0103), the index and the
+                    // element must be i64 (E0201 for the index).
+                    let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
+                        unreachable!("scalar store eligibility");
+                    };
+                    let def = self.resolved_expressions().scalar_writes[&base.range.start];
+                    let (slot, Type::Array(len)) = slots[&def] else {
+                        unreachable!("resolved array store");
+                    };
+                    if !self.names[name].1 {
+                        self.seek_scalar_offset(base.range.start);
+                        let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                        return Err(self.immutable_binding_error(diagnostic, slot));
+                    }
+                    self.seek_scalar_offset(base.range.end);
+                    let (line, column) = self.position();
+                    let element_index = self.lower_scalar_array_index(index, slots)?;
+                    self.seek_scalar_offset(value.range.start);
+                    let (element, element_ty) = self.lower_scalar_body_expression(value, slots)?;
+                    if element_ty != Type::Int {
+                        self.seek_scalar_offset(value.range.end);
+                        return Err(self.fail("array elements must be i64"));
+                    }
+                    self.seek_scalar_offset(statement.range.end);
+                    return Ok(Statement::Store(slot, len, element_index, element, line, column));
+                }
+                let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
+                    unreachable!("scalar assignment eligibility");
+                };
+                let def = self.resolved_expressions().scalar_writes[&target.range.start];
+                let (slot, ty) = slots[&def];
+                if !self.names[name].1 {
+                    self.seek_scalar_offset(target.range.start);
+                    let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                    return Err(self.immutable_binding_error(diagnostic, slot));
+                }
+                self.seek_scalar_offset(target.range.end);
+                let compound = compound_assignment_operator(operator);
+                if let Some(op) = &compound {
+                    self.check_compound_assignment(ty, op)?;
+                }
+                self.seek_scalar_offset(value.range.start);
+                let (line, column) = self.position();
+                let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
+                self.seek_scalar_offset(statement.range.end);
+                self.check_assignment_type(name, ty, rhs_ty, Some(&value.range))?;
+                let value = if let Some(op) = compound {
+                    let lhs = Expr::Variable(slot, ty, line, column);
+                    Expr::Binary(Box::new(lhs), op, Box::new(rhs), line, column, ty)
+                } else {
+                    rhs
+                };
+                Statement::Assign(slot, value, false)
+            }
+            StatementKind::PointerStore { pointer, pointer_range, value } => {
+                self.seek_scalar_offset(statement.range.start);
+                let (line, column) = self.position();
+                let def = self.resolved_expressions().scalar_writes[&pointer_range.start];
+                let (slot, ty) = slots[&def];
+                self.seek_scalar_offset(pointer_range.end);
+                let pointee = self.pointer_store_pointee(pointer, Some(ty), line)?;
+                let (lowered, actual) = self.lower_scalar_body_expression(value, slots)?;
+                self.seek_scalar_offset(value.range.end);
+                self.check_pointer_store_value(actual, pointee)?;
+                self.take(Kind::Semi)?;
+                Statement::PtrStore(slot, lowered, line, column)
+            }
+            StatementKind::Print(argument) => {
+                let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView) {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail(&format!("cannot print a value of type {}", ty.name())).with_code("E0206"));
+                }
+                Statement::Print(Printed::Expr(value))
+            }
+            StatementKind::Assert(argument) => {
+                self.seek_scalar_offset(statement.range.start);
+                let (line, column) = self.position();
+                let (condition, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                if ty != Type::Bool {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail("assert requires a boolean condition"));
+                }
+                Statement::Assert(condition, line, column)
+            }
+            StatementKind::Return(value) => {
+                if self.in_main {
+                    self.seek_scalar_offset(statement.range.start);
+                    return Err(self.fail("return is not supported in main"));
+                }
+                let returned_receiver = receiver_value(value);
+                let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
+                    self.seek_scalar_offset(value.range.start);
+                    let result = self.expression(0, true)?;
+                    self.take(Kind::Semi)?;
+                    result
+                } else {
+                    self.lower_scalar_body_expression(value, slots)?
+                };
+                if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &lowered) {
+                    self.seek_scalar_offset(atom.range.end);
+                    self.check_variable_move(*slot)?;
+                    self.moved.insert(*slot);
+                }
+                self.seek_scalar_offset(statement.range.end);
+                self.check_return_type(ty, Some(&value.range))?;
+                Statement::Return(lowered, self.live_owned())
+            }
+            StatementKind::If { condition, then_body, else_body } => {
+                let value = self.lower_scalar_condition(condition, slots)?;
+                let before = self.moved.clone();
+                let yes = self.lower_scalar_statements(then_body, slots)?;
+                let after_yes = std::mem::replace(&mut self.moved, before);
+                let no = if let Some(branch) = else_body {
+                    self.pos += 1;
+                    match branch {
+                        ElseBranch::Block(body) => self.lower_scalar_statements(body, slots)?,
+                        ElseBranch::If(statement) => vec![self.lower_scalar_statement(statement, slots)?],
+                    }
+                } else {
+                    Vec::new()
+                };
+                self.moved.extend(after_yes);
+                Statement::If(value, yes, no)
+            }
+            StatementKind::While { condition, body } => {
+                let condition = self.lower_scalar_condition(condition, slots)?;
+                if self.loop_depth >= 64 {
+                    return Err(self.fail("loop nesting limit exceeded (64)"));
+                }
+                let base = self.scopes.len();
+                let moved_before = self.moved.clone();
+                let loop_body = self.lower_scalar_loop_body(body, slots, None)?;
+                self.close_loop_moves(base, moved_before, statement.range.start)?;
+                Statement::While(condition, loop_body)
+            }
+            StatementKind::Unsafe(body) => {
+                // An `unsafe { ... }` block is a scoping container; mirror
+                // the typed route's depth tracking and the W0702 note for
+                // blocks with no unchecked operation.
+                self.seek_scalar_offset(statement.range.start);
+                self.pos += 1;
+                let block_line = self.tokens[self.pos].line;
+                let block_column = self.tokens[self.pos].column;
+                self.unsafe_depth += 1;
+                let inner = self.lower_scalar_statements(body, slots);
+                self.unsafe_depth -= 1;
+                let inner = inner?;
+                if !self.block_has_unchecked_operation(&inner) {
+                    eprintln!("ae: {}:{}: warning: unnecessary unsafe block (W0702): the body contains no unchecked operation", block_line, block_column);
+                }
+                Statement::Unsafe(inner)
+            }
+            StatementKind::Expr { propagates: true, .. } => {
+                let operand = propagation_call(statement).expect("resolved propagation eligibility");
+                self.seek_scalar_offset(operand.range.start);
+                self.lower_propagating_call()?
+            }
+            StatementKind::Expr { .. } => {
+                let status = exit_status_operand(statement).expect("resolved exit eligibility");
+                let (code, ty) = self.lower_scalar_body_expression(status, slots)?;
+                self.seek_scalar_offset(status.range.end);
+                self.finish_exit(code, ty)?
+            }
+            StatementKind::Match { subject, arms } => {
+                let (value, ty) = self.lower_scalar_body_expression(subject, slots)?;
+                self.seek_scalar_offset(subject.range.end);
+                self.lower_match(value, ty, |parser, index, names| {
+                    let definitions = names.iter().map(|(_, offset)| {
+                        parser.resolved_expressions().scalar_definitions.get(offset).copied()
+                    }).collect::<Option<Vec<_>>>();
+                    let (Some(arm), Some(definitions)) = (arms.get(index), definitions) else {
+                        return parser.block();
+                    };
+                    for ((name, _), &def) in names.iter().zip(&definitions) {
+                        let (slot, _, ty) = parser.names[name];
+                        slots.insert(def, (slot, ty));
+                    }
+                    let body = parser.lower_scalar_statements(&arm.body, slots);
+                    for def in definitions { slots.remove(&def); }
+                    body
+                })?
+            }
+            StatementKind::Break | StatementKind::Continue => {
+                let is_break = matches!(statement.kind, StatementKind::Break);
+                if self.loop_depth == 0 {
+                    self.seek_scalar_offset(statement.range.start);
+                    let keyword = if is_break { "break" } else { "continue" };
+                    return Err(self.fail(&format!("'{keyword}' outside of a loop")));
+                }
+                if is_break {
+                    Statement::Break
+                } else {
+                    Statement::Continue(self.loop_labels.last().copied().flatten())
+                }
+            }
+            _ => unreachable!("scalar body eligibility"),
+        };
+        self.seek_scalar_offset(statement.range.end);
+        Ok(lowered)
+    }
+
+    fn lower_scalar_range(
+        &mut self,
+        statement: &ae_syntax::statement::Statement,
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+        statements: &mut Vec<Statement>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        let ae_syntax::statement::StatementKind::ForRange { binding, binding_range, start, end, body } = &statement.kind else {
+            unreachable!("scalar range eligibility");
+        };
+        self.seek_scalar_offset(binding_range.end);
+        if RESERVED.contains(&binding.as_str()) {
+            return Err(self.fail(&format!("'{binding}' is a built-in name and cannot be a loop variable")));
+        }
+        if self.names.contains_key(binding) {
+            return Err(self.duplicate_binding_error(binding));
+        }
+        let start = self.lower_scalar_range_bound(start, slots)?;
+        let end = self.lower_scalar_range_bound(end, slots)?;
+        if self.loop_depth >= 64 {
+            return Err(self.fail("loop nesting limit exceeded (64)"));
+        }
+        let (line, column) = self.position();
+        let end_slot = self.next_var;
+        let slot = end_slot + 1;
+        self.next_var += 2;
+        let label = self.next_label;
+        self.next_label += 1;
+        let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
+        slots.insert(def, (slot, Type::Int));
+        self.names.insert(binding.clone(), (slot, false, Type::Int));
+        let body = self.lower_scalar_loop_body(body, slots, Some(label));
+        slots.remove(&def);
+        self.names.remove(binding);
+        let body = body?;
+        statements.push(Statement::Declare(slot, start));
+        statements.push(Statement::Declare(end_slot, end));
+        statements.push(Statement::For(slot, end_slot, body, label, line, column));
+        Ok(())
+    }
+
+    fn lower_scalar_for_in(
+        &mut self,
+        statement: &ae_syntax::statement::Statement,
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+        result: &mut Vec<Statement>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        let ae_syntax::statement::StatementKind::ForIn { binding, binding_range, iterable, body } = &statement.kind else {
+            unreachable!("resolved for-in eligibility");
+        };
+        self.seek_scalar_offset(binding_range.end);
+        if RESERVED.contains(&binding.as_str()) {
+            return Err(self.fail(&format!("'{binding}' is a built-in name and cannot be a loop variable")));
+        }
+        if self.names.contains_key(binding) {
+            return Err(self.duplicate_binding_error(binding));
+        }
+        let (iterable_value, ty) = self.lower_scalar_body_expression(iterable, slots)?;
+        self.seek_scalar_offset(iterable.range.end);
+        let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
+        let lower_body = |parser: &mut Self, slot, elem_ty| {
+            slots.insert(def, (slot, elem_ty));
+            let result = parser.lower_scalar_statements(body, slots);
+            slots.remove(&def);
+            result
+        };
+        if ty == Type::Tokens {
+            self.lower_token_loop(binding, iterable_value, statement.range.start, result, lower_body)
+        } else {
+            self.lower_vector_loop(binding, iterable_value, ty, statement.range.start, result, lower_body)
+        }
+    }
+
+    fn lower_token_loop(
+        &mut self, var_name: &str, first: Expr, loop_offset: usize,
+        result: &mut Vec<Statement>,
+        lower_body: impl FnOnce(&mut Self, usize, Type) -> Result<Vec<Statement>, ae_span::Diagnostic>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        // `for token in cursor` streams the tokens as read-only
+        // views: no vector, no per-token allocation, and the
+        // loop body sees one token at a time (ADR-53). Each
+        // loop restarts at the beginning of the base text.
+        let cursor = match &first {
+            Expr::Variable(id, Type::Tokens, _, _) => *id,
+            _ => return Err(self.fail("for-in over a token cursor needs a bare cursor variable: bind it first, e.g. let toks = tokens(text, \" \");")),
+        };
+        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
+        let (line, col) = self.position();
+        let var = self.next_var; self.next_var += 1;
+        let label = self.next_label; self.next_label += 1;
+        self.loop_depth += 1;
+        let base = self.scopes.len();
+        let moved_before = self.moved.clone();
+        self.scopes.push(vec![(var, Type::StrView)]);
+        self.loop_scopes.push(self.scopes.len());
+        self.loop_labels.push(Some(label));
+        self.names.insert(var_name.to_owned(), (var, false, Type::StrView));
+        let body = lower_body(self, var, Type::StrView);
+        self.loop_labels.pop();
+        self.loop_scopes.pop();
+        self.scopes.pop().unwrap();
+        self.loop_depth -= 1;
+        self.names.remove(var_name);
+        let body = body?;
+        self.close_loop_moves(base, moved_before, loop_offset)?;
+        result.push(Statement::ForTokens(cursor, var, body, label, line, col));
+        Ok(())
+    }
+
+    fn lower_vector_loop(
+        &mut self, var_name: &str, first: Expr, first_ty: Type, loop_offset: usize,
+        result: &mut Vec<Statement>,
+        lower_body: impl FnOnce(&mut Self, usize, Type) -> Result<Vec<Statement>, ae_span::Diagnostic>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        // `for x in vec-variable` iterates owned elements by
+        // value: desugars to a hidden range loop plus an
+        // immutable element declaration per iteration.
+        // Borrowed string vectors iterate the same way, with
+        // element access going through the pointer.
+        let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
+            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int, false),
+            (Expr::Variable(id, Type::StrVec, _, _), Type::StrVec) => (*id, Type::StrView, false),
+            (Expr::Variable(id, Type::StrVecRef, _, _), Type::StrVecRef) => (*id, Type::StrView, true),
+            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int, false),
+            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::F64, false),
+            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::F64, false),
+            _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
+        };
+        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
+        let (line, col) = self.position();
+        let end_var = self.next_var; self.next_var += 1;
+        let counter = self.next_var; self.next_var += 1;
+        let var = self.next_var; self.next_var += 1;
+        let label = self.next_label; self.next_label += 1;
+        self.loop_depth += 1;
+        let base = self.scopes.len();
+        let moved_before = self.moved.clone();
+        self.scopes.push(vec![(var, elem_ty), (counter, Type::Int), (end_var, Type::Int)]);
+        self.loop_scopes.push(self.scopes.len());
+        self.loop_labels.push(Some(label));
+        self.names.insert(var_name.to_owned(), (var, false, elem_ty));
+        // The container is borrowed for the whole loop.
+        let container_depth = self.scopes.len();
+        self.borrows.push((v_id, container_depth, BorrowKind::Container));
+        let body = lower_body(self, var, elem_ty);
+        self.loop_labels.pop();
+        self.loop_scopes.pop();
+        self.scopes.pop().unwrap();
+        self.loop_depth -= 1;
+        self.names.remove(var_name);
+        self.borrows.retain(|&(id, _, _)| id != v_id);
+        let mut body = body?;
+        if self.moved.contains(&v_id) { return Err(self.fail(&format!("cannot move the vector being iterated (a move of it happens in this loop)"))); }
+        self.close_loop_moves(base, moved_before, loop_offset)?;
+        // Per-iteration element binding, then the user's body.
+        let element = match elem_ty {
+            Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, by_ref),
+            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
+        };
+        body.insert(0, Statement::Declare(var, element));
+        result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));
+        result.push(Statement::Declare(counter, Expr::Number(0)));
+        result.push(Statement::For(counter, end_var, body, label, line, col));
+        Ok(())
+    }
+
+    fn lower_scalar_loop_body(
+        &mut self,
+        body: &[ae_syntax::statement::Statement],
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+        label: Option<usize>,
+    ) -> Result<Vec<Statement>, ae_span::Diagnostic> {
+        self.loop_depth += 1;
+        self.loop_labels.push(label);
+        let base = self.scopes.len();
+        self.loop_scopes.push(base);
+        let result = self.lower_scalar_statements(body, slots);
+        self.loop_scopes.pop();
+        self.loop_labels.pop();
+        self.loop_depth -= 1;
+        result
+    }
+
+    fn lower_scalar_range_bound(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Expr, ae_span::Diagnostic> {
+        let (value, ty) = self.lower_scalar_body_expression(expression, slots)?;
+        self.seek_scalar_offset(expression.range.end);
+        if ty != Type::Int {
+            return Err(self.fail("range bounds must be i64"));
+        }
+        Ok(value)
+    }
+
+    fn lower_scalar_condition(
+        &mut self,
+        condition: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Expr, ae_span::Diagnostic> {
+        let (value, ty) = self.lower_scalar_body_expression(condition, slots)?;
+        self.seek_scalar_offset(condition.range.end);
+        if ty != Type::Bool {
+            return Err(self.fail("condition must be a boolean expression").with_code("E0205"));
+        }
+        Ok(value)
+    }
+
+    pub(super) fn seek_scalar_offset(&mut self, offset: usize) {
+        self.pos = self.tokens.partition_point(|token| token.offset < offset);
+    }
+
+    fn field_ty_checked(&self, sid: usize, name: &str) -> Result<Type, ae_span::Diagnostic> {
+        let defn = &self.structs[sid];
+        defn.fields.iter().position(|(n, _)| n == name)
+            .map(|fidx| defn.fields[fidx].1)
+            .ok_or_else(|| self.fail(&format!("struct '{}' has no field '{}'", defn.name, name)))
+    }
+
+    fn lower_scalar_body_expression(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        Ok(match &expression.kind {
+            ExpressionKind::Atom(Kind::Number(value)) => (Expr::Number(*value), Type::Int),
+            ExpressionKind::Atom(Kind::Float(value)) => (Expr::FloatLit(*value), Type::F64),
+            ExpressionKind::Atom(Kind::True) => (Expr::BoolLit(true), Type::Bool),
+            ExpressionKind::Atom(Kind::False) => (Expr::BoolLit(false), Type::Bool),
+            ExpressionKind::Atom(Kind::Text(value)) => {
+                self.seek_scalar_offset(expression.range.start);
+                let (line, column) = self.position();
+                (Expr::StrLit(value.clone(), line, column), Type::String)
+            }
+            ExpressionKind::Atom(Kind::Ident(name)) => {
+                let def = self.resolved_expressions().scalar_reads[&expression.range.start];
+                let &(slot, ty) = slots.get(&def).ok_or_else(|| {
+                    self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101")
+                })?;
+                self.seek_scalar_offset(expression.range.start);
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"),
+                        slot,
+                    )));
+                }
+                let (line, column) = self.position();
+                (Expr::Variable(slot, ty, line, column), ty)
+            }
+            ExpressionKind::Group(inner) => self.lower_scalar_body_expression(inner, slots)?,
+            ExpressionKind::AddressCast { binding, binding_range, mutable, .. } => {
+                self.seek_scalar_offset(expression.range.start);
+                let position = self.position();
+                let def = self.resolved_expressions().scalar_reads[&binding_range.start];
+                let (slot, ty) = slots[&def];
+                self.seek_scalar_offset(binding_range.start);
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot use '{binding}' because it was moved")).with_code("E0102"), slot,
+                    )));
+                }
+                let (line, column) = self.position();
+                let operand = Expr::Variable(slot, ty, line, column);
+                self.seek_scalar_offset(binding_range.end);
+                self.check_address_binding(slot, *mutable)?;
+                self.take(Kind::As)?;
+                let (_, pointee) = self.pointer_cast_pointee(Some(*mutable))?;
+                self.lower_address_cast(operand, ty, pointee, *mutable, position)?
+            }
+            ExpressionKind::Struct { target, fields } => {
+                // Validate in source order and emit in layout order.
+                let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
+                    unreachable!("scalar construction eligibility");
+                };
+                let &sid = self.struct_names.get(name).expect("scalar construction target");
+                let mut values: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
+                for field in fields {
+                    let next = self.tokens.partition_point(|token| token.offset < field.name_range.end);
+                    let (slot, expected) = self.constructor_field(sid, &field.name, &values, Some(self.tokens[next].offset))?;
+                    let (value, actual) = self.lower_scalar_body_expression(&field.value, slots)?;
+                    self.check_field_value_type(&field.name, expected, actual, Some(&field.value.range))?;
+                    values[slot] = Some(value);
+                }
+                self.finish_struct_literal(sid, target.range.start, values)?
+            }
+            ExpressionKind::Field { base, name } => {
+                if let ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind {
+                    // A struct parameter's scalar field read: the slot carries
+                    // the struct type with its registry id, so the field type
+                    // comes straight from the compiler's own table.
+                    let def = self.resolved_expressions().scalar_reads[&base.range.start];
+                    let (slot, struct_ty) = slots[&def];
+                    let sid = match struct_ty {
+                        Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                        _ => unreachable!("resolved struct binding"),
+                    };
+                    self.seek_scalar_offset(base.range.start);
+                    if self.moved.contains(&slot) {
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{base_name}' because it was moved")).with_code("E0102"),
+                            slot,
+                        )));
+                    }
+                    let (line, column) = self.position();
+                    let fty = self.field_ty_checked(sid, name)?;
+                    (Expr::Field(Box::new(Expr::Variable(slot, struct_ty, line, column)), name.clone(), fty), fty)
+                } else {
+                    // A nested read (`o.inner.x`): the marked base lowers
+                    // recursively and its declared type supplies the owner.
+                    let (base_expr, base_ty) = self.lower_scalar_body_expression(base, slots)?;
+                    let sid = match base_ty {
+                        Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                        _ => unreachable!("resolved struct field base"),
+                    };
+                    let fty = self.field_ty_checked(sid, name)?;
+                    (Expr::Field(Box::new(base_expr), name.clone(), fty), fty)
+                }
+            }
+            ExpressionKind::Prefix { operator, operand } => {
+                self.seek_scalar_offset(expression.range.start);
+                let position = self.position();
+                let operand = self.lower_scalar_body_expression(operand, slots)?;
+                self.seek_scalar_offset(expression.range.end);
+                let fact = self.resolved_expressions().scalar_expression_types.get(&expression.range).copied();
+                self.lower_prefix(operator.clone(), operand, position, fact)?
+            }
+            ExpressionKind::Binary { left, operator, right } => {
+                let lhs = self.lower_scalar_body_expression(left, slots)?;
+                self.seek_scalar_offset(left.range.end);
+                let position = self.position();
+                let rhs = self.lower_scalar_body_expression(right, slots)?;
+                self.seek_scalar_offset(expression.range.end);
+                let fact = self.resolved_expressions().scalar_expression_types.get(&expression.range).copied();
+                self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                if let ExpressionKind::Field { base, .. } = &callee.kind {
+                    let (operand, ty) = self.lower_scalar_body_expression(base, slots)?;
+                    let (Type::Ptr(id) | Type::PtrMut(id)) = ty else {
+                        return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
+                    };
+                    let method = self.tokens.partition_point(|token| token.offset < callee.range.end) - 1;
+                    self.check_pointer_deref(self.tokens[method].offset)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    let (line, column) = self.position();
+                    return Ok((Expr::DerefPtr(Box::new(operand), line, column), super::ptr_pointee(id)));
+                }
+                let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
+                    unreachable!("scalar call eligibility");
+                };
+                let signature = self.functions.get(name).expect("scalar call signature").clone();
+                let mut args = Vec::with_capacity(arguments.len());
+                for (index, argument) in arguments.iter().enumerate() {
+                    self.seek_scalar_offset(argument.range.start);
+                    if index >= 64 {
+                        return Err(self.fail("function argument limit exceeded (64)"));
+                    }
+                    let &expected = signature.params.get(index)
+                        .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
+                        self.seek_scalar_offset(atom.range.end);
+                        self.check_variable_move(*slot)?;
+                    }
+                    self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
+                    // An owned aggregate passed by value moves: later uses
+                    // are rejected (E0102), and the drops pass trims the
+                    // Frees lists for this slot.
+                    if actual.owned() {
+                        if let Expr::Variable(slot, ..) = &value {
+                            self.moved.insert(*slot);
+                        }
+                    }
+                    args.push(Argument::Value(value));
+                }
+                self.seek_scalar_offset(expression.range.end);
+                if args.len() != signature.params.len() {
+                    return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", signature.params.len(), args.len())));
+                }
+                (Expr::Call(signature.id, args, signature.ret), signature.ret)
+            }
+            ExpressionKind::Index { base, index } => {
+                let def = self.resolved_expressions().scalar_reads[&base.range.start];
+                let (slot, ty) = slots[&def];
+                self.seek_scalar_offset(base.range.end);
+                let (line, column) = self.position();
+                match ty {
+                    Type::Array(len) => {
+                        let value = self.lower_scalar_array_index(index, slots)?;
+                        (Expr::Index(slot, len, Box::new(value), line, column), Type::Int)
+                    }
+                    Type::VecRef | Type::VecFRef | Type::Vec | Type::VecF => {
+                        let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if index_ty != Type::Int {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        let element = if matches!(ty, Type::VecFRef | Type::VecF) { Type::F64 } else { Type::Int };
+                        let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
+                        (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
+                    }
+                    Type::StrVecRef | Type::StrVec => {
+                        // A borrowed string vector's element is a view; an
+                        // owned one hands the element's view too.
+                        let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if index_ty != Type::Int {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        let by_ref = matches!(ty, Type::StrVecRef);
+                        (Expr::StrVecIndex(slot, Box::new(value), line, column, by_ref), Type::StrView)
+                    }
+                    _ => unreachable!("resolved array, borrowed or owned numeric/string vector binding"),
+                }
+            }
+            _ => unreachable!("scalar expression eligibility"),
+        })
+    }
+
+    fn lower_scalar_array_index(
+        &mut self,
+        index: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Expr, ae_span::Diagnostic> {
+        let (value, ty) = self.lower_scalar_body_expression(index, slots)?;
+        let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
+        self.check_array_index(scalar, Some(index.range.end))?;
+        Ok(value)
+    }
+
+    fn lower_propagating_call(&mut self) -> Result<Statement, ae_span::Diagnostic> {
+        let (value, ty) = match self.lower_shared_value(Some(Kind::Question), true) {
+            Some(value) => value,
+            None => self.expression(0, true)?,
+        };
+        if *self.current() != Kind::Question {
+            return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+        }
+        let (statement, _) = self.propagate_statement(value, ty, None)?;
+        self.pos += 1;
+        self.take(Kind::Semi)?;
+        Ok(statement)
+    }
+
+    fn finish_exit(&mut self, code: Expr, ty: Type) -> Result<Statement, ae_span::Diagnostic> {
+        if ty != Type::Int {
+            return Err(self.fail("exit expects an i64 status code"));
+        }
+        self.take(Kind::RParen)?;
+        self.take(Kind::Semi)?;
+        Ok(Statement::Exit(code, self.live_owned()))
+    }
+
+    fn check_view_binding(&self, mutable: bool, ty: Type) -> Result<(), ae_span::Diagnostic> {
+        if mutable && matches!(ty, Type::StrView | Type::Tokens) {
+            return Err(self.fail("a view binding cannot be mutable; declare it with 'let'"));
+        }
+        Ok(())
+    }
+
+    fn check_borrowed_binding(&self, ty: Type) -> Result<(), ae_span::Diagnostic> {
+        if matches!(ty, Type::VecRef | Type::StrVecRef) {
+            return Err(self.fail("cannot store a borrowed vector in a variable; pass it directly to a parameter that borrows"));
+        }
+        if matches!(ty, Type::StructRef(_) | Type::StructMut(_)) {
+            return Err(self.fail("cannot store a borrowed struct in a variable; pass it directly to a parameter that borrows"));
+        }
+        Ok(())
+    }
+
+    fn pointer_store_pointee(&self, name: &str, ty: Option<Type>, line: usize) -> Result<Type, ae_span::Diagnostic> {
+        let Some(Type::PtrMut(id)) = ty else {
+            return Err(self.fail(&format!("'*{name}' requires a *mut pointer variable")));
+        };
+        if self.unsafe_depth == 0 {
+            return Err(self.error_at(line, "writing through a raw pointer requires 'unsafe'").with_code("E0700"));
+        }
+        Ok(super::ptr_pointee(id))
+    }
+
+    pub(super) fn check_pointer_deref(&self, offset: usize) -> Result<(), ae_span::Diagnostic> {
+        if self.unsafe_depth == 0 {
+            return Err(self.error_at(offset, "dereferencing a raw pointer requires 'unsafe'").with_code("E0700"));
+        }
+        Ok(())
+    }
+
+    fn check_pointer_store_value(&self, actual: Type, pointee: Type) -> Result<(), ae_span::Diagnostic> {
+        if actual != pointee {
+            return Err(self.fail(&format!("cannot write a {} value through *mut {}", actual.name(), pointee.name())));
+        }
+        if pointee.owned() {
+            return Err(self.fail("writing an owned value through a pointer is not supported yet; the pointer would take over its release"));
+        }
+        Ok(())
+    }
+
+    fn checked_scalar(&self, range: Option<&std::ops::Range<usize>>) -> Option<ae_resolve::typecheck::Scalar> {
+        match self.resolved_expressions().scalar_expression_types.get(range?)? {
+            ae_resolve::resolve::ExpressionType::Checked(scalar) => Some(*scalar),
+            _ => None,
+        }
+    }
+
+    fn check_compound_assignment(&self, target: Type, operator: &Kind) -> Result<(), ae_span::Diagnostic> {
+        if (target == Type::String && *operator == Kind::Plus)
+            || ae_resolve::typecheck::scalar_compound_assignment(super::expression::operator_scalar(target), operator)
+        {
+            return Ok(());
+        }
+        Err(self.fail(&format!("compound assignment is not supported for type '{}'", target.name())))
+    }
+
+    pub(super) fn matches_value_type(&self, expected: Type, actual: Type, range: Option<&std::ops::Range<usize>>) -> bool {
+        match self.checked_scalar(range) {
+            Some(scalar) => super::expression::operator_scalar(expected) == Some(scalar),
+            None => actual == expected,
+        }
+    }
+
+    fn check_return_type(&self, value: Type, range: Option<&std::ops::Range<usize>>) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(self.return_type, value, range) {
+            return Ok(());
+        }
+        Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"))
+    }
+
+    pub(super) fn check_value_argument_type(
+        &mut self,
+        name: &str,
+        index: usize,
+        expected: Type,
+        actual: Type,
+        range: Option<&std::ops::Range<usize>>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(expected, actual, range) {
+            return Ok(());
+        }
+        if let Some(range) = range {
+            self.seek_scalar_offset(range.end);
+        }
+        Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())))
+    }
+
+    pub(super) fn check_field_value_type(
+        &mut self,
+        name: &str,
+        expected: Type,
+        actual: Type,
+        range: Option<&std::ops::Range<usize>>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(expected, actual, range) {
+            return Ok(());
+        }
+        if let Some(range) = range {
+            self.seek_scalar_offset(range.end);
+        }
+        Err(self.fail(&format!("field '{name}' must be {}", expected.name())))
+    }
+
+    fn check_assignment_type(
+        &self,
+        name: &str,
+        target: Type,
+        value: Type,
+        range: Option<&std::ops::Range<usize>>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(target, value, range) {
+            return Ok(());
+        }
+        Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value.name(), target.name())))
     }
 
     fn lower_resolved_local(&mut self, name: &str, offset: usize) -> Option<(Expr, Type)> {
@@ -642,35 +2322,51 @@ impl<'a> Parser<'a> {
         let ExpressionKind::Qualified { base, name: variant } = &target.kind else {
             return None;
         };
-        let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
-            return None;
-        };
         let member = self.tokens.partition_point(|token| token.offset < target.range.end).checked_sub(1)?;
         let offset = self.tokens[member].offset;
         if !self.resolved_expressions().enum_variants.contains(&offset) {
             return None;
         }
-        let &eid = self.enum_names.get(name)?;
+        let eid = match &base.kind {
+            ExpressionKind::Atom(Kind::Ident(name)) => *self.enum_names.get(name)?,
+            ExpressionKind::Specialization { base, arguments } => {
+                let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return None };
+                self.cached_enum_specialization(name, arguments)?
+            }
+            _ => return None,
+        };
         let def = self.enums.get(eid)?;
         self.require_public("enum", def.name, &def.file, def.public).ok()?;
-        let (variant_id, (_, payload)) = def.variants.iter().enumerate().find(|(_, (name, _))| name == variant)?;
+        let (variant_id, payload) = def.variant_payload(variant)?;
+        let (enum_name, payload) = (def.name, payload.to_vec());
+        let values = self.lower_shared_enum_payload(arguments, &payload, remaining, nodes_left, effects)?;
+        Some((Expr::EnumLit(enum_name, eid, variant_id, values), Type::Enum(enum_name, eid)))
+    }
+
+    fn lower_shared_enum_payload(
+        &mut self,
+        arguments: &[ae_syntax::expression::Expression],
+        payload: &[Type],
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<Vec<Expr>> {
         if arguments.len() != payload.len() {
             return None;
         }
-        let (enum_name, payload) = (def.name, payload.clone());
         let mut values = Vec::with_capacity(payload.len());
-        for (argument, expected) in arguments.iter().zip(payload) {
+        for (argument, &expected) in arguments.iter().zip(payload) {
             let (value, actual) = if expected == Type::String {
                 self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?
             } else {
                 self.lower_shared_expression(argument, remaining, nodes_left, effects)?
             };
-            if expected != actual {
+            if !self.matches_value_type(expected, actual, Some(&argument.range)) {
                 return None;
             }
             values.push(value);
         }
-        Some((Expr::EnumLit(enum_name, eid, variant_id, values), Type::Enum(enum_name, eid)))
+        Some(values)
     }
 
     fn lower_shared_expression(
@@ -689,8 +2385,8 @@ impl<'a> Parser<'a> {
         }
         let remaining = remaining.checked_sub(1)?;
         // The typed Pratt parser charges operands, groups and prefixes.
-        // An infix node adds no charge beyond its two operand walks.
-        if !matches!(expression.kind, ExpressionKind::Binary { .. }) {
+        // Infix and postfix cast nodes add no charge beyond their operands.
+        if !matches!(expression.kind, ExpressionKind::Binary { .. } | ExpressionKind::PointerCast { .. }) {
             *nodes_left = nodes_left.checked_sub(1)?;
         }
         match &expression.kind {
@@ -705,7 +2401,7 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 let (_, _, ty) = self.names.get(name)?;
-                if !matches!(ty, Type::Int | Type::F64 | Type::Bool) {
+                if !matches!(ty, Type::Int | Type::F64 | Type::Bool | Type::Closure(_) | Type::Ptr(_) | Type::PtrMut(_)) {
                     return None;
                 }
                 self.lower_resolved_local(name, expression.range.start)
@@ -740,35 +2436,20 @@ impl<'a> Parser<'a> {
                 }
             }
             ExpressionKind::Struct { target, fields } => {
-                let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
-                    return None;
-                };
                 if std::env::var_os("AE_DEBUG_MIR").is_some()
                     || !self.resolved_expressions().struct_constructors.contains(&target.range.start)
                 {
                     return None;
                 }
-                let &sid = self.struct_names.get(name)?;
-                let def = self.structs.get(sid)?;
-                self.require_public("struct", &def.name, &def.file, def.public).ok()?;
-                if fields.len() != def.fields.len() {
-                    return None;
-                }
-                let declared_fields = def.fields.clone();
-                let mut values: Vec<_> = (0..fields.len()).map(|_| None).collect();
-                for field in fields {
-                    let slot = declared_fields.iter().position(|(name, _)| name == &field.name)?;
-                    if values[slot].is_some() {
-                        return None;
+                let sid = match &target.kind {
+                    ExpressionKind::Atom(Kind::Ident(name)) => *self.struct_names.get(name)?,
+                    ExpressionKind::Specialization { base, arguments } => {
+                        let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return None };
+                        self.cached_struct_specialization(name, arguments)?
                     }
-                    let expected = declared_fields[slot].1;
-                    let (value, actual) = self.lower_shared_argument(&field.value, expected, remaining, nodes_left, effects)?;
-                    if actual != expected {
-                        return None;
-                    }
-                    values[slot] = Some(value);
-                }
-                Some((Expr::StructLit(sid, values.into_iter().collect::<Option<_>>()?), Type::Struct(sid)))
+                    _ => return None,
+                };
+                self.lower_shared_struct_fields(sid, fields, remaining, nodes_left, effects)
             }
             ExpressionKind::Vector(elements) => {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < expression.range.start))?;
@@ -791,6 +2472,33 @@ impl<'a> Parser<'a> {
                 let ty = vector_type.unwrap_or(Type::Vec);
                 Some((Expr::VecLit(values, ty, line, column), ty))
             }
+            ExpressionKind::AddressCast { binding, binding_range, mutable, pointee } => {
+                remaining.checked_sub(1)?;
+                *nodes_left = nodes_left.checked_sub(1)?;
+                let (operand, ty) = self.lower_resolved_local(binding, binding_range.start)?;
+                let name = self.source.get(pointee.clone())?;
+                if super::types::scalar_type(name)? != ty || (*mutable && !self.names.get(binding)?.1) {
+                    return None;
+                }
+                let start = self.tokens.partition_point(|token| token.offset < expression.range.start);
+                let token = self.tokens.get(start)?;
+                let id = super::intern_pointee(ty);
+                let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
+                Some((Expr::BorrowAs(Box::new(operand), *mutable, token.line, token.column), ty))
+            }
+            ExpressionKind::PointerCast { base, mutable, pointee } => {
+                let (operand, base_type) = self.lower_shared_expression(base, remaining, nodes_left, effects)?;
+                if !matches!(base_type, Type::Ptr(_) | Type::PtrMut(_)) {
+                    return None;
+                }
+                let name = self.source.get(pointee.clone())?;
+                let pointee = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))?;
+                let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                let token = self.tokens.get(end)?;
+                let id = super::intern_pointee(pointee);
+                let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
+                Some((Expr::PtrCast(Box::new(operand), *mutable, id, token.line, token.column), ty))
+            }
             ExpressionKind::Group(inner) => self.lower_shared_expression(inner, remaining, nodes_left, effects),
             ExpressionKind::Qualified { .. } => {
                 self.lower_shared_variant(expression, &[], remaining, nodes_left, effects)
@@ -805,94 +2513,54 @@ impl<'a> Parser<'a> {
                     }
                     return self.lower_shared_variant(callee, arguments, remaining, nodes_left, effects);
                 }
-                let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
+                let (base, types) = match &callee.kind {
+                    ExpressionKind::BracketedCallTarget { base, arguments } => (base.as_ref(), Some(arguments.as_slice())),
+                    _ => (callee.as_ref(), None),
+                };
+                let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
                     return None;
                 };
-                if self.names.contains_key(name) || RESERVED.contains(&name.as_str())
-                    || !self.resolved_expressions().direct_calls.contains(&callee.range.start)
-                {
+                if self.names.contains_key(name) || RESERVED.contains(&name.as_str()) {
                     return None;
                 }
-                let signature = self.functions.get(name)?;
-                if signature.file != self.file || signature.extern_c || is_unsafe_fn(signature.id)
-                    || arguments.len() != signature.params.len() || arguments.len() > 64
-                    || !signature.params.iter().all(|ty| {
+                let resolved = self.resolved_expressions();
+                let offset = base.range.start;
+                let (id, params, ret) = if let Some(types) = types {
+                    let (definition, (id, params, ret)) = self.cached_function_specialization(name, types)?;
+                    let visible = if definition.file == self.file {
+                        resolved.direct_calls.contains(&offset)
+                    } else {
+                        definition.file != PRELUDE && definition.public && resolved.unresolved_calls.contains(&offset)
+                    };
+                    if !visible {
+                        return None;
+                    }
+                    (*id, params, *ret)
+                } else {
+                    let signature = self.functions.get(name)?;
+                    if signature.file != self.file || signature.extern_c || !resolved.direct_calls.contains(&offset) {
+                        return None;
+                    }
+                    (signature.id, &signature.params, signature.ret)
+                };
+                if is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
+                    || !params.iter().all(|ty| {
                         matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView
                             | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
                     })
-                    || !matches!(signature.ret, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
+                    || !matches!(ret, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
                 {
                     return None;
                 }
-                let (id, params, ret) = (signature.id, signature.params.clone(), signature.ret);
-                let mut args = Vec::with_capacity(arguments.len());
-                for (argument, expected) in arguments.iter().zip(params) {
-                    if matches!(expected, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
-                        let ExpressionKind::BorrowArgument { name, name_range, mutable } = &argument.kind else {
-                            return None;
-                        };
-                        if *mutable != matches!(expected, Type::StructMut(_)) {
-                            return None;
-                        }
-                        let (Expr::Variable(slot, ..), actual) = self.lower_resolved_local(name, name_range.start)? else {
-                            return None;
-                        };
-                        if effects.moves.contains(&slot) {
-                            return None;
-                        }
-                        let address = match (expected, actual) {
-                            (expected, actual) if expected == actual && !*mutable => false,
-                            (Type::StructRef(wanted), Type::Struct(actual_id) | Type::StructMut(actual_id))
-                                if wanted == actual_id =>
-                            {
-                                if effects.mut_borrows.contains(&slot)
-                                    || self.mut_borrows.iter().any(|&(borrowed, _)| borrowed == slot)
-                                {
-                                    return None;
-                                }
-                                if !self.is_borrowed(slot) && !effects.call_borrows.contains(&slot) {
-                                    effects.call_borrows.push(slot);
-                                }
-                                matches!(actual, Type::Struct(_))
-                            }
-                            (Type::StructMut(wanted), Type::Struct(actual_id) | Type::StructMut(actual_id))
-                                if wanted == actual_id =>
-                            {
-                                if !self.names.get(name)?.1 || effects.call_borrows.contains(&slot)
-                                    || effects.mut_borrows.contains(&slot)
-                                {
-                                    return None;
-                                }
-                                if self.is_borrowed(slot) {
-                                    if !self.only_view_borrows_active(slot) {
-                                        return None;
-                                    }
-                                    effects.conflicts.push((slot, name_range.start, name.clone(), "mutate", None));
-                                }
-                                effects.mut_borrows.push(slot);
-                                matches!(actual, Type::Struct(_))
-                            }
-                            (Type::VecRef, Type::Vec) | (Type::VecFRef, Type::VecF)
-                            | (Type::StrVecRef, Type::StrVec) => true,
-                            _ => return None,
-                        };
-                        args.push(Argument::Borrow(slot, address));
-                        continue;
-                    }
-                    let value = self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?;
-                    args.push(match (expected, value) {
-                        (Type::StrView, (value, Type::String | Type::StrView)) => Argument::View(value),
-                        (expected, (value, actual)) if expected == actual => Argument::Value(value),
-                        _ => return None,
-                    });
-                }
+                let params = params.clone();
+                let args = self.lower_shared_call_arguments(arguments, &params, remaining, nodes_left, effects)?;
                 Some((Expr::Call(id, args, ret), ret))
             }
             ExpressionKind::Prefix { operator, operand } => {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < expression.range.start))?;
                 let position = (token.line, token.column);
                 let operand = self.lower_shared_expression(operand, remaining, nodes_left, effects)?;
-                self.lower_prefix(operator.clone(), operand, position).ok()
+                self.lower_prefix(operator.clone(), operand, position, None).ok()
             }
             ExpressionKind::Binary { left, operator, right } => {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < left.range.end))?;
@@ -907,10 +2575,174 @@ impl<'a> Parser<'a> {
                 };
                 let left = lower_operand(self, left, remaining, nodes_left, effects)?;
                 let right = lower_operand(self, right, remaining, nodes_left, effects)?;
-                self.lower_infix(left, operator.clone(), right, position).ok()
+                self.lower_infix(left, operator.clone(), right, position, None).ok()
             }
             _ => None,
         }
+    }
+
+    fn lower_shared_struct_fields(
+        &mut self,
+        sid: usize,
+        fields: &[ae_syntax::expression::FieldInitializer],
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<(Expr, Type)> {
+        let def = self.structs.get(sid)?;
+        self.require_public("struct", &def.name, &def.file, def.public).ok()?;
+        if fields.len() != def.fields.len() {
+            return None;
+        }
+        let declared_fields = def.fields.clone();
+        let mut values: Vec<_> = (0..fields.len()).map(|_| None).collect();
+        for field in fields {
+            let slot = declared_fields.iter().position(|(name, _)| name == &field.name)?;
+            if values[slot].is_some() {
+                return None;
+            }
+            let expected = declared_fields[slot].1;
+            let (value, actual) = self.lower_shared_argument(&field.value, expected, remaining, nodes_left, effects)?;
+            if !self.matches_value_type(expected, actual, Some(&field.value.range)) {
+                return None;
+            }
+            values[slot] = Some(value);
+        }
+        Some((Expr::StructLit(sid, values.into_iter().collect::<Option<_>>()?), Type::Struct(sid)))
+    }
+
+    pub(super) fn lower_committed_specialized_struct(&mut self, sid: usize) -> Option<(Expr, Type)> {
+        if *self.current() != Kind::LBrace || std::env::var_os("AE_DEBUG_MIR").is_some() {
+            return None;
+        }
+        let offset = self.tokens[self.pos].offset;
+        let (end, fields) = self.resolved_expressions().specialized_struct_fields.get(&offset)?.clone();
+        let cursor = self.tokens.partition_point(|token| token.offset < end);
+        let close = self.tokens.get(cursor.checked_sub(1)?)?;
+        if close.kind != Kind::RBrace || close.end != end {
+            return None;
+        }
+        let depth = 128usize.checked_sub(self.expression_depth)?.min(64);
+        let budget = 128usize.checked_sub(self.expression_nodes)?;
+        let mut nodes_left = budget;
+        let mut effects = SharedExpressionEffects::default();
+        let value = self.lower_shared_struct_fields(sid, &fields, depth, &mut nodes_left, &mut effects)?;
+        self.commit_shared_effects(effects);
+        self.expression_nodes += budget - nodes_left;
+        self.pos = cursor;
+        Some(value)
+    }
+
+    fn lower_shared_call_arguments(
+        &mut self,
+        arguments: &[ae_syntax::expression::Expression],
+        params: &[Type],
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<Vec<Argument>> {
+        use ae_syntax::expression::ExpressionKind;
+        let mut args = Vec::with_capacity(arguments.len());
+        for (argument, expected) in arguments.iter().zip(params.iter().copied()) {
+            if matches!(expected, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+                let ExpressionKind::BorrowArgument { name, name_range, mutable } = &argument.kind else {
+                    return None;
+                };
+                if *mutable != matches!(expected, Type::StructMut(_)) {
+                    return None;
+                }
+                let (Expr::Variable(slot, ..), actual) = self.lower_resolved_local(name, name_range.start)? else {
+                    return None;
+                };
+                if effects.moves.contains(&slot) {
+                    return None;
+                }
+                use super::declarations::CallBorrow;
+                let borrow = CallBorrow::classify(expected, actual)?;
+                if let CallBorrow::Struct { .. } = borrow {
+                    if !*mutable {
+                        if effects.mut_borrows.contains(&slot)
+                            || self.mut_borrows.iter().any(|&(borrowed, _)| borrowed == slot)
+                        {
+                            return None;
+                        }
+                        if !self.is_borrowed(slot) && !effects.call_borrows.contains(&slot) {
+                            effects.call_borrows.push(slot);
+                        }
+                    } else {
+                        if !self.names.get(name)?.1 || effects.call_borrows.contains(&slot)
+                            || effects.mut_borrows.contains(&slot)
+                        {
+                            return None;
+                        }
+                        if self.is_borrowed(slot) {
+                            if !self.only_view_borrows_active(slot) {
+                                return None;
+                            }
+                            effects.conflicts.push((slot, name_range.start, name.clone(), "mutate", None));
+                        }
+                        effects.mut_borrows.push(slot);
+                    }
+                }
+                args.push(Argument::Borrow(slot, borrow.address()));
+                continue;
+            }
+            let value = self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?;
+            args.push(match (expected, value) {
+                (Type::StrView, (value, Type::String | Type::StrView)) => Argument::View(value),
+                (expected, (value, actual)) if self.matches_value_type(expected, actual, Some(&argument.range)) => Argument::Value(value),
+                _ => return None,
+            });
+        }
+        Some(args)
+    }
+
+    pub(super) fn lower_committed_specialized_arguments(&mut self, params: &[Type]) -> Option<Vec<Argument>> {
+        self.lower_indexed_argument_list(params, Self::lower_shared_call_arguments)
+    }
+
+    pub(super) fn lower_committed_enum_payload(&mut self, payload: &[Type]) -> Option<Vec<Expr>> {
+        self.lower_indexed_argument_list(payload, Self::lower_shared_enum_payload)
+    }
+
+    fn lower_indexed_argument_list<T>(
+        &mut self,
+        params: &[Type],
+        lower: impl FnOnce(&mut Self, &[ae_syntax::expression::Expression], &[Type], usize, &mut usize, &mut SharedExpressionEffects) -> Option<T>,
+    ) -> Option<T> {
+        if *self.current() != Kind::LParen {
+            return None;
+        }
+        let offset = self.tokens[self.pos].offset;
+        let arguments = self.resolved_expressions().specialized_call_arguments.get(&offset)?.clone();
+        if arguments.len() != params.len() || arguments.len() > 64 {
+            return None;
+        }
+        let mut cursor = self.pos + 1;
+        for (index, argument) in arguments.iter().enumerate() {
+            if self.tokens.get(cursor)?.offset != argument.range.start {
+                return None;
+            }
+            cursor = self.tokens.partition_point(|token| token.offset < argument.range.end);
+            if index + 1 < arguments.len() {
+                if self.tokens.get(cursor)?.kind != Kind::Comma {
+                    return None;
+                }
+                cursor += 1;
+            }
+        }
+        if self.tokens.get(cursor)?.kind != Kind::RParen {
+            return None;
+        }
+        let depth = 128usize.checked_sub(self.expression_depth)?.min(64);
+        let budget = 128usize.checked_sub(self.expression_nodes)?;
+        let mut nodes_left = budget;
+        let mut effects = SharedExpressionEffects::default();
+        let args = lower(self, &arguments, params, depth, &mut nodes_left, &mut effects)?;
+        self.commit_shared_effects(effects);
+        self.expression_nodes += budget - nodes_left;
+        self.pos = cursor + 1;
+        Some(args)
     }
 
     fn commit_shared_effects(&mut self, effects: SharedExpressionEffects) {
@@ -922,7 +2754,7 @@ impl<'a> Parser<'a> {
 
     fn shared_expression_start(kind: &Kind) -> bool {
         matches!(kind, Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False |
-            Kind::Text(_) | Kind::LParen | Kind::Ident(_))
+            Kind::Text(_) | Kind::LParen | Kind::Ident(_) | Kind::Amp)
             || ae_syntax::operator::prefix_binding_power(kind).is_some()
     }
 
@@ -987,6 +2819,29 @@ impl<'a> Parser<'a> {
         }
         self.pos = end;
         Some(value)
+    }
+
+    pub(super) fn spawn_callable(&mut self) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if let Some(header) = self.shared_closure_header() {
+            let end = self.tokens.partition_point(|token| token.offset < header.range.end);
+            if self.tokens.get(end).is_some_and(|token| token.kind == Kind::RParen)
+                && self.expression_depth < 128
+            {
+                if self.expression_depth == 0 {
+                    self.expression_nodes = 0;
+                }
+                self.expression_depth += 1;
+                self.expression_nodes += 1;
+                let result = if self.expression_nodes > 128 {
+                    Err(self.fail("expression complexity limit exceeded (128)"))
+                } else {
+                    self.closure_literal()
+                };
+                self.expression_depth -= 1;
+                return result;
+            }
+        }
+        self.expression(0, false)
     }
 
     fn lower_shared_array(&mut self) -> Option<Vec<Expr>> {
@@ -1233,18 +3088,11 @@ impl<'a> Parser<'a> {
                         // reassignment re-point the view at different bytes
                         // with no kill in the region math, so it is rejected
                         // before it can exist.
-                        if mutable && matches!(ty, Type::StrView | Type::Tokens) {
-                            return Err(self.fail("a view binding cannot be mutable; declare it with 'let'"));
-                        }
+                        self.check_view_binding(mutable, ty)?;
                         self.take(Kind::Semi)?;
                         // A borrow has no storage of its own: it lives only as a
                         // parameter or a pattern binding, never as a variable.
-                        if matches!(ty, Type::VecRef | Type::StrVecRef) {
-                            return Err(self.fail("cannot store a borrowed vector in a variable; pass it directly to a parameter that borrows"));
-                        }
-                        if matches!(ty, Type::StructRef(_) | Type::StructMut(_)) {
-                            return Err(self.fail("cannot store a borrowed struct in a variable; pass it directly to a parameter that borrows"));
-                        }
+                        self.check_borrowed_binding(ty)?;
                         (Statement::Declare(id, value), ty)
                     };
                     self.names.insert(name.clone(), (id, mutable, ty));
@@ -1267,9 +3115,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, false)?,
                         };
-                        if code_ty != Type::Int { return Err(self.fail("exit expects an i64 status code")); }
-                        self.take(Kind::RParen)?; self.take(Kind::Semi)?;
-                        result.push(Statement::Exit(code, self.live_owned()));
+                        result.push(self.finish_exit(code, code_ty)?);
                         continue;
                     }
                     // Built-in mutation statements come before assignment so
@@ -1353,17 +3199,7 @@ impl<'a> Parser<'a> {
                     if !self.names.contains_key(&name) {
                         // A call used only for its effect. The value must be
                         // propagated with '?', so a failure is never dropped.
-                        let (value, ty) = match self.lower_shared_value(Some(Kind::Question), true) {
-                            Some(value) => value,
-                            None => self.expression(0, true)?,
-                        };
-                        if *self.current() != Kind::Question {
-                            return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
-                        }
-                        let (statement, _) = self.propagate_statement(value, ty, None)?;
-                        self.pos += 1;
-                        self.take(Kind::Semi)?;
-                        result.push(statement);
+                        result.push(self.lower_propagating_call()?);
                         continue;
                     }
                     let (id, mutable, ty) = *self.names.get(&name).ok_or_else(|| self.fail(&format!("unknown variable '{name}'")).with_code("E0101"))?;
@@ -1395,7 +3231,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, false)?,
                         };
-                        if index_ty != Type::Int { return Err(self.fail("array index must be an integer").with_code("E0201")); }
+                        self.check_array_index(super::expression::operator_scalar(index_ty), None)?;
                         self.take(Kind::RBracket)?; self.take(Kind::Equal)?;
                         let (value, value_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
@@ -1496,7 +3332,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                            if value_ty != fty { return Err(self.fail(&format!("field '{}' must be {}", fname, fty.name()))); }
+                            self.check_field_value_type(&fname, fty, value_ty, None)?;
                             result.push(Statement::FieldStore(id, fname, fty, value, ty));
                             continue;
                         }
@@ -1566,9 +3402,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
     None => self.expression(0, false)?,
 };
                                 self.take(Kind::Semi)?;
-                                if rhs_ty != fty {
-                                    return Err(self.fail(&format!("field '{}' must be {}", fname, fty.name())));
-                                }
+                                self.check_field_value_type(&fname, fty, rhs_ty, None)?;
                                 let base_var = Expr::Variable(id, ty, line, col);
                                 let lhs_field = Expr::Field(Box::new(base_var), fname.clone(), fty);
                                 let value = Expr::Binary(Box::new(lhs_field), op, Box::new(rhs), line, col, fty);
@@ -1582,7 +3416,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                            if value_ty != fty { return Err(self.fail(&format!("field '{}' must be {}", fname, fty.name()))); }
+                            self.check_field_value_type(&fname, fty, value_ty, None)?;
                             result.push(Statement::FieldStore(id, fname, fty, value, ty));
                             continue;
                         }
@@ -1615,21 +3449,9 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         if self.is_borrowed(id) {
                             self.deferred_write_conflicts.push((id, name_offset, name.clone(), "assign to", None));
                         }
-                        let compound_op = match *self.current() {
-                            Kind::PlusEqual => Some(Kind::Plus),
-                            Kind::MinusEqual => Some(Kind::Minus),
-                            Kind::StarEqual => Some(Kind::Star),
-                            Kind::SlashEqual => Some(Kind::Slash),
-                            Kind::PercentEqual => Some(Kind::Percent),
-                            _ => None,
-                        };
+                        let compound_op = compound_assignment_operator(self.current());
                         if let Some(op) = compound_op {
-                            let allowed = matches!(ty, Type::Int)
-                                || (matches!(ty, Type::F64) && op != Kind::Percent)
-                                || (ty == Type::String && op == Kind::Plus);
-                            if !allowed {
-                                return Err(self.fail(&format!("compound assignment is not supported for type '{}'", ty.name())));
-                            }
+                            self.check_compound_assignment(ty, &op)?;
                             self.pos += 1;
                             let (line, col) = self.position();
                             let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
@@ -1637,9 +3459,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                                 None => self.expression(0, false)?,
                             };
                             self.take(Kind::Semi)?;
-                            if rhs_ty != ty {
-                                return Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", rhs_ty.name(), ty.name())));
-                            }
+                            self.check_assignment_type(&name, ty, rhs_ty, None)?;
                             let lhs_var = Expr::Variable(id, ty, line, col);
                             let value = Expr::Binary(Box::new(lhs_var), op, Box::new(rhs), line, col, ty);
                             result.push(Statement::Assign(id, value, false));
@@ -1659,7 +3479,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                        if value_ty != ty { return Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value_ty.name(), ty.name()))); }
+                        self.check_assignment_type(&name, ty, value_ty, None)?;
                         // The right-hand side may not consume the target itself;
                         // assigning to an already-moved variable is a legal
                         // re-initialization, so the move flag clears either way.
@@ -1681,7 +3501,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                     };
                     self.take(Kind::Semi)?;
                     if matches!(ty, Type::Closure(_)) { return Err(self.fail("a closure cannot be returned: it has no storage, and its captures live in this frame")); }
-                    if ty != self.return_type { return Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204")); }
+                    self.check_return_type(ty, None)?;
                     // Every live owned value that is not returned is released.
                     result.push(Statement::Return(value, self.live_owned()));
                 }
@@ -1700,24 +3520,15 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         }
                         None => self.identifier()?,
                     };
-                    let Some((var_id, _, Type::PtrMut(pointee_id))) = self.names.get(&name).cloned() else {
-                        return Err(self.fail(&format!("'*{name}' requires a *mut pointer variable")));
-                    };
-                    if self.unsafe_depth == 0 {
-                        return Err(self.error_at(line, "writing through a raw pointer requires 'unsafe'").with_code("E0700"));
-                    }
+                    let target = self.names.get(&name).copied();
+                    let pointee = self.pointer_store_pointee(&name, target.map(|(_, _, ty)| ty), line)?;
+                    let (var_id, _, _) = target.expect("validated pointer store target");
                     self.take(Kind::Equal)?;
                     let (value, value_ty) = match self.lower_shared_value(None, false) {
                         Some(pair) => pair,
                         None => self.expression(0, false)?,
                     };
-                    let pointee = super::ptr_pointee(pointee_id);
-                    if value_ty != pointee {
-                        return Err(self.fail(&format!("cannot write a {} value through *mut {}", value_ty.name(), pointee.name())));
-                    }
-                    if pointee.owned() {
-                        return Err(self.fail("writing an owned value through a pointer is not supported yet; the pointer would take over its release"));
-                    }
+                    self.check_pointer_store_value(value_ty, pointee)?;
                     self.take(Kind::Semi)?;
                     result.push(Statement::PtrStore(var_id, value, line, column));
                 }
@@ -1779,86 +3590,11 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         None => self.expression(0, false)?,
                     };
                     if first_ty == Type::Tokens {
-                        // `for token in cursor` streams the tokens as read-only
-                        // views: no vector, no per-token allocation, and the
-                        // loop body sees one token at a time (ADR-53). Each
-                        // loop restarts at the beginning of the base text.
-                        let cursor = match &first {
-                            Expr::Variable(id, Type::Tokens, _, _) => *id,
-                            _ => return Err(self.fail("for-in over a token cursor needs a bare cursor variable: bind it first, e.g. let toks = tokens(text, \" \");")),
-                        };
-                        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
-                        let (line, col) = self.position();
-                        let var = self.next_var; self.next_var += 1;
-                        let label = self.next_label; self.next_label += 1;
-                        self.loop_depth += 1;
-                        let base = self.scopes.len();
-                        let moved_before = self.moved.clone();
-                        self.scopes.push(vec![(var, Type::StrView)]);
-                        self.loop_scopes.push(self.scopes.len());
-                        self.loop_labels.push(Some(label));
-                        self.names.insert(var_name.clone(), (var, false, Type::StrView));
-                        let body = self.block();
-                        self.loop_labels.pop();
-                        self.loop_scopes.pop();
-                        self.scopes.pop().unwrap();
-                        self.loop_depth -= 1;
-                        self.names.remove(&var_name);
-                        let body = body?;
-                        self.close_loop_moves(base, moved_before, loop_offset)?;
-                        result.push(Statement::ForTokens(cursor, var, body, label, line, col));
+                        self.lower_token_loop(&var_name, first, loop_offset, &mut result, |parser, _, _| parser.block())?;
                         continue;
                     }
                     if *self.current() != Kind::DotDot {
-                        // `for x in vec-variable` iterates owned elements by
-                        // value: desugars to a hidden range loop plus an
-                        // immutable element declaration per iteration.
-                        // Borrowed string vectors iterate the same way, with
-                        // element access going through the pointer.
-                        let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
-                            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int, false),
-                            (Expr::Variable(id, Type::StrVec, _, _), Type::StrVec) => (*id, Type::StrView, false),
-                            (Expr::Variable(id, Type::StrVecRef, _, _), Type::StrVecRef) => (*id, Type::StrView, true),
-                            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int, false),
-                            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::F64, false),
-                            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::F64, false),
-                            _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
-                        };
-                        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
-                        let (line, col) = self.position();
-                        let end_var = self.next_var; self.next_var += 1;
-                        let counter = self.next_var; self.next_var += 1;
-                        let var = self.next_var; self.next_var += 1;
-                        let label = self.next_label; self.next_label += 1;
-                        self.loop_depth += 1;
-                        let base = self.scopes.len();
-                        let moved_before = self.moved.clone();
-                        self.scopes.push(vec![(var, elem_ty), (counter, Type::Int), (end_var, Type::Int)]);
-                        self.loop_scopes.push(self.scopes.len());
-                        self.loop_labels.push(Some(label));
-                        self.names.insert(var_name.clone(), (var, false, elem_ty));
-                        // The container is borrowed for the whole loop.
-                        let container_depth = self.scopes.len();
-                        self.borrows.push((v_id, container_depth, BorrowKind::Container));
-                        let body = self.block();
-                        self.loop_labels.pop();
-                        self.loop_scopes.pop();
-                        self.scopes.pop().unwrap();
-                        self.loop_depth -= 1;
-                        self.names.remove(&var_name);
-                        self.borrows.retain(|&(id, _, _)| id != v_id);
-                        let mut body = body?;
-                        if self.moved.contains(&v_id) { return Err(self.fail(&format!("cannot move the vector being iterated (a move of it happens in this loop)"))); }
-                        self.close_loop_moves(base, moved_before, loop_offset)?;
-                        // Per-iteration element binding, then the user's body.
-                        let element = match elem_ty {
-                            Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, by_ref),
-                            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
-                        };
-                        body.insert(0, Statement::Declare(var, element));
-                        result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));
-                        result.push(Statement::Declare(counter, Expr::Number(0)));
-                        result.push(Statement::For(counter, end_var, body, label, line, col));
+                        self.lower_vector_loop(&var_name, first, first_ty, loop_offset, &mut result, |parser, _, _| parser.block())?;
                         continue;
                     }
                     if first_ty != Type::Int { return Err(self.fail("range bounds must be i64")); }
@@ -2030,6 +3766,15 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
             Some(value) => value,
             None => self.expression(0, false)?,
         };
+        self.lower_match(subject, subject_ty, |parser, _, _| parser.block())
+    }
+
+    fn lower_match(
+        &mut self,
+        subject: Expr,
+        subject_ty: Type,
+        mut lower_body: impl FnMut(&mut Self, usize, &[(String, usize)]) -> Result<Vec<Statement>, ae_span::Diagnostic>,
+    ) -> Result<Statement, ae_span::Diagnostic> {
         let (sid, eid) = match (&subject, subject_ty) {
             (Expr::Variable(id, Type::Enum(_, _), _, _), Type::Enum(_, k)) => (*id, k),
             _ => return Err(self.fail("match needs a bare enum variable as its subject")),
@@ -2103,7 +3848,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
             };
             self.scopes.push(Vec::new());
             let mut bindings = Vec::new();
-            let mut bound: Vec<String> = Vec::new();
+            let mut bound = Vec::new();
             for (index, (field, payload_pattern)) in fields.iter().copied().zip(payloads).enumerate() {
                 let bname = match payload_pattern.kind {
                     ae_syntax::pattern::PatternKind::Binding(name) => name,
@@ -2133,13 +3878,13 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                 };
                 self.names.insert(bname.clone(), (id, false, bty));
                 self.scopes.last_mut().unwrap().push((id, bty));
-                bound.push(bname);
+                bound.push((bname, name_at));
                 bindings.push((id, field, index));
             }
             self.take(Kind::FatArrow)?;
-            let body = self.block()?;
+            let body = lower_body(self, arms.len(), &bound)?;
             self.scopes.pop().unwrap();
-            for name in bound { self.names.remove(&name); }
+            for (name, _) in bound { self.names.remove(&name); }
             arms.push(MatchArm { variant: vidx, bindings, body });
         }
         self.take(Kind::RBrace)?;
@@ -2157,11 +3902,37 @@ mod tests {
 
     #[test]
     fn scalar_output_matches_resolver_definition_to_live_slot() {
-        let source = "fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; let value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); }";
+        let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
+        let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
+        let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }} fn closure_vector() -> i64 {{ let numbers = vec[10, 20]; let get = || -> i64 {{ print(numbers[1]); return 0; }}; return get(); }} fn closure_words() -> i64 {{ let labels = vec[\"aa\", \"bb\"]; let pick = || -> i64 {{ print(labels[0]); return 0; }}; return pick(); }}");
+        let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
+        let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
+        let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
+        let source = format!("{source} fn bad_point() -> i64 {{ let wrong = Point {{ x: false, y: 1 }}; return wrong.y; }}");
+        let source = format!("{source} fn bad_fields() -> i64 {{ let extra = Point {{ z: 1 }}; return 0; }} fn dup_fields() -> i64 {{ let dup = Point {{ x: 1, x: false }}; return 0; }} fn missing_fields() -> i64 {{ let missing = Point {{ x: 1 }}; return 0; }}");
+        let source = source.as_str();
+        let source = format!("{source} enum CachedBox[T] {{ Item(T) }} fn pack(specialized_text: string) -> CachedBox[string] {{ return CachedBox[string]::Item(specialized_text); }}");
+        let source = format!("{source} struct CachedRecord[T] {{ value: T, count: i64 }} fn record(record_text: string) -> CachedRecord[string] {{ return CachedRecord[string] {{ count: 2, value: record_text }}; }}");
+        let source = format!("{source} fn relay(call_text: string) -> string {{ return generic_scalar[string](call_text); }}");
+        let source = format!("{source} fn use_import() -> i64 {{ return imported_generic[i64](7); }}");
+        let source = format!("{source} fn write_ptr(raw_param: *mut i64) -> i64 {{ unsafe {{ *raw_param = 7; }} return 0; }}");
+        let source = format!("{source} fn read_ptr(read_param: *const i64) -> i64 {{ unsafe {{ return read_param.deref(); }} }}");
+        let source = format!("{source} fn local_pointer() -> i64 {{ var pointee = 1; let local_ptr = &mut pointee as *mut i64; unsafe {{ *local_ptr = 7; return local_ptr.deref(); }} }}");
+        let source = format!("{source} fn vector_sum(vector_arg: &vec[f64]) -> f64 {{ var total = 0.0; for item in vector_arg {{ total += item; }} return total; }}");
+        let source = format!("{source} fn owned_loop() -> i64 {{ let empty_vec = vec[]; for unused in empty_vec {{ print(unused); }} return 0; }}");
+        let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = vec[]; let moved = take_vec; return 0; }}");
+        let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
+        let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
+        let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
+        let source = format!("{source} enum Reading {{ Value(i64), Empty }} fn read_match(input: Reading) -> i64 {{ match input {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
+        let source = format!("{source} fn local_match() -> i64 {{ let reading = Reading::Value(42); match reading {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
+        let source = format!("{source} fn exits() -> i64 {{ exit(7); return 0; }} fn bad_exit() -> i64 {{ exit(false); return 0; }}");
+        let source = format!("{source} enum Maybe {{ Some(i64), None }} fn step() -> Maybe {{ return Maybe::None; }} fn propagate() -> Maybe {{ step()?; return Maybe::Some(7); }} fn bind() -> Maybe {{ let value = step()?; return Maybe::Some(value); }}");
+        let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
-        let print_token = tokens.iter().position(|token| token.kind == Kind::Print).unwrap();
+        let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
-        let condition_token = tokens.iter().position(|token| token.kind == Kind::If).unwrap() + 1;
+        let condition_token = tokens.partition_point(|token| token.offset < source.find("if flag").unwrap() + 3);
         let initializer = source.find("flag;").unwrap();
         let initializer_token = tokens.iter().position(|token| token.offset == initializer).unwrap();
         let binding = source.find("flag").unwrap();
@@ -2170,15 +3941,765 @@ mod tests {
             id: 9, params: vec![Type::Int], ret: Type::Int, file: "case.ae".into(),
             public: false, extern_c: false,
         });
+        functions.insert("consume_point".into(), Signature {
+            id: 12, params: vec![Type::Struct(0)], ret: Type::Int, file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
+        functions.insert("imported_scalar".into(), Signature {
+            id: 10, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
+            public: true, extern_c: false,
+        });
+        functions.insert("imported_private".into(), Signature {
+            id: 11, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
+            public: false, extern_c: false,
+        });
         let mut structs = Vec::new();
+        structs.push(StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
+        structs.push(StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
+        structs.push(StructDef { name: "Outer".into(), fields: vec![("inner".into(), Type::Struct(1)), ("tag".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
+        structs.push(StructDef { name: "Holder".into(), fields: vec![("ready".into(), Type::Bool), ("text".into(), Type::String)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
+        structs.push(StructDef { name: "Guard".into(), fields: vec![("id".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: Some(0) });
         let mut struct_names = HashMap::new();
-        let mut enums = Vec::new();
+        struct_names.insert("Point".into(), 0);
+        struct_names.insert("Holder".into(), 3);
+        struct_names.insert("Inner".into(), 1);
+        struct_names.insert("Outer".into(), 2);
+        struct_names.insert("Guard".into(), 4);
+        let mut enums = vec![EnumDef {
+            name: "Reading", variants: vec![("Value".into(), vec![Type::Int]), ("Empty".into(), vec![])],
+            file: "case.ae".into(), public: false, pattern: "Reading".into(),
+        }];
         let mut enum_names = HashMap::new();
+        enum_names.insert("Reading".into(), 0);
+        enums.push(EnumDef {
+            name: "Maybe", variants: vec![("Some".into(), vec![Type::Int]), ("None".into(), vec![])],
+            file: "case.ae".into(), public: false, pattern: "Maybe".into(),
+        });
+        enum_names.insert("Maybe".into(), 1);
+        functions.insert("step".into(), Signature {
+            id: 19, params: vec![], ret: Type::Enum("Maybe", 1), file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
         let mut generics = Generics::default();
         let mut parser = make_parser(
             "case.ae", source, tokens, &mut functions, &mut structs,
             &mut struct_names, &mut enums, &mut enum_names, &mut generics,
         );
+        let next_var = parser.next_var;
+        let input = source.find("input: Reading").unwrap();
+        parser.names.insert("input".into(), (89, false, Type::Enum("Reading", 0)));
+        parser.binding_ranges.insert(89, input..input + "input".len());
+        parser.seek_scalar_offset(source.find("{ match input").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved enum match").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Match(89, Type::Enum(_, 0), arms)]
+            if matches!(arms[0].body.as_slice(), [Statement::Return(Expr::Variable(slot, Type::Int, ..), _)]
+                if *slot == arms[0].bindings[0].0)));
+        parser.names.remove("input");
+        parser.binding_ranges.remove(&89);
+        parser.seek_scalar_offset(source.find("{ exit(7)").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved exit").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Exit(Expr::Number(7), _), Statement::Return(..)]));
+        parser.seek_scalar_offset(source.find("{ exit(false)").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved exit diagnostic").err().unwrap();
+        assert_eq!(error.message, "exit expects an i64 status code");
+        assert_eq!(*parser.current(), Kind::RParen);
+        parser.return_type = Type::Enum("Maybe", 1);
+        parser.seek_scalar_offset(source.find("{ step()?").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved bare propagation").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Propagate(Expr::Call(19, _, Type::Enum(_, 1)), Type::Enum(_, 1), _, None, _),
+            Statement::Return(Expr::EnumLit(_, 1, 0, _), _)]));
+        parser.seek_scalar_offset(source.find("{ let value = step").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved binding propagation").unwrap();
+        let [Statement::Propagate(prop_value, prop_ty, prop_fields, prop_bound, _), Statement::Return(ret_expr, _)] = body.as_slice() else {
+            panic!("unexpected binding-propagation body: {body:?}");
+        };
+        assert!(matches!(prop_value, Expr::Call(19, args, Type::Enum(_, 1)) if args.is_empty()), "{prop_value:?}");
+        assert_eq!(prop_ty, &Type::Enum("Maybe", 1));
+        assert_eq!(prop_fields, &[Type::Int]);
+        let Some((payload_slot, payload_ty)) = prop_bound else {
+            panic!("payload binding missing: {prop_bound:?}");
+        };
+        assert_eq!(payload_ty, &Type::Int);
+        assert!(matches!(ret_expr, Expr::EnumLit(_, _, 0, vals)
+            if matches!(&**vals, [Expr::Variable(vs, Type::Int, ..)] if vs == payload_slot)), "{ret_expr:?}");
+        parser.return_type = Type::Int;
+        parser.seek_scalar_offset(source.find("{ let reading =").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved local enum match").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(slot, Expr::EnumLit(_, 0, 0, _)),
+            Statement::Match(subject, Type::Enum(_, 0), arms), ..] if slot == subject && arms.len() == 2));
+        parser.next_var = next_var;
+        let start = source.find("raw_param:").unwrap();
+        parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(intern_pointee(Type::Int))));
+        parser.binding_ranges.insert(85, start..start + "raw_param".len());
+        parser.seek_scalar_offset(source.find("{ unsafe { *raw_param").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved pointer store").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Unsafe(inner), Statement::Return(..)]
+            if matches!(inner.as_slice(), [Statement::PtrStore(85, Expr::Number(7), ..)])));
+        parser.names.remove("raw_param");
+        parser.binding_ranges.remove(&85);
+        let start = source.find("read_param:").unwrap();
+        parser.names.insert("read_param".into(), (86, false, Type::Ptr(intern_pointee(Type::Int))));
+        parser.binding_ranges.insert(86, start..start + "read_param".len());
+        parser.seek_scalar_offset(source.find("{ unsafe { return read_param").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved pointer read").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Unsafe(inner)]
+            if matches!(inner.as_slice(), [Statement::Return(Expr::DerefPtr(..), _)])));
+        parser.names.remove("read_param");
+        parser.binding_ranges.remove(&86);
+        parser.seek_scalar_offset(source.find("{ var pointee = 1").unwrap());
+        let next_var = parser.next_var;
+        let body = parser.lower_resolved_scalar_body().expect("resolved local pointer body").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(_, Expr::Number(1)), Statement::Declare(pointer, Expr::BorrowAs(_, true, ..)), Statement::Unsafe(inner)]
+            if matches!(inner.as_slice(), [Statement::PtrStore(slot, Expr::Number(7), ..), Statement::Return(Expr::DerefPtr(..), _)] if slot == pointer)));
+        parser.next_var = next_var;
+        let start = source.find("vector_arg:").unwrap();
+        parser.names.insert("vector_arg".into(), (87, false, Type::VecFRef));
+        parser.binding_ranges.insert(87, start..start + "vector_arg".len());
+        parser.return_type = Type::F64;
+        parser.seek_scalar_offset(source.find("{ var total = 0.0").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [_, _, _, Statement::For(_, _, inner, ..), Statement::Return(..)]
+            if matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(87, _, _, _, true, Type::F64))))));
+        parser.return_type = Type::Int;
+        parser.names.remove("vector_arg");
+        parser.binding_ranges.remove(&87);
+        parser.seek_scalar_offset(source.find("{ let empty_vec =").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved owning vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::VecLit(values, Type::Vec, ..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
+            if values.is_empty() && owned.contains(&(*vector, Type::Vec))
+                && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int))) if source == vector)));
+        parser.seek_scalar_offset(source.find("{ let take_vec =").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none());
+        let start = source.find("words: &vec[string]").unwrap();
+        parser.names.insert("words".into(), (88, false, Type::StrVecRef));
+        parser.binding_ranges.insert(88, start..start + "words".len());
+        parser.seek_scalar_offset(source.find("{ for word in words").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved string vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [_, _, Statement::For(_, _, inner, ..), Statement::Return(..)]
+            if matches!(inner.as_slice(), [Statement::Declare(slot, Expr::StrVecIndex(88, _, _, _, true)),
+                Statement::Print(Printed::Expr(Expr::Variable(read, Type::StrView, ..)))] if slot == read)));
+        parser.names.remove("words");
+        parser.binding_ranges.remove(&88);
+        parser.seek_scalar_offset(source.find("{ let text_base").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved token loop").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(base, Expr::StrLit(..)),
+            Statement::Declare(cursor, Expr::Tokens(source, None, ..)), Statement::ForTokens(read, _, _, ..), ..]
+            if base == source && cursor == read));
+        assert!(parser.borrows.is_empty());
+        parser.seek_scalar_offset(source.find("{ let pieces = split").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved local string vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::Split(..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
+            if owned.contains(&(*vector, Type::StrVec))
+                && matches!(inner.first(), Some(Statement::Declare(_, Expr::StrVecIndex(source, _, _, _, false))) if source == vector)));
+        parser.next_var = next_var;
+        parser.next_label = 0;
+        parser.generics.names.insert("CachedBox".into(), 0);
+        parser.generics.defs.push(GenericEnum {
+            name: "CachedBox".into(), params: vec!["T".into()],
+            variants: vec![("Item".into(), vec![Payload::Param(0)])],
+            file: "case.ae".into(), public: false,
+        });
+        let payload = source.find("specialized_text:").unwrap();
+        parser.names.insert("specialized_text".into(), (82, false, Type::String));
+        parser.binding_ranges.insert(82, payload..payload + "specialized_text".len());
+        let variant = source.find("CachedBox[string]::Item").unwrap();
+        parser.seek_scalar_offset(variant);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
+        assert_eq!(parser.pos, start);
+        assert!(!parser.moved.contains(&82));
+        let eid = parser.instantiate_enum(0, vec![Type::String], variant).unwrap();
+        parser.seek_scalar_offset(variant + "CachedBox[string]::Item".len());
+        let open = parser.pos;
+        assert!(parser.lower_committed_enum_payload(&[Type::Int]).is_none());
+        assert_eq!(parser.pos, open);
+        assert!(!parser.moved.contains(&82));
+        assert!(matches!(
+            parser.lower_committed_enum_payload(&[Type::String]).as_deref(),
+            Some([Expr::Variable(82, Type::String, ..)])
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
+        assert!(parser.moved.remove(&82));
+        parser.seek_scalar_offset(variant);
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), true),
+            Some((Expr::EnumLit(_, actual, 0, payload), Type::Enum(_, ty)))
+                if actual == eid && ty == eid && matches!(payload.as_slice(), [Expr::Variable(82, Type::String, ..)])
+        ));
+        assert!(parser.moved.remove(&82));
+        parser.names.remove("specialized_text");
+        parser.binding_ranges.remove(&82);
+        parser.generics.struct_names.insert("CachedRecord".into(), 0);
+        parser.generics.struct_defs.push(GenericStruct {
+            name: "CachedRecord".into(), params: vec!["T".into()],
+            fields: vec![("value".into(), Payload::Param(0)), ("count".into(), Payload::Concrete(Type::Int))],
+            file: "case.ae".into(), public: false,
+        });
+        let payload = source.find("record_text:").unwrap();
+        parser.names.insert("record_text".into(), (83, false, Type::String));
+        parser.binding_ranges.insert(83, payload..payload + "record_text".len());
+        let constructor = source.find("CachedRecord[string] { count").unwrap();
+        parser.seek_scalar_offset(constructor);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
+        assert_eq!(parser.pos, start);
+        assert!(!parser.moved.contains(&83));
+        let sid = parser.instantiate_struct(0, vec![Type::String], constructor).unwrap();
+        let mismatched = parser.instantiate_struct(0, vec![Type::Int], constructor).unwrap();
+        parser.seek_scalar_offset(constructor + "CachedRecord[string] ".len());
+        let brace = parser.pos;
+        assert!(parser.lower_committed_specialized_struct(mismatched).is_none());
+        assert_eq!(parser.pos, brace);
+        assert!(!parser.moved.contains(&83));
+        assert!(matches!(
+            parser.lower_committed_specialized_struct(sid),
+            Some((Expr::StructLit(actual, fields), Type::Struct(ty)))
+                if actual == sid && ty == sid
+                    && matches!(fields.as_slice(), [Expr::Variable(83, Type::String, ..), Expr::Number(2)])
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
+        assert!(parser.moved.remove(&83));
+        parser.seek_scalar_offset(constructor);
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), true),
+            Some((Expr::StructLit(actual, fields), Type::Struct(ty)))
+                if actual == sid && ty == sid
+                    && matches!(fields.as_slice(), [Expr::Variable(83, Type::String, ..), Expr::Number(2)])
+        ));
+        assert!(parser.moved.remove(&83));
+        parser.names.remove("record_text");
+        parser.binding_ranges.remove(&83);
+        let definition = source.find("(generic_value: T)").unwrap();
+        parser.generics.fn_names.insert("generic_scalar".into(), 0);
+        parser.generics.fn_defs.push(GenericFn {
+            name: "generic_scalar".into(), bindings: None, params: vec!["T".into()],
+            bounds: vec![vec![]], trait_bounds: vec![vec![]],
+            start: parser.tokens.partition_point(|token| token.offset < definition),
+            tokens: Rc::clone(&parser.tokens), source: Rc::clone(&parser.shared_source),
+            file: "case.ae".into(), public: false,
+        });
+        let payload = source.find("call_text:").unwrap();
+        parser.names.insert("call_text".into(), (84, false, Type::String));
+        parser.binding_ranges.insert(84, payload..payload + "call_text".len());
+        let call = source.find("generic_scalar[string](call_text)").unwrap();
+        parser.seek_scalar_offset(call);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
+        assert_eq!(parser.pos, start);
+        assert!(!parser.moved.contains(&84));
+        let (id, params, _) = parser.instantiate_fn(0, vec![Type::String], call).unwrap();
+        parser.seek_scalar_offset(call + "generic_scalar[string]".len());
+        let open = parser.pos;
+        assert!(parser.lower_committed_specialized_arguments(&[Type::Int]).is_none());
+        assert_eq!(parser.pos, open);
+        assert!(!parser.moved.contains(&84));
+        assert!(matches!(
+            parser.lower_committed_specialized_arguments(&params).as_deref(),
+            Some([Argument::Value(Expr::Variable(84, Type::String, ..))])
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
+        assert!(parser.moved.remove(&84));
+        parser.seek_scalar_offset(call);
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), true),
+            Some((Expr::Call(actual, arguments, Type::String), Type::String))
+                if actual == id && matches!(arguments.as_slice(), [Argument::Value(Expr::Variable(84, Type::String, ..))])
+        ));
+        assert!(parser.moved.remove(&84));
+        parser.names.remove("call_text");
+        parser.binding_ranges.remove(&84);
+        let mut imported = parser.generics.fn_defs[0].clone();
+        imported.name = "imported_generic".into();
+        imported.file = "imported.ae".into();
+        imported.public = true;
+        parser.generics.fn_names.insert(imported.name.clone(), 1);
+        parser.generics.fn_defs.push(imported);
+        let offset = source.find("imported_generic[i64](7)").unwrap();
+        let (id, _, _) = parser.instantiate_fn(1, vec![Type::Int], offset).unwrap();
+        parser.seek_scalar_offset(offset);
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), false),
+            Some((Expr::Call(actual, _, Type::Int), Type::Int)) if actual == id
+        ));
+        parser.generics.fn_defs[1].public = false;
+        parser.seek_scalar_offset(offset);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), false).is_none());
+        assert_eq!(parser.pos, start);
+        let capture_start = source.find("captured_scalar:").unwrap();
+        parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
+        parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(80, capture_start)])
+            .expect("resolved emitted closure body").unwrap();
+        assert!(matches!(closure.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
+        parser.names.remove("captured_scalar");
+        // A captured owned string flows through the capture slot: the
+        // resolver records the capture and the route re-admits its read.
+        let keep_start = source.find("let keep =").unwrap() + 4;
+        parser.names.insert("keep".into(), (82, false, Type::StrView));
+        parser.seek_scalar_offset(source.find("|| -> i64 { print(keep)").unwrap() + 10);
+        let closure = parser.lower_resolved_body_with_captures(&[(82, keep_start)])
+            .expect("resolved string-capture closure body").unwrap();
+        assert!(matches!(closure.as_slice(), [Statement::Print(Printed::Expr(Expr::Variable(82, Type::StrView, ..))),
+            Statement::Return(Expr::Number(0), _)]));
+        parser.names.insert("keep".into(), (82, false, Type::String));
+        parser.seek_scalar_offset(source.find("{ print(keep)").unwrap());
+        assert!(parser.lower_resolved_body_with_captures(&[(82, keep_start)]).is_none());
+        parser.names.remove("keep");
+        let numbers_start = source.find("let numbers = vec[10, 20]").unwrap() + 4;
+        let vector_body = source.find("{ print(numbers[1])").unwrap();
+        for (capture_type, element) in [(Type::VecRef, Type::Int), (Type::VecFRef, Type::F64)] {
+            parser.names.insert("numbers".into(), (82, false, capture_type));
+            parser.seek_scalar_offset(vector_body);
+            let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
+                .expect("resolved numeric vector-capture closure body").unwrap();
+            assert!(matches!(closure.as_slice(),
+                [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, true, actual))),
+                 Statement::Return(Expr::Number(0), _)] if *actual == element));
+        }
+        // An owning value capture moves the vector into the closure's slot;
+        // the element read is a borrowed index into that slot, and the
+        // body's own Frees releases the slot after the call (FnOnce).
+        parser.names.insert("numbers".into(), (82, false, Type::Vec));
+        parser.seek_scalar_offset(vector_body);
+        let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
+            .expect("resolved owning numeric vector-capture closure body").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, false, Type::Int))),
+             Statement::Return(Expr::Number(0), _)]), "{closure:?}");
+        parser.names.remove("numbers");
+        // A borrowed string-vector capture: its element read is a view.
+        let labels_start = source.find("let labels = vec[").unwrap() + 4;
+        parser.names.insert("labels".into(), (83, false, Type::StrVecRef));
+        parser.seek_scalar_offset(source.find("{ print(labels[0])").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(83, labels_start)])
+            .expect("resolved borrowed string-vector capture").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(Printed::Expr(Expr::StrVecIndex(83, _, _, _, true))),
+             Statement::Return(Expr::Number(0), _)]), "{closure:?}");
+        parser.names.remove("labels");
+        let generic_binding = source.find("generic_value:").unwrap();
+        let body = source.find("{ return generic_value;").unwrap();
+        for ty in [Type::Int, Type::Bool] {
+            parser.subst.insert("T".into(), ty);
+            parser.return_type = ty;
+            parser.names.insert("generic_value".into(), (80, false, ty));
+            parser.binding_ranges.insert(80, generic_binding..generic_binding + "generic_value".len());
+            parser.seek_scalar_offset(body);
+            let lowered = parser.lower_resolved_scalar_body().expect("resolved generic instance").unwrap();
+            assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Variable(80, actual, ..), _)] if *actual == ty));
+        }
+        parser.names.remove("generic_value");
+        let method_binding = source.find("method_value:").unwrap();
+        parser.return_type = Type::Int;
+        parser.subst.insert("T".into(), Type::Int);
+        parser.impl_self = Some(Type::Struct(0));
+        parser.names.insert("method_value".into(), (80, false, Type::Int));
+        parser.binding_ranges.insert(80, method_binding..method_binding + "method_value".len());
+        parser.seek_scalar_offset(source.find("{ return method_value;").unwrap());
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved generic associated body").unwrap();
+        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
+        parser.names.remove("method_value");
+        let receiver_binding = source.find("get(&self)").unwrap() + "get(&".len();
+        let instance = parser.structs.len();
+        parser.structs.push(StructDef {
+            name: "ScalarBox[i64]".into(), fields: vec![("item".into(), Type::Int)],
+            file: "case.ae".into(), public: false, repr_c: false, drop_fn: None,
+        });
+        let receiver = Type::StructRef(instance);
+        parser.receiver = Some(receiver);
+        parser.names.insert("self".into(), (80, false, receiver));
+        parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());
+        let receiver_body = source.find("{ return self.item;").unwrap();
+        parser.seek_scalar_offset(receiver_body);
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver body").unwrap();
+        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(base, name, Type::Int), _)]
+            if name == "item" && matches!(**base, Expr::Variable(80, actual, ..) if actual == receiver)));
+        let setter_binding = source.find("set(&mut self").unwrap() + "set(&mut ".len();
+        let value_binding = source.find("new_value:").unwrap();
+        let setter_body = source.find("{ self.item = new_value;").unwrap();
+        let mutable_receiver = Type::StructMut(instance);
+        parser.receiver = Some(mutable_receiver);
+        parser.names.insert("self".into(), (80, true, mutable_receiver));
+        parser.names.insert("new_value".into(), (81, false, Type::Int));
+        parser.binding_ranges.insert(80, setter_binding..setter_binding + "self".len());
+        parser.binding_ranges.insert(81, value_binding..value_binding + "new_value".len());
+        parser.seek_scalar_offset(setter_body);
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver store").unwrap();
+        assert!(matches!(lowered.as_slice(), [Statement::FieldStore(80, name, Type::Int, Expr::Variable(81, Type::Int, ..), actual), Statement::Return(Expr::Field(..), _)]
+            if name == "item" && *actual == mutable_receiver));
+        parser.names.insert("new_value".into(), (81, false, Type::Bool));
+        parser.seek_scalar_offset(setter_body);
+        let error = parser.lower_resolved_scalar_body().expect("resolved setter error").err().unwrap();
+        assert_eq!(error.message, "field 'item' must be i64");
+        assert_eq!(*parser.current(), Kind::Return);
+        parser.names.remove("new_value");
+        parser.binding_ranges.remove(&81);
+        let owned_binding = source.find("consume_box(self)").unwrap() + "consume_box(".len();
+        let owned_body = source.find("consume_box(self) -> T {").unwrap() + "consume_box(self) -> T ".len();
+        let owned_receiver = Type::Struct(instance);
+        parser.receiver = Some(owned_receiver);
+        parser.names.insert("self".into(), (80, false, owned_receiver));
+        parser.binding_ranges.insert(80, owned_binding..owned_binding + "self".len());
+        parser.scopes.push(vec![(80, owned_receiver)]);
+        parser.seek_scalar_offset(owned_body);
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved owned receiver body").unwrap();
+        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(..), owned)]
+            if owned == &[(80, owned_receiver)]));
+        parser.scopes.pop();
+        let transfer_binding = source.find("round_trip(self,").unwrap() + "round_trip(".len();
+        let route_binding = source.find("route:").unwrap();
+        parser.return_type = owned_receiver;
+        parser.binding_ranges.insert(80, transfer_binding..transfer_binding + "self".len());
+        parser.names.insert("route".into(), (81, false, Type::Bool));
+        parser.binding_ranges.insert(81, route_binding..route_binding + "route".len());
+        parser.scopes.push(vec![(80, owned_receiver)]);
+        parser.seek_scalar_offset(source.find("{ if route").unwrap());
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved owning transfer").unwrap();
+        let [Statement::If(_, yes, no)] = lowered.as_slice() else { panic!("expected both return branches") };
+        for branch in [yes, no] {
+            assert!(matches!(branch.as_slice(), [Statement::Return(Expr::Variable(80, ty, ..), owned)]
+                if *ty == owned_receiver && owned == &[(80, owned_receiver)]));
+        }
+        assert!(parser.moved.remove(&80));
+        parser.scopes.pop();
+        parser.names.remove("route");
+        parser.binding_ranges.remove(&81);
+        parser.return_type = Type::Int;
+        parser.functions.insert("take_box".into(), Signature {
+            id: 13, params: vec![owned_receiver], ret: Type::Int, file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
+        let send_binding = source.find("send(self)").unwrap() + "send(".len();
+        parser.binding_ranges.insert(80, send_binding..send_binding + "self".len());
+        parser.seek_scalar_offset(source.find("{ return take_box((self));").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved receiver argument").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(13, args, Type::Int), _)]
+            if matches!(args.as_slice(), [Argument::Value(Expr::Variable(80, ty, ..))] if *ty == owned_receiver)));
+        assert!(parser.moved.remove(&80));
+        let twice_binding = source.find("send_twice(self)").unwrap() + "send_twice(".len();
+        let next_slot = parser.next_var;
+        parser.binding_ranges.insert(80, twice_binding..twice_binding + "self".len());
+        parser.seek_scalar_offset(source.find("{ let sent = take_box(self)").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved moved receiver").err().unwrap();
+        assert_eq!(error.code.as_deref(), Some("E0102"));
+        parser.moved.remove(&80);
+        parser.names.remove("sent");
+        parser.binding_ranges.remove(&next_slot);
+        parser.next_var = next_slot;
+        parser.receiver = Some(receiver);
+        parser.names.insert("self".into(), (80, false, receiver));
+        parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());
+        parser.structs[instance].fields[0].1 = Type::String;
+        parser.seek_scalar_offset(receiver_body);
+        assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar receiver field stays typed");
+        parser.structs.pop();
+        parser.receiver = None;
+        parser.names.remove("self");
+        parser.subst.clear();
+        parser.impl_self = None;
+        parser.binding_ranges.remove(&80);
+        parser.return_type = Type::Bool;
+        let comparison = "local == 20";
+        let start = source.find(comparison).unwrap();
+        assert_eq!(
+            parser.resolved_expressions().scalar_expression_types.get(&(start..start + comparison.len())),
+            Some(&ae_resolve::resolve::ExpressionType::Checked(ae_resolve::typecheck::Scalar::Bool)),
+        );
+        parser.seek_scalar_offset(source.find("{ let local").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved scalar route").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(0, _), Statement::Return(Expr::Binary(_, Kind::EqEq, _, _, _, Type::Bool), _)]));
+        parser.return_type = Type::Int;
+        parser.seek_scalar_offset(source.find("{ return true").unwrap());
+        let mismatch = parser.lower_resolved_scalar_body().expect("resolved error route").err().unwrap();
+        assert_eq!(mismatch.message, "return type must be i64");
+        assert_eq!(mismatch.code.as_deref(), Some("E0204"));
+
+        parser.seek_scalar_offset(source.find("{ if false").unwrap());
+        let branches = parser.lower_resolved_scalar_body().expect("resolved branches").unwrap();
+        let [Statement::If(_, yes, otherwise)] = branches.as_slice() else { panic!("expected if") };
+        let [Statement::If(_, other_yes, other_no)] = otherwise.as_slice() else { panic!("expected else if") };
+        for (index, body) in [yes, other_yes, other_no].into_iter().enumerate() {
+            assert!(matches!(body.as_slice(), [Statement::Declare(slot, _), Statement::Return(Expr::Variable(read, Type::Int, ..), _)] if *slot == index + 1 && slot == read));
+        }
+
+        parser.seek_scalar_offset(source.find("{ while true").unwrap());
+        let loops = parser.lower_resolved_scalar_body().expect("resolved loops").unwrap();
+        let [Statement::While(_, outer), Statement::Return(Expr::Number(7), _)] = loops.as_slice() else {
+            panic!("expected loop and return");
+        };
+        let [Statement::While(_, inner), Statement::Break] = outer.as_slice() else {
+            panic!("expected nested loop and break");
+        };
+        assert!(matches!(inner.as_slice(), [Statement::Continue(None)]));
+        parser.seek_scalar_offset(source.find("{ continue; return").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved loop error").err().unwrap();
+        assert_eq!(error.message, "'continue' outside of a loop");
+        assert_eq!(parser.loop_depth, 0);
+
+        parser.seek_scalar_offset(source.find("{ for i in 2").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved range").unwrap();
+        let [Statement::Declare(start, Expr::Number(2)), Statement::Declare(end, Expr::Number(5)), Statement::For(counter, limit, loop_body, label, ..), Statement::Declare(reused, Expr::Number(7)), Statement::Return(Expr::Variable(read, Type::Int, ..), _)] = body.as_slice() else {
+            panic!("expected range bounds and loop");
+        };
+        assert_eq!((start, end), (counter, limit));
+        assert_eq!(*start, *end + 1);
+        assert_ne!(counter, reused);
+        assert_eq!(reused, read);
+        let [Statement::While(_, inner), Statement::If(_, branch, _)] = loop_body.as_slice() else {
+            panic!("expected nested while and conditional");
+        };
+        assert!(matches!(inner.as_slice(), [Statement::Continue(None)]));
+        assert!(matches!(branch.as_slice(), [Statement::Continue(Some(jump))] if jump == label));
+
+        parser.seek_scalar_offset(source.find("{ for j in false").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved range error").err().unwrap();
+        assert_eq!(error.message, "range bounds must be i64");
+
+        parser.seek_scalar_offset(source.find("{ var n = 4").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved assignments").unwrap();
+        let [Statement::Declare(slot, _), Statement::Assign(plain, Expr::Number(2), false), Statement::While(_, loop_body), Statement::Return(Expr::Variable(read, Type::Int, ..), _)] = body.as_slice() else {
+            panic!("expected scalar assignments");
+        };
+        assert_eq!(slot, plain);
+        assert_eq!(slot, read);
+        assert!(matches!(loop_body.as_slice(), [Statement::Assign(compound, Expr::Binary(_, Kind::Minus, _, _, _, Type::Int), false)] if compound == slot));
+
+        parser.seek_scalar_offset(source.find("{ let n = 1").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved immutable assignment").err().unwrap();
+        assert_eq!(error.message, "cannot assign to immutable variable 'n'");
+        assert_eq!(error.secondary.len(), 1);
+        parser.names.remove("n");
+
+        parser.seek_scalar_offset(source.find("{ print(2);").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved output").unwrap();
+        let [Statement::Print(Printed::Expr(Expr::Number(2))), Statement::Assert(Expr::Binary(_, Kind::EqEq, _, _, _, Type::Bool), 1, column), Statement::Return(Expr::Number(0), _)] = body.as_slice() else {
+            panic!("expected print, assert, and return");
+        };
+        assert_eq!(*column, source.find("assert(2 == 2)").unwrap() + 1);
+        parser.seek_scalar_offset(source.find("{ assert(5)").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved assert error").err().unwrap();
+        assert_eq!(error.message, "assert requires a boolean condition");
+        assert_eq!(*parser.current(), Kind::RParen);
+
+        parser.in_main = true;
+        parser.seek_scalar_offset(source.find("{ print(23)").unwrap());
+        let entry = parser.lower_resolved_scalar_body().expect("resolved entry body").unwrap();
+        assert!(matches!(entry.as_slice(), [Statement::Print(Printed::Expr(Expr::Number(23)))]));
+        parser.seek_scalar_offset(source.find("{ return true").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved entry return error").err().unwrap();
+        assert_eq!(error.message, "return is not supported in main");
+        assert_eq!(*parser.current(), Kind::Return);
+        parser.in_main = false;
+
+        parser.seek_scalar_offset(source.find("{ return compute(compute").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved direct calls").unwrap();
+        let [Statement::Return(Expr::Call(9, args, Type::Int), _)] = body.as_slice() else {
+            panic!("expected direct call");
+        };
+        assert!(matches!(args.as_slice(), [Argument::Value(Expr::Call(9, _, Type::Int))]));
+        parser.seek_scalar_offset(source.find("{ return compute(false)").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved call error").err().unwrap();
+        assert_eq!(error.message, "argument 1 to 'compute' must be i64");
+        assert_eq!(*parser.current(), Kind::RParen);
+
+        parser.seek_scalar_offset(source.find("{ return imported_scalar").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved cross-module call").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(10, _, Type::Int), _)]));
+        parser.seek_scalar_offset(source.find("{ return imported_private").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none());
+
+        parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[1]").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved local array").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Array(slot, values), Statement::Return(Expr::Index(read, 2, index, ..), _)]
+            if slot == read && values.len() == 2 && matches!(**index, Expr::Number(1))));
+        parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[false]").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved array error").err().unwrap();
+        assert_eq!(error.code.as_deref(), Some("E0201"));
+        assert_eq!(*parser.current(), Kind::RBracket);
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[1] = 9").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved array store").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Array(slot, values), Statement::Store(read, 2, store_index, element, ..), Statement::Return(Expr::Index(read_back, 2, back_index, ..), _)]
+            if slot == read && read == read_back && values.len() == 2
+                && matches!(store_index, Expr::Number(1)) && matches!(element, Expr::Number(9))
+                && matches!(**back_index, Expr::Number(1))));
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[false]").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved store index error").err().unwrap();
+        assert_eq!(error.code.as_deref(), Some("E0201"));
+        assert_eq!(*parser.current(), Kind::RBracket);
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ let a = [4, 5]; a[0] = 9").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved immutable store").err().unwrap();
+        assert_eq!(error.message, "cannot assign to immutable variable 'a'");
+        assert_eq!(error.secondary.len(), 1);
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] = false").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved store value error").err().unwrap();
+        assert_eq!(error.message, "array elements must be i64");
+        parser.names.remove("a");
+
+        parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] += 1").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none(), "compound store stays typed");
+
+        let param_offset = source.find("(a: &[i64; 2]").unwrap() + 1;
+        parser.names.insert("a".into(), (0, false, Type::Array(2)));
+        parser.binding_ranges.insert(0, param_offset..param_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return a[1]").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved array param").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Index(slot, 2, index, ..), _)]
+            if *slot == 0 && matches!(**index, Expr::Number(1))));
+        let store_param_offset = source[param_offset + 1..].find("(a: &[i64; 2]").unwrap() + param_offset + 2;
+        parser.binding_ranges.insert(0, store_param_offset..store_param_offset + 1);
+        parser.seek_scalar_offset(source.find("{ a[0] = 3").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved param store").err().unwrap();
+        assert_eq!(error.message, "cannot assign to immutable variable 'a'");
+        assert_eq!(error.secondary.len(), 1);
+        parser.names.remove("a");
+
+        let p_offset = source.find("(p: &Point)").unwrap() + 1;
+        parser.names.insert("p".into(), (0, false, Type::StructRef(0)));
+        parser.binding_ranges.insert(0, p_offset..p_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return p.x").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved field reads").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Binary(lhs, Kind::Plus, rhs, ..), _)]
+            if matches!(&**lhs, Expr::Field(base, fname, fty)
+                if matches!(&**base, Expr::Variable(0, Type::StructRef(0), ..)) && fname == "x" && *fty == Type::Int)
+                && matches!(&**rhs, Expr::Field(_, fname, fty) if fname == "y" && *fty == Type::Int)));
+        parser.names.remove("p");
+
+        let h_offset = source.find("(h: &Holder)").unwrap() + 1;
+        parser.names.insert("h".into(), (0, false, Type::StructRef(3)));
+        parser.binding_ranges.insert(0, h_offset..h_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return h.text").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar field reads stay typed");
+        parser.names.remove("h");
+
+        let o_offset = source.find("(o: &Outer)").unwrap() + 1;
+        parser.names.insert("o".into(), (0, false, Type::StructRef(2)));
+        parser.binding_ranges.insert(0, o_offset..o_offset + 1);
+        parser.seek_scalar_offset(source.find("{ return o.inner.x").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved nested field read").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Field(outer, fname, fty), _)]
+            if matches!(&**outer, Expr::Field(inner, iname, ifty)
+                if matches!(&**inner, Expr::Variable(0, Type::StructRef(2), ..)) && iname == "inner" && *ifty == Type::Struct(1))
+                && fname == "x" && *fty == Type::Int));
+        parser.names.remove("o");
+
+        parser.seek_scalar_offset(source.find("{ let p = Point { x: 1").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved construction").unwrap();
+        assert!(matches!(body.as_slice(),
+            [Statement::Declare(slot, Expr::StructLit(sid, values)),
+             Statement::Return(Expr::Binary(l, Kind::Plus, r, ..), frees),
+             Statement::Frees(scope_frees)]
+            if *sid == 0 && values.len() == 2
+                && matches!(&**l, Expr::Field(b, f, t)
+                    if f == "x" && *t == Type::Int
+                        && matches!(&**b, Expr::Variable(ps, Type::Struct(0), ..) if *ps == *slot))
+                && matches!(&**r, Expr::Field(_, f2, t2) if f2 == "y" && *t2 == Type::Int)
+                && *frees == vec![(*slot, Type::Struct(0))]
+                && *scope_frees == vec![(*slot, Type::Struct(0))]));
+        parser.names.remove("p");
+
+        parser.seek_scalar_offset(source.find("{ let g = Guard { id: 1").unwrap());
+        assert!(parser.lower_resolved_scalar_body().is_none(), "drop-carrying constructions stay typed");
+
+        parser.seek_scalar_offset(source.find("{ let wrong = Point").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved constructor field error").err().unwrap();
+        assert_eq!(error.message, "field 'x' must be i64");
+        assert_eq!(*parser.current(), Kind::Comma);
+        for (binding, message) in [
+            ("{ let extra", "struct 'Point' has no field 'z'"),
+            ("{ let dup", "field 'x' specified twice"),
+            ("{ let missing", "missing field 'y' in 'Point' construction"),
+        ] {
+            parser.seek_scalar_offset(source.find(binding).unwrap());
+            let error = parser.lower_resolved_scalar_body().expect("resolved constructor shape error").err().unwrap();
+            assert_eq!(error.message, message);
+        }
+        parser.names.remove("g");
+
+        parser.seek_scalar_offset(source.find("{ let q = Point { x: 3").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved owned-aggregate call").unwrap();
+        assert!(matches!(body.as_slice(),
+            [Statement::Declare(q, Expr::StructLit(0, values)),
+             Statement::Declare(r, Expr::Call(12, args, Type::Int)),
+             Statement::Return(.., frees),
+             Statement::Frees(scope_frees)]
+            if values.len() == 2
+                && matches!(args.as_slice(), [Argument::Value(Expr::Variable(qs, Type::Struct(0), ..))] if *qs == *q)
+                && *frees == vec![(*q, Type::Struct(0))]
+                && *scope_frees == vec![(*q, Type::Struct(0))]));
+        parser.names.remove("q");
+        parser.names.remove("r");
+
+        parser.seek_scalar_offset(source.find("{ let q = Point { x: 5").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved use after move").err().unwrap();
+        assert_eq!(error.message, "cannot use 'q' because it was moved");
+        parser.names.remove("q");
+        parser.names.remove("r");
+        parser.names.remove("s");
+
+        let b_offset = source.find("(b: bool)").unwrap() + 1;
+        parser.names.insert("b".into(), (5, false, Type::Bool));
+        parser.binding_ranges.insert(5, b_offset..b_offset + 1);
+        parser.seek_scalar_offset(source.find("{ unsafe { let a = 1").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved unsafe block").unwrap();
+        assert!(matches!(body.as_slice(),
+            [Statement::Unsafe(inner), Statement::Return(Expr::Number(2), frees)]
+            if matches!(inner.as_slice(), [Statement::Declare(_slot, Expr::Number(1))])
+                && frees.is_empty()));
+        parser.seek_scalar_offset(source.find("{ let q = Point { x: 7").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved loop move").err().unwrap();
+        assert!(error.message.contains("cannot move 'q' inside a loop body"));
+        parser.names.remove("q");
+        parser.names.remove("r");
+        parser.names.remove("b");
+
+        for prefix in [
+            "choose[",
+            "Pair[i64, vec[f64]] {",
+            "Pair[i64, vec[f64]]::",
+            "Choice[i64, vec[f64]]::Some",
+            "Choice[i64, vec[f64]]::empty",
+        ] {
+            let target = source.find(prefix).unwrap();
+            let ranges = parser.shared_specialization_arguments(target).unwrap();
+            let spellings: Vec<_> = ranges.iter().map(|range| &source[range.clone()]).collect();
+            assert_eq!(spellings, ["i64", "vec[f64]"]);
+        }
+
+        let target = source.find("*const shared").unwrap();
+        parser.pos = parser.tokens.partition_point(|token| token.offset < target);
+        assert_eq!(parser.shared_pointer_cast_qualifier(), Some(false));
+        assert_eq!(parser.pointer_cast_pointee(None).unwrap(), (false, Type::Shared(intern_shared(Type::Int))));
+        assert_eq!(*parser.current(), Kind::Semi);
+
+        for (prefix, expected) in [("|| -> i64", "i64"), ("|x: i64|", "bool")] {
+            let offset = source.find(prefix).unwrap();
+            parser.pos = parser.tokens.partition_point(|token| token.offset < offset);
+            let header = parser.shared_closure_header().unwrap();
+            let ae_syntax::expression::ExpressionKind::Closure { params, return_type, .. } = &header.kind else {
+                unreachable!("closure header index");
+            };
+            assert_eq!(&source[return_type.clone()], expected);
+            if expected == "bool" {
+                assert_eq!(params[0].name, "x");
+                assert_eq!(&source[params[0].ty.clone()], "i64");
+            } else {
+                assert!(params.is_empty());
+            }
+        }
+        let inline = source.find("task_spawn(ex, ||").unwrap() + "task_spawn(ex, ".len();
+        parser.seek_scalar_offset(inline);
+        assert!(matches!(parser.spawn_callable(), Ok((Expr::ClosureLit(id), Type::Closure(ty))) if id == ty));
+        assert_eq!(*parser.current(), Kind::RParen);
+
         parser.names.insert("flag".into(), (7, false, Type::Bool));
         parser.binding_ranges.insert(7, binding..binding + 4);
         parser.pos = initializer_token;
@@ -2281,5 +4802,43 @@ mod tests {
             parser.lower_output_from_syntax(),
             Some(Statement::Print(Printed::Expr(Expr::VecIndex(11, _, 1, _, false, Type::F64))))
         ));
+
+        let binding = source.find("var value").unwrap() + 4;
+        parser.names.insert("value".into(), (12, true, Type::Bool));
+        parser.binding_ranges.insert(12, binding..binding + 5);
+        for (prefix, mutable) in [("&value", false), ("&mut value", true)] {
+            let cast = source.find(prefix).unwrap();
+            parser.pos = parser.tokens.partition_point(|token| token.offset < cast);
+            assert!(matches!(
+                parser.lower_shared_value(Some(Kind::Semi), false),
+                Some((Expr::BorrowAs(operand, actual, 1, column), ty))
+                    if matches!(*operand, Expr::Variable(12, Type::Bool, _, _))
+                        && actual == mutable && matches!(ty, Type::PtrMut(_)) == mutable
+                        && column == cast + 1
+            ));
+            assert_eq!(*parser.current(), Kind::Semi);
+        }
+
+        parser.names.get_mut("value").unwrap().1 = false;
+        let cast = source.find("&mut value").unwrap();
+        let start = parser.tokens.partition_point(|token| token.offset < cast);
+        parser.pos = start;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), false).is_none());
+        assert_eq!(parser.pos, start);
+
+        let binding = source.find("let raw").unwrap() + 4;
+        let raw = Type::Ptr(super::super::intern_pointee(Type::Bool));
+        parser.names.insert("raw".into(), (13, false, raw));
+        parser.binding_ranges.insert(13, binding..binding + 3);
+        let cast = source.find("raw as").unwrap();
+        parser.pos = parser.tokens.partition_point(|token| token.offset < cast);
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), false),
+            Some((Expr::PtrCast(operand, true, id, _, column), Type::PtrMut(pointee)))
+                if matches!(*operand, Expr::Variable(13, ty, _, _) if ty == raw)
+                    && id == pointee && super::super::ptr_pointee(id) == Type::F64
+                    && column == cast + "raw as *mut f64;".len()
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
     }
 }

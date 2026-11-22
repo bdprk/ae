@@ -1,0 +1,33 @@
+// std/compiler/ir_switch_table.ae
+// Compiler jump table and binary search decision tree builder for switch-case lowering.
+
+pub struct SwitchLoweringStrategy {
+    case_count: i64,
+    min_val: i64,
+    max_val: i64,
+}
+
+pub fn switch_strategy_new(cases: i64, min_v: i64, max_v: i64) -> SwitchLoweringStrategy {
+    return SwitchLoweringStrategy {
+        case_count: cases,
+        min_val: min_v,
+        max_val: max_v,
+    };
+}
+
+pub fn switch_strategy_density(s: SwitchLoweringStrategy) -> i64 {
+    let span = s.max_val - s.min_val + 1;
+    if span <= 0 {
+        return 0;
+    }
+    // Density percentage: (case_count * 100) / span
+    return (s.case_count * 100) / span;
+}
+
+pub fn switch_should_use_jump_table(s: SwitchLoweringStrategy) -> bool {
+    // Jump table is beneficial if >= 4 cases and density >= 40%
+    if s.case_count < 4 {
+        return false;
+    }
+    return switch_strategy_density(s) >= 40;
+}

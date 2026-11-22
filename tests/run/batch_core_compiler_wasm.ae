@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_wasm.ae
 // Verification of WasmFuncType, WasmSection, WasmOp, and WasmExport primitives.
 
-use "../../std/core/ir_wasm_type.ae";
-use "../../std/core/ir_wasm_section.ae";
-use "../../std/core/ir_wasm_opcode.ae";
-use "../../std/core/ir_wasm_export.ae";
+use "../../std/compiler/ir_wasm_type.ae";
+use "../../std/compiler/ir_wasm_section.ae";
+use "../../std/compiler/ir_wasm_opcode.ae";
+use "../../std/compiler/ir_wasm_export.ae";
 
 fn main() {
     print("--- batch_core_compiler_wasm test start ---");

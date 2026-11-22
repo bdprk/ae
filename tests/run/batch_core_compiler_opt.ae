@@ -1,7 +1,7 @@
-use "../../std/core/ir_ssa.ae";
-use "../../std/core/ir_live_range.ae";
-use "../../std/core/ir_constant_fold.ae";
-use "../../std/core/ir_dead_code.ae";
+use "../../std/compiler/ir_ssa.ae";
+use "../../std/compiler/ir_live_range.ae";
+use "../../std/compiler/ir_constant_fold.ae";
+use "../../std/compiler/ir_dead_code.ae";
 
 fn main() {
     let v0 = ssa_var_new(1, 0);

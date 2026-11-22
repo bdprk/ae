@@ -1,0 +1,28 @@
+// std/compiler/ir_branch_relax.ae
+// Compiler jump target offset relaxation and short vs near jump decision.
+
+pub struct BranchDecision {
+    target_offset: i64,
+    current_offset: i64,
+}
+
+pub fn branch_decision_new(target: i64, current: i64) -> BranchDecision {
+    return BranchDecision {
+        target_offset: target,
+        current_offset: current,
+    };
+}
+
+pub fn branch_decision_displacement(b: BranchDecision) -> i64 {
+    return b.target_offset - b.current_offset;
+}
+
+pub fn branch_can_use_short_jump(disp: i64) -> bool {
+    // 8-bit signed displacement: -128 to 127
+    return disp >= -128 && disp <= 127;
+}
+
+pub fn branch_needs_near_jump(disp: i64) -> bool {
+    // Requires 32-bit displacement
+    return !branch_can_use_short_jump(disp);
+}

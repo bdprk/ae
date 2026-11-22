@@ -1,0 +1,65 @@
+// std/compiler/ir_crate_interface.ae
+// Crate interface summary: the per-crate value that participates in cache keys
+// of dependent crates. Editing a function body leaves the summary unchanged and
+// recompiles one crate; moving a signature or the ABI epoch rechecks dependents.
+
+pub struct CrateInterface {
+    crate_id: i64,
+    item_count: i64,
+    signature_hash: i64,
+    abi_epoch: i64,
+}
+
+pub fn make_crate_interface(crate_id: i64, item_count: i64, signature_hash: i64, abi_epoch: i64) -> CrateInterface {
+    return CrateInterface {
+        crate_id: crate_id,
+        item_count: item_count,
+        signature_hash: signature_hash,
+        abi_epoch: abi_epoch,
+    };
+}
+
+pub fn crate_interface_summary_hash(ci: CrateInterface) -> i64 {
+    // The item count is folded in so that adding or removing an item moves the
+    // summary even when the surviving signatures hash to the same value.
+    let k = 1000003;
+    let h1 = (ci.signature_hash * k + ci.item_count) % 2147483647;
+    let h2 = (h1 * k + ci.abi_epoch) % 2147483647;
+    if h2 < 0 {
+        return 0 - h2;
+    }
+    return h2;
+}
+
+pub fn crate_interface_unchanged(prev: CrateInterface, next: CrateInterface) -> bool {
+    // Identity first: two different crates never share a summary even when the
+    // numbers happen to agree.
+    if prev.crate_id != next.crate_id {
+        return false;
+    }
+    if prev.abi_epoch != next.abi_epoch {
+        return false;
+    }
+    return crate_interface_summary_hash(prev) == crate_interface_summary_hash(next);
+}
+
+pub fn crate_affected_crates(prev: CrateInterface, next: CrateInterface, dependents: i64) -> i64 {
+    // An unchanged interface rebuilds nothing downstream; a changed one
+    // rechecks this crate plus every dependent. A negative dependent count is
+    // treated as unknown and reported as zero rather than guessed.
+    if dependents < 0 {
+        return 0;
+    }
+    if crate_interface_unchanged(prev, next) {
+        return 0;
+    }
+    return dependents + 1;
+}
+
+pub fn crate_interface_abi_moved(prev: CrateInterface, next: CrateInterface) -> bool {
+    return prev.abi_epoch != next.abi_epoch;
+}
+
+pub fn crate_interface_items_moved(prev: CrateInterface, next: CrateInterface) -> bool {
+    return prev.item_count != next.item_count;
+}

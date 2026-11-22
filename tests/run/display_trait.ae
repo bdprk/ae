@@ -1,4 +1,4 @@
-use "../../std/core/fmt.ae";
+use "../../std/alloc/fmt.ae";
 
 pub struct Point {
     x: i64,

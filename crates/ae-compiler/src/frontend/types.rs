@@ -1,6 +1,27 @@
 //! Type syntax, definitions, constructors, and generic instantiation.
 use super::*;
 
+impl EnumDef {
+    pub(super) fn variant_payload(&self, name: &str) -> Option<(usize, &[Type])> {
+        self.variants.iter().enumerate().find_map(|(index, (variant, payload))| {
+            (variant == name).then_some((index, payload.as_slice()))
+        })
+    }
+}
+
+pub(super) fn specialization_key(gid: usize, arguments: &[Type]) -> String {
+    format!("{gid}:{}", arguments.iter().map(|ty| ty.name()).collect::<Vec<_>>().join(","))
+}
+
+pub(super) fn scalar_type(name: &str) -> Option<Type> {
+    match name {
+        "i64" => Some(Type::Int),
+        "f64" => Some(Type::F64),
+        "bool" => Some(Type::Bool),
+        _ => None,
+    }
+}
+
 impl Parser<'_> {
     pub(super) fn read_type_arguments(
         &mut self,
@@ -26,10 +47,8 @@ impl Parser<'_> {
         // argument the call site supplied; nothing must reach code generation
         // with a parameter still in it.
         if let Some(&concrete) = self.subst.get(&name) { return Ok(concrete); }
+        if let Some(ty) = scalar_type(&name) { return Ok(ty); }
         match name.as_str() {
-            "i64" => Ok(Type::Int),
-            "f64" => Ok(Type::F64),
-            "bool" => Ok(Type::Bool),
             "string" => Ok(Type::String),
             // The copy-semantics cell handle (spec/concurrency.md §8): a
             // parameter typed `atomic` shares the caller's cell.
@@ -151,16 +170,18 @@ impl Parser<'_> {
         self.pos = end;
         let def = self.enums[eid].clone();
         self.require_public("enum", def.name, &def.file, def.public)?;
-        let vidx = def.variants.iter().position(|(n, _)| *n == vname)
+        let (vidx, fields) = def.variant_payload(&vname)
             .ok_or_else(|| self.error_at(offset, &format!("enum '{}' has no variant '{}'", def.name, vname)))?;
-        let fields = def.variants[vidx].1.clone();
+        if let Some(values) = self.lower_committed_enum_payload(fields) {
+            return Ok((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid)));
+        }
         let mut values = Vec::new();
         if *self.current() == Kind::LParen {
             self.pos += 1;
             for (index, field) in fields.iter().enumerate() {
                 // String payloads are moved into the variant.
                 let (value, value_ty) = self.expression(0, *field == Type::String)?;
-                if value_ty != *field {
+                if !self.matches_value_type(*field, value_ty, None) {
                     return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name())));
                 }
                 values.push(value);
@@ -175,6 +196,39 @@ impl Parser<'_> {
         }
         Ok((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid)))
     }
+    pub(super) fn constructor_field(
+        &self,
+        sid: usize,
+        name: &str,
+        slots: &[Option<Expr>],
+        diagnostic_pos: Option<usize>,
+    ) -> Result<(usize, Type), ae_span::Diagnostic> {
+        let def = &self.structs[sid];
+        let diagnostic = |message: String| match diagnostic_pos {
+            Some(offset) => self.error_at(offset, &message),
+            None => self.fail(&message),
+        };
+        let (index, (_, ty)) = def.fields.iter().enumerate().find(|(_, (field, _))| field == name)
+            .ok_or_else(|| diagnostic(format!("struct '{}' has no field '{}'", def.name, name)))?;
+        if slots[index].is_some() {
+            return Err(diagnostic(format!("field '{}' specified twice", name)));
+        }
+        Ok((index, *ty))
+    }
+
+    pub(super) fn finish_struct_literal(
+        &self,
+        sid: usize,
+        offset: usize,
+        slots: Vec<Option<Expr>>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let def = &self.structs[sid];
+        let values = slots.into_iter().enumerate().map(|(i, slot)| {
+            slot.ok_or_else(|| self.error_at(offset, &format!("missing field '{}' in '{}' construction", def.fields[i].0, def.name)))
+        }).collect::<Result<_, _>>()?;
+        Ok((Expr::StructLit(sid, values), Type::Struct(sid)))
+    }
+
     // `Name { field: expr, ... }` once the layout is known. Fields may appear
     // in any order but each exactly once; owned fields are moved in.
     pub(super) fn struct_literal(&mut self, sid: usize, offset: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
@@ -183,29 +237,18 @@ impl Parser<'_> {
             eprintln!("struct literal debug: sid {} name '{}' at token {}", sid, name, self.pos);
         }
         self.take(Kind::LBrace)?;
-        let def_fields = self.structs[sid].fields.clone();
-        let mut slots: Vec<Option<Expr>> = (0..def_fields.len()).map(|_| None).collect();
-        let mut seen = std::collections::HashSet::new();
+        let mut slots: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
         while *self.current() != Kind::RBrace {
             let fname = self.identifier()?;
-            let fidx = def_fields.iter().position(|(n, _)| *n == fname)
-                .ok_or_else(|| self.fail(&format!("struct '{}' has no field '{}'", name, fname)))?;
-            if !seen.insert(fname.clone()) { return Err(self.fail(&format!("field '{}' specified twice", fname))); }
+            let (fidx, expected) = self.constructor_field(sid, &fname, &slots, None)?;
             self.take(Kind::Colon)?;
             let (value, vty) = self.expression(0, true)?;
-            if vty != def_fields[fidx].1 { return Err(self.fail(&format!("field '{}' must be {}", fname, def_fields[fidx].1.name()))); }
+            self.check_field_value_type(&fname, expected, vty, None)?;
             slots[fidx] = Some(value);
             if *self.current() == Kind::Comma { self.pos += 1; }
         }
         self.take(Kind::RBrace)?;
-        let mut values = Vec::new();
-        for (i, slot) in slots.into_iter().enumerate() {
-            match slot {
-                Some(v) => values.push(v),
-                None => return Err(self.error_at(offset, &format!("missing field '{}' in '{}' construction", def_fields[i].0, name))),
-            }
-        }
-        Ok((Expr::StructLit(sid, values), Type::Struct(sid)))
+        self.finish_struct_literal(sid, offset, slots)
     }
     // `enum Name { ... }` or `enum Name[T, U] { ... }`. A generic declaration
     // produces no layout at all; only instantiations do (ADR-21).
@@ -360,7 +403,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = format!("{gid}:{}", args.iter().map(|t| t.name()).collect::<Vec<_>>().join(","));
+        let key = specialization_key(gid, &args);
         if let Some(&eid) = self.generics.done.get(&key) { return Ok(eid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "enum" && *active == key) {
@@ -395,6 +438,45 @@ impl Parser<'_> {
         // block (same machinery as generic structs, ADR-0187/0196).
         self.generics.enum_origin.insert(eid, (gid, args));
         Ok(eid)
+    }
+
+    /// Look up an existing specialization without allocating layouts or
+    /// changing the token cursor during speculative lowering.
+    pub(super) fn cached_enum_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
+        let &gid = self.generics.names.get(name)?;
+        let arguments = self.shared_specialization_types(ranges)?;
+        self.generics.done.get(&specialization_key(gid, &arguments)).copied()
+    }
+
+    pub(super) fn cached_struct_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
+        let &gid = self.generics.struct_names.get(name)?;
+        let arguments = self.shared_specialization_types(ranges)?;
+        self.generics.struct_done.get(&specialization_key(gid, &arguments)).copied()
+    }
+
+    pub(super) fn shared_specialization_types(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<Type>> {
+        ranges.iter().map(|range| {
+            let start = self.tokens.partition_point(|token| token.offset < range.start);
+            let end = self.tokens.partition_point(|token| token.offset < range.end);
+            match self.tokens.get(start..end)? {
+                [Token { kind: Kind::Ident(name), .. }] => {
+                    let ty = self.subst.get(name).copied().or_else(|| match name.as_str() {
+                        "string" => Some(Type::String),
+                        "vec" => Some(Type::Vec),
+                        _ => scalar_type(name),
+                    })?;
+                    matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
+                }
+                [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
+                 Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
+                    if name == "vec" && !self.subst.contains_key(name) => match element.as_str() {
+                        "string" => Some(Type::StrVec),
+                        "f64" => Some(Type::VecF),
+                        _ => None,
+                    },
+                _ => None,
+            }
+        }).collect()
     }
     // A concrete type argument. Structs and enums are rejected for the same
     // reason variant payloads are: no recursion and no hidden layout.
@@ -488,7 +570,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = format!("{gid}:{}", args.iter().map(|t| t.name()).collect::<Vec<_>>().join(","));
+        let key = specialization_key(gid, &args);
         if let Some(&sid) = self.generics.struct_done.get(&key) { return Ok(sid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "struct" && *active == key) {
@@ -608,14 +690,34 @@ impl Parser<'_> {
     // address (ADR-0207), so the declaration check stays the C-ABI shape
     // test — the pointee's ownership is the deref-side's problem (U11).
     pub(super) fn pointer_type(&mut self) -> Result<Type, ae_span::Diagnostic> {
-        self.take(Kind::Star)?;
-        let mutable = ae_syntax::declaration::pointer_mutability(
-            &self.file, self.source, &self.tokens[self.pos],
-        )?;
-        self.pos += 1;
-        let pointee = self.named_type()?;
+        let (mutable, pointee) = self.pointer_pointee(None)?;
         let id = super::intern_pointee(pointee);
         Ok(if mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
+    }
+
+    pub(super) fn pointer_cast_pointee(&mut self, required: Option<bool>) -> Result<(bool, Type), ae_span::Diagnostic> {
+        if let Some(mutable) = self.shared_pointer_cast_qualifier() {
+            if required.is_none() || required == Some(mutable) {
+                self.pos += 2;
+                return Ok((mutable, self.named_type()?));
+            }
+        }
+        self.pointer_pointee(required)
+    }
+
+    fn pointer_pointee(&mut self, required: Option<bool>) -> Result<(bool, Type), ae_span::Diagnostic> {
+        self.take(Kind::Star)?;
+        let mutable = if let Some(required) = required {
+            self.take(if required { Kind::Mut } else { Kind::Const })?;
+            required
+        } else {
+            let mutable = ae_syntax::declaration::pointer_mutability(
+                &self.file, self.source, &self.tokens[self.pos],
+            )?;
+            self.pos += 1;
+            mutable
+        };
+        Ok((mutable, self.named_type()?))
     }
 
     // Arrays are borrowed read-only; strings and scalars pass by value.

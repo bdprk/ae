@@ -1,0 +1,40 @@
+// std/compiler/ir_section.ae
+// Object file section header and flag descriptor.
+
+pub struct SectionDescriptor {
+    name_id: i64,     // String table index
+    sec_type: i64,    // 1=PROGBITS, 2=SYMTAB, 3=STRTAB, 4=RELA, 8=NOBITS
+    flags: i64,       // 1=WRITE, 2=ALLOC, 4=EXECINSTR
+    size: i64,
+    alignment: i64,
+}
+
+pub fn section_new(name: i64, s_type: i64, flags: i64, align: i64) -> SectionDescriptor {
+    return SectionDescriptor {
+        name_id: name,
+        sec_type: s_type,
+        flags: flags,
+        size: 0,
+        alignment: align,
+    };
+}
+
+pub fn section_is_executable(s: SectionDescriptor) -> bool {
+    // Flag & 4
+    return (s.flags % 8) >= 4;
+}
+
+pub fn section_is_writable(s: SectionDescriptor) -> bool {
+    // Flag & 1
+    return (s.flags % 2) == 1;
+}
+
+pub fn section_with_size(s: SectionDescriptor, sz: i64) -> SectionDescriptor {
+    return SectionDescriptor {
+        name_id: s.name_id,
+        sec_type: s.sec_type,
+        flags: s.flags,
+        size: sz,
+        alignment: s.alignment,
+    };
+}

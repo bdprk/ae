@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_asm2.ae
 // Verification of GasSyntaxConfig, AsmOpcodeMap, AsmAddrMode, and AsmCondCode primitives.
 
-use "../../std/core/ir_gas_syntax.ae";
-use "../../std/core/ir_asm_opcode_map.ae";
-use "../../std/core/ir_asm_addr_mode.ae";
-use "../../std/core/ir_asm_cond_code.ae";
+use "../../std/compiler/ir_gas_syntax.ae";
+use "../../std/compiler/ir_asm_opcode_map.ae";
+use "../../std/compiler/ir_asm_addr_mode.ae";
+use "../../std/compiler/ir_asm_cond_code.ae";
 
 fn main() {
     print("--- batch_core_compiler_asm2 test start ---");

@@ -1,0 +1,30 @@
+// std/compiler/ir_lower.ae
+// Compiler instruction lowering to target machine operation representation.
+
+pub struct TargetOp {
+    opcode: i64,      // Target machine opcode (e.g., 1=MOV, 2=ADD, 3=SUB, 4=CMP, 5=JMP, 6=RET)
+    dst_reg: i64,     // Target physical register or spill slot
+    src_reg: i64,     // Source physical register or immediate
+    is_imm: bool,     // Whether src is an immediate value
+}
+
+pub fn target_op_new(opcode: i64, dst: i64, src: i64, is_imm: bool) -> TargetOp {
+    return TargetOp {
+        opcode: opcode,
+        dst_reg: dst,
+        src_reg: src,
+        is_imm: is_imm,
+    };
+}
+
+pub fn target_op_opcode(op: TargetOp) -> i64 {
+    return op.opcode;
+}
+
+pub fn target_op_dst(op: TargetOp) -> i64 {
+    return op.dst_reg;
+}
+
+pub fn target_op_is_imm(op: TargetOp) -> bool {
+    return op.is_imm;
+}

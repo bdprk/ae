@@ -1,0 +1,30 @@
+// std/compiler/ir_safepoint.ae
+// Compiler GC Safepoint poll site insertion descriptor and poll address calculator.
+
+pub struct SafepointPoll {
+    pc_offset: i64,
+    is_loop_backedge: bool,
+    is_function_prologue: bool,
+    poll_register: i64,
+}
+
+pub fn safepoint_poll_new(pc: i64, backedge: bool, prologue: bool, reg: i64) -> SafepointPoll {
+    return SafepointPoll {
+        pc_offset: pc,
+        is_loop_backedge: backedge,
+        is_function_prologue: prologue,
+        poll_register: reg,
+    };
+}
+
+pub fn safepoint_is_backedge(p: SafepointPoll) -> bool {
+    return p.is_loop_backedge;
+}
+
+pub fn safepoint_is_prologue(p: SafepointPoll) -> bool {
+    return p.is_function_prologue;
+}
+
+pub fn safepoint_poll_reg(p: SafepointPoll) -> i64 {
+    return p.poll_register;
+}

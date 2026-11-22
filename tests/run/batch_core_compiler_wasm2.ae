@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_wasm2.ae
 // Verification of WasmLocalRun, WasmImport, WasmMemoryLimits, and WasmBranchTarget primitives.
 
-use "../../std/core/ir_wasm_local.ae";
-use "../../std/core/ir_wasm_import.ae";
-use "../../std/core/ir_wasm_memory.ae";
-use "../../std/core/ir_wasm_branch.ae";
+use "../../std/compiler/ir_wasm_local.ae";
+use "../../std/compiler/ir_wasm_import.ae";
+use "../../std/compiler/ir_wasm_memory.ae";
+use "../../std/compiler/ir_wasm_branch.ae";
 
 fn main() {
     print("--- batch_core_compiler_wasm2 test start ---");

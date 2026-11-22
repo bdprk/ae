@@ -1,4 +1,4 @@
-use "../../std/task/timer.ae";
+use "../../std/std/task/timer.ae";
 fn main() {
     let t = timer_new(0, 10);
     let _ = timer_cancel(&t, "soon");

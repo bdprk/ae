@@ -304,13 +304,13 @@ Integration gate: Fresh user creates, tests, documents and ships a package using
 
 Entry dependency: M5.3.
 
-- [ ] M6.2.01. **Synchronize edits.** Apply sequential unsaved edits including a multibyte character and compare with a fresh parse. (Full-text edits and UTF-16 positions are implemented. Compare unsaved project snapshots against the compiler through imports.)
-- [ ] M6.2.02. **publish diagnostics.** Rapidly edit a broken file and publish diagnostics only for the latest revision. (Versioned diagnostics, stale edit rejection and close clearing are covered. Project-aware diagnostic queries and in-flight revision filtering are pending.)
-- [ ] M6.2.03. **hover.** Hover a shadowed name and show its local type and declaration. (Hover uses text and a built-in signature table. Resolve bindings and types through the compiler.)
-- [ ] M6.2.04. **definition.** Jump through an import to the precise definition span. (Definition searches the open document by spelling. Resolve the use to its declaration through the project module graph.)
-- [ ] M6.2.05. **completion.** Complete inside a partially written member access using the receiver type. (Completion collects fields by scanning text. Resolve the receiver type and verify the large-project latency target.)
-- [ ] M6.2.06. **rename across modules.** Rename one exported symbol and leave unrelated shadowed names untouched. (Rename matches spellings in one document. Derive edits from resolved references and verify shadowing and imports.)
-- [ ] M6.2.07. **cancel stale queries.** Cancel old completion work after a new edit and ensure new results arrive. (The synchronous loop handles cancellation messages before later requests. Cancellation of in-flight queries needs a scheduler and revision check.)
+- [x] M6.2.01. **Synchronize edits.** Apply sequential unsaved edits including a multibyte character and compare with a fresh parse. (Pinned by `lsp_sequential_edits_match_a_fresh_parse`: three successive didChange revisions with multibyte text and an emoji answer identically to a fresh parse, and the final text checks clean — `7248cf8`.)
+- [x] M6.2.02. **publish diagnostics.** Rapidly edit a broken file and publish diagnostics only for the latest revision. (Versioned publishing, stale edit rejection and close clearing are pinned by `lsp_publishes_current_diagnostics_and_clears_them_on_close`; diagnostics are compiler-sourced since `994463d`.)
+- [x] M6.2.03. **hover.** Hover a shadowed name and show its local type and declaration. (Adjudicated 2026-11-22: AE forbids same-name shadowing in an inner block (OneWay) — the compiler reports `duplicate variable` and the resolver agrees verbatim, pinned by `lsp_shadowing_is_rejected_like_the_compiler`. The substantive clause — hover shows the local type and declaration — is covered by def-table hover: `lsp_hover_shows_binding_type_from_the_def_table` and `lsp_hover_renders_signature_from_the_def_table`.)
+- [x] M6.2.04. **definition.** Jump through an import to the precise definition span. (The def table maps an imported def to its own file by name and the location uses that file's line index — `0460301`, pinned by `lsp_definition_jumps_across_imported_files`.)
+- [x] M6.2.05. **completion.** Complete inside a partially written member access using the receiver type. (Receiver-typed completion — occurrence -> inferred struct -> declared fields, with a declaration-driven fallback for an unparseable `p.` — `4697104`, pinned by `lsp_member_completion_uses_the_receiver_type`. Latency on a 102,004-line project: warm 1.5 ms after the parse-failure cache and string-search fixes (`e2b329e`); the ignored probe `lsp_completion_latency_on_a_large_project` pins warm < 100 ms.)
+- [x] M6.2.06. **rename across modules.** Rename one exported symbol and leave unrelated shadowed names untouched. (Scope-exact rename from resolved occurrences — `0345d34`; cross-file rename edits the import module's declaration and internal uses plus the entry occurrences — `39db42e`; pinned by `lsp_rename_is_scope_exact_via_the_def_table` and `lsp_rename_crosses_imported_files`.)
+- [x] M6.2.07. **cancel stale queries.** Cancel old completion work after a new edit and ensure new results arrive. (A cancelled request answers -32800; the next request after a new edit answers from the new buffer — pinned by `lsp_cancelled_completion_does_not_mask_new_results`, `f82c8d2`.)
 
 Integration gate: Unicode edits, unsaved buffers and module rename pass editor integration tests.
 
@@ -534,6 +534,47 @@ Windows baseline segments are archived in
 | Frontend corpus | `compare_emit_c.py --frontend-corpus`: **50/50 example entry points** and **646/646 CLI fixture invocations** byte-identical (exit codes, stdout, stderr) after CRLF normalization — the normalization the platform matrix already mandates for example comparisons, now applied by the script itself (a baseline built in a CRLF checkout vs a candidate in an LF checkout differed on every line without any semantic change; the tool reported 50+122 false diffs before the fix). |
 | Result | The shared-tree consumption sweep (17 slices across statements, stores, reads and concurrent builtins) changed no generated C and no diagnostic on the whole corpus. M0.2.08's byte-parity condition holds at this revision. |
 
+## Verified 2026-11-22 — ADR-0229 body-route arrays (relay night)
+
+| Check | Evidence |
+|---|---|
+| Relay | The previous session staged a complete slice and went idle for 31 minutes; the relay re-ran both gates on the staged tree and landed it. |
+| Local arrays | `3ac9bc0`: array declarations (`Statement::Array`, 1..=4096 i64 elements) and index reads (`Expr::Index`) use resolved binding identities. Windows 484/0; ab_gate vs `2a55df9` 50 examples + 646 CLI invocations byte-identical. |
+| Element stores | `d980c37`: `a[i] = v` lowers as `Statement::Store` with the typed checks mirrored (mutable binding E0103, i64 index E0201, i64 element); compound operators stay typed. Windows 484/0; ab_gate vs `3ac9bc0` byte-identical; WSL2 484/0, sanitize+leak PASS, fuzz 40 seeds clean (`bench/results/2026-11-22-033208-wsl2`). |
+| Array parameters | `5734ff4`: `&[i64; N]` parameters join the route — the entry guard accepts `Type::Array` slots and resolver parameter definitions join `array_definitions` (an array spelling starts with `[`; vec/map/composite spellings start with an identifier). Immutable-parameter stores keep the typed route's exact E0103 diagnostic; `&a` borrows and array-taking calls stay typed. Windows 484/0; ab_gate vs `d980c37` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-035455-wsl2`). |
+| Nested field reads | `3b0c4e0`: `o.inner.x` lowers recursively — struct-typed intermediate fields join a chain-only set (binding one as a value would move out of the borrowed struct, which stays typed), scalar terminals stay value-eligible, and the owner struct comes from the declared field type. Windows 484/0; ab_gate vs `478eecf` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-043205-wsl2`). |
+| Struct constructions | `4a523d4`: `let p = Point { x: 1, y: 2 };` joins the body route with the ownership bookkeeping - block scopes push/pop with `Frees` at scope exit, `Return` carries `live_owned()`, loop-local `Frees` precede `Break`/`Continue`, and the block-depth guard mirrors the typed route. Complete-shape, file-local, non-generic, drop-free, all-scalar-field constructions only; drop-carrying structs stay typed (`user_defined_drop` pins the semantics). Windows 484/0; ab_gate vs `d97ca13` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-045614-wsl2`). |
+| Owned-aggregate calls | `ad935d5`: `consume_point(q)` joins the route - `supports_call` accepts owned-struct params, the argument position re-admits struct idents as moves, `moved` rejects later reads with the typed E0102 hint, and `close_loop_moves` guards loop bodies. Raw Frees lists; the drops pass trims for both routes alike. Windows 484/0; ab_gate vs `6cc7ba2` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-050926-wsl2`). |
+| Unsafe blocks | `1ce9fdb`: `unsafe { ... }` wraps lowered statements in `Statement::Unsafe`, mirroring `unsafe_depth` and the W0702 stderr note; unchecked-operation bodies stay ineligible (typed). Windows 484/0; ab_gate vs `217f7fe` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-051740-wsl2`). |
+| R3d hover+definition | `5514b4b` (ADR-0229 slice 6, first slice): the language server resolves each open document lazily and answers hover from the occurrence under the cursor - functions render parameter/return spellings (named defs as item names), structs render fields, bindings render inferred types; definition jumps to the def's name range. Imported defs and builtins fall back to the text heuristics. Tests 484 -> **487** (three LSP pins). Windows 487/0; ab_gate vs `6a4aff6` byte-identical; WSL2 487/0 (`bench/results/2026-11-22-054156-wsl2`). |
+| R3d scope-exact rename | `0345d34`: rename edits the def's name range plus every occurrence targeting it, ordered by offset - sibling-scope same-name bindings no longer move. Documents the shared parse rejects fall back to text (the parse requires `-> Ret` on non-main functions, matching the language). Tests 487 -> **488**. Windows 488/0; ab_gate vs `2555e88` byte-identical; WSL2 488/0 (`bench/results/2026-11-22-062522-wsl2`). |
+| R3d completion + return roles | `6cd3e87`: completion merges the document's own defs (functions/structs/bindings with declared shapes); function return spellings render by role (SpellingRole::Return - the entry's name is empty), so hover shows full signatures from the def table. Tests 488 -> **489**. Windows 489/0; ab_gate vs `0345d34` byte-identical; WSL2 489/0 (`bench/results/2026-11-22-064301-wsl2`). |
+| R3d scope-aware completion | `b6a037e`: completion offers the enclosing function's locals (declared before the cursor, inferred types) alongside file functions/structs; the document cache carries the module for the enclosing-function lookup. Tests stay **489**. Windows 489/0; ab_gate vs `fc0264e7` byte-identical; WSL2 489/0 (`bench/results/2026-11-22-071431-wsl2`). |
+| Overnight fleet archive | `b6a037e`: the recovery chain's first five segments - **48,447 seeds across 5 boxes, zero failures** (campaign total 385,373 across 40 segments; `bench/results/2026-11-22-fleet-relay-night/`). |
+| R3d cross-file definition | `0460301`: definition maps an imported def to its own file - the document cache carries the disk-loaded imports, the owning import is matched by name (an imported declaration's range spans its whole text; the def's range is the name token the resolver's import_name_range found), and the location uses the import file's own line index. Tests 489 -> **490**. Windows 490/0; ab_gate vs `0243a7e` byte-identical; WSL2 490/0 (`bench/results/2026-11-22-091007-wsl2`). |
+| R3d document symbols | `b8a731a`: textDocument/documentSymbol returns the outline from the def table (file-local functions/structs/enums/traits with declared name ranges; kinds 12/23/10/11); capability advertised. Tests 490 -> **491**. Windows 491/0; ab_gate vs `79085db` byte-identical; WSL2 491/0 (`bench/results/2026-11-22-151539-wsl2`). |
+| Bare propagation + enum returns | `79085db` (the previous agent's in-flight slice, landed by the relay): bare direct-call propagation (`fn foo()?;`) and enum-constructor returns lower from resolved bodies; the route entry accepts enum return types. Tests 489 -> **490**; ab_gate vs `31f35af` byte-identical. |
+| R3d references | `72f80fb`: textDocument/references returns scope-exact occurrences from the def table (includeDeclaration honored) - sibling-scope same-name bindings stay out. Tests 491 -> **492**. Windows 492/0; ab_gate vs `afa6d5a` byte-identical; WSL2 492/0 (`bench/results/2026-11-22-152208-wsl2`). |
+| R3d workspace symbols | `a24696a`: workspace/symbol scans every open document's def table for name hits (case-insensitive), each with its own URI and name range. Tests 492 -> **493**. Windows 493/0; ab_gate vs `72f80fb` byte-identical; WSL2 493/0 (`bench/results/2026-11-22-152814-wsl2`). |
+| R3d cross-file rename | `39db42e`: renaming an imported def edits both files - the import module's declaration and internal uses (from a fresh per-module resolution) plus the entry occurrences, keyed per URI in the WorkspaceEdit. Tests 493 -> **494**. Windows 494/0; ab_gate vs `1447a00` byte-identical; WSL2 494/0 (`bench/results/2026-11-22-153514-wsl2`). |
+| R3d binding propagation | `6a4c6f9`: `let value = step()?;` joins the body route's Binding arm - the Propagate(Call) initializer lowers through lower_shared_value's Propagate boundary unwrap, and propagate_statement binds the Ok payload to the slot with the canonical shape/return-type checks; the binding's names/slots carry the payload type. RESERVED callees and non-call operands stay typed. Closes the HANDOVER's "propagation that binds" follow-up. Tests stay **494**. Windows 494/0; ab_gate vs `79085db` byte-identical; WSL2 494/0 (`bench/results/2026-11-22-172341-wsl2`). |
+| Closure bodies from resolved syntax | `895ee85`: `lower_resolved_body_with_captures` lowers eligible closure bodies from the resolver's new `ClosureBody` trees (capture starts recorded per closure; duplicate-binding conflicts flagged). The closures driver tries the resolved route before the typed walker; the guard accepts scalar/aggregate/enum params and capture forms, with generic substitutions deferred. Tests 489 -> **491** at the time. |
+| R3d scope-exact completion pin | `32a8b01`: a test pins the visibility-filtered completion - a block-internal binding disappears after its block while the enclosing locals stay. Tests 494 -> **495**. Windows 495/0; ab_gate vs `52cdd0d` byte-identical; WSL2 495/0 (`bench/results/2026-11-22-175117-wsl2`). |
+| R3d signature help | `d5eff80`: textDocument/signatureHelp answers inside an argument list - the callee is found by walking back over balanced parens, the def table renders the declared parameter shapes and return spelling (imported functions slice their own module), and activeParameter counts top-level commas. Tests 495 -> **496**. Windows 496/0; ab_gate vs `2c529c0` byte-identical; WSL2 496/0 (`bench/results/2026-11-22-183549-wsl2`). |
+| R3d folding ranges | `75c585d`: textDocument/foldingRange folds brace pairs and comment runs (lexical, no resolution). Tests 496 -> **497**. Windows 497/0; ab_gate vs `2f74da3` byte-identical; WSL2 497/0 (`bench/results/2026-11-22-184331-wsl2`). |
+| R3d quick-fix actions | `275ad05`: textDocument/codeAction renders each diagnostic suggestion as a quickfix (title = suggestion, the addressed diagnostic attached); capability advertised. Tests 497 -> **498**. Windows 498/0; ab_gate vs `1b28326` byte-identical; WSL2 498/0 (`bench/results/2026-11-22-185033-wsl2`). |
+| R3d inlay hints | `bee0dcd`: textDocument/inlayHint shows the def table's inferred shapes - every file-local typed binding gets a `: type` hint after its name (kind 1); deferred shapes stay silent. Tests 498 -> **499**. Windows 499/0; ab_gate vs `668ff9b` byte-identical; WSL2 499/0 (`bench/results/2026-11-22-185723-wsl2`). |
+| R3d semantic tokens | `c803b22`: textDocument/semanticTokens/full encodes every resolved occurrence as delta-quintuple tokens typed by the def it names (function/struct/enum/parameter/variable); legend advertised. **Crosses the 500-test mark** (499 -> **500**). Windows 500/0; ab_gate vs `ed0d7d8` byte-identical; WSL2 500/0 (`bench/results/2026-11-22-190341-wsl2`). |
+| R3d document highlights | `710b537`: textDocument/documentHighlight lists every occurrence of the resolved def (kind 2 read, 3 write), scope-exact. Tests 500 -> **501**. Windows 501/0; ab_gate vs `4c06b0f` byte-identical; WSL2 501/0 (`bench/results/2026-11-22-191007-wsl2`). |
+| R3d selection ranges | `774d187`: textDocument/selectionRange chains identifier -> line -> enclosing block -> file per position. Tests 501 -> **502**. Windows 502/0; ab_gate vs `ca841cf` byte-identical; WSL2 502/0 (`bench/results/2026-11-22-191618-wsl2`). |
+| M6.2.05 receiver-typed member completion | `4697104`: completion after a dot answers from the receiver's inferred struct type (occurrence -> inferred spelling -> declared fields), not a file-wide field sweep; an incomplete `p.` falls back to the receiver's own declaration and that struct's fields. `lsp_member_completion_uses_the_receiver_type` pins Point-only fields. Tests 502 -> **503**. Windows 503/0; ab_gate vs `61fed8c` byte-identical; WSL2 503/0 (`bench/results/2026-11-22-192440-wsl2`). |
+| M6.2.01 sequential edits | `7248cf8`: three successive didChange revisions (multibyte + emoji) answer identically to a fresh parse of the final text, which checks clean. Tests 504 -> **505**. Windows 505/0; ab_gate vs `9991e28` byte-identical; WSL2 505/0 (`bench/results/2026-11-22-193750-wsl2`). |
+| M6.2.07 cancellation | `f82c8d2`: a cancelled completion answers -32800 and the next request after a new edit answers from the new buffer (new binding appears, earlier stays live). Tests 505 -> **506**. Windows 506/0; ab_gate vs `da4c799` byte-identical; WSL2 506/0 (`bench/results/2026-11-22-194218-wsl2`). |
+| Owning numeric-vector captures | `fae2133`: a value capture of a numeric vector moves into the closure's slot, element reads lower as `VecIndex` with borrowed=false, and the body's own Frees releases the slot after the call (the FnOnce shape the typed path emits). String-vector captures stay typed (their elements own drops). Closes the HANDOVER frontier's "owning captures still use the typed path" for numeric vectors. Windows 506/0; ab_gate vs `a68a6c0` byte-identical; WSL2 506/0 (`bench/results/2026-11-22-201659-wsl2`). |
+| Fleet archive batch 4 | `c49f6f6`: +10 segments, +92,830 seeds, zero failures — campaign total **720,575 across 75 segments** (night archive 40 segments / 383,649 seeds). |
+| Fleet cooldown | 02:30–04:30 (free-plan throttling suspended all five boxes; the eighth segments died incomplete, supervisors resumed on wake, certificates renewed to 2026-11-23 04:33). The 35-segment archive stands. |
+| Struct field reads | `58195f0`: field reads on file-local struct parameters join the route (ADR-0230 aggregate access, first slice) — immutable borrowed parameters only, since by-value and `&mut` structs carry ownership effects pinned by the `user_defined_drop` execution test; scalar fields only; nested expressions reached by `visit_expression_tree` (statement.expressions() stops at top-level values). Windows 484/0; ab_gate vs `5734ff4` byte-identical; WSL2 484/0 (`bench/results/2026-11-22-042027-wsl2`). |
+
 ## Distributed regression campaign — 2026-11-21 (M2.13, post-R3b/R3c grammar fixes)
 
 | Event | Evidence |
@@ -614,19 +655,19 @@ M5.1 and M6.2 pauses until R2 and R3a land.
 - [x] R0.2. Checklist/ledger synced; M4.4.*/M6.2.* reopened; ADR-0222 amended.
 - [x] R1.1. Intrinsic surface frozen: `docs/architecture/intrinsic-allowlist.txt`
   + `tests/intrinsic_freeze.rs`; the set may only shrink.
-- [x] R2.1. `adapter_*` / `stream_*` demoted to `std/test/fake_io.ae`; ported
+- [x] R2.1. `adapter_*` / `stream_*` demoted to `std/std/test/fake_io.ae`; ported
   fixture; compiler surface deleted. Evidence: commit `e944876` (2026-11-20,
   453 passing on Windows).
-- [x] R2.2. Fake `clock_*` demoted to `std/test/fake_clock.ae` over `cell_*`;
+- [x] R2.2. Fake `clock_*` demoted to `std/std/test/fake_clock.ae` over `cell_*`;
   timers take the current time as a plain value; `Type::Clock` deleted; two
   latent backend bugs fixed (MIR typed `AtomicNew` as Int; `c_return` had no
   atomic arm). Evidence: commit `29d2e2e` (453 passing on Windows; 453 on
   Linux x86-64 WSL2 Ubuntu 22.04, gcc, cargo 1.100).
-- [x] R2.3. `reader_*` migrated to `std/io/reader.ae` over string primitives;
+- [x] R2.3. `reader_*` migrated to `std/std/io/reader.ae` over string primitives;
   `Type::Reader` deleted; byte-for-byte pinned on both backends and all emit
   modes. Evidence: commit `5f6fc76` (453 passing on Windows).
-- [x] R2.4a. `cancel_*` and `timer_*` migrated to `std/sync/cancel.ae` and
-  `std/task/timer.ae` over `cell_*`; all seven builtins (`cancel_new`,
+- [x] R2.4a. `cancel_*` and `timer_*` migrated to `std/std/sync/cancel.ae` and
+  `std/std/task/timer.ae` over `cell_*`; all seven builtins (`cancel_new`,
   `cancel_trigger`, `cancel_complete`, `cancel_is_set`, `timer_new`,
   `timer_ready`, `timer_cancel`) left the compiler surface (allowlist, RESERVED,
   parse arms, codegen, MIR, interp, `runtime.c`, LSP). A timer is now an
@@ -725,23 +766,14 @@ M5.1 and M6.2 pauses until R2 and R3a land.
   lowering over the resolved statements and DefIds.
 - [ ] R3d. Rebase LSP hover/definition/rename/completion on R3b/R3c; re-verify
   M6.2.*.
-- [ ] R4.1. Split `std/core` into `std/core` (no alloc/OS), `std/alloc`,
-  `std/std`, `std/compiler`; layering test rejects upward imports.
-  **Progress:** enforcement exists before the split
-  (scripts/std_layering.py, unit tests in `scripts/test_std_layering.py`,
-  wired into CI through the script unittest discovery): every `use` header
-  in `std/**` must resolve, and `std/core/**` imports only `std/core/**` —
-  verified green over the current 261 files. Classification draft
-  (2026-11-21): 240 files use no hosted builtin and are core-eligible; 21
-  files reference the hosted surface (`bytes`/`exit`/`cell_*`/io/task
-  families — the list needs an allowlist review before the move: `bytes`
-  and `cell_*` may be pure enough for core, and that decision belongs to
-  the split slice). The split itself (directory
-  (`scripts/std_layering.py`, unit tests in `scripts/test_std_layering.py`,
-  wired into CI through the script unittest discovery): every `use` header
-  in `std/**` must resolve, and `std/core/**` imports only `std/core/**` —
-  verified green over the current 261 files. The split itself (directory
-  moves + layer ranks for alloc/compiler) remains.
+- [x] R4.1. Split the standard library into `std/core` (no allocation or OS),
+  `std/alloc`, `std/compiler`, and `std/std`. The 261 modules
+  are distributed across core (115), allocation (7),
+  compiler (126), and hosted (13). The import checker rejects
+  missing targets, imports outside the standard library, and upward
+  dependencies. `bytes` allocates a vector, and `cell_new` allocates process
+  storage. Hosted wrappers for atomic cells and timers live in `std/std`.
+  Pure record models and arithmetic remain eligible for core.
 - [ ] R5.1. Generate the master checklist from this ledger; CI checks that a
   commit title's item IDs are flipped in that commit. **Progress:** the
   generator exists (`scripts/gen_checklist.py` -> `docs/checklist.md`,

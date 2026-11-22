@@ -1,5 +1,5 @@
 use "../../std/core/fnv1a.ae";
-use "../../std/core/line_indexer.ae";
+use "../../std/compiler/line_indexer.ae";
 use "../../std/core/int_formatter.ae";
 use "../../std/core/crc8.ae";
 

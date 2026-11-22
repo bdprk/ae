@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_runtime2.ae
 // Verification of TlsAccessPattern relaxation, TlsSectionLayout, SafepointTableState, and ActionTableEntry.
 
-use "../../std/core/ir_tls_model.ae";
-use "../../std/core/ir_tls_size.ae";
-use "../../std/core/ir_safepoint_table.ae";
-use "../../std/core/ir_landing_pad_table.ae";
+use "../../std/compiler/ir_tls_model.ae";
+use "../../std/compiler/ir_tls_size.ae";
+use "../../std/compiler/ir_safepoint_table.ae";
+use "../../std/compiler/ir_landing_pad_table.ae";
 
 fn main() {
     print("--- batch_core_compiler_runtime2 test start ---");

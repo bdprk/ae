@@ -1,0 +1,28 @@
+// std/compiler/ir_wasm_export.ae
+// Compiler WebAssembly export entry and external index mapper.
+
+pub struct WasmExport {
+    name_len: i64,
+    export_kind: i64, // 0x00=func, 0x01=table, 0x02=mem, 0x03=global
+    item_index: i64,
+}
+
+pub fn wasm_export_new(length: i64, kind: i64, idx: i64) -> WasmExport {
+    return WasmExport {
+        name_len: length,
+        export_kind: kind,
+        item_index: idx,
+    };
+}
+
+pub fn wasm_export_is_function(e: WasmExport) -> bool {
+    return e.export_kind == 0;
+}
+
+pub fn wasm_export_is_memory(e: WasmExport) -> bool {
+    return e.export_kind == 2;
+}
+
+pub fn wasm_export_index(e: WasmExport) -> i64 {
+    return e.item_index;
+}

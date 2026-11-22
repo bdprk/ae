@@ -1,0 +1,31 @@
+// std/compiler/ir_asm_addr_mode.ae
+// Compiler effective address operand representation (base + index * scale + disp).
+
+pub struct AsmAddrMode {
+    base_reg: i64,      // -1 if none
+    index_reg: i64,     // -1 if none
+    scale: i64,         // 1, 2, 4, 8
+    displacement: i64,
+}
+
+pub fn asm_addr_new(base: i64, idx: i64, scale: i64, disp: i64) -> AsmAddrMode {
+    return AsmAddrMode {
+        base_reg: base,
+        index_reg: idx,
+        scale: scale,
+        displacement: disp,
+    };
+}
+
+pub fn asm_addr_has_index(a: AsmAddrMode) -> bool {
+    return a.index_reg >= 0;
+}
+
+pub fn asm_addr_is_rip_relative(a: AsmAddrMode) -> bool {
+    // base == -2 denotes RIP
+    return a.base_reg == -2 && a.index_reg < 0;
+}
+
+pub fn asm_addr_displacement(a: AsmAddrMode) -> i64 {
+    return a.displacement;
+}

@@ -1,0 +1,32 @@
+// std/compiler/ir_stack_frame.ae
+// Compiler call stack frame layout offset calculator primitives.
+
+pub struct StackFrameLayout {
+    spill_slots: i64,
+    local_bytes: i64,
+    total_frame_size: i64,
+}
+
+pub fn stack_frame_layout_new(slots: i64, locals: i64) -> StackFrameLayout {
+    // 8 bytes per spill slot + locals aligned to 16 bytes
+    let spill_bytes = slots * 8;
+    let raw_total = spill_bytes + locals;
+    let rem = raw_total % 16;
+    var aligned_total = raw_total;
+    if rem > 0 {
+        aligned_total = raw_total + (16 - rem);
+    }
+    return StackFrameLayout {
+        spill_slots: slots,
+        local_bytes: locals,
+        total_frame_size: aligned_total,
+    };
+}
+
+pub fn stack_frame_total_size(f: StackFrameLayout) -> i64 {
+    return f.total_frame_size;
+}
+
+pub fn stack_frame_slot_offset(f: StackFrameLayout, slot_idx: i64) -> i64 {
+    return slot_idx * 8;
+}

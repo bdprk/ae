@@ -1,0 +1,70 @@
+// std/compiler/ast_node_kind.ae
+// Compiler Abstract Syntax Tree (AST) node classification primitives.
+
+pub enum AstNodeKind {
+    NodeFunction,
+    NodeStruct,
+    NodeEnum,
+    NodeImpl,
+    NodeLet,
+    NodeVar,
+    NodeIf,
+    NodeWhile,
+    NodeMatch,
+    NodeReturn,
+    NodeExpression,
+}
+
+pub fn ast_node_kind_id(k: AstNodeKind) -> i64 {
+    var id = 0;
+    match k {
+        AstNodeKind::NodeFunction => { id = 1; }
+        AstNodeKind::NodeStruct => { id = 2; }
+        AstNodeKind::NodeEnum => { id = 3; }
+        AstNodeKind::NodeImpl => { id = 4; }
+        AstNodeKind::NodeLet => { id = 5; }
+        AstNodeKind::NodeVar => { id = 6; }
+        AstNodeKind::NodeIf => { id = 7; }
+        AstNodeKind::NodeWhile => { id = 8; }
+        AstNodeKind::NodeMatch => { id = 9; }
+        AstNodeKind::NodeReturn => { id = 10; }
+        AstNodeKind::NodeExpression => { id = 11; }
+    }
+    return id;
+}
+
+pub fn ast_node_is_declaration(k: AstNodeKind) -> bool {
+    var r = false;
+    match k {
+        AstNodeKind::NodeFunction => { r = true; }
+        AstNodeKind::NodeStruct => { r = true; }
+        AstNodeKind::NodeEnum => { r = true; }
+        AstNodeKind::NodeImpl => { r = true; }
+        AstNodeKind::NodeLet => {}
+        AstNodeKind::NodeVar => {}
+        AstNodeKind::NodeIf => {}
+        AstNodeKind::NodeWhile => {}
+        AstNodeKind::NodeMatch => {}
+        AstNodeKind::NodeReturn => {}
+        AstNodeKind::NodeExpression => {}
+    }
+    return r;
+}
+
+pub fn ast_node_is_statement(k: AstNodeKind) -> bool {
+    var r = false;
+    match k {
+        AstNodeKind::NodeFunction => {}
+        AstNodeKind::NodeStruct => {}
+        AstNodeKind::NodeEnum => {}
+        AstNodeKind::NodeImpl => {}
+        AstNodeKind::NodeLet => { r = true; }
+        AstNodeKind::NodeVar => { r = true; }
+        AstNodeKind::NodeIf => { r = true; }
+        AstNodeKind::NodeWhile => { r = true; }
+        AstNodeKind::NodeMatch => { r = true; }
+        AstNodeKind::NodeReturn => { r = true; }
+        AstNodeKind::NodeExpression => { r = true; }
+    }
+    return r;
+}

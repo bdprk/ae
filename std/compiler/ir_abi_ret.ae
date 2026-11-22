@@ -1,0 +1,31 @@
+// std/compiler/ir_abi_ret.ae
+// Compiler machine ABI return value layout and sret (hidden return pointer) decision.
+
+pub struct AbiReturnSlot {
+    is_passed_via_sret: bool,
+    primary_reg: i64,    // RAX (0) or XMM0
+    secondary_reg: i64,  // RDX (1) or -1 if fits in 1 register
+    size_bytes: i64,
+}
+
+pub fn abi_ret_new(sret: bool, r1: i64, r2: i64, size: i64) -> AbiReturnSlot {
+    return AbiReturnSlot {
+        is_passed_via_sret: sret,
+        primary_reg: r1,
+        secondary_reg: r2,
+        size_bytes: size,
+    };
+}
+
+pub fn abi_ret_is_sret(ret: AbiReturnSlot) -> bool {
+    return ret.is_passed_via_sret;
+}
+
+pub fn abi_ret_uses_two_regs(ret: AbiReturnSlot) -> bool {
+    return !ret.is_passed_via_sret && ret.secondary_reg >= 0;
+}
+
+pub fn abi_should_use_sret(size_bytes: i64) -> bool {
+    // x86_64 ABI: aggregate > 16 bytes passed via hidden pointer (sret)
+    return size_bytes > 16;
+}

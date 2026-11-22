@@ -1,7 +1,7 @@
-use "../../std/core/ir_link_sym.ae";
-use "../../std/core/ir_link_resolve.ae";
-use "../../std/core/ir_section_merge.ae";
-use "../../std/core/ir_reloc_apply.ae";
+use "../../std/compiler/ir_link_sym.ae";
+use "../../std/compiler/ir_link_resolve.ae";
+use "../../std/compiler/ir_section_merge.ae";
+use "../../std/compiler/ir_reloc_apply.ae";
 
 fn defined_global(obj: i64, val: i64) -> LinkSymbol {
     return link_sym_new(7, link_binding_global(), obj, 1, val, 16);

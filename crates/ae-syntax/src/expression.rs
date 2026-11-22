@@ -33,7 +33,7 @@ pub enum ExpressionKind {
     Atom(Kind),
     Group(Box<Expression>),
     Propagate(Box<Expression>),
-    AddressCast { binding: String, mutable: bool, pointee: Range<usize> },
+    AddressCast { binding: String, binding_range: Range<usize>, mutable: bool, pointee: Range<usize> },
     PointerCast { base: Box<Expression>, mutable: bool, pointee: Range<usize> },
     BorrowArgument { mutable: bool, name: String, name_range: Range<usize> },
     Array(Vec<Expression>),
@@ -210,7 +210,7 @@ impl Parser<'_> {
                         self.file, self.source, self.tokens, self.cursor, None,
                     )?;
                     self.cursor = end;
-                    let ExpressionKind::BorrowArgument { name, mutable, .. } = argument.kind else {
+                    let ExpressionKind::BorrowArgument { name, name_range, mutable } = argument.kind else {
                         unreachable!("expected a borrowed binding");
                     };
                     if self.current().kind != Kind::As {
@@ -222,7 +222,7 @@ impl Parser<'_> {
                         return Err(self.error("pointer qualifier must match the address borrow"));
                     }
                     range.end = pointee.end;
-                    ExpressionKind::AddressCast { binding: name, mutable, pointee }
+                    ExpressionKind::AddressCast { binding: name, binding_range: name_range, mutable, pointee }
                 }
                 Kind::LParen => {
                     self.cursor += 1;
@@ -669,7 +669,7 @@ mod tests {
         let ExpressionKind::Call { arguments, .. } = parsed.kind else {
             panic!("expected a call");
         };
-        let ExpressionKind::AddressCast { binding, mutable, pointee } = &arguments[0].kind else {
+        let ExpressionKind::AddressCast { binding, mutable, pointee, .. } = &arguments[0].kind else {
             panic!("expected an address conversion");
         };
         assert_eq!(binding, "value");

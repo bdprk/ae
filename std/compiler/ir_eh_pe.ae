@@ -1,0 +1,76 @@
+// std/compiler/ir_eh_pe.ae
+// DW_EH_PE pointer encoding, the compact scheme every unwind table uses to
+// describe its own fields. An encoding byte packs four independent decisions:
+// the field format (low nibble), whether the stored value is relative to its
+// own address (0x10), whether the field holds an indirect pointer (0x80), and
+// whether the value is a plain omitted pointer (0xff).
+
+pub fn eh_pe_format(encoding: i64) -> i64 {
+    if encoding < 0 {
+        return -1;
+    }
+    return encoding % 16;
+}
+
+pub fn eh_pe_is_omitted(encoding: i64) -> bool {
+    return encoding == 255;
+}
+
+pub fn eh_pe_is_pcrel(encoding: i64) -> bool {
+    if encoding < 0 {
+        return false;
+    }
+    return encoding / 16 % 2 == 1;
+}
+
+pub fn eh_pe_is_indirect(encoding: i64) -> bool {
+    if encoding < 0 {
+        return false;
+    }
+    return encoding / 128 % 2 == 1;
+}
+
+pub fn eh_pe_field_bytes(encoding: i64) -> i64 {
+    // Zero means "the width depends on the value" (ULEB128/SLEB128) or "not a
+    // layout this model knows"; a caller must not turn that into a guess.
+    if eh_pe_is_omitted(encoding) {
+        return 0;
+    }
+    let format = eh_pe_format(encoding);
+    if format == 0 {
+        return 8; // absptr: pointer sized on every target this compiler emits
+    }
+    if format == 1 || format == 9 {
+        return 0; // uleb128 / sleb128
+    }
+    if format == 2 || format == 10 {
+        return 2;
+    }
+    if format == 3 || format == 11 {
+        return 4;
+    }
+    if format == 4 || format == 12 {
+        return 8;
+    }
+    return 0;
+}
+
+pub fn eh_pe_is_variable_width(encoding: i64) -> bool {
+    let format = eh_pe_format(encoding);
+    return format == 1 || format == 9;
+}
+
+pub fn eh_pe_value(stored: i64, field_addr: i64, encoding: i64) -> i64 {
+    // A pcrel field holds the distance from its own address to the target.
+    if eh_pe_is_pcrel(encoding) {
+        return field_addr + stored;
+    }
+    return stored;
+}
+
+pub fn eh_pe_apply_offset(value: i64, base: i64) -> i64 {
+    // The datarel form points into a base chosen by the section (for .eh_frame_hdr
+    // the base is the header itself); it is kept separate from pcrel so a caller
+    // cannot silently add the field address where the base is meant.
+    return base + value;
+}

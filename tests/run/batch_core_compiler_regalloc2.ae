@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_regalloc2.ae
 // Verification of Coalescing, Rematerialization, LiveRangeSplitting, and CallClobber masking.
 
-use "../../std/core/ir_coalesce.ae";
-use "../../std/core/ir_remat.ae";
-use "../../std/core/ir_live_split.ae";
-use "../../std/core/ir_call_clobber.ae";
+use "../../std/compiler/ir_coalesce.ae";
+use "../../std/compiler/ir_remat.ae";
+use "../../std/compiler/ir_live_split.ae";
+use "../../std/compiler/ir_call_clobber.ae";
 
 fn main() {
     print("--- batch_core_compiler_regalloc2 test start ---");

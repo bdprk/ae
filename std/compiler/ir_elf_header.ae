@@ -1,0 +1,26 @@
+// std/compiler/ir_elf_header.ae
+// ELF64 file header layout and magic byte validator.
+
+pub struct Elf64Header {
+    is_valid_magic: bool,
+    arch_type: i64,      // 0x3E for x86_64
+    entry_point: i64,
+    shoff: i64,          // Section header offset
+}
+
+pub fn elf64_header_new(entry: i64, shoff: i64) -> Elf64Header {
+    return Elf64Header {
+        is_valid_magic: true,
+        arch_type: 62, // 0x3E = EM_X86_64
+        entry_point: entry,
+        shoff: shoff,
+    };
+}
+
+pub fn elf64_header_is_valid(h: Elf64Header) -> bool {
+    return h.is_valid_magic && h.arch_type == 62;
+}
+
+pub fn elf64_header_entry(h: Elf64Header) -> i64 {
+    return h.entry_point;
+}

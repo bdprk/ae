@@ -1,17 +1,4 @@
-"""Layering enforcement for the std tree (ADR-0224 R4.1, enforcement first).
-
-The split itself is a later slice; the enforcement exists now so the split
-cannot regress it. Rules, in force today and verified against the tree:
-
-* every `use "path";` header in a std file resolves to an existing file
-  relative to the importing file;
-* `std/core/**` — the no-alloc, no-OS layer — imports only `std/core/**`.
-  Anything else in `std/` is a hosted module above it, and a core file
-  reaching up (io, sync, task, test, …) is a violation.
-
-When R4.1's split introduces `std/alloc` and `std/compiler`, this module
-gains their ranks; the direction rule is already written as a comparison.
-"""
+"""Check that standard-library imports resolve and only point down the layer stack."""
 
 import re
 from pathlib import Path
@@ -21,10 +8,9 @@ STD = ROOT / "std"
 
 USE = re.compile(r'^\s*use\s+"([^"]+)"\s*;')
 
-# std/<dir> -> layer rank. core is the bottom; every other directory is a
-# hosted layer above it until R4.1 names them (alloc, compiler).
-LAYERS = {"core": 0}
-DEFAULT_RANK = 1
+# Compiler models may use allocation helpers. Hosted modules sit above them.
+LAYERS = {"core": 0, "alloc": 1, "compiler": 2, "std": 3}
+DEFAULT_RANK = LAYERS["std"]
 
 
 def layer_of(relative: Path) -> int:
@@ -44,6 +30,7 @@ def header_uses(source: str):
 
 def check(std_root: Path = STD):
     """Return every layering violation as a human-readable line."""
+    std_root = std_root.resolve()
     violations = []
     files = sorted(std_root.rglob("*.ae"))
     for file in files:
@@ -54,10 +41,14 @@ def check(std_root: Path = STD):
             if not target.exists():
                 violations.append(f"{relative}: use \"{use_path}\" does not resolve")
                 continue
+            if not target.is_relative_to(std_root):
+                violations.append(f'{relative}: use "{use_path}" escapes the std tree')
+                continue
             imported_relative = target.relative_to(std_root)
-            if layer_of(relative) == LAYERS.get("core", 0) and layer_of(imported_relative) > LAYERS.get("core", 0):
+            if layer_of(relative) < layer_of(imported_relative):
                 violations.append(
-                    f"{relative}: core imports hosted module {imported_relative.as_posix()}"
+                    f"{relative}: {relative.parts[0]} imports higher layer "
+                    f"{imported_relative.as_posix()}"
                 )
     return violations
 

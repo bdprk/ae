@@ -1,7 +1,7 @@
-use "../../std/core/ir_semver_order.ae";
-use "../../std/core/ir_version_req.ae";
-use "../../std/core/ir_mvs.ae";
-use "../../std/core/ir_lockfile.ae";
+use "../../std/compiler/ir_semver_order.ae";
+use "../../std/compiler/ir_version_req.ae";
+use "../../std/compiler/ir_mvs.ae";
+use "../../std/compiler/ir_lockfile.ae";
 
 fn v(major: i64, minor: i64, patch: i64) -> SemVerOrder {
     return semver_release(major, minor, patch);

@@ -1,0 +1,28 @@
+// std/compiler/ir_macho_segment.ae
+// Compiler Mach-O LC_SEGMENT_64 load command and section layout descriptor.
+
+pub struct MachOSegment64 {
+    vmaddr: i64,
+    vmsize: i64,
+    fileoff: i64,
+    filesize: i64,
+    nsects: i64,
+}
+
+pub fn macho_segment_new(vmaddr: i64, vmsize: i64, off: i64, sz: i64, nsects: i64) -> MachOSegment64 {
+    return MachOSegment64 {
+        vmaddr: vmaddr,
+        vmsize: vmsize,
+        fileoff: off,
+        filesize: sz,
+        nsects: nsects,
+    };
+}
+
+pub fn macho_segment_file_size(s: MachOSegment64) -> i64 {
+    return s.filesize;
+}
+
+pub fn macho_segment_has_sections(s: MachOSegment64) -> bool {
+    return s.nsects > 0;
+}

@@ -1,0 +1,19 @@
+// std/compiler/ir_wasm_leb_custom.ae
+// Compiler WebAssembly custom section and naming payload descriptor.
+
+pub struct WasmCustomSection {
+    name_len: i64,
+    payload_len: i64,
+}
+
+pub fn wasm_custom_new(n_len: i64, p_len: i64) -> WasmCustomSection {
+    return WasmCustomSection {
+        name_len: n_len,
+        payload_len: p_len,
+    };
+}
+
+pub fn wasm_custom_total_payload(s: WasmCustomSection) -> i64 {
+    // 1 byte name length prefix + name bytes + payload
+    return 1 + s.name_len + s.payload_len;
+}

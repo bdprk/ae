@@ -1,0 +1,10 @@
+// std/std/env_utils.ae
+// Core Environment Variable Key-Value Parsing (M1.4 / M3.2)
+
+pub fn env_is_valid_key_char(b: i64) -> bool {
+    // Alphanumeric + '_'
+    if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 95 {
+        return true;
+    }
+    return false;
+}

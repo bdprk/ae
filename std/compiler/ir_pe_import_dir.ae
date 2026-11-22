@@ -1,0 +1,28 @@
+// std/compiler/ir_pe_import_dir.ae
+// Compiler Windows PE import directory table entry and IAT descriptor.
+
+pub struct PeImportDirectoryEntry {
+    import_lookup_table_rva: i64,
+    time_date_stamp: i64,
+    forwarder_chain: i64,
+    name_rva: i64,
+    import_address_table_rva: i64,
+}
+
+pub fn pe_import_dir_new(lookup_rva: i64, name_rva: i64, iat_rva: i64) -> PeImportDirectoryEntry {
+    return PeImportDirectoryEntry {
+        import_lookup_table_rva: lookup_rva,
+        time_date_stamp: 0,
+        forwarder_chain: 0,
+        name_rva: name_rva,
+        import_address_table_rva: iat_rva,
+    };
+}
+
+pub fn pe_import_is_null_terminator(entry: PeImportDirectoryEntry) -> bool {
+    return entry.name_rva == 0 && entry.import_lookup_table_rva == 0;
+}
+
+pub fn pe_import_iat_rva(entry: PeImportDirectoryEntry) -> i64 {
+    return entry.import_address_table_rva;
+}

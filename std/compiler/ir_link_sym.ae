@@ -1,0 +1,127 @@
+// std/compiler/ir_link_sym.ae
+// Output symbol table of a link: one record per name, and the rule for folding a
+// second object's definition into the record already held.
+//
+// The container formats each describe symbols in their own layout (ir_elf_symtab,
+// ir_pe_coff_symtab, ir_macho_symtab). Those describe how a symbol is *stored*;
+// this describes what a symbol *means* once several objects claim the same name.
+
+pub fn link_binding_local() -> i64 { return 0; }
+pub fn link_binding_global() -> i64 { return 1; }
+pub fn link_binding_weak() -> i64 { return 2; }
+
+pub fn link_merge_keep() -> i64 { return 0; }
+pub fn link_merge_replace() -> i64 { return 1; }
+pub fn link_merge_conflict() -> i64 { return 2; }
+
+pub struct LinkSymbol {
+    name_id: i64,    // Interned name; the link's identity for this symbol.
+    binding: i64,    // 0=local, 1=global, 2=weak.
+    obj: i64,        // Object index that defines it, -1 while undefined.
+    section: i64,    // Section in that object, -1 for an absolute value.
+    value: i64,      // Offset in the section, or the absolute value.
+    size_bytes: i64,
+}
+
+pub fn link_sym_new(name_id: i64, binding: i64, obj: i64, section: i64, value: i64, size_bytes: i64) -> LinkSymbol {
+    return LinkSymbol {
+        name_id: name_id,
+        binding: binding,
+        obj: obj,
+        section: section,
+        value: value,
+        size_bytes: size_bytes,
+    };
+}
+
+pub fn link_sym_undefined(name_id: i64, binding: i64) -> LinkSymbol {
+    // An undefined symbol has no place to live yet; obj and section carry the
+    // -1 that every caller tests instead of a separate flag.
+    return LinkSymbol {
+        name_id: name_id,
+        binding: binding,
+        obj: -1,
+        section: -1,
+        value: 0,
+        size_bytes: 0,
+    };
+}
+
+pub fn link_sym_is_defined(sym: LinkSymbol) -> bool {
+    return sym.obj >= 0;
+}
+
+pub fn link_sym_is_local(sym: LinkSymbol) -> bool {
+    return sym.binding == link_binding_local();
+}
+
+pub fn link_sym_is_global(sym: LinkSymbol) -> bool {
+    return sym.binding == link_binding_global();
+}
+
+pub fn link_sym_is_weak(sym: LinkSymbol) -> bool {
+    return sym.binding == link_binding_weak();
+}
+
+/// Decides what a second definition of the same name does to the record already
+/// in the table. Returns one of the `link_merge_*` codes.
+pub fn link_sym_merge_decision(existing: LinkSymbol, incoming: LinkSymbol) -> i64 {
+    // Fields are copied out first: handing a struct to a function moves it, and
+    // this decision reads both symbols on several paths.
+    let e_defined = existing.obj >= 0;
+    let e_binding = existing.binding;
+    let i_defined = incoming.obj >= 0;
+    let i_binding = incoming.binding;
+    // A reference never displaces a definition it was waiting for.
+    if !i_defined {
+        return link_merge_keep();
+    }
+    if !e_defined {
+        return link_merge_replace();
+    }
+    // A local is private to its object: two locals of the same name are two
+    // different symbols, which is how every C object file names its static
+    // helpers, so neither may replace the other.
+    if e_binding == link_binding_local() || i_binding == link_binding_local() {
+        return link_merge_keep();
+    }
+    // A strong definition overrides a weak one; the weak body is dropped whole,
+    // it is not merged field by field.
+    if e_binding == link_binding_weak() && i_binding == link_binding_global() {
+        return link_merge_replace();
+    }
+    // Two strong definitions of one name have no defensible winner.
+    if e_binding == link_binding_global() && i_binding == link_binding_global() {
+        return link_merge_conflict();
+    }
+    // Two weak definitions, or a strong one already held: the first stays.
+    return link_merge_keep();
+}
+
+/// Applies a merge decision, returning the record the table should hold. A
+/// conflict keeps the existing record so the caller can report the name; the
+/// decision code, not this result, is what a driver must branch on.
+pub fn link_sym_merge(existing: LinkSymbol, incoming: LinkSymbol) -> LinkSymbol {
+    // Both records are read out field by field: handing either to the decision
+    // below moves it, and one of the two has to be returned afterwards.
+    let en = existing.name_id;
+    let eb = existing.binding;
+    let eo = existing.obj;
+    let es = existing.section;
+    let ev = existing.value;
+    let ez = existing.size_bytes;
+    let iname = incoming.name_id;
+    let ib = incoming.binding;
+    let io = incoming.obj;
+    let isec = incoming.section;
+    let iv = incoming.value;
+    let iz = incoming.size_bytes;
+    let decision = link_sym_merge_decision(
+        link_sym_new(en, eb, eo, es, ev, ez),
+        link_sym_new(iname, ib, io, isec, iv, iz)
+    );
+    if decision == link_merge_replace() {
+        return link_sym_new(iname, ib, io, isec, iv, iz);
+    }
+    return link_sym_new(en, eb, eo, es, ev, ez);
+}

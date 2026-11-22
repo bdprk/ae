@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_opt3.ae
 // Verification of GVN canonicalization, LICM hoist check, StrengthReduction, and SIMD vector packing.
 
-use "../../std/core/ir_gvn.ae";
-use "../../std/core/ir_licm.ae";
-use "../../std/core/ir_strength_reduce.ae";
-use "../../std/core/ir_vector_pack.ae";
+use "../../std/compiler/ir_gvn.ae";
+use "../../std/compiler/ir_licm.ae";
+use "../../std/compiler/ir_strength_reduce.ae";
+use "../../std/compiler/ir_vector_pack.ae";
 
 fn main() {
     print("--- batch_core_compiler_opt3 test start ---");

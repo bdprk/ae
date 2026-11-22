@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_wasm3.ae
 // Verification of WasmTableDescriptor, WasmGlobal, WasmDataSegment, and WasmCallIndirect.
 
-use "../../std/core/ir_wasm_table.ae";
-use "../../std/core/ir_wasm_global.ae";
-use "../../std/core/ir_wasm_data.ae";
-use "../../std/core/ir_wasm_call_indirect.ae";
+use "../../std/compiler/ir_wasm_table.ae";
+use "../../std/compiler/ir_wasm_global.ae";
+use "../../std/compiler/ir_wasm_data.ae";
+use "../../std/compiler/ir_wasm_call_indirect.ae";
 
 fn main() {
     print("--- batch_core_compiler_wasm3 test start ---");

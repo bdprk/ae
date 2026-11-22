@@ -1,0 +1,43 @@
+// std/compiler/ir_safepoint_table.ae
+// Compiler GC safepoint metadata table generator and address index encoder.
+
+pub struct SafepointTableState {
+    entry_count: i64,
+    min_address: i64,
+    max_address: i64,
+}
+
+pub fn safepoint_table_new() -> SafepointTableState {
+    return SafepointTableState {
+        entry_count: 0,
+        min_address: -1,
+        max_address: -1,
+    };
+}
+
+pub fn safepoint_table_record(s: SafepointTableState, addr: i64) -> SafepointTableState {
+    var min_a = s.min_address;
+    var max_a = s.max_address;
+    if min_a < 0 || addr < min_a {
+        min_a = addr;
+    }
+    if max_a < 0 || addr > max_a {
+        max_a = addr;
+    }
+    return SafepointTableState {
+        entry_count: s.entry_count + 1,
+        min_address: min_a,
+        max_address: max_a,
+    };
+}
+
+pub fn safepoint_table_span(s: SafepointTableState) -> i64 {
+    if s.entry_count <= 0 {
+        return 0;
+    }
+    return s.max_address - s.min_address;
+}
+
+pub fn safepoint_table_count(s: SafepointTableState) -> i64 {
+    return s.entry_count;
+}

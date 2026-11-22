@@ -1,0 +1,21 @@
+// std/std/socket.ae
+// Core Socket Address & Port Representation (M1.4 / M4.6)
+
+use "../core/ip.ae";
+
+pub struct SocketAddrV4 {
+    ip: Ipv4Addr,
+    port: i64,
+}
+
+pub fn socket_new(ip: Ipv4Addr, port: i64) -> SocketAddrV4 {
+    return SocketAddrV4 { ip: ip, port: port };
+}
+
+pub fn socket_port(s: SocketAddrV4) -> i64 {
+    return s.port;
+}
+
+pub fn socket_is_privileged(s: SocketAddrV4) -> bool {
+    return s.port > 0 && s.port < 1024;
+}

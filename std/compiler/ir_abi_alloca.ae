@@ -1,0 +1,34 @@
+// std/compiler/ir_abi_alloca.ae
+// Compiler dynamic alloca and variable length array alignment manager.
+
+pub struct AbiAlloca {
+    size_bytes: i64,
+    alignment: i64,
+}
+
+pub fn abi_alloca_new(sz: i64, align: i64) -> AbiAlloca {
+    return AbiAlloca {
+        size_bytes: sz,
+        alignment: align,
+    };
+}
+
+pub fn abi_alloca_aligned_size(a: AbiAlloca) -> i64 {
+    let raw = a.size_bytes;
+    let align = a.alignment;
+    let rem = raw % align;
+    if rem > 0 {
+        return raw + (align - rem);
+    }
+    return raw;
+}
+
+pub fn abi_alloca_sp_adjustment(a: AbiAlloca) -> i64 {
+    // Stack pointer grows downward by aligned size rounded to multiple of 16
+    let aligned = abi_alloca_aligned_size(a);
+    let rem16 = aligned % 16;
+    if rem16 > 0 {
+        return aligned + (16 - rem16);
+    }
+    return aligned;
+}

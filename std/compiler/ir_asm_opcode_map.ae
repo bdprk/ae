@@ -1,0 +1,32 @@
+// std/compiler/ir_asm_opcode_map.ae
+// Compiler machine opcode to mnemonic name mapper and size suffix calculator.
+
+pub struct AsmOpcodeMap {
+    base_opcode: i64, // 1=MOV, 2=ADD, 3=SUB, 4=CMP, 5=JMP
+    size_bytes: i64,  // 1=b, 2=w, 4=l, 8=q
+}
+
+pub fn asm_opcode_map_new(op: i64, size: i64) -> AsmOpcodeMap {
+    return AsmOpcodeMap {
+        base_opcode: op,
+        size_bytes: size,
+    };
+}
+
+pub fn asm_opcode_size_suffix_ascii(m: AsmOpcodeMap) -> i64 {
+    // Returns ASCII char: 'b'(98), 'w'(119), 'l'(108), 'q'(113)
+    if m.size_bytes == 1 {
+        return 98; // 'b'
+    }
+    if m.size_bytes == 2 {
+        return 119; // 'w'
+    }
+    if m.size_bytes == 4 {
+        return 108; // 'l'
+    }
+    return 113; // 'q' (8 bytes)
+}
+
+pub fn asm_opcode_is_64bit(m: AsmOpcodeMap) -> bool {
+    return m.size_bytes == 8;
+}

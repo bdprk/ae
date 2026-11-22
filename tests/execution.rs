@@ -1460,12 +1460,23 @@ fn vector_growth_during_iteration_is_rejected() {
 
 #[test]
 fn returning_a_live_owned_local_keeps_the_buffer_valid() {
-    // Regression: the exit release list must skip slots the return moved
-    // out of, for both owned types.
-    let source = "fn pick_v() -> vec { var v = vec[7, 8]; return v; } fn pick_s() -> string { let s = \"live\"; return s; } fn main() { var v = pick_v(); print(len(v)); print(v[1]); print(pick_s()); }";
+    // Returned slots transfer ownership and must survive the callee's drops.
+    let source = r#"
+        fn pick_v() -> vec { var v = vec[7, 8]; return v; }
+        fn pick_s() -> string { let s = "live"; return s; }
+        fn identity[T](value: T) -> T { return value; }
+        fn main() {
+            var v = pick_v();
+            print(len(v));
+            print(v[1]);
+            print(pick_s());
+            let floats = identity[vec[f64]](vec[1.5, 2.5]);
+            print(floats[1]);
+        }
+    "#;
     let output = execute(source);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "2\n8\nlive\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "2\n8\nlive\n2.5\n");
 }
 #[test]
 fn len_works_in_binary_and_condition_contexts() {
@@ -8503,7 +8514,7 @@ fn tasks_fifo_yield_and_reclaim_agree_across_backends() {
 
 #[test]
 fn fake_clock_and_timers_agree_across_backends() {
-    // ADR-0224 R2.2: the fake clock lives in std/test/fake_clock.ae; equal
+    // ADR-0224 R2.2: the fake clock lives in std/std/test/fake_clock.ae; equal
     // deadlines, pre/post-deadline cancellation, and task-driven timeout must
     // match byte-for-byte between compiled C and --interp (pinned to the
     // former builtin implementation's output).
@@ -8572,7 +8583,7 @@ fn byte_streams_and_buffered_readers_agree_across_backends() {
 #[test]
 fn fake_io_std_module_agrees_across_backends() {
     // ADR-0224 R2.1: the in-memory readiness/completion model lives in
-    // std/test/fake_io.ae and agrees byte-for-byte across backends.
+    // std/std/test/fake_io.ae and agrees byte-for-byte across backends.
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/fake_io.ae");
     let compiled = Command::new(env!("CARGO_BIN_EXE_ae"))
         .args(["run", fixture.to_str().unwrap()])

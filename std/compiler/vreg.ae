@@ -1,0 +1,24 @@
+// std/compiler/vreg.ae
+// Compiler Virtual Register (VReg) allocation tracking primitives.
+
+pub struct VRegPool {
+    next_reg: i64,
+}
+
+pub fn vreg_pool_new() -> VRegPool {
+    return VRegPool { next_reg: 0 };
+}
+
+pub fn vreg_pool_allocated_count(p: VRegPool) -> i64 {
+    return p.next_reg;
+}
+
+pub fn vreg_pool_alloc(p: VRegPool) -> VRegPool {
+    return VRegPool {
+        next_reg: p.next_reg + 1,
+    };
+}
+
+pub fn vreg_pool_current_reg_id(p: VRegPool) -> i64 {
+    return p.next_reg;
+}

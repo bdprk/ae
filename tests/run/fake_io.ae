@@ -1,8 +1,8 @@
 // ADR-0224 R2.1: the in-memory readiness/completion model is ordinary ae
 // code in std/test, not a compiler builtin. Output is pinned against the
 // former builtin implementation (network_adapter.stdout).
-use "../../std/test/fake_io.ae";
-use "../../std/sync/cancel.ae";
+use "../../std/std/test/fake_io.ae";
+use "../../std/std/sync/cancel.ae";
 
 fn main() {
     // readiness, would-block, and edge-triggered rearm

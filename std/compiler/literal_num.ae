@@ -1,0 +1,30 @@
+// std/compiler/literal_num.ae
+// Numeric literal suffix classification and radix parsing primitives for lexers.
+
+pub enum NumRadix {
+    Decimal,
+    Hexadecimal,
+    Binary,
+    Octal,
+}
+
+pub fn num_radix_base(r: NumRadix) -> i64 {
+    var b = 10;
+    match r {
+        NumRadix::Decimal => { b = 10; }
+        NumRadix::Hexadecimal => { b = 16; }
+        NumRadix::Binary => { b = 2; }
+        NumRadix::Octal => { b = 8; }
+    }
+    return b;
+}
+
+pub fn is_binary_digit(c: i64) -> bool {
+    // '0' is 48, '1' is 49
+    return c == 48 || c == 49;
+}
+
+pub fn is_octal_digit(c: i64) -> bool {
+    // '0'..'7' : 48..55
+    return c >= 48 && c <= 55;
+}
