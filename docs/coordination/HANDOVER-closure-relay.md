@@ -35,12 +35,16 @@ Direct string literal returns now lower through the same resolved
 return path in eligible closures and ordinary functions.
 Parentheses around a return operand preserve the same classifications
 for literals, resolved calls, string bindings, and string-vector views.
+A concatenation with a literal or known string binding can now return
+from a resolved body. The return uses the existing expression routes
+for operand moves and view reads.
 
 ## What is half-done
 
 Captured strings from other initializers and other uses of an owned
-capture still use the typed parser. The next slice can migrate direct
-returns of string concatenation with its operand ownership effects.
+capture still use the typed parser. Concatenation operands still use
+the existing expression routes. The next slice can advance shared
+lowering of string operands while preserving their move checks.
 
 ## Next step
 
@@ -53,10 +57,10 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `1fcaded` matched 50 examples and 646 CLI
+- The byte comparison against `d13efc8` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for grouped literal, call, local, and captured string returns.
-  The diagnostic for a grouped element view returned as string matched.
+  output for concatenated owned locals and read-only captures, including
+  a string-vector element. The mixed-operand diagnostic matched.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

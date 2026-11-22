@@ -83,6 +83,28 @@ fn ungroup_expression(mut expression: &ae_syntax::expression::Expression) -> &ae
     expression
 }
 
+fn string_concat_return(
+    expression: &ae_syntax::expression::Expression,
+    resolved: &ResolvedExpressions,
+) -> bool {
+    use ae_syntax::expression::ExpressionKind;
+    fn has_string_operand(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions) -> bool {
+        let operand = ungroup_expression(expression);
+        match &operand.kind {
+            ExpressionKind::Atom(Kind::Text(_)) => true,
+            ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.get(&operand.range.start)
+                .is_some_and(|def| resolved.owned_text_bindings.contains(def)),
+            ExpressionKind::Binary { left, operator: Kind::Plus, right } =>
+                has_string_operand(left, resolved) || has_string_operand(right, resolved),
+            _ => false,
+        }
+    }
+    let ExpressionKind::Binary { left, operator: Kind::Plus, right } = &ungroup_expression(expression).kind else {
+        return false;
+    };
+    has_string_operand(left, resolved) || has_string_operand(right, resolved)
+}
+
 fn receiver_value(expression: &ae_syntax::expression::Expression) -> Option<&ae_syntax::expression::Expression> {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
@@ -336,6 +358,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             let operand = ungroup_expression(value);
             scalar_body_expression(value, resolved, supports_call, supports_field)
                 || matches!(operand.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                || string_concat_return(value, resolved)
                 || resolved.closure_string_returns.contains(&operand.range.start)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
@@ -1306,6 +1329,7 @@ impl<'a> Parser<'a> {
         if string_return || (!capture_starts.is_empty() && has_string_vector) {
             use ae_syntax::{expression::ExpressionKind, statement::{StatementKind, visit_statements}};
             let mut read_only_offsets = HashSet::new();
+            let mut typed_returns = Vec::new();
             let mut has_string_return = false;
             let mut has_unsupported_return = false;
             for statement in body.iter() {
@@ -1336,7 +1360,11 @@ impl<'a> Parser<'a> {
                         }
                     }
                     if is_return {
-                        let supported = view_base.is_some()
+                        let concat = string_concat_return(value, resolved);
+                        if concat {
+                            typed_returns.push(value.range.clone());
+                        }
+                        let supported = concat || view_base.is_some()
                             || matches!(operand.kind, ExpressionKind::Atom(Kind::Text(_)))
                             || resolved.closure_string_returns.contains(&operand.range.start)
                             || matches!(&operand.kind, ExpressionKind::Call { callee, .. }
@@ -1353,6 +1381,7 @@ impl<'a> Parser<'a> {
             let end = body.last().map_or(start, |statement| statement.range.end);
             if resolved.scalar_reads.iter().any(|(&offset, def)| {
                 (start..end).contains(&offset)
+                    && !typed_returns.iter().any(|range| range.contains(&offset))
                     && match slots.get(def) {
                         Some((_, Type::StrVecRef)) => !read_only_offsets.contains(&offset),
                         Some((_, Type::String)) => !read_only_offsets.contains(&offset)
@@ -1634,9 +1663,16 @@ impl<'a> Parser<'a> {
                     return Err(self.fail("return is not supported in main"));
                 }
                 let moved_receiver = receiver_value(value);
-                let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
+                let concat = string_concat_return(value, self.resolved_expressions());
+                let (lowered, ty) = if concat
+                    || self.resolved_expressions().enum_constructors.contains(&value.range.start)
+                {
                     self.seek_scalar_offset(value.range.start);
-                    let result = self.expression(0, true)?;
+                    let shared = if concat { self.lower_shared_value(None, true) } else { None };
+                    let result = match shared {
+                        Some(value) => value,
+                        None => self.expression(0, true)?,
+                    };
                     self.take(Kind::Semi)?;
                     result
                 } else {
@@ -4015,7 +4051,7 @@ mod tests {
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }} fn closure_vector() -> i64 {{ let numbers = vec[10, 20]; let get = || -> i64 {{ print(numbers[1]); return 0; }}; return get(); }}");
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
-        let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; return 0; }}");
+        let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; let concat = || -> string {{ return captured_text + \"!\"; }}; return 0; }}");
         let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return ((call_text)); }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; let direct = || -> string {{ return ((capture_source())); }}; let literal = || -> string {{ return ((\"direct literal\")); }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
@@ -4469,6 +4505,15 @@ mod tests {
         assert!(matches!(closure.as_slice(),
             [Statement::Return(Expr::StrLit(value, ..), owned)]
             if value == "direct literal" && owned.is_empty()));
+        parser.names.insert("captured_text".into(), (82, false, Type::StrView));
+        parser.seek_scalar_offset(source.find("{ return captured_text +").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(82, text_start)])
+            .expect("resolved string concatenation return").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Return(Expr::Binary(lhs, Kind::Plus, _, _, _, Type::String), _)]
+            if matches!(lhs.as_ref(), Expr::Variable(82, Type::StrView, ..))));
+        assert!(!parser.moved.contains(&82));
+        parser.names.remove("captured_text");
         parser.return_type = Type::Int;
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
