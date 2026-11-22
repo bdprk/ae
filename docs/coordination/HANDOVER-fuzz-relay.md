@@ -430,7 +430,11 @@ the def's name range. Imported defs (other-file ranges) and
 builtin/prelude names fall back to the existing text heuristics. Rename is
 scope-exact through the def table (the def's name range plus every
 occurrence targeting it; documents the shared parse rejects fall back to
-text). Completion
+text). Definition crosses files: the document cache carries the
+disk-loaded imports, an imported def maps to its own file by name match
+(an imported declaration's range spans its whole text; the def's range is
+the name token import_name_range found), and the location uses the import
+file's own line index. Completion
 merges the enclosing function's locals (declared before the cursor, with
 inferred types) and the file's functions/structs with their declared
 shapes; exact live-scope filtering needs scope-structured ranges and
