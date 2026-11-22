@@ -38,6 +38,15 @@ thread_local! {
     static BORROW_CAPTURES: std::cell::RefCell<Vec<Vec<(usize, Type)>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Clear the closure-side registries; called from the frontend's
+/// `reset_compilation_state` at every top-level entry.
+pub(super) fn reset_compilation_state() {
+    FN_SIGS.with(|registry| registry.borrow_mut().clear());
+    FN_IDS.with(|registry| registry.borrow_mut().clear());
+    SPAWNED.with(|registry| registry.borrow_mut().clear());
+    BORROW_CAPTURES.with(|registry| registry.borrow_mut().clear());
+}
+
 // One spawn surface: a closure's generated function with its capture types in
 // order, or a zero-parameter function value keyed by its interned signature.
 #[derive(Clone, PartialEq, Debug)]

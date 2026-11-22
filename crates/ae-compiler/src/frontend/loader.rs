@@ -323,6 +323,9 @@ struct Loaded {
 }
 
 fn load_program_full(entry: &Path, recover: bool) -> Result<Loaded, FrontendError> {
+    // Every top-level entry starts from empty per-compilation registries;
+    // see `frontend::reset_compilation_state`.
+    super::reset_compilation_state();
     let root = entry.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut visited = HashMap::new();
     let mut shared: SharedFunctions = HashMap::new();

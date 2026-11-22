@@ -239,6 +239,27 @@ fn shared_types_get(id: usize) -> Type {
     SHARED_TYPES.with(|all| all.borrow()[id])
 }
 
+/// Clear every per-compilation registry. The registries are thread-local
+/// mirrors of state a program owns (ids into the pointee, extern, exposure,
+/// unsafe-fn, shared-handle, fn-signature, closure and spawn maps), so a
+/// long-lived process compiling a second program must start from empty maps:
+/// the ids restart at 0 for every program, and a stale entry would answer
+/// for the wrong program. Every top-level entry (`check_source`,
+/// `check_source_diagnostic`, `compile`, `load_program_full`) calls this
+/// first.
+///
+/// A true per-compile context (so two compilations can run in parallel on
+/// different threads without sharing these maps) belongs to the query
+/// engine work in checklist §8 phase P6.
+pub fn reset_compilation_state() {
+    PTR_POINTEES.with(|registry| registry.borrow_mut().clear());
+    SHARED_TYPES.with(|registry| registry.borrow_mut().clear());
+    EXTERN_NAMES.with(|registry| registry.borrow_mut().clear());
+    EXPOSURE_NAMES.with(|registry| registry.borrow_mut().clear());
+    UNSAFE_FNS.with(|registry| registry.borrow_mut().clear());
+    closures::reset_compilation_state();
+}
+
 // Built-in names are reserved so their semantics stay unambiguous.
 // `pub` is reserved too: it is only meaningful before a top-level item.
 const RESERVED: &[&str] = &["len", "push", "pop", "vec", "read_file", "write_file", "bytes", "contains", "slice", "split", "args", "join", "slice_view", "lines", "count_lines_with", "try_read_file", "try_write_file", "parse_int", "to_string", "try_list_dir", "path_exists", "path_is_dir", "path_join", "path_name", "path_parent", "try_file_info", "try_copy_file", "try_rename_path", "try_remove_file", "try_create_dir", "try_remove_dir", "map_new", "f64map_new", "map_put", "map_get", "map_has", "map_remove", "map_inc", "keys", "utf8_len", "utf8_prefix", "pub", "trim", "starts_with", "ends_with", "find", "sort", "reverse", "now_ms", "now_s", "env", "try_append_file", "exit", "read_stdin", "cwd", "json_get", "json_int", "json_bool", "json_len", "json_has", "strvec_new", "f64vec_new", "run_command", "set_cwd", "to_f64", "to_i64", "c_size_of", "c_align_of", "c_offset_of", "tokenize", "sqrt", "abs", "floor", "ceil", "round", "exp", "log", "sin", "cos", "pow", "atan2", "min", "max", "spawn", "wait", "cell_new", "cell_load", "cell_store", "cell_add", "cell_cas", "shared_new", "shared_get", "shared_set", "mutex_new", "mutex_lock", "chan_new", "chan_send", "chan_try_send", "chan_recv", "chan_select", "chan_close", "exec_new", "task_spawn", "task_yield", "exec_run", "scope_new", "scope_spawn", "pool_new", "pool_spawn", "pool_join"];
@@ -725,6 +746,7 @@ pub fn check(source: &str) -> Result<(), String> {
 }
 
 pub(crate) fn check_source_diagnostic(source: &str) -> Result<(), FrontendDiagnostic> {
+    reset_compilation_state();
     let mut shared: SharedFunctions = HashMap::new();
     let mut structs: Vec<StructDef> = Vec::new();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
@@ -736,6 +758,7 @@ pub(crate) fn check_source_diagnostic(source: &str) -> Result<(), FrontendDiagno
 }
 #[allow(dead_code)] // exercised by in-memory unit tests
 pub fn compile(source: &str) -> Result<String, String> {
+    reset_compilation_state();
     let mut shared: SharedFunctions = HashMap::new();
     let mut structs: Vec<StructDef> = Vec::new();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
@@ -849,6 +872,41 @@ pub fn compile_path_tracked(path: &Path) -> Result<TrackedC, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The audit's P0.2 acceptance: two programs compiled one after the
+    // other must not answer from each other's registries. Function ids
+    // restart at 0 for every program, so a leaked `unsafe fn` at id 0
+    // would make the second program's safe function id 0 unsafe.
+    #[test]
+    fn compilation_registries_do_not_leak_between_programs() {
+        // Program A: an `unsafe fn` at id 0 (E0704 wants the doc comment).
+        let a = "/// Preconditions: v is a valid i64; single-threaded context.\nunsafe fn risky(v: i64) -> i64 { return v * 2; }\nfn main() { unsafe { print(risky(1)); } }";
+        assert!(compile(a).is_ok(), "{}", compile(a).unwrap_err());
+        assert!(is_unsafe_fn(0), "program A registers its unsafe fn at id 0");
+        // Program B: id 0 is an ordinary safe function. The marker must be
+        // gone — the registries restart empty for every program.
+        let b = "fn safe(v: i64) -> i64 { return v + 1; }\nfn main() { print(safe(1)); }";
+        assert!(compile(b).is_ok(), "{}", compile(b).unwrap_err());
+        assert!(!is_unsafe_fn(0), "the unsafe marker leaked from program A");
+
+        // Pointees: a program with an address cast fills the registry; the
+        // next one starts from empty.
+        let c = "fn main() { var v = 1; let raw = &mut v as *mut i64; print(2); }";
+        assert!(compile(c).is_ok(), "{}", compile(c).unwrap_err());
+        let filled = PTR_POINTEES.with(|registry| registry.borrow().len());
+        assert!(filled > 0, "the cast registered a pointee");
+        assert!(compile("fn main() { print(3); }").is_ok());
+        let cleared = PTR_POINTEES.with(|registry| registry.borrow().len());
+        assert_eq!(cleared, 0, "the pointee registry carried entries across programs");
+
+        // Extern names: same rule for the C-symbol map.
+        let d = "/// Preconditions: size is a positive byte count; the block is released once.\nextern \"C\" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;\nfn main() { unsafe { let _slot = ae_std_alloc(8, 1, 1); } print(1); }";
+        assert!(compile(d).is_ok(), "{}", compile(d).unwrap_err());
+        assert!(extern_name(0).is_some(), "the extern declaration registered");
+        assert!(compile("fn main() { print(4); }").is_ok());
+        assert_eq!(extern_name(0), None, "an extern entry leaked from the previous program");
+    }
+
     #[test] fn rejects_invalid_semantics() {
         for s in ["fn main() { let x = 1; x = 2; }", "fn main() { print(x); }", "fn main() { let x = x; }", "fn main() { var x = 1; let x = 2; }", "fn main() { print(9223372036854775808); }", "fn main() { print(1) }", "fn main() {} junk"] { assert!(compile(s).is_err(), "{s}"); }
     }

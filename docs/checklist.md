@@ -3,7 +3,7 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-134 of 190 items done.
+136 of 192 items done.
 
 ## Start here
 
@@ -261,6 +261,11 @@ live in the ledger; this file mirrors only the checkbox state and titles.
 - [ ] M8.2.03: **exercise rollback.** Install the previous release after the candidate and rebuild its locked project.
 - [ ] M8.2.04: **publish support windows.** Give each platform a support owner, end date and update channel.
 - [ ] M8.2.05: **validate real deployments.** Record CLI, web service and proxy deployment versions, observation periods and incident outcomes.
+
+## Audit remediation (2026-11-23, master-checklist §8 phases)
+
+- [x] P0.1: **Repository hygiene and CI gates.** The working tree is clean, the autopush fallback scripts are tracked, and benchmark binaries are gitignored. CI runs `std_layering.py` on every push/PR, `check_commit_ids.py --base origin/<base>` on PRs, and `clippy -W clippy::all` as a reporting gate (392 existing findings stay visible without failing the build until the debt list shrinks). The one hard clippy error (ae-span's intentional reversed-range assertion) carries a targeted allow with its reason. (`7bdb1fa`)
+- [x] P0.2: **Per-compilation registry isolation.** `reset_compilation_state()` empties the nine thread-local mirrors (pointee, shared-handle, extern, exposure, unsafe-fn in `frontend/mod.rs`; fn-signature, fn-id, spawned, borrow-captures in `closures.rs`) at every top-level entry (`check_source_diagnostic`, `compile`, `load_program_full`). A leaked `unsafe fn` marker at function id 0 would make the next program's id 0 unsafe; the regression test compiles unsafe/extern/pointee programs and then a plain program, asserting the markers do not answer across compilations. A true per-compile context (parallel compilations, Salsa-style queries) remains phase P6 work. (`fix: reset per-compilation registries...`)
 
 ## Architecture realignment track (ADR-0224)
 

@@ -647,6 +647,11 @@ Hosts: Windows 11 x86-64 (`cargo test --workspace --locked` 14 bin + 308 executi
 | Self forms ride existing paths | `self_forms_parse_as_plain_atoms`: `Self { x: 2 }` parses as a struct literal over an `Atom(Ident("Self"))` target and `Self::Value(3)` as a qualified constructor call — no dedicated grammar needed, matching the compiler's dispatch. |
 | Behavior-preserving scope | The compiler's closure path is untouched (double-probe capture inference keeps its own parse); all pre-existing run/ui/ui-json snapshots and closure fixtures pass unchanged on both platforms. |
 
+## Audit remediation (2026-11-23, master-checklist §8 phases)
+
+- [x] P0.1. **Repository hygiene and CI gates.** The working tree is clean, the autopush fallback scripts are tracked, and benchmark binaries are gitignored. CI runs `std_layering.py` on every push/PR, `check_commit_ids.py --base origin/<base>` on PRs, and `clippy -W clippy::all` as a reporting gate (392 existing findings stay visible without failing the build until the debt list shrinks). The one hard clippy error (ae-span's intentional reversed-range assertion) carries a targeted allow with its reason. (`7bdb1fa`)
+- [x] P0.2. **Per-compilation registry isolation.** `reset_compilation_state()` empties the nine thread-local mirrors (pointee, shared-handle, extern, exposure, unsafe-fn in `frontend/mod.rs`; fn-signature, fn-id, spawned, borrow-captures in `closures.rs`) at every top-level entry (`check_source_diagnostic`, `compile`, `load_program_full`). A leaked `unsafe fn` marker at function id 0 would make the next program's id 0 unsafe; the regression test compiles unsafe/extern/pointee programs and then a plain program, asserting the markers do not answer across compilations. A true per-compile context (parallel compilations, Salsa-style queries) remains phase P6 work. (`fix: reset per-compilation registries...`)
+
 ## Architecture realignment track (ADR-0224)
 
 Entry dependency: baseline `994463d` (451 passing). Breadth work on M4.4,
