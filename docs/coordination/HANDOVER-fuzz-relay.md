@@ -1169,3 +1169,24 @@ still typed).
 Next: effectful `try_*` builtins (need the typed route's effect/result
 handling), closure-valued bindings, generic-instance structs (`Cell[T]`),
 for-in over borrowed vectors, trait-method calls, nested store bases.
+
+## P1.1 slice 12 landed: the endgame switch
+
+- `AE_DENY_LEGACY_ROUTE=1` makes every body the resolved route does not
+  take a diagnostic (functions and closures): "the legacy body parser is
+  disabled ... this function's body is not on the resolved route yet".
+  `AE_ROUTE_REPORT` keeps printing the legacy lines first, so a corpus run
+  still counts them.
+- `scripts/deny_route.py` is the manifest of files that are demonstrably
+  legacy-free and CI runs it every build. Current list:
+  `tests/run/mut_param_fields.ae`, `tests/run/owned_string_fields.ae`,
+  `tests/run/struct_value_params.ae`. Add a file once `route_report.py
+  --details` shows no `route legacy` line for it; when the list covers the
+  corpus, delete the legacy parser (P1.2-P1.4).
+- `tests/execution.rs::deny_legacy_route_turns_fallbacks_into_diagnostics`
+  pins both sides (a routed program compiles, a generic-instance
+  construction fails with the message).
+
+Gates: 511/0 on Windows and WSL2 (the new test), byte parity 0 failed,
+sanitize+leak PASS, fuzz 0 failures, layering and commit-id discipline hold.
+Fallback count unchanged at 410 — this slice is the switch, not a widening.

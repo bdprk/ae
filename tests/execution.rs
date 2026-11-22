@@ -8670,3 +8670,32 @@ fn resolver_agrees_with_the_compiler_on_accepted_programs() {
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     assert!(checked > 100, "expected a large resolution corpus, checked {checked}");
 }
+
+// P1.1 endgame switch: AE_DENY_LEGACY_ROUTE=1 turns every body the resolved
+// route does not take into a diagnostic. A fully routed program compiles;
+// a generic-instance construction (still typed) fails with the message.
+#[test]
+fn deny_legacy_route_turns_fallbacks_into_diagnostics() {
+    let routed = "struct S { a: i64, b: i64 }\nfn make(a: i64, b: i64) -> S { return S { a: a, b: b }; }\nfn main() { let s = make(1, 2); print(s.a + s.b); }\n";
+    let legacy = "struct P[T] { v: T }\nfn make(v: i64) -> P[i64] { return P[i64] { v: v }; }\nfn main() { print(1); }\n";
+    for (source, expect_ok) in [(routed, true), (legacy, false)] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-deny-legacy-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::write(&path, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .env("AE_DENY_LEGACY_ROUTE", "1")
+            .output()
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), expect_ok, "{stderr}");
+        if !expect_ok {
+            assert!(stderr.contains("the legacy body parser is disabled"), "{stderr}");
+        }
+    }
+}
