@@ -1118,14 +1118,15 @@ impl Parser<'_> {
         self.adjudicate_deferred_conflicts(&function)?;
         Ok(function)
     }
-    pub(super) fn cached_function_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<&Instance> {
+    pub(super) fn cached_function_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<(&GenericFn, &Instance)> {
         let &gid = self.generics.fn_names.get(name)?;
         let def = self.generics.fn_defs.get(gid)?;
-        if def.file != self.file || ranges.len() != def.params.len() || ranges.len() > 8 {
+        if ranges.len() != def.params.len() || ranges.len() > 8 {
             return None;
         }
         let arguments = self.shared_specialization_types(ranges)?;
-        self.generics.fn_done.get(&super::types::specialization_key(gid, &arguments))
+        let instance = self.generics.fn_done.get(&super::types::specialization_key(gid, &arguments))?;
+        Some((def, instance))
     }
 
     // Parse a generic function's own tokens once per argument list. The

@@ -1952,17 +1952,25 @@ impl<'a> Parser<'a> {
                 let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
                     return None;
                 };
-                if self.names.contains_key(name) || RESERVED.contains(&name.as_str())
-                    || !self.resolved_expressions().direct_calls.contains(&base.range.start)
-                {
+                if self.names.contains_key(name) || RESERVED.contains(&name.as_str()) {
                     return None;
                 }
+                let resolved = self.resolved_expressions();
+                let offset = base.range.start;
                 let (id, params, ret) = if let Some(types) = types {
-                    let (id, params, ret) = self.cached_function_specialization(name, types)?;
+                    let (definition, (id, params, ret)) = self.cached_function_specialization(name, types)?;
+                    let visible = if definition.file == self.file {
+                        resolved.direct_calls.contains(&offset)
+                    } else {
+                        definition.file != PRELUDE && definition.public && resolved.unresolved_calls.contains(&offset)
+                    };
+                    if !visible {
+                        return None;
+                    }
                     (*id, params, *ret)
                 } else {
                     let signature = self.functions.get(name)?;
-                    if signature.file != self.file || signature.extern_c {
+                    if signature.file != self.file || signature.extern_c || !resolved.direct_calls.contains(&offset) {
                         return None;
                     }
                     (signature.id, &signature.params, signature.ret)
@@ -3296,6 +3304,7 @@ mod tests {
         let source = format!("{source} enum CachedBox[T] {{ Item(T) }} fn pack(specialized_text: string) -> CachedBox[string] {{ return CachedBox[string]::Item(specialized_text); }}");
         let source = format!("{source} struct CachedRecord[T] {{ value: T, count: i64 }} fn record(record_text: string) -> CachedRecord[string] {{ return CachedRecord[string] {{ count: 2, value: record_text }}; }}");
         let source = format!("{source} fn relay(call_text: string) -> string {{ return generic_scalar[string](call_text); }}");
+        let source = format!("{source} fn use_import() -> i64 {{ return imported_generic[i64](7); }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3416,6 +3425,24 @@ mod tests {
         assert!(parser.moved.remove(&84));
         parser.names.remove("call_text");
         parser.binding_ranges.remove(&84);
+        let mut imported = parser.generics.fn_defs[0].clone();
+        imported.name = "imported_generic".into();
+        imported.file = "imported.ae".into();
+        imported.public = true;
+        parser.generics.fn_names.insert(imported.name.clone(), 1);
+        parser.generics.fn_defs.push(imported);
+        let offset = source.find("imported_generic[i64](7)").unwrap();
+        let (id, _, _) = parser.instantiate_fn(1, vec![Type::Int], offset).unwrap();
+        parser.seek_scalar_offset(offset);
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), false),
+            Some((Expr::Call(actual, _, Type::Int), Type::Int)) if actual == id
+        ));
+        parser.generics.fn_defs[1].public = false;
+        parser.seek_scalar_offset(offset);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), false).is_none());
+        assert_eq!(parser.pos, start);
         let capture_start = source.find("captured_scalar:").unwrap();
         parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
         parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());

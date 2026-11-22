@@ -606,10 +606,12 @@ to the committed token route. Cached struct specializations now use the
 same lookup rules and share field checks while lowering initializers in
 source order and emitting fields in layout order.
 
-Explicit generic calls can reuse a cached file-local function signature
+Explicit generic calls can reuse a cached function signature
 through shared lowering. Cache misses stay on the committed route, which
 instantiates the body and checks constraints. Shared lowering validates
 arguments against the cached concrete signature and commits ownership
-effects only after the call is accepted. The next slice can extend this
-lookup to eligible imported specializations.
+effects only after the call is accepted. For imports, the concrete registry
+must identify a public template and local resolution must leave the call
+unbound. A cached private template still falls through to the canonical
+visibility diagnostic.
 
