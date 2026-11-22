@@ -247,6 +247,16 @@ fn exit_status_operand(statement: &ae_syntax::statement::Statement) -> Option<&a
     matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "exit").then_some(status)
 }
 
+fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: true } = &statement.kind else { return None };
+    let ExpressionKind::Propagate(operand) = &value.kind else { return None };
+    let ExpressionKind::Call { callee, .. } = &operand.kind else { return None };
+    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if !RESERVED.contains(&name.as_str()))
+        .then_some(operand)
+}
+
 fn iterator_constructor(expression: &ae_syntax::expression::Expression) -> Option<Type> {
     use ae_syntax::expression::ExpressionKind;
     let ExpressionKind::Call { callee, arguments } = &expression.kind else { return None };
@@ -306,6 +316,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Return(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
+                || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
         }
         StatementKind::Print(value) | StatementKind::Assert(value) => {
@@ -352,7 +363,8 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
         StatementKind::Break | StatementKind::Continue => true,
         StatementKind::Expr { .. } => exit_status_operand(statement)
-            .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field)),
+            .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field))
+            || propagation_call(statement).is_some(),
     }
 }
 
@@ -934,17 +946,6 @@ impl<'a> Parser<'a> {
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
                         use ae_syntax::expression::ExpressionKind;
                         if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
-                            let target = match &initializer.kind {
-                                ExpressionKind::Call { callee, .. } => callee.as_ref(),
-                                _ => initializer,
-                            };
-                            if matches!(&target.kind, ExpressionKind::Qualified { .. }) {
-                                let end = self.tokens.partition_point(|token| token.offset < target.range.end);
-                                if end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset) {
-                                    expressions.enum_constructors.insert(initializer.range.start);
-                                    expressions.enum_bindings.insert(id);
-                                }
-                            }
                             match &initializer.kind {
                                 ExpressionKind::Vector(_) => {
                                     expressions.vector_definitions.insert(id);
@@ -965,6 +966,22 @@ impl<'a> Parser<'a> {
                         }
                     }
                     for top_level in statement.expressions() {
+                        use ae_syntax::expression::ExpressionKind;
+                        let target = match &top_level.kind {
+                            ExpressionKind::Call { callee, .. } => callee.as_ref(),
+                            _ => top_level,
+                        };
+                        if matches!(&target.kind, ExpressionKind::Qualified { .. }) {
+                            let end = self.tokens.partition_point(|token| token.offset < target.range.end);
+                            if end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset) {
+                                expressions.enum_constructors.insert(top_level.range.start);
+                                if let StatementKind::Binding { name_range, .. } = &statement.kind {
+                                    if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                                        expressions.enum_bindings.insert(id);
+                                    }
+                                }
+                            }
+                        }
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
                         visit_expression_tree(top_level, &mut |expression| {
                             use ae_syntax::expression::ExpressionKind;
@@ -1133,7 +1150,7 @@ impl<'a> Parser<'a> {
         if !self.subst.values().copied().all(scalar_type)
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
-            || !(scalar_type(self.return_type)
+            || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..))
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(_, _, ty))| {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
@@ -1437,7 +1454,14 @@ impl<'a> Parser<'a> {
                     return Err(self.fail("return is not supported in main"));
                 }
                 let returned_receiver = receiver_value(value);
-                let (lowered, ty) = self.lower_scalar_body_expression(value, slots)?;
+                let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
+                    self.seek_scalar_offset(value.range.start);
+                    let result = self.expression(0, true)?;
+                    self.take(Kind::Semi)?;
+                    result
+                } else {
+                    self.lower_scalar_body_expression(value, slots)?
+                };
                 if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &lowered) {
                     self.seek_scalar_offset(atom.range.end);
                     self.check_variable_move(*slot)?;
@@ -1491,6 +1515,11 @@ impl<'a> Parser<'a> {
                     eprintln!("ae: {}:{}: warning: unnecessary unsafe block (W0702): the body contains no unchecked operation", block_line, block_column);
                 }
                 Statement::Unsafe(inner)
+            }
+            StatementKind::Expr { propagates: true, .. } => {
+                let operand = propagation_call(statement).expect("resolved propagation eligibility");
+                self.seek_scalar_offset(operand.range.start);
+                self.lower_propagating_call()?
             }
             StatementKind::Expr { .. } => {
                 let status = exit_status_operand(statement).expect("resolved exit eligibility");
@@ -1941,6 +1970,20 @@ impl<'a> Parser<'a> {
         let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
         self.check_array_index(scalar, Some(index.range.end))?;
         Ok(value)
+    }
+
+    fn lower_propagating_call(&mut self) -> Result<Statement, ae_span::Diagnostic> {
+        let (value, ty) = match self.lower_shared_value(Some(Kind::Question), true) {
+            Some(value) => value,
+            None => self.expression(0, true)?,
+        };
+        if *self.current() != Kind::Question {
+            return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+        }
+        let (statement, _) = self.propagate_statement(value, ty, None)?;
+        self.pos += 1;
+        self.take(Kind::Semi)?;
+        Ok(statement)
     }
 
     fn finish_exit(&mut self, code: Expr, ty: Type) -> Result<Statement, ae_span::Diagnostic> {
@@ -3067,17 +3110,7 @@ impl<'a> Parser<'a> {
                     if !self.names.contains_key(&name) {
                         // A call used only for its effect. The value must be
                         // propagated with '?', so a failure is never dropped.
-                        let (value, ty) = match self.lower_shared_value(Some(Kind::Question), true) {
-                            Some(value) => value,
-                            None => self.expression(0, true)?,
-                        };
-                        if *self.current() != Kind::Question {
-                            return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
-                        }
-                        let (statement, _) = self.propagate_statement(value, ty, None)?;
-                        self.pos += 1;
-                        self.take(Kind::Semi)?;
-                        result.push(statement);
+                        result.push(self.lower_propagating_call()?);
                         continue;
                     }
                     let (id, mutable, ty) = *self.names.get(&name).ok_or_else(|| self.fail(&format!("unknown variable '{name}'")).with_code("E0101"))?;
@@ -3805,6 +3838,7 @@ mod tests {
         let source = format!("{source} enum Reading {{ Value(i64), Empty }} fn read_match(input: Reading) -> i64 {{ match input {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = format!("{source} fn local_match() -> i64 {{ let reading = Reading::Value(42); match reading {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = format!("{source} fn exits() -> i64 {{ exit(7); return 0; }} fn bad_exit() -> i64 {{ exit(false); return 0; }}");
+        let source = format!("{source} enum Maybe {{ Some(i64), None }} fn step() -> Maybe {{ return Maybe::None; }} fn propagate() -> Maybe {{ step()?; return Maybe::Some(7); }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3848,6 +3882,15 @@ mod tests {
         }];
         let mut enum_names = HashMap::new();
         enum_names.insert("Reading".into(), 0);
+        enums.push(EnumDef {
+            name: "Maybe", variants: vec![("Some".into(), vec![Type::Int]), ("None".into(), vec![])],
+            file: "case.ae".into(), public: false, pattern: "Maybe".into(),
+        });
+        enum_names.insert("Maybe".into(), 1);
+        functions.insert("step".into(), Signature {
+            id: 19, params: vec![], ret: Type::Enum("Maybe", 1), file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
         let mut generics = Generics::default();
         let mut parser = make_parser(
             "case.ae", source, tokens, &mut functions, &mut structs,
@@ -3871,6 +3914,12 @@ mod tests {
         let error = parser.lower_resolved_scalar_body().expect("resolved exit diagnostic").err().unwrap();
         assert_eq!(error.message, "exit expects an i64 status code");
         assert_eq!(*parser.current(), Kind::RParen);
+        parser.return_type = Type::Enum("Maybe", 1);
+        parser.seek_scalar_offset(source.find("{ step()?").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved bare propagation").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Propagate(Expr::Call(19, _, Type::Enum(_, 1)), Type::Enum(_, 1), _, None, _),
+            Statement::Return(Expr::EnumLit(_, 1, 0, _), _)]));
+        parser.return_type = Type::Int;
         parser.seek_scalar_offset(source.find("{ let reading =").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local enum match").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(slot, Expr::EnumLit(_, 0, 0, _)),

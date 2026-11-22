@@ -705,3 +705,8 @@ Resolved bodies now lower scalar `exit` statements. Both body drivers
 validate the status at the closing parenthesis and attach the same live
 owned values for cleanup.
 
+Bare direct-call propagation can now be lowered from a resolved body.
+Both drivers use the same result-shape and enclosing-return checks. Enum
+constructor returns still use the existing ownership-aware operand path.
+Propagation that binds the success payload remains a follow-up.
+
