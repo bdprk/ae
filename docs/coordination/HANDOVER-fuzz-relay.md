@@ -537,3 +537,10 @@ An owned generic struct receiver may move into a direct function call on
 the resolved body route. The argument preserves the original slot and
 move check, and later receiver reads retain the moved-value diagnostic.
 
+## Resolved closure capture probes (2026-11-22)
+
+Capture probes use the same resolved body entry as emission when their
+candidate parameter types and binding identities qualify. Both probes still
+run in their original order, and the existing AST capture walk determines
+which hidden parameters are used, moved, or mutated.
+

@@ -106,7 +106,7 @@ impl Parser<'_> {
             .collect();
         let id1 = self.generics.next_fn_id;
         self.generics.next_fn_id += 1;
-        let probe = self.parse_closure_body(id1, body_start, &[], borrow_probe.clone(), false);
+        let probe = self.parse_closure_body(id1, body_start, &borrow_probe);
         let (probe, value_mode) = match probe {
             Ok((function, _moved, _)) => (function, false),
             Err(_) => {
@@ -115,7 +115,7 @@ impl Parser<'_> {
                 let owned_probe: Vec<(String, Type)> = outer.iter()
                     .map(|(name, _, _, ty)| (name.clone(), *ty))
                     .collect();
-                let (function, _moved, _) = self.parse_closure_body(id1b, body_start, &[], owned_probe, false)?;
+                let (function, _moved, _) = self.parse_closure_body(id1b, body_start, &owned_probe)?;
                 (function, true)
             }
         };
@@ -165,7 +165,7 @@ impl Parser<'_> {
         // the emitted body reads borrows as borrows and values as owned slots.
         let id2 = self.generics.next_fn_id;
         self.generics.next_fn_id += 1;
-        let (function, _, end_pos) = self.parse_closure_body(id2, body_start, &[], bindings, true)?;
+        let (function, _, end_pos) = self.parse_closure_body(id2, body_start, &bindings)?;
         // The enclosing parser continues after the literal's closing brace.
         self.pos = end_pos;
         // Only the visible parameters are call-checkable; the leading capture
@@ -189,17 +189,15 @@ impl Parser<'_> {
         Ok((Expr::ClosureLit(cid), Type::Closure(cid)))
     }
 
-    // One body parse. `outer` pre-binds the enclosing scope under its own
-    // names (probe pass, shadowing allowed); `captures` binds exactly the
-    // classified captures under fresh ids, which become the hidden leading
-    // parameters of the generated function (emit pass).
-    fn parse_closure_body(&mut self, id: usize, body_start: usize, outer: &[(String, usize, bool, Type)], captures: Vec<(String, Type)>, emit: bool) -> Result<(Function, std::collections::HashSet<usize>, usize), ae_span::Diagnostic> {
-        let capture_starts = emit.then(|| captures.iter().map(|(name, _)| {
+    // Each pass binds its candidates as hidden parameters in capture order.
+    // Use the outer declaration offsets to recover their resolved identities.
+    fn parse_closure_body(&mut self, id: usize, body_start: usize, captures: &[(String, Type)]) -> Result<(Function, std::collections::HashSet<usize>, usize), ae_span::Diagnostic> {
+        let capture_starts: Vec<_> = captures.iter().map(|(name, _)| {
             self.names.get(name).and_then(|&(slot, _, _)| self.binding_ranges.get(&slot)).map(|range| range.start)
-        }).collect::<Vec<_>>());
+        }).collect();
         let mut sub = Parser {
             file: self.file.clone(), source: self.source, tokens: Rc::clone(&self.tokens), shared_source: Rc::clone(&self.shared_source), pos: body_start,
-            names: HashMap::new(), binding_ranges: HashMap::new(), resolved_expressions: Rc::clone(&self.resolved_expressions), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0,
+            names: HashMap::new(), binding_ranges: HashMap::new(), resolved_expressions: Rc::clone(&self.resolved_expressions), next_var: 1, expression_depth: 0, expression_nodes: 0, block_depth: 0,
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
@@ -211,15 +209,7 @@ impl Parser<'_> {
             // was captured.
             shadow_ok: true, pending: Vec::new(),
         };
-        // The probe pass binds every outer name under its ORIGINAL id, so
-        // the AST walk's id set can be compared with the enclosing scope's
-        // ids directly; fresh ids in this sub-parser start above them.
-        sub.next_var = outer.iter().map(|(_, id, _, _)| *id).max().unwrap_or(0) + 1;
-        for (name, outer_id, mutable, ty) in outer {
-            sub.names.insert(name.clone(), (*outer_id, *mutable, *ty));
-            sub.binding_ranges.insert(*outer_id, 0..0);
-        }
-        let parsed = sub.closure_body(id, &captures, capture_starts.as_deref());
+        let parsed = sub.closure_body(id, captures, &capture_starts);
         let end_pos = sub.pos;
         let sub_moved = std::mem::take(&mut sub.moved);
         let mut nested = std::mem::take(&mut sub.pending);
@@ -239,10 +229,10 @@ impl Parser<'_> {
     // here may clear that state. The captures are the hidden leading
     // parameters in exactly the order the call site will pass them, so they
     // are added to the signature before the visible ones are parsed.
-    fn closure_body(&mut self, id: usize, captures: &[(String, Type)], capture_starts: Option<&[Option<usize>]>) -> Result<Function, ae_span::Diagnostic> {
+    fn closure_body(&mut self, id: usize, captures: &[(String, Type)], capture_starts: &[Option<usize>]) -> Result<Function, ae_span::Diagnostic> {
         let mut params: Vec<(usize, Type)> = Vec::new();
         let mut resolved_captures = Vec::new();
-        for (index, (name, ty)) in captures.iter().enumerate() {
+        for ((name, ty), start) in captures.iter().zip(capture_starts.iter().copied()) {
             let var_id = self.next_var; self.next_var += 1;
             // Capture slots parse as mutable so the probe reaches every
             // mutation site and the walker can reject it by name; the
@@ -250,7 +240,7 @@ impl Parser<'_> {
             // can never actually write one.
             self.names.insert(name.clone(), (var_id, true, *ty));
             params.push((var_id, *ty));
-            if let Some(start) = capture_starts.and_then(|starts| starts[index]) {
+            if let Some(start) = start {
                 resolved_captures.push((var_id, start));
             }
         }
@@ -318,9 +308,7 @@ impl Parser<'_> {
         self.return_type = ret;
         self.in_main = false;
         self.scopes.push(params.iter().map(|&(var_id, ty)| (var_id, ty)).collect());
-        // Capture probes use the existing path. Lower the emitted body only
-        // after capture modes and hidden parameter slots have been fixed.
-        let body = match capture_starts.and_then(|_| self.lower_resolved_body_with_captures(&resolved_captures)) {
+        let body = match self.lower_resolved_body_with_captures(&resolved_captures) {
             Some(body) => body,
             None => self.block(),
         };
