@@ -722,3 +722,42 @@ and rename crosses imported files (the import module's declaration and
 internal uses edit from a fresh per-module resolution alongside the
 entry's occurrences).
 
+
+## Next arc blueprint: no-capture closures through the body route
+
+The ladder's final rung (generic and closure bodies) starts with the
+simplest closure shape. The verified machinery map (2026-11-22 16:00):
+
+1. `closure_literal` (closures.rs:82) runs a two-probe capture inference:
+   probe 1 binds every enclosing name in borrow form, probe 2 (only if
+   probe 1's body parse fails) binds everything owned; `collect_capture_uses`
+   reads used/mutated from the probe's leading params. The FINAL body parse
+   re-parses the tokens with the chosen capture set.
+2. `parse_closure_body` (closures.rs:232) parses the body tokens through the
+   typed statement walker with captures + declared params bound as leading
+   parameters. Its `Function` feeds the generics.closures registry.
+3. The resolver already retains closure statement trees
+   (`FnOccurrences.closure_bodies`) and closure params are
+   `DefKind::ClosureParameter` defs — the def table covers closure bodies.
+
+First slice: **closures with zero captures**. For those the probe system
+concludes no captures, and the final body parse can lower through the
+resolved route instead of the typed walker when the body passes
+`scalar_body_statement` and the params/return are scalar. The route's
+slots need the closure params bound — `scalar_definitions` carries the
+ClosureParameter defs (keyed by name range), so `lower_resolved_scalar_body`'s
+slots construction works if the closure params are registered in `names`
+with their slots before the body lowers (parse_closure_body already binds
+them for the typed parse).
+
+Verification questions to answer while implementing:
+- Does the resolver's closure walk register closure params into
+  `scalar_definitions` (the collection's `is_local()` filter includes
+  ClosureParameter ✓), and do their ranges match the header parse?
+- The probe parses run BEFORE the final parse; the resolved route must not
+  disturb the probe's `names` state (the probes run inside
+  `closure_literal` on the same parser).
+- The eligibility and lowering reuse the existing Binding/Return/... arms —
+  no new arms, only a new driver entry in parse_closure_body's final parse.
+
+Gates as always; a corpus closure example pins byte parity.
