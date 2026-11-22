@@ -29,12 +29,14 @@ Capture classification also recognizes a binding initialized by a
 resolved file-local function call returning `string`.
 The resolved closure route can also lower that call inside a local
 binding and transfer ownership when the closure returns the binding.
+Direct returns of the same file-local calls now lower the call as the
+return value without introducing a temporary binding.
 
 ## What is half-done
 
 Captured strings from other initializers and other uses of an owned
-capture still use the typed parser. The next slice can lower a direct
-string-returning call in the return statement itself.
+capture still use the typed parser. The next slice can support returning
+a string literal directly from the closure.
 
 ## Next step
 
@@ -47,10 +49,11 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `3f4b299` matched 50 examples and 646 CLI
+- The byte comparison against `683fb26` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for a closure that binds two string call results, frees one,
-  and returns the other. It matched the argument type diagnostic.
+  output for direct returns of calls from branches of a closure with a
+  captured scalar and an owned local. Argument count and type diagnostics
+  matched as well.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers
