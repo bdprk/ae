@@ -577,6 +577,10 @@ operators checked against the compiler's concrete types.
 
 Fixed-array reads and writes share the integer index rule across both parser
 routes. The resolved route uses checked index types when available and retains
-the compiler's E0201 location. The next slice extends shared checks to
-assignments, returns and direct call arguments.
+the compiler's E0201 location.
+
+Plain and compound local assignments share compatibility checks. The resolved
+route uses checked RHS types by byte range, and the compiler handles string
+concatenation and ownership. The next slice applies checked types to returns
+and direct call arguments.
 

@@ -1203,17 +1203,13 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(target.range.end);
                 let compound = compound_assignment_operator(operator);
                 if let Some(op) = &compound {
-                    if ty != Type::Int && !(ty == Type::F64 && *op != Kind::Percent) {
-                        return Err(self.fail(&format!("compound assignment is not supported for type '{}'", ty.name())));
-                    }
+                    self.check_compound_assignment(ty, op)?;
                 }
                 self.seek_scalar_offset(value.range.start);
                 let (line, column) = self.position();
                 let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
                 self.seek_scalar_offset(statement.range.end);
-                if rhs_ty != ty {
-                    return Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", rhs_ty.name(), ty.name())));
-                }
+                self.check_assignment_type(name, ty, rhs_ty, Some(&value.range))?;
                 let value = if let Some(op) = compound {
                     let lhs = Expr::Variable(slot, ty, line, column);
                     Expr::Binary(Box::new(lhs), op, Box::new(rhs), line, column, ty)
@@ -1568,13 +1564,42 @@ impl<'a> Parser<'a> {
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<Expr, ae_span::Diagnostic> {
         let (value, ty) = self.lower_scalar_body_expression(index, slots)?;
-        let fact = self.resolved_expressions().scalar_expression_types.get(&index.range);
-        let scalar = match fact {
-            Some(ae_resolve::resolve::ExpressionType::Checked(scalar)) => Some(*scalar),
-            _ => super::expression::operator_scalar(ty),
-        };
+        let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
         self.check_array_index(scalar, Some(index.range.end))?;
         Ok(value)
+    }
+
+    fn checked_scalar(&self, range: Option<&std::ops::Range<usize>>) -> Option<ae_resolve::typecheck::Scalar> {
+        match self.resolved_expressions().scalar_expression_types.get(range?)? {
+            ae_resolve::resolve::ExpressionType::Checked(scalar) => Some(*scalar),
+            _ => None,
+        }
+    }
+
+    fn check_compound_assignment(&self, target: Type, operator: &Kind) -> Result<(), ae_span::Diagnostic> {
+        if (target == Type::String && *operator == Kind::Plus)
+            || ae_resolve::typecheck::scalar_compound_assignment(super::expression::operator_scalar(target), operator)
+        {
+            return Ok(());
+        }
+        Err(self.fail(&format!("compound assignment is not supported for type '{}'", target.name())))
+    }
+
+    fn check_assignment_type(
+        &self,
+        name: &str,
+        target: Type,
+        value: Type,
+        range: Option<&std::ops::Range<usize>>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        let compatible = match self.checked_scalar(range) {
+            Some(scalar) => super::expression::operator_scalar(target) == Some(scalar),
+            None => value == target,
+        };
+        if compatible {
+            return Ok(());
+        }
+        Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value.name(), target.name())))
     }
 
     fn lower_resolved_local(&mut self, name: &str, offset: usize) -> Option<(Expr, Type)> {
@@ -2697,12 +2722,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         }
                         let compound_op = compound_assignment_operator(self.current());
                         if let Some(op) = compound_op {
-                            let allowed = matches!(ty, Type::Int)
-                                || (matches!(ty, Type::F64) && op != Kind::Percent)
-                                || (ty == Type::String && op == Kind::Plus);
-                            if !allowed {
-                                return Err(self.fail(&format!("compound assignment is not supported for type '{}'", ty.name())));
-                            }
+                            self.check_compound_assignment(ty, &op)?;
                             self.pos += 1;
                             let (line, col) = self.position();
                             let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
@@ -2710,9 +2730,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                                 None => self.expression(0, false)?,
                             };
                             self.take(Kind::Semi)?;
-                            if rhs_ty != ty {
-                                return Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", rhs_ty.name(), ty.name())));
-                            }
+                            self.check_assignment_type(&name, ty, rhs_ty, None)?;
                             let lhs_var = Expr::Variable(id, ty, line, col);
                             let value = Expr::Binary(Box::new(lhs_var), op, Box::new(rhs), line, col, ty);
                             result.push(Statement::Assign(id, value, false));
@@ -2732,7 +2750,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                        if value_ty != ty { return Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value_ty.name(), ty.name()))); }
+                        self.check_assignment_type(&name, ty, value_ty, None)?;
                         // The right-hand side may not consume the target itself;
                         // assigning to an already-moved variable is a legal
                         // re-initialization, so the move flag clears either way.

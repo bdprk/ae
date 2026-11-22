@@ -15,6 +15,11 @@ pub fn valid_array_index(index: Option<Scalar>) -> bool {
     index == Some(Scalar::Int)
 }
 
+/// Compound arithmetic stores its result back into the target's type.
+pub fn scalar_compound_assignment(target: Option<Scalar>, operator: &Kind) -> bool {
+    target.is_some_and(|ty| infix(operator, Some(ty), Some(ty)) == Ok(ty))
+}
+
 impl Scalar {
     pub fn from_spelling(name: &str) -> Option<Self> {
         match name {
