@@ -260,6 +260,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                         .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
                     ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
                     _ => iterator_constructor(initializer).is_some()
+                        || resolved.enum_constructors.contains(&initializer.range.start)
                         || scalar_body_expression(initializer, resolved, supports_call, supports_field),
                 }
         }
@@ -923,6 +924,17 @@ impl<'a> Parser<'a> {
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
                         use ae_syntax::expression::ExpressionKind;
                         if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                            let target = match &initializer.kind {
+                                ExpressionKind::Call { callee, .. } => callee.as_ref(),
+                                _ => initializer,
+                            };
+                            if matches!(&target.kind, ExpressionKind::Qualified { .. }) {
+                                let end = self.tokens.partition_point(|token| token.offset < target.range.end);
+                                if end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset) {
+                                    expressions.enum_constructors.insert(initializer.range.start);
+                                    expressions.enum_bindings.insert(id);
+                                }
+                            }
                             match &initializer.kind {
                                 ExpressionKind::Vector(_) => {
                                     expressions.vector_definitions.insert(id);
@@ -1285,7 +1297,9 @@ impl<'a> Parser<'a> {
                     let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
-                    let (value, ty) = if iterator_constructor(initializer).is_some() {
+                    let (value, ty) = if iterator_constructor(initializer).is_some()
+                        || self.resolved_expressions().enum_constructors.contains(&initializer.range.start)
+                    {
                         self.seek_scalar_offset(initializer.range.start);
                         self.expression(0, false)?
                     } else {
@@ -3766,6 +3780,7 @@ mod tests {
         let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
         let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
         let source = format!("{source} enum Reading {{ Value(i64), Empty }} fn read_match(input: Reading) -> i64 {{ match input {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
+        let source = format!("{source} fn local_match() -> i64 {{ let reading = Reading::Value(42); match reading {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3808,6 +3823,7 @@ mod tests {
             file: "case.ae".into(), public: false, pattern: "Reading".into(),
         }];
         let mut enum_names = HashMap::new();
+        enum_names.insert("Reading".into(), 0);
         let mut generics = Generics::default();
         let mut parser = make_parser(
             "case.ae", source, tokens, &mut functions, &mut structs,
@@ -3824,6 +3840,10 @@ mod tests {
                 if *slot == arms[0].bindings[0].0)));
         parser.names.remove("input");
         parser.binding_ranges.remove(&89);
+        parser.seek_scalar_offset(source.find("{ let reading =").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved local enum match").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(slot, Expr::EnumLit(_, 0, 0, _)),
+            Statement::Match(subject, Type::Enum(_, 0), arms), ..] if slot == subject && arms.len() == 2));
         parser.next_var = next_var;
         let start = source.find("raw_param:").unwrap();
         parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(intern_pointee(Type::Int))));

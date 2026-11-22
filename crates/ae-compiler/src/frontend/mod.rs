@@ -698,6 +698,7 @@ struct ResolvedExpressions {
     owned_vectors: HashSet<ae_resolve::DefId>,
     owned_text_bindings: HashSet<ae_resolve::DefId>,
     enum_bindings: HashSet<ae_resolve::DefId>,
+    enum_constructors: HashSet<usize>,
     token_cursor_definitions: HashSet<ae_resolve::DefId>,
     scalar_expression_types: HashMap<std::ops::Range<usize>, ae_resolve::resolve::ExpressionType>,
     scalar_writes: HashMap<usize, ae_resolve::DefId>,
