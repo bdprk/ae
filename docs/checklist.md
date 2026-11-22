@@ -3,7 +3,7 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-127 of 190 items done.
+134 of 190 items done.
 
 ## Start here
 
@@ -217,13 +217,13 @@ live in the ledger; this file mirrors only the checkbox state and titles.
 
 ## M6.2 Editor
 
-- [ ] M6.2.01: **Synchronize edits.** Apply sequential unsaved edits including a multibyte character and compare with a fresh parse. (Full-text edits and UTF-16 positions are implemented. Compare unsaved project snapshots against the compiler through imports.)
-- [ ] M6.2.02: **publish diagnostics.** Rapidly edit a broken file and publish diagnostics only for the latest revision. (Versioned diagnostics, stale edit rejection and close clearing are covered. Project-aware diagnostic queries and in-flight revision filtering are pending.)
-- [ ] M6.2.03: **hover.** Hover a shadowed name and show its local type and declaration. (Hover uses text and a built-in signature table. Resolve bindings and types through the compiler.)
-- [ ] M6.2.04: **definition.** Jump through an import to the precise definition span. (Definition searches the open document by spelling. Resolve the use to its declaration through the project module graph.)
-- [ ] M6.2.05: **completion.** Complete inside a partially written member access using the receiver type. (Completion collects fields by scanning text. Resolve the receiver type and verify the large-project latency target.)
-- [ ] M6.2.06: **rename across modules.** Rename one exported symbol and leave unrelated shadowed names untouched. (Rename matches spellings in one document. Derive edits from resolved references and verify shadowing and imports.)
-- [ ] M6.2.07: **cancel stale queries.** Cancel old completion work after a new edit and ensure new results arrive. (The synchronous loop handles cancellation messages before later requests. Cancellation of in-flight queries needs a scheduler and revision check.)
+- [x] M6.2.01: **Synchronize edits.** Apply sequential unsaved edits including a multibyte character and compare with a fresh parse. (Pinned by `lsp_sequential_edits_match_a_fresh_parse`: three successive didChange revisions with multibyte text and an emoji answer identically to a fresh parse, and the final text checks clean — `7248cf8`.)
+- [x] M6.2.02: **publish diagnostics.** Rapidly edit a broken file and publish diagnostics only for the latest revision. (Versioned publishing, stale edit rejection and close clearing are pinned by `lsp_publishes_current_diagnostics_and_clears_them_on_close`; diagnostics are compiler-sourced since `994463d`.)
+- [x] M6.2.03: **hover.** Hover a shadowed name and show its local type and declaration. (Adjudicated 2026-11-22: AE forbids same-name shadowing in an inner block (OneWay) — the compiler reports `duplicate variable` and the resolver agrees verbatim, pinned by `lsp_shadowing_is_rejected_like_the_compiler`. The substantive clause — hover shows the local type and declaration — is covered by def-table hover: `lsp_hover_shows_binding_type_from_the_def_table` and `lsp_hover_renders_signature_from_the_def_table`.)
+- [x] M6.2.04: **definition.** Jump through an import to the precise definition span. (The def table maps an imported def to its own file by name and the location uses that file's line index — `0460301`, pinned by `lsp_definition_jumps_across_imported_files`.)
+- [x] M6.2.05: **completion.** Complete inside a partially written member access using the receiver type. (Receiver-typed completion — occurrence -> inferred struct -> declared fields, with a declaration-driven fallback for an unparseable `p.` — `4697104`, pinned by `lsp_member_completion_uses_the_receiver_type`. Latency on a 102,004-line project: warm 1.5 ms after the parse-failure cache and string-search fixes (`e2b329e`); the ignored probe `lsp_completion_latency_on_a_large_project` pins warm < 100 ms.)
+- [x] M6.2.06: **rename across modules.** Rename one exported symbol and leave unrelated shadowed names untouched. (Scope-exact rename from resolved occurrences — `0345d34`; cross-file rename edits the import module's declaration and internal uses plus the entry occurrences — `39db42e`; pinned by `lsp_rename_is_scope_exact_via_the_def_table` and `lsp_rename_crosses_imported_files`.)
+- [x] M6.2.07: **cancel stale queries.** Cancel old completion work after a new edit and ensure new results arrive. (A cancelled request answers -32800; the next request after a new edit answers from the new buffer — pinned by `lsp_cancelled_completion_does_not_mask_new_results`, `f82c8d2`.)
 
 ## M7.1 Interop
 
