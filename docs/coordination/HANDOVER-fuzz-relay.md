@@ -685,5 +685,10 @@ ownership transfers still use the typed path.
 String vector parameters can now use the resolved vector loop path.
 Each element remains a read-only string view, and binding a borrowed
 container or a mutable view produces the same diagnostics in both drivers.
-String vector construction and token-cursor iteration are follow-ups.
+String vector construction remains a follow-up.
+
+Resolved bodies handle local token cursors and for-in iteration. Both
+drivers share the loop setup and bind each token as a read-only view.
+Cursor construction reuses the existing tokenize checks and registers
+its base borrow at the declaring scope.
 

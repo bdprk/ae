@@ -162,7 +162,8 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
     match &expression.kind {
         ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
-                && !resolved.owned_vectors.contains(id)),
+                && !resolved.owned_vectors.contains(id) && !resolved.owned_text_bindings.contains(id)
+                && !resolved.token_cursor_definitions.contains(id)),
         // A construction of a drop-free file-local struct with scalar
         // fields: the layout is known at collection time.
         ExpressionKind::Struct { target, fields } => {
@@ -245,14 +246,18 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     ae_syntax::expression::ExpressionKind::Array(elements)
                     | ae_syntax::expression::ExpressionKind::Vector(elements) => elements.iter()
                         .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
-                    _ => scalar_body_expression(initializer, resolved, supports_call, supports_field),
+                    ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
+                    _ => resolved.scalar_definitions.get(&name_range.start)
+                        .is_some_and(|id| resolved.token_cursor_definitions.contains(id))
+                        || scalar_body_expression(initializer, resolved, supports_call, supports_field),
                 }
         }
         StatementKind::Assign { target, operator, value } => {
             match &target.kind {
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start)
-                        .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_vectors.contains(id))
+                        .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_vectors.contains(id)
+                            && !resolved.owned_text_bindings.contains(id) && !resolved.token_cursor_definitions.contains(id))
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
@@ -311,7 +316,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             resolved.scalar_definitions.contains_key(&binding_range.start)
                 && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.scalar_reads.get(&iterable.range.start)
-                    .is_some_and(|id| resolved.vector_definitions.contains(id))
+                    .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id))
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
@@ -888,10 +893,23 @@ impl<'a> Parser<'a> {
                         }
                     }
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
-                        if matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Vector(_)) {
-                            if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
-                                expressions.vector_definitions.insert(id);
-                                expressions.owned_vectors.insert(id);
+                        use ae_syntax::expression::ExpressionKind;
+                        if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                            match &initializer.kind {
+                                ExpressionKind::Vector(_) => {
+                                    expressions.vector_definitions.insert(id);
+                                    expressions.owned_vectors.insert(id);
+                                }
+                                ExpressionKind::Atom(Kind::Text(_)) => {
+                                    expressions.owned_text_bindings.insert(id);
+                                }
+                                ExpressionKind::Call { callee, arguments }
+                                    if matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "tokenize")
+                                        && matches!(arguments.as_slice(), [_, _]) =>
+                                {
+                                    expressions.token_cursor_definitions.insert(id);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1167,6 +1185,8 @@ impl<'a> Parser<'a> {
                 slots.remove(&self.resolved_expressions().scalar_definitions[&name_range.start]);
             }
         }
+        let depth = self.scopes.len();
+        self.borrows.retain(|&(_, borrow_depth, _)| borrow_depth <= depth);
         // Owned values declared in this block are released at its end,
         // mirroring the typed route's block exit.
         let owned: Vec<(usize, Type)> = scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
@@ -1197,6 +1217,7 @@ impl<'a> Parser<'a> {
                 }
                 let slot = self.next_var;
                 self.next_var += 1;
+                let def = self.resolved_expressions().scalar_definitions[&name_range.start];
                 let (statement, ty) = if let ae_syntax::expression::ExpressionKind::Array(elements) = &initializer.kind {
                     if elements.is_empty() {
                         self.seek_scalar_offset(initializer.range.start);
@@ -1235,14 +1256,19 @@ impl<'a> Parser<'a> {
                     let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
-                    let (value, ty) = self.lower_scalar_body_expression(initializer, slots)?;
-                    self.seek_scalar_offset(initializer.range.end);
+                    let (value, ty) = if self.resolved_expressions().token_cursor_definitions.contains(&def) {
+                        self.seek_scalar_offset(initializer.range.start);
+                        self.expression(0, false)?
+                    } else {
+                        let lowered = self.lower_scalar_body_expression(initializer, slots)?;
+                        self.seek_scalar_offset(initializer.range.end);
+                        lowered
+                    };
                     self.check_view_binding(*mutable, ty)?;
                     self.take(Kind::Semi)?;
                     self.check_borrowed_binding(ty)?;
                     (Statement::Declare(slot, value), ty)
                 };
-                let def = self.resolved_expressions().scalar_definitions[&name_range.start];
                 slots.insert(def, (slot, ty));
                 self.names.insert(name.clone(), (slot, *mutable, ty));
                 self.binding_ranges.insert(slot, name_range.clone());
@@ -1491,12 +1517,53 @@ impl<'a> Parser<'a> {
         let (iterable_value, ty) = self.lower_scalar_body_expression(iterable, slots)?;
         self.seek_scalar_offset(iterable.range.end);
         let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
-        self.lower_vector_loop(binding, iterable_value, ty, statement.range.start, result, |parser, slot, elem_ty| {
+        let lower_body = |parser: &mut Self, slot, elem_ty| {
             slots.insert(def, (slot, elem_ty));
             let result = parser.lower_scalar_statements(body, slots);
             slots.remove(&def);
             result
-        })
+        };
+        if ty == Type::Tokens {
+            self.lower_token_loop(binding, iterable_value, statement.range.start, result, lower_body)
+        } else {
+            self.lower_vector_loop(binding, iterable_value, ty, statement.range.start, result, lower_body)
+        }
+    }
+
+    fn lower_token_loop(
+        &mut self, var_name: &str, first: Expr, loop_offset: usize,
+        result: &mut Vec<Statement>,
+        lower_body: impl FnOnce(&mut Self, usize, Type) -> Result<Vec<Statement>, ae_span::Diagnostic>,
+    ) -> Result<(), ae_span::Diagnostic> {
+        // `for token in cursor` streams the tokens as read-only
+        // views: no vector, no per-token allocation, and the
+        // loop body sees one token at a time (ADR-53). Each
+        // loop restarts at the beginning of the base text.
+        let cursor = match &first {
+            Expr::Variable(id, Type::Tokens, _, _) => *id,
+            _ => return Err(self.fail("for-in over a token cursor needs a bare cursor variable: bind it first, e.g. let toks = tokens(text, \" \");")),
+        };
+        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
+        let (line, col) = self.position();
+        let var = self.next_var; self.next_var += 1;
+        let label = self.next_label; self.next_label += 1;
+        self.loop_depth += 1;
+        let base = self.scopes.len();
+        let moved_before = self.moved.clone();
+        self.scopes.push(vec![(var, Type::StrView)]);
+        self.loop_scopes.push(self.scopes.len());
+        self.loop_labels.push(Some(label));
+        self.names.insert(var_name.to_owned(), (var, false, Type::StrView));
+        let body = lower_body(self, var, Type::StrView);
+        self.loop_labels.pop();
+        self.loop_scopes.pop();
+        self.scopes.pop().unwrap();
+        self.loop_depth -= 1;
+        self.names.remove(var_name);
+        let body = body?;
+        self.close_loop_moves(base, moved_before, loop_offset)?;
+        result.push(Statement::ForTokens(cursor, var, body, label, line, col));
+        Ok(())
     }
 
     fn lower_vector_loop(
@@ -1621,6 +1688,11 @@ impl<'a> Parser<'a> {
             ExpressionKind::Atom(Kind::Float(value)) => (Expr::FloatLit(*value), Type::F64),
             ExpressionKind::Atom(Kind::True) => (Expr::BoolLit(true), Type::Bool),
             ExpressionKind::Atom(Kind::False) => (Expr::BoolLit(false), Type::Bool),
+            ExpressionKind::Atom(Kind::Text(value)) => {
+                self.seek_scalar_offset(expression.range.start);
+                let (line, column) = self.position();
+                (Expr::StrLit(value.clone(), line, column), Type::String)
+            }
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 let def = self.resolved_expressions().scalar_reads[&expression.range.start];
                 let &(slot, ty) = slots.get(&def).ok_or_else(|| {
@@ -3311,34 +3383,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         None => self.expression(0, false)?,
                     };
                     if first_ty == Type::Tokens {
-                        // `for token in cursor` streams the tokens as read-only
-                        // views: no vector, no per-token allocation, and the
-                        // loop body sees one token at a time (ADR-53). Each
-                        // loop restarts at the beginning of the base text.
-                        let cursor = match &first {
-                            Expr::Variable(id, Type::Tokens, _, _) => *id,
-                            _ => return Err(self.fail("for-in over a token cursor needs a bare cursor variable: bind it first, e.g. let toks = tokens(text, \" \");")),
-                        };
-                        if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
-                        let (line, col) = self.position();
-                        let var = self.next_var; self.next_var += 1;
-                        let label = self.next_label; self.next_label += 1;
-                        self.loop_depth += 1;
-                        let base = self.scopes.len();
-                        let moved_before = self.moved.clone();
-                        self.scopes.push(vec![(var, Type::StrView)]);
-                        self.loop_scopes.push(self.scopes.len());
-                        self.loop_labels.push(Some(label));
-                        self.names.insert(var_name.clone(), (var, false, Type::StrView));
-                        let body = self.block();
-                        self.loop_labels.pop();
-                        self.loop_scopes.pop();
-                        self.scopes.pop().unwrap();
-                        self.loop_depth -= 1;
-                        self.names.remove(&var_name);
-                        let body = body?;
-                        self.close_loop_moves(base, moved_before, loop_offset)?;
-                        result.push(Statement::ForTokens(cursor, var, body, label, line, col));
+                        self.lower_token_loop(&var_name, first, loop_offset, &mut result, |parser, _, _| parser.block())?;
                         continue;
                     }
                     if *self.current() != Kind::DotDot {
@@ -3661,6 +3706,7 @@ mod tests {
         let source = format!("{source} fn owned_loop() -> i64 {{ let empty_vec = vec[]; for unused in empty_vec {{ print(unused); }} return 0; }}");
         let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = vec[]; let moved = take_vec; return 0; }}");
         let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
+        let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3757,6 +3803,12 @@ mod tests {
                 Statement::Print(Printed::Expr(Expr::Variable(read, Type::StrView, ..)))] if slot == read)));
         parser.names.remove("words");
         parser.binding_ranges.remove(&88);
+        parser.seek_scalar_offset(source.find("{ let text_base").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved token loop").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(base, Expr::StrLit(..)),
+            Statement::Declare(cursor, Expr::Tokens(source, None, ..)), Statement::ForTokens(read, _, _, ..), ..]
+            if base == source && cursor == read));
+        assert!(parser.borrows.is_empty());
         parser.next_var = next_var;
         parser.next_label = 0;
         parser.generics.names.insert("CachedBox".into(), 0);
