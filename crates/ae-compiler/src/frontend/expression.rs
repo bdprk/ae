@@ -1830,19 +1830,25 @@ impl Parser<'_> {
         self.lower_infix(lhs, op, parsed?, (line, column))
     }
 
+    fn operator_error(&self, error: ae_resolve::typecheck::OperatorError) -> ae_span::Diagnostic {
+        let diagnostic = self.fail(error.message());
+        if let Some(code) = error.code() { diagnostic.with_code(code) } else { diagnostic }
+    }
+
     pub(super) fn lower_prefix(
         &self,
         operator: Kind,
         (operand, ty): (Expr, Type),
         (line, column): (usize, usize),
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        if operator == Kind::Minus {
-            if !matches!(ty, Type::Int | Type::F64) { return Err(self.fail("unary '-' requires an i64 or f64 operand").with_code("E0203")); }
-            Ok((Expr::Neg(Box::new(operand), line, column), ty))
+        let ty = ae_resolve::typecheck::prefix(&operator, operator_scalar(ty))
+            .map_err(|error| self.operator_error(error))?;
+        let value = if operator == Kind::Minus {
+            Expr::Neg(Box::new(operand), line, column)
         } else {
-            if ty != Type::Bool { return Err(self.fail("'!' requires a boolean operand")); }
-            Ok((Expr::Not(Box::new(operand)), Type::Bool))
-        }
+            Expr::Not(Box::new(operand))
+        };
+        Ok((value, concrete_scalar(ty)))
     }
 
     pub(super) fn lower_infix(
@@ -1853,65 +1859,43 @@ impl Parser<'_> {
         (line, column): (usize, usize),
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         let (lhs_expr, lhs_ty) = lhs;
-        let ty = match op {
-            Kind::And | Kind::Or => {
-                if lhs_ty != Type::Bool || rhs_ty != Type::Bool { return Err(self.fail(&format!("'{}' requires boolean operands", if op == Kind::And { "&&" } else { "||" }))); }
-                Type::Bool
+        let stringlike = |ty: Type| matches!(ty, Type::String | Type::StrView);
+        if matches!(op, Kind::EqEq | Kind::NotEq) && stringlike(lhs_ty) && stringlike(rhs_ty) {
+            return Ok((Expr::StrEq(Box::new(lhs_expr), Box::new(rhs), op == Kind::NotEq), Type::Bool));
+        }
+        let ty = if op == Kind::Plus && (stringlike(lhs_ty) || stringlike(rhs_ty)) {
+            if !stringlike(lhs_ty) || !stringlike(rhs_ty) {
+                return Err(self.fail("'+' requires two strings, two string views, or two integers"));
             }
-            Kind::Pipe | Kind::Caret | Kind::Amp | Kind::Shl | Kind::Shr => {
-                if lhs_ty != Type::Int || rhs_ty != Type::Int { return Err(self.fail("bitwise operator requires i64 operands")); }
-                Type::Int
+            // Concatenation consumes owned variables and copies borrowed views.
+            if let Expr::Variable(id, Type::String, ..) = &lhs_expr {
+                self.moved.insert(*id);
             }
-            Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq => {
-                let comparable = match (lhs_ty, rhs_ty) {
-                    (Type::Int, Type::Int) => true,
-                    (Type::F64, Type::F64) => true,
-                    (Type::Bool, Type::Bool) => op == Kind::EqEq || op == Kind::NotEq,
-                    (Type::String | Type::StrView, Type::String | Type::StrView) => op == Kind::EqEq || op == Kind::NotEq,
-                    _ => false,
-                };
-                if !comparable {
-                    return Err(self.fail("comparison requires two i64, two f64, or two strings/views with == or !=").with_code("E0202"));
-                }
-                // String/view equality gets a dedicated node so emission
-                // never confuses it with C pointer comparison.
-                if (op == Kind::EqEq || op == Kind::NotEq) && matches!(lhs_ty, Type::String | Type::StrView) {
-                    return Ok((Expr::StrEq(Box::new(lhs_expr), Box::new(rhs), op == Kind::NotEq), Type::Bool));
-                }
-                Type::Bool
-            }
-            Kind::Plus if matches!(lhs_ty, Type::String | Type::StrView) || matches!(rhs_ty, Type::String | Type::StrView) => {
-                // `+` builds a new owned string. Two views are read only and
-                // copied into the result, so no view can be consumed.
-                let stringlike = |ty: Type| matches!(ty, Type::String | Type::StrView);
-                if !stringlike(lhs_ty) || !stringlike(rhs_ty) { return Err(self.fail("'+' requires two strings, two string views, or two integers")); }
-                // The left operand was parsed in the caller's mode; using it
-                // here consumes it, so retroactively record the move. Only a
-                // plain owned variable is consumed: fields, vector elements
-                // and views are borrowed and get copied by the emitter. The
-                // right operand follows the same rule.
-                if lhs_ty == Type::String {
-                    if let Expr::Variable(id, ty, _, _) = &lhs_expr {
-                        if ty.owned() && !self.moved.contains(id) { self.moved.insert(*id); }
-                    }
-                }
-                Type::String
-            }
-            _ => {
-                if lhs_ty == Type::F64 || rhs_ty == Type::F64 {
-                    if lhs_ty != Type::F64 || rhs_ty != Type::F64 {
-                        return Err(self.fail("mixed i64/f64 arithmetic is not allowed; convert one side explicitly with to_f64 or to_i64"));
-                    }
-                    if op == Kind::Percent {
-                        return Err(self.fail("'%' is defined for i64 operands only"));
-                    }
-                    Type::F64
-                } else {
-                    if lhs_ty != Type::Int || rhs_ty != Type::Int { return Err(self.fail("arithmetic requires integer operands").with_code("E0203")); }
-                    Type::Int
-                }
-            }
+            Type::String
+        } else {
+            let ty = ae_resolve::typecheck::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
+                .map_err(|error| self.operator_error(error))?;
+            concrete_scalar(ty)
         };
         Ok((Expr::Binary(Box::new(lhs_expr), op, Box::new(rhs), line, column, ty), ty))
+    }
+}
+
+fn operator_scalar(ty: Type) -> Option<ae_resolve::typecheck::Scalar> {
+    use ae_resolve::typecheck::Scalar;
+    match ty {
+        Type::Int => Some(Scalar::Int),
+        Type::F64 => Some(Scalar::Float),
+        Type::Bool => Some(Scalar::Bool),
+        _ => None,
+    }
+}
+
+fn concrete_scalar(ty: ae_resolve::typecheck::Scalar) -> Type {
+    use ae_resolve::typecheck::Scalar;
+    match ty {
+        Scalar::Int => Type::Int,
+        Scalar::Float => Type::F64,
+        Scalar::Bool => Type::Bool,
     }
 }

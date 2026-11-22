@@ -34,6 +34,7 @@
 pub mod dump;
 pub mod imports;
 pub mod module;
+pub mod typecheck;
 pub mod resolve;
 pub mod types;
 
@@ -305,6 +306,18 @@ fn main() {
             ("flagged".to_owned(), "bool".to_owned()),
             ("negated".to_owned(), "i64".to_owned()),
         ], "literals, copies, calls, struct literals, field reads, arithmetic, comparisons, logic and unary minus bind");
+
+        let operators = resolve_source(
+            "fn main() {\n    let bits = 1 & 3;\n    let equal = true == false;\n    let product = 1.5 * 2.0;\n    let remainder = 1.5 % 2.0;\n    let ordered = true < false;\n    let mixed = 1 + 2.0;\n}\n",
+        );
+        let inferred: Vec<_> = operators.defs.iter()
+            .filter(|entry| entry.kind == crate::DefKind::Binding)
+            .map(|entry| entry.inferred.as_ref().map(|ty| ty.describe()))
+            .collect();
+        assert_eq!(inferred, vec![
+            Some("i64".to_owned()), Some("bool".to_owned()), Some("f64".to_owned()),
+            None, None, None,
+        ]);
     }
 
     #[test]

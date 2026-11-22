@@ -662,13 +662,11 @@ impl Walker<'_> {
                 }
                 None
             }
-            ExpressionKind::Prefix { operator: Kind::Bang, operand } => {
-                let shape = self.infer_expression(operand)?;
-                matches!(shape, TypeSpelling::Primitive("bool")).then_some(TypeSpelling::Primitive("bool"))
-            }
-            ExpressionKind::Prefix { operator: Kind::Minus, operand } => {
-                let shape = self.infer_expression(operand)?;
-                matches!(shape, TypeSpelling::Primitive("i64") | TypeSpelling::Primitive("f64")).then_some(shape)
+            ExpressionKind::Prefix { operator, operand } if matches!(operator, Kind::Bang | Kind::Minus) => {
+                let TypeSpelling::Primitive(name) = self.infer_expression(operand)? else { return None };
+                let scalar = crate::typecheck::Scalar::from_spelling(name)?;
+                let result = crate::typecheck::prefix(operator, Some(scalar)).ok()?;
+                Some(TypeSpelling::Primitive(result.spelling()))
             }
             ExpressionKind::Propagate(inner) | ExpressionKind::Group(inner) => self.infer_expression(inner),
             ExpressionKind::Binary { left, operator, right } => self.infer_binary(left, operator, right),
@@ -779,37 +777,17 @@ impl Walker<'_> {
         }
     }
 
-    /// Arithmetic keeps the operand's primitive (`+ - * / %` never mix:
-    /// the compiler rejects implicit conversions); comparisons and logic
-    /// yield bool when their operands infer.
     fn infer_binary(&mut self, left: &Expression, operator: &Kind, right: &Expression) -> Option<TypeSpelling> {
-        let arithmetic = matches!(operator, Kind::Plus | Kind::Minus | Kind::Star | Kind::Slash | Kind::Percent);
-        let comparison = matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq);
-        let logic = matches!(operator, Kind::And | Kind::Or);
-        if logic {
-            let left_shape = self.infer_expression(left);
-            let right_shape = self.infer_expression(right);
-            let both_bool = matches!(left_shape, Some(TypeSpelling::Primitive("bool")))
-                && matches!(right_shape, Some(TypeSpelling::Primitive("bool")));
-            return both_bool.then_some(TypeSpelling::Primitive("bool"));
+        use crate::typecheck::{Scalar, infix};
+        let (TypeSpelling::Primitive(left), TypeSpelling::Primitive(right)) =
+            (self.infer_expression(left)?, self.infer_expression(right)?) else { return None };
+        if left == "string" && right == "string"
+            && matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq)
+        {
+            return Some(TypeSpelling::Primitive("bool"));
         }
-        if comparison {
-            let left_shape = self.infer_expression(left);
-            let right_shape = self.infer_expression(right);
-            let same = matches!((&left_shape, &right_shape),
-                (Some(a), Some(b)) if a == b && matches!(a, TypeSpelling::Primitive(_)));
-            return same.then_some(TypeSpelling::Primitive("bool"));
-        }
-        if arithmetic {
-            let left_shape = self.infer_expression(left)?;
-            let right_shape = self.infer_expression(right)?;
-            return match (&left_shape, &right_shape) {
-                (TypeSpelling::Primitive("i64"), TypeSpelling::Primitive("i64")) => Some(TypeSpelling::Primitive("i64")),
-                (TypeSpelling::Primitive("f64"), TypeSpelling::Primitive("f64")) => Some(TypeSpelling::Primitive("f64")),
-                _ => None,
-            };
-        }
-        None
+        let result = infix(operator, Some(Scalar::from_spelling(left)?), Some(Scalar::from_spelling(right)?)).ok()?;
+        Some(TypeSpelling::Primitive(result.spelling()))
     }
 
     /// The shape of a field read through a base shape: named structs look

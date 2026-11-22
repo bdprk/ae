@@ -561,8 +561,10 @@ still produce E0104.
 
 ## R3c shared type rules (2026-11-22)
 
-[ADR-0231](../adr/0231-shared-type-checking.md) identifies the first shared
-type-checking slice. Primitive operator rules will supply both resolver
-inference and compiler lowering, with the compiler's diagnostics preserved
-at its own cursor. The type-checking and parser-cutover milestones stay open.
+[ADR-0231](../adr/0231-shared-type-checking.md) governs the shared type rules.
+The resolver and compiler now use the same operator checks for `i64`, `f64`,
+and `bool`. Resolver inference covers integer bitwise operators and withholds
+types for rejected scalar expressions. The compiler retains its diagnostic
+positions and string lowering. The next slice records checked expression
+types for downstream consumers.
 
