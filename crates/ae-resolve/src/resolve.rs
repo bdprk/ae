@@ -63,9 +63,16 @@ pub enum ExpressionType {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClosureBody {
     pub start: usize,
+    /// The body's closing brace end, so a consumer can scope it precisely.
+    pub end: usize,
     pub statements: Arc<[Statement]>,
     /// A duplicate could denote valid shadowing in the compiler's closure scope.
     pub has_binding_conflict: bool,
+    /// The outer defs the body reads — the closure's captures. The compiler
+    /// decides the capture MODE (borrow vs value); this is the name
+    /// resolution fact a body route needs to re-admit reads of outer
+    /// bindings from inside the closure.
+    pub captures: Vec<DefId>,
 }
 
 pub fn resolve(module: &Module) -> Resolution {
@@ -1570,6 +1577,8 @@ impl Walker<'_> {
             });
         }
         if let Some(open) = self.tokens.iter().position(|token| token.offset == body.start) {
+            let occurrences_start = self.occurrences.len();
+            let locals_start = self.locals.len();
             match parse_statements_until_close(&self.module.file, &self.module.source, self.tokens, open + 1) {
                 Ok((statements, _)) => {
                     for statement in &statements {
@@ -1577,8 +1586,22 @@ impl Walker<'_> {
                     }
                     let has_binding_conflict = self.diagnostics[diagnostics_start..].iter()
                         .any(|diagnostic| diagnostic.code.as_deref() == Some("E0104"));
+                    // Captures: reads inside the body whose target is an
+                    // outer def (declared before this closure's locals
+                    // began). The compiler owns the capture mode.
+                    let mut captures: Vec<DefId> = Vec::new();
+                    for occurrence in &self.occurrences[occurrences_start..] {
+                        if occurrence.role != Role::Read { continue; }
+                        let Some(target) = occurrence.target else { continue };
+                        let outer = (self.base as usize..self.base as usize + locals_start)
+                            .contains(&(target.0 as usize));
+                        if outer && !captures.contains(&target) {
+                            captures.push(target);
+                        }
+                    }
                     self.closure_bodies.push(ClosureBody {
-                        start: body.start, statements: statements.into(), has_binding_conflict,
+                        start: body.start, end: body.end, statements: statements.into(),
+                        has_binding_conflict, captures,
                     });
                 }
                 // The grammar accepted the literal's header; a body that does

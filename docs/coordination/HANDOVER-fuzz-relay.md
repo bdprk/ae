@@ -785,3 +785,8 @@ Ident arm to re-admit reads whose target is a capture of the enclosing
 closure (offset-scoped to that closure's body range — ClosureBody needs
 an `end` field too). The lowering side needs no change: a StrView
 capture read lowers as a plain Variable through the capture slot.
+
+The resolved closure route now accepts reads of captured string literals
+when the compiler binds the capture slot as a read-only string view.
+Resolution records outer local definitions and scopes the read to the
+closure body. The owning capture form still uses the typed path.

@@ -702,6 +702,8 @@ struct ResolvedExpressions {
     token_cursor_definitions: HashSet<ae_resolve::DefId>,
     scalar_expression_types: HashMap<std::ops::Range<usize>, ae_resolve::resolve::ExpressionType>,
     scalar_writes: HashMap<usize, ae_resolve::DefId>,
+    /// Reads of an owned string through a closure capture slot.
+    closure_capture_reads: HashSet<usize>,
     array_definitions: HashSet<ae_resolve::DefId>,
     struct_definitions: HashSet<ae_resolve::DefId>,
     struct_field_reads: HashSet<usize>,

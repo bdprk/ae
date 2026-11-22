@@ -164,7 +164,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
                 && !resolved.owned_vectors.contains(id) && !resolved.owned_text_bindings.contains(id)
                 && !resolved.enum_bindings.contains(id)
-                && !resolved.token_cursor_definitions.contains(id)),
+                && !resolved.token_cursor_definitions.contains(id))
+            // The body driver checks the capture slot's concrete view type.
+            || resolved.closure_capture_reads.contains(&expression.range.start),
         // A construction of a drop-free file-local struct with scalar
         // fields: the layout is known at collection time.
         ExpressionKind::Struct { target, fields } => {
@@ -1095,7 +1097,24 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            for body in resolution.functions.iter().flat_map(|function| &function.closure_bodies) {
+            for (function, body) in resolution.functions.iter().flat_map(|function| {
+                function.closure_bodies.iter().map(move |body| (function, body))
+            }) {
+                // A captured outer read is legal inside the closure body:
+                // the compiler hands the value through a capture slot, so
+                // the route re-admits reads whose target is one of this
+                // body's captures.
+                for occurrence in &function.occurrences {
+                    if occurrence.role == ae_resolve::Role::Read
+                        && occurrence.range.start >= body.start
+                        && occurrence.range.end <= body.end
+                        && occurrence.target.is_some_and(|target| {
+                            expressions.owned_text_bindings.contains(&target) && body.captures.contains(&target)
+                        })
+                    {
+                        expressions.closure_capture_reads.insert(occurrence.range.start);
+                    }
+                }
                 if !body.has_binding_conflict
                     && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| false))
                 {
@@ -1159,9 +1178,10 @@ impl<'a> Parser<'a> {
             || (self.impl_self.is_some() && self.subst.is_empty())
             || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..))
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
-            || !self.names.iter().all(|(name, &(_, _, ty))| {
+            || !self.names.iter().all(|(name, &(slot, _, ty))| {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
+                    || (ty == Type::StrView && capture_starts.iter().any(|&(capture, _)| capture == slot))
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
         {
@@ -3846,7 +3866,7 @@ mod tests {
     fn scalar_output_matches_resolver_definition_to_live_slot() {
         let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
-        let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }}");
+        let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4175,6 +4195,19 @@ mod tests {
             .expect("resolved emitted closure body").unwrap();
         assert!(matches!(closure.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
         parser.names.remove("captured_scalar");
+        // A captured owned string flows through the capture slot: the
+        // resolver records the capture and the route re-admits its read.
+        let keep_start = source.find("let keep =").unwrap() + 4;
+        parser.names.insert("keep".into(), (82, false, Type::StrView));
+        parser.seek_scalar_offset(source.find("|| -> i64 { print(keep)").unwrap() + 10);
+        let closure = parser.lower_resolved_body_with_captures(&[(82, keep_start)])
+            .expect("resolved string-capture closure body").unwrap();
+        assert!(matches!(closure.as_slice(), [Statement::Print(Printed::Expr(Expr::Variable(82, Type::StrView, ..))),
+            Statement::Return(Expr::Number(0), _)]));
+        parser.names.insert("keep".into(), (82, false, Type::String));
+        parser.seek_scalar_offset(source.find("{ print(keep)").unwrap());
+        assert!(parser.lower_resolved_body_with_captures(&[(82, keep_start)]).is_none());
+        parser.names.remove("keep");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
         for ty in [Type::Int, Type::Bool] {
