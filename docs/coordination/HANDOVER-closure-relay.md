@@ -27,12 +27,14 @@ Direct prints of the owned capture, including parenthesized reads, now
 use the resolved body without moving the capture before the return.
 Capture classification also recognizes a binding initialized by a
 resolved file-local function call returning `string`.
+The resolved closure route can also lower that call inside a local
+binding and transfer ownership when the closure returns the binding.
 
 ## What is half-done
 
 Captured strings from other initializers and other uses of an owned
-capture still use the typed parser. The next slice can migrate local
-returns initialized by a direct call inside the closure.
+capture still use the typed parser. The next slice can lower a direct
+string-returning call in the return statement itself.
 
 ## Next step
 
@@ -45,10 +47,10 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `7d1ea4f` matched 50 examples and 646 CLI
+- The byte comparison against `3f4b299` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for borrowed and owned captures of a call result, and matched
-  the diagnostic when the outer binding is read after an owning call.
+  output for a closure that binds two string call results, frees one,
+  and returns the other. It matched the argument type diagnostic.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

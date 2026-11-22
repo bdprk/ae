@@ -974,6 +974,7 @@ impl<'a> Parser<'a> {
                                             Some(ae_resolve::TypeSpelling::Primitive("string"))) =>
                                 {
                                     expressions.owned_text_bindings.insert(id);
+                                    expressions.string_binding_calls.insert(callee.range.start);
                                 }
                                 _ => match iterator_constructor(initializer) {
                                     Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
@@ -1116,13 +1117,9 @@ impl<'a> Parser<'a> {
                 let mut local_strings = HashSet::new();
                 for statement in body.statements.iter() {
                     visit_statements(statement, &mut |statement| match &statement.kind {
-                        StatementKind::Binding { name_range, initializer, .. }
-                            if matches!(initializer.kind, ExpressionKind::Atom(Kind::Text(_))) =>
-                        {
-                            if let Some(&def) = expressions.scalar_definitions.get(&name_range.start) {
-                                local_strings.insert(def);
-                                expressions.owned_text_bindings.insert(def);
-                            }
+                        StatementKind::Binding { name_range, .. } => {
+                            local_strings.extend(expressions.scalar_definitions.get(&name_range.start)
+                                .copied().filter(|def| expressions.owned_text_bindings.contains(def)));
                         }
                         StatementKind::Return(value)
                             if matches!(value.kind, ExpressionKind::Atom(Kind::Ident(_)))
@@ -1242,7 +1239,8 @@ impl<'a> Parser<'a> {
                     signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
-                    && scalar_type(signature.ret)
+                    && (scalar_type(signature.ret)
+                        || (string_return && signature.ret == Type::String && resolved.string_binding_calls.contains(&offset)))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
                         // moves the argument, tracked in `moved`, and the
@@ -3995,7 +3993,7 @@ mod tests {
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
         let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; return 0; }}");
-        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return call_text; }}; return 0; }}");
+        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return call_text; }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4423,6 +4421,20 @@ mod tests {
              Statement::Return(Expr::Variable(82, Type::String, ..), _)]));
         assert!(parser.moved.remove(&82));
         parser.names.remove("call_text");
+        parser.functions.insert("capture_source".into(), Signature {
+            id: 98, params: Vec::new(), ret: Type::String, file: "case.ae".into(),
+            public: false, extern_c: false,
+        });
+        let next_var = parser.next_var;
+        parser.seek_scalar_offset(source.find("{ let result_text = capture_source();").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[])
+            .expect("resolved local binding initialized by a string call").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Declare(slot, Expr::Call(98, _, Type::String)),
+             Statement::Return(Expr::Variable(read, Type::String, ..), _), Statement::Frees(_)]
+            if slot == read && parser.moved.contains(slot)));
+        parser.moved.remove(&next_var);
+        parser.next_var = next_var;
         parser.return_type = Type::Int;
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
