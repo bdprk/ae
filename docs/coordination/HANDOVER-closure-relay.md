@@ -23,12 +23,14 @@ Direct returns of captured string literals use the same move check.
 The borrow probe still fails the owned return type check, so existing
 capture inference selects the by-value slot and the closure remains
 callable once.
+Direct prints of the owned capture, including parenthesized reads, now
+use the resolved body without moving the capture before the return.
 
 ## What is half-done
 
 Captured strings from other initializers and other uses of an owned
-capture still use the typed parser. The next slice can migrate direct
-reads of owned captures while retaining the distinct move checks.
+capture still use the typed parser. The next slice can extend capture
+classification to resolved string-returning call initializers.
 
 ## Next step
 
@@ -41,11 +43,11 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `15921f0` matched 50 examples and 646 CLI
+- The byte comparison against `2413230` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for local owned-string returns and the closure that chooses
-  between two captured owned strings. It matched diagnostics for calling
-  an owning closure twice and reading the original binding after its move.
+  output for a closure that reads its capture twice before returning it.
+  It matched diagnostics for calling an owning closure twice and for
+  reads after moving the captured string to a local binding.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers
