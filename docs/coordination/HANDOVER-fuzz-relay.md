@@ -599,6 +599,9 @@ missing fields in layout order.
 Enum constructors share variant and payload lookup on the concrete enum
 layout. Shared lowering uses checked scalar payload facts and concrete
 compiler types for other payloads. On rejection, the token route retains
-the payload ordinal, source location and diagnostic ordering. The next
-slice checks coverage for specialized constructors and their ownership.
+the payload ordinal, source location and diagnostic ordering. Explicit enum
+specializations can also use shared lowering when their concrete layouts
+are already cached. Cache misses leave instance allocation and diagnostics
+to the committed token route. The next slice covers cached specialized
+struct constructors.
 

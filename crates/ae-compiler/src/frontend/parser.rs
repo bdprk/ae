@@ -1747,15 +1747,19 @@ impl<'a> Parser<'a> {
         let ExpressionKind::Qualified { base, name: variant } = &target.kind else {
             return None;
         };
-        let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
-            return None;
-        };
         let member = self.tokens.partition_point(|token| token.offset < target.range.end).checked_sub(1)?;
         let offset = self.tokens[member].offset;
         if !self.resolved_expressions().enum_variants.contains(&offset) {
             return None;
         }
-        let &eid = self.enum_names.get(name)?;
+        let eid = match &base.kind {
+            ExpressionKind::Atom(Kind::Ident(name)) => *self.enum_names.get(name)?,
+            ExpressionKind::Specialization { base, arguments } => {
+                let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return None };
+                self.cached_enum_specialization(name, arguments)?
+            }
+            _ => return None,
+        };
         let def = self.enums.get(eid)?;
         self.require_public("enum", def.name, &def.file, def.public).ok()?;
         let (variant_id, payload) = def.variant_payload(variant)?;
@@ -3273,6 +3277,8 @@ mod tests {
         let source = format!("{source} fn bad_point() -> i64 {{ let wrong = Point {{ x: false, y: 1 }}; return wrong.y; }}");
         let source = format!("{source} fn bad_fields() -> i64 {{ let extra = Point {{ z: 1 }}; return 0; }} fn dup_fields() -> i64 {{ let dup = Point {{ x: 1, x: false }}; return 0; }} fn missing_fields() -> i64 {{ let missing = Point {{ x: 1 }}; return 0; }}");
         let source = source.as_str();
+        let source = format!("{source} enum CachedBox[T] {{ Item(T) }} fn pack(specialized_text: string) -> CachedBox[string] {{ return CachedBox[string]::Item(specialized_text); }}");
+        let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
         let call_token = tokens.iter().position(|token| token.offset == source.find("print(compute").unwrap()).unwrap();
@@ -3316,6 +3322,30 @@ mod tests {
             "case.ae", source, tokens, &mut functions, &mut structs,
             &mut struct_names, &mut enums, &mut enum_names, &mut generics,
         );
+        parser.generics.names.insert("CachedBox".into(), 0);
+        parser.generics.defs.push(GenericEnum {
+            name: "CachedBox".into(), params: vec!["T".into()],
+            variants: vec![("Item".into(), vec![Payload::Param(0)])],
+            file: "case.ae".into(), public: false,
+        });
+        let payload = source.find("specialized_text:").unwrap();
+        parser.names.insert("specialized_text".into(), (82, false, Type::String));
+        parser.binding_ranges.insert(82, payload..payload + "specialized_text".len());
+        let variant = source.find("CachedBox[string]::Item").unwrap();
+        parser.seek_scalar_offset(variant);
+        let start = parser.pos;
+        assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
+        assert_eq!(parser.pos, start);
+        assert!(!parser.moved.contains(&82));
+        let eid = parser.instantiate_enum(0, vec![Type::String], variant).unwrap();
+        assert!(matches!(
+            parser.lower_shared_value(Some(Kind::Semi), true),
+            Some((Expr::EnumLit(_, actual, 0, payload), Type::Enum(_, ty)))
+                if actual == eid && ty == eid && matches!(payload.as_slice(), [Expr::Variable(82, Type::String, ..)])
+        ));
+        assert!(parser.moved.remove(&82));
+        parser.names.remove("specialized_text");
+        parser.binding_ranges.remove(&82);
         let capture_start = source.find("captured_scalar:").unwrap();
         parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
         parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());

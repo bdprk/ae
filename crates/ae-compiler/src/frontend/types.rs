@@ -9,6 +9,10 @@ impl EnumDef {
     }
 }
 
+fn enum_instance_key(gid: usize, arguments: &[Type]) -> String {
+    format!("{gid}:{}", arguments.iter().map(|ty| ty.name()).collect::<Vec<_>>().join(","))
+}
+
 pub(super) fn scalar_type(name: &str) -> Option<Type> {
     match name {
         "i64" => Some(Type::Int),
@@ -396,7 +400,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = format!("{gid}:{}", args.iter().map(|t| t.name()).collect::<Vec<_>>().join(","));
+        let key = enum_instance_key(gid, &args);
         if let Some(&eid) = self.generics.done.get(&key) { return Ok(eid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "enum" && *active == key) {
@@ -431,6 +435,35 @@ impl Parser<'_> {
         // block (same machinery as generic structs, ADR-0187/0196).
         self.generics.enum_origin.insert(eid, (gid, args));
         Ok(eid)
+    }
+
+    /// Look up an existing specialization without allocating layouts or
+    /// changing the token cursor during speculative lowering.
+    pub(super) fn cached_enum_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
+        let &gid = self.generics.names.get(name)?;
+        let arguments = ranges.iter().map(|range| {
+            let start = self.tokens.partition_point(|token| token.offset < range.start);
+            let end = self.tokens.partition_point(|token| token.offset < range.end);
+            match self.tokens.get(start..end)? {
+                [Token { kind: Kind::Ident(name), .. }] => {
+                    let ty = self.subst.get(name).copied().or_else(|| match name.as_str() {
+                        "string" => Some(Type::String),
+                        "vec" => Some(Type::Vec),
+                        _ => scalar_type(name),
+                    })?;
+                    matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
+                }
+                [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
+                 Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
+                    if name == "vec" && !self.subst.contains_key(name) => match element.as_str() {
+                        "string" => Some(Type::StrVec),
+                        "f64" => Some(Type::VecF),
+                        _ => None,
+                    },
+                _ => None,
+            }
+        }).collect::<Option<Vec<_>>>()?;
+        self.generics.done.get(&enum_instance_key(gid, &arguments)).copied()
     }
     // A concrete type argument. Structs and enums are rejected for the same
     // reason variant payloads are: no recursion and no hidden layout.
