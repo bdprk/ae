@@ -744,7 +744,7 @@ impl<'a> Parser<'a> {
                 .filter_map(|function| function.body.as_ref()).flatten();
             let closure_statements = resolution.functions.iter()
                 .flat_map(|function| function.closure_bodies.iter())
-                .flat_map(|body| body.iter());
+                .flat_map(|body| body.statements.iter());
             for statement in function_statements.chain(closure_statements) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
@@ -864,6 +864,13 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            for body in resolution.functions.iter().flat_map(|function| &function.closure_bodies) {
+                if !body.has_binding_conflict
+                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true))
+                {
+                    expressions.scalar_bodies.insert(body.start, body.statements.clone());
+                }
+            }
             for function in module.functions {
                 if function.impl_owner.is_some() {
                     continue;
@@ -895,6 +902,13 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn lower_resolved_scalar_body(&mut self) -> Option<Result<Vec<Statement>, ae_span::Diagnostic>> {
+        self.lower_resolved_body_with_captures(&[])
+    }
+
+    pub(super) fn lower_resolved_body_with_captures(
+        &mut self,
+        capture_starts: &[(usize, usize)],
+    ) -> Option<Result<Vec<Statement>, ae_span::Diagnostic>> {
         // Array parameters are borrowed views (`&[i64; N]` is the only array
         // parameter form, and `Type::Array` bakes the borrow in): their
         // element reads and stores flow through the same arms as local
@@ -941,8 +955,9 @@ impl<'a> Parser<'a> {
         }
         let mut slots = HashMap::new();
         for &(slot, _, ty) in self.names.values() {
-            let range = self.binding_ranges.get(&slot)?;
-            slots.insert(*resolved.scalar_definitions.get(&range.start)?, (slot, ty));
+            let start = self.binding_ranges.get(&slot).map(|range| range.start)
+                .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
+            slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
         }
         Some(self.lower_scalar_statements(&body, &mut slots))
     }
@@ -3099,6 +3114,7 @@ mod tests {
     fn scalar_output_matches_resolver_definition_to_live_slot() {
         let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
+        let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3143,6 +3159,13 @@ mod tests {
             "case.ae", source, tokens, &mut functions, &mut structs,
             &mut struct_names, &mut enums, &mut enum_names, &mut generics,
         );
+        let capture_start = source.find("captured_scalar:").unwrap();
+        parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
+        parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[(80, capture_start)])
+            .expect("resolved emitted closure body").unwrap();
+        assert!(matches!(closure.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
+        parser.names.remove("captured_scalar");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
         for ty in [Type::Int, Type::Bool] {

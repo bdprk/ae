@@ -489,3 +489,10 @@ checks. The compiler allocates and caches instances before and after body
 lowering as before. Non-scalar substitutions and generic methods still use
 the typed path. Closure bodies are the next instance-boundary slice.
 
+## Resolved emitted closure bodies (2026-11-22)
+
+After the compiler fixes the capture modes and slot order, eligible closure
+bodies use the resolved body route. Capture probes retain their existing path.
+The emitted body maps capture definitions to their assigned slots. Closure
+shadowing conflicts and unsupported capture types retain the typed path.
+

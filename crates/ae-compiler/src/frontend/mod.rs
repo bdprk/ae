@@ -687,7 +687,7 @@ struct ResolvedExpressions {
     statements: HashMap<usize, (IndexedStatement, usize)>,
     pointer_store_names: HashMap<usize, String>,
     match_patterns: HashMap<usize, ae_syntax::pattern::Pattern>,
-    scalar_bodies: HashMap<usize, Rc<[ae_syntax::statement::Statement]>>,
+    scalar_bodies: HashMap<usize, std::sync::Arc<[ae_syntax::statement::Statement]>>,
     scalar_definitions: HashMap<usize, ae_resolve::DefId>,
     scalar_reads: HashMap<usize, ae_resolve::DefId>,
     scalar_writes: HashMap<usize, ae_resolve::DefId>,

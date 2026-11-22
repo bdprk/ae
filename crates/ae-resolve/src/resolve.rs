@@ -38,13 +38,21 @@ pub struct FnOccurrences {
     pub function_def: DefId,
     pub occurrences: Vec<Occurrence>,
     /// Successfully parsed closure bodies reached during name resolution.
-    pub closure_bodies: Vec<Arc<[Statement]>>,
+    pub closure_bodies: Vec<ClosureBody>,
     /// Type argument ranges for expression specializations, keyed by base-name offset.
     pub specialization_arguments: HashMap<usize, Arc<[Range<usize>]>>,
     /// The pointer qualifier for each cast, keyed by the pointee type offset.
     pub pointer_cast_targets: HashMap<usize, bool>,
     /// Closure syntax keyed by the opening pipe token offset.
     pub closure_headers: HashMap<usize, Arc<Expression>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosureBody {
+    pub start: usize,
+    pub statements: Arc<[Statement]>,
+    /// A duplicate could denote valid shadowing in the compiler's closure scope.
+    pub has_binding_conflict: bool,
 }
 
 pub fn resolve(module: &Module) -> Resolution {
@@ -577,7 +585,7 @@ struct Walker<'w> {
     live: HashMap<String, DefId>,
     blocks: Vec<Vec<String>>,
     occurrences: Vec<Occurrence>,
-    closure_bodies: Vec<Arc<[Statement]>>,
+    closure_bodies: Vec<ClosureBody>,
     specialization_arguments: HashMap<usize, Arc<[Range<usize>]>>,
     pointer_cast_targets: HashMap<usize, bool>,
     closure_headers: HashMap<usize, Arc<Expression>>,
@@ -1468,6 +1476,7 @@ impl Walker<'_> {
     /// occurrences inside resolve against parameters, enclosing locals and
     /// items. Capture semantics stay with the type checker (R3c).
     fn closure(&mut self, params: &[ClosureParam], body: &Range<usize>, return_type: &Range<usize>) {
+        let diagnostics_start = self.diagnostics.len();
         self.blocks.push(Vec::new());
         for param in params {
             let shape = if param.ty.start == param.ty.end {
@@ -1500,7 +1509,11 @@ impl Walker<'_> {
                     for statement in &statements {
                         self.statement(statement);
                     }
-                    self.closure_bodies.push(statements.into());
+                    let has_binding_conflict = self.diagnostics[diagnostics_start..].iter()
+                        .any(|diagnostic| diagnostic.code.as_deref() == Some("E0104"));
+                    self.closure_bodies.push(ClosureBody {
+                        start: body.start, statements: statements.into(), has_binding_conflict,
+                    });
                 }
                 // The grammar accepted the literal's header; a body that does
                 // not parse stays opaque rather than inventing diagnostics.
