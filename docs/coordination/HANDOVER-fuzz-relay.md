@@ -685,7 +685,9 @@ ownership transfers still use the typed path.
 String vector parameters can now use the resolved vector loop path.
 Each element remains a read-only string view, and binding a borrowed
 container or a mutable view produces the same diagnostics in both drivers.
-String vector construction remains a follow-up.
+Local string vectors produced by `strvec_new`, `split` or `lines` now join
+the same resolved loop route. Construction keeps the builtin argument
+checks, and the local vector releases after its loop views expire.
 
 Resolved bodies handle local token cursors and for-in iteration. Both
 drivers share the loop setup and bind each token as a read-only view.

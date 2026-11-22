@@ -237,6 +237,17 @@ fn compound_assignment_operator(operator: &Kind) -> Option<Kind> {
     }
 }
 
+fn iterator_constructor(expression: &ae_syntax::expression::Expression) -> Option<Type> {
+    use ae_syntax::expression::ExpressionKind;
+    let ExpressionKind::Call { callee, arguments } = &expression.kind else { return None };
+    let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
+    match (name.as_str(), arguments.len()) {
+        ("tokenize", 2) => Some(Type::Tokens),
+        ("strvec_new", 0) | ("lines", 1) | ("split", 2) => Some(Type::StrVec),
+        _ => None,
+    }
+}
+
 fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression, ae_resolve::Role) -> bool) -> bool {
     use ae_syntax::statement::{ElseBranch, StatementKind};
     match &statement.kind {
@@ -247,8 +258,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     | ae_syntax::expression::ExpressionKind::Vector(elements) => elements.iter()
                         .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
                     ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
-                    _ => resolved.scalar_definitions.get(&name_range.start)
-                        .is_some_and(|id| resolved.token_cursor_definitions.contains(id))
+                    _ => iterator_constructor(initializer).is_some()
                         || scalar_body_expression(initializer, resolved, supports_call, supports_field),
                 }
         }
@@ -903,13 +913,14 @@ impl<'a> Parser<'a> {
                                 ExpressionKind::Atom(Kind::Text(_)) => {
                                     expressions.owned_text_bindings.insert(id);
                                 }
-                                ExpressionKind::Call { callee, arguments }
-                                    if matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "tokenize")
-                                        && matches!(arguments.as_slice(), [_, _]) =>
-                                {
-                                    expressions.token_cursor_definitions.insert(id);
-                                }
-                                _ => {}
+                                _ => match iterator_constructor(initializer) {
+                                    Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
+                                    Some(Type::StrVec) => {
+                                        expressions.vector_definitions.insert(id);
+                                        expressions.owned_vectors.insert(id);
+                                    }
+                                    _ => {}
+                                },
                             }
                         }
                     }
@@ -1256,7 +1267,7 @@ impl<'a> Parser<'a> {
                     let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
-                    let (value, ty) = if self.resolved_expressions().token_cursor_definitions.contains(&def) {
+                    let (value, ty) = if iterator_constructor(initializer).is_some() {
                         self.seek_scalar_offset(initializer.range.start);
                         self.expression(0, false)?
                     } else {
@@ -3707,6 +3718,7 @@ mod tests {
         let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = vec[]; let moved = take_vec; return 0; }}");
         let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
         let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
+        let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3809,6 +3821,11 @@ mod tests {
             Statement::Declare(cursor, Expr::Tokens(source, None, ..)), Statement::ForTokens(read, _, _, ..), ..]
             if base == source && cursor == read));
         assert!(parser.borrows.is_empty());
+        parser.seek_scalar_offset(source.find("{ let pieces = split").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved local string vector loop").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::Split(..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
+            if owned.contains(&(*vector, Type::StrVec))
+                && matches!(inner.first(), Some(Statement::Declare(_, Expr::StrVecIndex(source, _, _, _, false))) if source == vector)));
         parser.next_var = next_var;
         parser.next_label = 0;
         parser.generics.names.insert("CachedBox".into(), 0);
