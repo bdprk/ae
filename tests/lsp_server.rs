@@ -593,3 +593,22 @@ fn lsp_selection_ranges_expand_identifier_to_block() {
     assert!(levels.contains(&(0, 3)), "fn block present: {levels:?}");
     assert!(levels.contains(&(2, 2)), "line present: {levels:?}");
 }
+
+#[test]
+fn lsp_member_completion_uses_the_receiver_type() {
+    let mut server = LspServer::new();
+    // Two structs; the receiver is a Point, so Point's fields only.
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64, y: i64 }\nstruct Color { red: i64, green: i64 }\nfn main() {\n    let p = Point { x: 1, y: 2 };\n    p.\n}"}}}"#;
+    server.handle_message(open);
+
+    let comp_req = r#"{"jsonrpc":"2.0","id":25,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":4,"character":6}}}"#;
+    let resps = server.handle_message(comp_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let names: Vec<&str> = items.iter().filter_map(|i| i.get("label").and_then(|n| n.as_str())).collect();
+    assert!(names.contains(&"x") && names.contains(&"y"), "Point fields: {names:?}");
+    assert!(!names.contains(&"red") && !names.contains(&"green"), "Color fields leaked: {names:?}");
+    // The detail carries the declared field type.
+    let x = items.iter().find(|i| i.get("label").and_then(|l| l.as_str()) == Some("x")).unwrap();
+    assert_eq!(x.get("detail").and_then(|d| d.as_str()), Some("i64"));
+}

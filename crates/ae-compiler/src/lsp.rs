@@ -467,6 +467,59 @@ fn symbol_kind_number(kind: ae_resolve::DefKind) -> u32 {
     }
 }
 
+fn textual_member_fields(text: &str, receiver: &str) -> Option<Vec<(String, String)>> {
+    let mut struct_name = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("let ").or_else(|| trimmed.strip_prefix("var ")) else { continue };
+        let Some(rest) = rest.strip_prefix(receiver) else { continue };
+        let Some(after_equal) = rest.split_once('=').map(|pair| pair.1) else { continue };
+        let after_equal = after_equal.trim_start();
+        let name_end = after_equal.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_equal.len());
+        let candidate = &after_equal[..name_end];
+        if candidate.is_empty() { continue; }
+        if after_equal[name_end..].trim_start().starts_with('{') {
+            struct_name = Some(candidate.to_owned());
+            break;
+        }
+    }
+    let struct_name = struct_name?;
+    let mut fields = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            if trimmed.starts_with("struct ") && trimmed[7..].starts_with(&struct_name) {
+                inside = true;
+                // A single-line declaration carries its fields inline.
+                if let Some((open, rest)) = trimmed.split_once('{') {
+                    if let Some((body, _)) = rest.split_once('}') {
+                        for part in body.split(',') {
+                            if let Some((field, ty)) = part.split_once(':') {
+                                let field = field.trim();
+                                if is_ident(field) {
+                                    fields.push((field.to_owned(), ty.trim().to_owned()));
+                                }
+                            }
+                        }
+                        return Some(fields);
+                    }
+                    let _ = open;
+                }
+            }
+            continue;
+        }
+        if let Some((field, ty)) = trimmed.split_once(':') {
+            let field = field.trim();
+            if is_ident(field) && !trimmed.starts_with("//") {
+                fields.push((field.to_owned(), ty.trim().trim_end_matches(',').trim_end_matches('}').trim().to_owned()));
+            }
+        }
+        if trimmed.starts_with('}') { break; }
+    }
+    (!fields.is_empty()).then_some(fields)
+}
+
 /// An imported function's declared signature, sliced from its own module's
 /// source (`fn name(params) -> ret`) — the entry-side def table has no
 /// parameter spellings for imported items.
@@ -968,6 +1021,64 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+/// M6.2.05: the fields of the receiver before a `.` — the identifier ending
+/// at the dot resolves through the def table, its inferred spelling names a
+/// file-local struct, and that struct's declared fields come back with
+/// their shapes. `None` when the receiver has no resolved struct type.
+    fn member_fields(&self, doc: &Document, offset: usize) -> Option<Vec<(String, String)>> {
+        let mut dot = offset;
+        while dot > 0 && doc.text.as_bytes()[dot - 1].is_ascii_whitespace() { dot -= 1; }
+        if dot == 0 || doc.text.as_bytes()[dot - 1] != b'.' { return None; }
+        let mut end = dot - 1;
+        while end > 0 && doc.text.as_bytes()[end - 1].is_ascii_whitespace() { end -= 1; }
+        let mut start = end;
+        while start > 0 && (doc.text.as_bytes()[start - 1].is_ascii_alphanumeric()
+            || doc.text.as_bytes()[start - 1] == b'_') { start -= 1; }
+        if start == end { return None; }
+        let receiver = &doc.text[start..end];
+        // A document with an incomplete `p.` does not parse, so the def
+        // table is unavailable: fall back to the receiver's own declaration
+        // (its `= Name {` initializer names the struct) and read that
+        // struct's fields from the text. Still type-driven — never a sweep
+        // over every field in the file.
+        let Some(cached) = doc.resolution() else {
+            return textual_member_fields(&doc.text, receiver);
+        };
+        let resolution = &cached.2;
+        // The receiver's occurrence resolves by offset when the statement is
+        // complete; an incomplete `p.` has no occurrence yet, so the def
+        // table's bindings answer by name instead (the most recent one
+        // wins, which matches shadowing).
+        let by_occurrence = resolution.functions.iter().flat_map(|function| &function.occurrences)
+            .find(|occurrence| occurrence.range.start == start && occurrence.range.end == end)
+            .and_then(|occurrence| occurrence.target)
+            .and_then(|target| resolution.defs.get(target.0 as usize));
+        let def = match by_occurrence {
+            Some(def) => def,
+            None => resolution.defs.iter().rev().find(|def| {
+                !def.imported && def.name == receiver && def.kind == ae_resolve::DefKind::Binding
+            })?,
+        };
+        if def.name != receiver { return None; }
+        let spelling = def.inferred.as_ref()?;
+        let struct_def = match spelling {
+            ae_resolve::TypeSpelling::Named { def } => *def,
+            ae_resolve::TypeSpelling::Borrow { inner, .. } => match inner.as_ref() {
+                ae_resolve::TypeSpelling::Named { def } => *def,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let struct_entry = resolution.defs.get(struct_def.0 as usize)?;
+        if struct_entry.kind != ae_resolve::DefKind::Struct { return None; }
+        let fields: Vec<(String, String)> = resolution.spellings.iter()
+            .filter(|entry| entry.owner == struct_def
+                && entry.role == ae_resolve::SpellingRole::Field)
+            .map(|entry| (entry.name.clone(), describe_spelling(&entry.spelled.spelling, resolution)))
+            .collect();
+        Some(fields)
     }
 
     /// R3d: selection ranges — innermost to outermost: the identifier under
@@ -1503,27 +1614,13 @@ impl LspServer {
 
         let is_dot = prefix_bytes.iter().rev().find(|&&b| !b.is_ascii_whitespace()) == Some(&b'.');
         if is_dot {
-            for line in doc.text.lines() {
-                let trimmed = line.trim();
-                if let Some(start_brace) = trimmed.find('{') {
-                    if let Some((inside, _)) = trimmed[start_brace + 1..].split_once('}') {
-                        for field_part in inside.split(',') {
-                            if let Some((field, _)) = field_part.split_once(':') {
-                                let f = field.trim();
-                                if is_ident(f) {
-                                    out.push((f.to_owned(), 5, Some("field".to_owned())));
-                                }
-                            }
-                        }
-                    }
-                }
-                if trimmed.contains(':') && !trimmed.starts_with("fn ") && !trimmed.starts_with("let ") && !trimmed.starts_with("var ") && !trimmed.starts_with("struct ") {
-                    if let Some((field, _)) = trimmed.split_once(':') {
-                        let f = field.trim();
-                        if is_ident(f) {
-                            out.push((f.to_owned(), 5, Some("field".to_owned())));
-                        }
-                    }
+            // M6.2.05: member completion reads the receiver's inferred type
+            // from the def table. A receiver without a resolved struct type
+            // offers nothing — the old text scan advertised every field in
+            // the file, which was wrong more often than right.
+            if let Some(fields) = self.member_fields(doc, offset) {
+                for (name, ty) in fields {
+                    out.push((name.clone(), 5, Some(ty)));
                 }
             }
             return out;
