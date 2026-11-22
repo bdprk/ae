@@ -359,3 +359,25 @@ fn lsp_document_symbols_from_the_def_table() {
     let line = area.get("location").and_then(|l| l.get("range")).and_then(|r| r.get("start")).and_then(|s| s.get("line")).and_then(|l| l.as_i64()).unwrap();
     assert_eq!(line, 1);
 }
+
+#[test]
+fn lsp_references_from_the_def_table() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn a() -> i64 { let counter = 1; print(counter); return counter; }\nfn b() -> i64 { let counter = 2; print(counter); return counter; }"}}}"#;
+    server.handle_message(open);
+
+    // References from fn a's `counter` declaration: fn a's read and return
+    // use, but nothing from fn b's same-named binding.
+    let ref_req = r#"{"jsonrpc":"2.0","id":13,"method":"textDocument/references","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":0,"character":20},"context":{"includeDeclaration":true}}}"#;
+    let resps = server.handle_message(ref_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    let lines: Vec<i64> = items.iter().filter_map(|i| i.get("range").and_then(|r| r.get("start")).and_then(|s| s.get("line")).and_then(|l| l.as_i64())).collect();
+    assert_eq!(lines, vec![0, 0, 0], "scope-exact references: {lines:?}");
+
+    let ref_req = r#"{"jsonrpc":"2.0","id":14,"method":"textDocument/references","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":0,"character":20},"context":{"includeDeclaration":false}}}"#;
+    let resps = server.handle_message(ref_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let items = val.get("result").and_then(|r| r.as_array()).unwrap();
+    assert_eq!(items.len(), 2, "declaration excluded");
+}

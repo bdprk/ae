@@ -580,6 +580,26 @@ impl LspServer {
                 }).collect();
                 Self::make_response(id, JsonValue::Array(items))
             }
+            "textDocument/references" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("").to_owned();
+                let line = params.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let character = params.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let include_declaration = matches!(
+                    params.get("context").and_then(|c| c.get("includeDeclaration")),
+                    Some(JsonValue::Bool(true)) | None
+                );
+                let refs = self.references(&uri, Position { line, character }, include_declaration);
+                let items: Vec<JsonValue> = refs.into_iter().map(|location| {
+                    let mut map = BTreeMap::new();
+                    map.insert("uri".to_owned(), JsonValue::String(location.uri));
+                    map.insert("range".to_owned(), Self::range_to_json(&location.range));
+                    JsonValue::Object(map)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(items))
+            }
             "textDocument/definition" => {
                 let Some(params) = params else {
                     return Self::make_response(id, JsonValue::Null);
@@ -812,6 +832,43 @@ impl LspServer {
             let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
             (def.name.clone(), kind_number(def.kind), Range { start, end })
         }).collect()
+    }
+
+    /// R3d: find all references — every occurrence targeting the resolved
+    /// def, plus the def's own declaration when asked. Imported defs
+    /// resolve within their own file's occurrences only (the single-file
+    /// occurrence walk does not reach other files).
+    fn references(&self, uri: &str, pos: Position, include_declaration: bool) -> Vec<Location> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        let Some(resolution) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &resolution.2;
+        let Some(def) = def_at(resolution, offset) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        if include_declaration && !def.imported {
+            let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+            locations.push(Location { uri: doc.uri.clone(), range: Range { start, end } });
+        }
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target != Some(def.id) {
+                    continue;
+                }
+                // An occurrence's range belongs to the file the resolution
+                // was computed for — the entry document here.
+                let start = doc.line_index.offset_to_position(&doc.text, occurrence.range.start);
+                let end = doc.line_index.offset_to_position(&doc.text, occurrence.range.end);
+                locations.push(Location { uri: doc.uri.clone(), range: Range { start, end } });
+            }
+        }
+        locations
     }
 
     /// R3d: the def's own range is the definition site. Imported defs carry
