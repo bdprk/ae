@@ -1189,7 +1189,10 @@ impl<'a> Parser<'a> {
                 // and a string vector's Frees releases its elements in the
                 // same order the typed path emits.
                 let _ = captured;
-                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
+                // A `&mut` struct parameter is a borrowed receiver: its field
+// writes are FieldStore on a StructMut slot (the Checked arm already
+// lowers them), and nothing moves or drops through the borrow.
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (ty == Type::StrView && captured)
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
