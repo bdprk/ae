@@ -549,6 +549,7 @@ impl LspServer {
                 caps.insert("completionProvider".to_owned(), JsonValue::Object(comp));
                 caps.insert("renameProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("documentSymbolProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("signatureHelpProvider".to_owned(), JsonValue::Bool(true));
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -626,6 +627,18 @@ impl LspServer {
                     JsonValue::Object(symbol)
                 }).collect();
                 Self::make_response(id, JsonValue::Array(items))
+            }
+            "textDocument/signatureHelp" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let line = params.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let character = params.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                match self.signature_help(uri, Position { line, character }) {
+                    Some(signature) => Self::make_response(id, signature),
+                    None => Self::make_response(id, JsonValue::Null),
+                }
             }
             "textDocument/definition" => {
                 let Some(params) = params else {
@@ -830,6 +843,83 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: signature help — when the cursor sits inside a call's argument
+    /// list, the enclosing call's callee name is found by walking back over
+    /// the balanced parentheses, and the def table renders its declared
+    /// signature with the active parameter index.
+    fn signature_help(&self, uri: &str, pos: Position) -> Option<JsonValue> {
+        let doc = self.documents.get(uri)?;
+        let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        let cached = doc.resolution()?;
+        let resolution = &cached.2;
+        // Walk back from the cursor over the current argument list.
+        let mut depth = 0usize;
+        let mut index = offset;
+        let bytes = doc.text.as_bytes();
+        while index > 0 {
+            index -= 1;
+            match bytes[index] {
+                b')' => depth += 1,
+                b'(' => {
+                    if depth == 0 { break; }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        if index == 0 { return None; }
+        // The '(' at `index`; its callee name sits just before the spaces.
+        let mut name_end = index;
+        while name_end > 0 && bytes[name_end - 1].is_ascii_whitespace() { name_end -= 1; }
+        let mut name_start = name_end;
+        while name_start > 0 && (bytes[name_start - 1].is_ascii_alphanumeric() || bytes[name_start - 1] == b'_') {
+            name_start -= 1;
+        }
+        if name_start == name_end { return None; }
+        let callee = &doc.text[name_start..name_end];
+        // The active parameter: count commas since the '(' at depth zero.
+        let mut active = 0usize;
+        let mut depth = 0usize;
+        for &byte in &bytes[index + 1..offset] {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => active += 1,
+                _ => {}
+            }
+        }
+        let def = resolution.defs.iter().find(|def| def.name == callee
+            && (def.kind == ae_resolve::DefKind::Function))?;
+        let signature = if def.imported {
+            imported_fn_signature(&cached.1, def)?
+        } else {
+            let mut params = String::new();
+            for entry in resolution.defs.iter().filter(|entry| {
+                entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
+            }) {
+                if !params.is_empty() { params.push_str(", "); }
+                let ty = entry.inferred.as_ref()
+                    .map(|shape| describe_spelling(shape, resolution))
+                    .unwrap_or_else(|| "deferred".to_owned());
+                params.push_str(&format!("{}: {}", entry.name, ty));
+            }
+            let mut returns = String::new();
+            if let Some(entry) = resolution.spellings.iter().find(|entry| {
+                entry.owner == def.id && entry.role == ae_resolve::SpellingRole::Return
+            }) {
+                returns = format!(" -> {}", describe_spelling(&entry.spelled.spelling, resolution));
+            }
+            format!("fn {}({params}){returns}", def.name)
+        };
+        let mut label = BTreeMap::new();
+        label.insert("label".to_owned(), JsonValue::String(signature));
+        let mut res = BTreeMap::new();
+        res.insert("signatures".to_owned(), JsonValue::Array(vec![JsonValue::Object(label)]));
+        res.insert("activeSignature".to_owned(), JsonValue::Number(0.0));
+        res.insert("activeParameter".to_owned(), JsonValue::Number(active as f64));
+        Some(JsonValue::Object(res))
     }
 
     /// R3d: the document outline from the def table — every file-local

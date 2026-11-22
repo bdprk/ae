@@ -453,3 +453,21 @@ fn lsp_completion_is_scope_exact() {
     assert!(names.contains(&"width"), "names: {names:?}");
     assert!(!names.contains(&"inner"), "inner leaked past its scope: {names:?}");
 }
+
+#[test]
+fn lsp_signature_help_renders_the_call_signature() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"fn area(width: i64, height: i64) -> i64 { return width * height; }\nfn main() {\n    let s = area(3, 4);\n}"}}}"#;
+    server.handle_message(open);
+
+    // The cursor sits on the second argument: signature help names the
+    // callee, renders its declared parameters, and reports activeParameter 1.
+    let sig_req = r#"{"jsonrpc":"2.0","id":18,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///test.ae"},"position":{"line":2,"character":20}}}"#;
+    let resps = server.handle_message(sig_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let result = val.get("result").unwrap();
+    let sigs = result.get("signatures").and_then(|s| s.as_array()).unwrap();
+    let label = sigs[0].get("label").and_then(|l| l.as_str()).unwrap();
+    assert!(label.contains("fn area(width: i64, height: i64) -> i64"), "label: {label}");
+    assert_eq!(result.get("activeParameter").and_then(|v| v.as_i64()), Some(1));
+}
