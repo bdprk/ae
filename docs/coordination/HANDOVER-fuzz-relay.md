@@ -796,6 +796,19 @@ vectors through the concrete read-only capture slots. Integer and float
 elements use the same vector-index expressions as the typed parser.
 Owning and string-vector captures still use the typed path.
 
+## M6.2 checklist closed (2026-11-22 20:00)
+
+All seven M6.2 items are [x] in the ledger with per-item evidence (the
+checklist is regenerated from it, R5.1). The LSP now has fourteen
+def-table features (hover, definition across imports, scope-exact and
+cross-file rename, scope-exact completion with receiver-typed member
+completion, documentSymbol, references, workspace/symbol, signatureHelp,
+foldingRange, codeAction, inlayHint, semanticTokens, documentHighlight,
+selectionRange) plus compiler-sourced diagnostics — ADR-0224's D4
+("LSP finds results by matching text") is closed. Latency on a
+102,004-line project: warm completion 1.5 ms (the ignored probe pins
+< 100 ms); cold is the one-time parse (~175 ms).
+
 ## M6.2 checklist adjudication note (2026-11-22 19:30)
 
 M6.2.03 asks for "hover a shadowed name and show its local type and
