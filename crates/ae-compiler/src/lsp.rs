@@ -1137,6 +1137,78 @@ impl LspServer {
         out
     }
 
+    /// R3d: rename an imported def across files — the import module's own
+    /// declaration and internal uses (from a fresh resolution of that
+    /// module's source) plus the entry document's occurrences, keyed per
+    /// file URI in the WorkspaceEdit.
+    fn imported_rename(
+        &self,
+        doc: &Document,
+        cached: &std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>,
+        def: &ae_resolve::DefEntry,
+        new_name: &str,
+    ) -> Option<JsonValue> {
+        let (_, imports, resolution) = &**cached;
+        let (file_name, import_module) = imports.iter().find(|(_, import_module)| {
+            import_module.declarations.iter().any(|declaration| declaration.name == def.name)
+        })?;
+        // Resolve the import module itself so its internal uses join the
+        // edit set.
+        let tokens = Rc::new(ae_syntax::lex_diagnostic(&import_module.source).ok()?);
+        let import_resolution = ae_resolve::resolve::resolve_with_tokens(import_module, &[], tokens.as_slice());
+        let import_def = import_resolution.defs.iter()
+            .find(|entry| entry.name == def.name && entry.kind == def.kind)?;
+
+        let disk_dir = doc.disk_path()?.parent()?.to_path_buf();
+        let import_path = disk_dir.join(file_name);
+        let import_source = std::fs::read_to_string(&import_path).ok()?;
+        let import_index = LineIndex::new(&import_source);
+        let import_uri = format!("file:///{}/{}", disk_dir.to_string_lossy().replace('\\', "/"), file_name);
+
+        let mut edits: Vec<JsonValue> = Vec::new();
+        let mut push_edit = |source: &str, index: &LineIndex, range: std::ops::Range<usize>| {
+            let start = index.offset_to_position(source, range.start);
+            let end = index.offset_to_position(source, range.end);
+            let mut text_edit = BTreeMap::new();
+            text_edit.insert("range".to_owned(), Self::range_to_json(&Range { start, end }));
+            text_edit.insert("newText".to_owned(), JsonValue::String(new_name.to_owned()));
+            edits.push(JsonValue::Object(text_edit));
+        };
+        push_edit(&import_source, &import_index, import_def.range.clone());
+        for function in &import_resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target == Some(import_def.id) {
+                    push_edit(&import_source, &import_index, occurrence.range.clone());
+                }
+            }
+        }
+
+        let mut entry_edits: Vec<(usize, JsonValue)> = Vec::new();
+        let mut push_entry_edit = |range: std::ops::Range<usize>| {
+            let start = doc.line_index.offset_to_position(&doc.text, range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, range.end);
+            let mut text_edit = BTreeMap::new();
+            text_edit.insert("range".to_owned(), Self::range_to_json(&Range { start, end }));
+            text_edit.insert("newText".to_owned(), JsonValue::String(new_name.to_owned()));
+            entry_edits.push((range.start, JsonValue::Object(text_edit)));
+        };
+        for function in resolution.functions.iter() {
+            for occurrence in &function.occurrences {
+                if occurrence.target == Some(def.id) {
+                    push_entry_edit(occurrence.range.clone());
+                }
+            }
+        }
+        entry_edits.sort_by_key(|(start, _)| *start);
+
+        let mut changes = BTreeMap::new();
+        changes.insert(doc.uri.clone(), JsonValue::Array(entry_edits.into_iter().map(|(_, edit)| edit).collect()));
+        changes.insert(import_uri, JsonValue::Array(edits));
+        let mut res = BTreeMap::new();
+        res.insert("changes".to_owned(), JsonValue::Object(changes));
+        Some(JsonValue::Object(res))
+    }
+
     /// R3d: rename the resolved def only — every occurrence whose target is
     /// the same def, plus the def's own declaration range, ordered by
     /// offset. Scope-exact, unlike the text fallback which renames every
@@ -1146,7 +1218,7 @@ impl LspServer {
         let resolution = &cached.2;
         let def = def_at(resolution, offset)?;
         if def.imported {
-            return None;
+            return self.imported_rename(doc, &cached, def, new_name);
         }
         let mut edits: Vec<(usize, JsonValue)> = Vec::new();
         let mut push_edit = |range: std::ops::Range<usize>| {

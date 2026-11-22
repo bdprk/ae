@@ -399,3 +399,40 @@ fn lsp_workspace_symbol_searches_open_documents() {
     let uri = items[0].get("location").and_then(|l| l.get("uri")).and_then(|u| u.as_str()).unwrap();
     assert_eq!(uri, "file:///b.ae");
 }
+
+#[test]
+fn lsp_rename_crosses_imported_files() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("ae-lsp-rename-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let utils_source = "pub fn helper(x: i64) -> i64 { return helper(x) + 1; }";
+    let main_source = "use \"utils.ae\";\nfn main() {\n    let value = helper(1);\n    print(value);\n}";
+    std::fs::write(dir.join("utils.ae"), utils_source).unwrap();
+    let main_path = dir.join(format!("main-{}.ae", NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&main_path, main_source).unwrap();
+
+    let mut server = LspServer::new();
+    let uri = format!("file:///{}", main_path.to_string_lossy().replace('\\', "/"));
+    let open = format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","version":1,"text":{}}}}}}}"#, JsonValue::String(main_source.to_owned()).serialize());
+    server.handle_message(open.as_str());
+
+    // Rename the imported `helper` from the call site: the edit set spans
+    // both files — the import's declaration and internal use, plus the
+    // entry's call.
+    let rename_req = format!(r#"{{"jsonrpc":"2.0","id":16,"method":"textDocument/rename","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":2,"character":16}},"newName":"helper2"}}}}"#);
+    let resps = server.handle_message(rename_req.as_str());
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let changes = val.get("result").and_then(|r| r.get("changes")).unwrap();
+    let entry = changes.get(&uri).and_then(|e| e.as_array()).unwrap();
+    assert_eq!(entry.len(), 1, "entry call edited once: {entry:?}");
+    let utils_keys: Vec<&String> = match changes {
+        JsonValue::Object(map) => map.keys().filter(|k| k.ends_with("utils.ae")).collect(),
+        _ => panic!("changes should be an object"),
+    };
+    let utils_uris: Vec<&String> = utils_keys;
+    assert_eq!(utils_uris.len(), 1, "utils.ae present in changes");
+    let utils_edits = changes.get(utils_uris[0].as_str()).and_then(|e| e.as_array()).unwrap();
+    assert_eq!(utils_edits.len(), 2, "declaration + internal use edited: {utils_edits:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
