@@ -76,6 +76,9 @@ impl fmt::Display for Diagnostic {
 mod tests {
     use super::*;
     #[test]
+    // The reversed range is the point of the last assertion: a caller that
+    // hands span() an inverted range must get None, not a panic.
+    #[allow(clippy::reversed_empty_ranges)]
     fn positions_are_unicode_aware_and_ranges_are_checked() {
         let source = SourceFile { name: Some("test.ae"), text: "中a\r\n😀x" };
         let span = source.span(10..11).unwrap();

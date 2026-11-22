@@ -27,6 +27,17 @@ jobs:
         run: |
           python scripts/gen_checklist.py
           git diff --exit-code docs/checklist.md
+      - name: Standard library layering (R4.1)
+        run: python scripts/std_layering.py
+      - name: Commit titles record their ledger work (R5.1)
+        if: github.event_name == 'pull_request'
+        run: python scripts/check_commit_ids.py --base origin/${{ github.base_ref }}
+      - name: Clippy
+        # Reporting gate: `-W clippy::all` surfaces the debt list in
+        # docs/implementation-ledger.md §7 without failing the build while
+        # that list is still being paid down. Tighten to `-D warnings` as
+        # the audit's P0 items land.
+        run: cargo clippy --workspace --all-targets -- -W clippy::all
       - name: Test
         run: cargo test --workspace --locked
       - name: Verify generated C (Linux sanitizers)
