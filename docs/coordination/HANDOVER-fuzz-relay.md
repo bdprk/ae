@@ -1190,3 +1190,31 @@ for-in over borrowed vectors, trait-method calls, nested store bases.
 Gates: 511/0 on Windows and WSL2 (the new test), byte parity 0 failed,
 sanitize+leak PASS, fuzz 0 failures, layering and commit-id discipline hold.
 Fallback count unchanged at 410 — this slice is the switch, not a widening.
+
+## P1.1 slice 13 landed: slice_view, borrowed arrays, enum-returning calls, string assignment
+
+- `slice_view` lowers natively with the typed route's rules and messages: a
+  string variable, or a string field of a struct *variable* (the view
+  registers a `BorrowKind::View` on the whole variable with the current
+  scope depth).
+- Borrowed-array arguments join the call surface: a `&[i64; N]` parameter
+  takes `&values` as `Argument::Borrow(slot, false)` (classify Forward).
+- A user function returning a prelude enum joins `supports_call`
+  (`Type::Enum(..)` returns), so `let a = upper(true); match a { ... }`
+  routes.
+- An owned string prints as a view, and may be reassigned: the resolved
+  Assign arm now releases the old value (`Statement::Assign(..., ty.owned())`),
+  moves an owned right-hand side in, and applies the typed view rules —
+  a string's view conflict defers to the graph (so the pinned NLL message
+  and its position, the borrowed *name*, still match), every other owned
+  type rejects on sight.
+- The route-reason report also reports bodies the lowering's own gates
+  reject ("route reason blocked ..."), which found these last shapes.
+
+Coverage: 410 → **397**, files with fallbacks 123 → 113. Five examples are
+now legacy-free and joined the deny manifest: borrow, concat, field_view,
+option_propagate, strings (manifest now 8 files, CI-gated).
+
+Next: `push`/`pop` statement builtins (`tokens.ae`, `io/reader.ae`), map
+stores (`counts[word] = ...`), effectful `try_*`/`read_file`, generic-instance
+structs (`Cell[T]`), method calls on `self`, function-pointer calls.

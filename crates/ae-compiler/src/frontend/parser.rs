@@ -31,7 +31,7 @@ fn scalar_type(ty: Type) -> bool {
 /// handles), so the body needs no borrow-argument machinery for them. Every
 /// other reserved name keeps its typed body until its surface is reviewed.
 const RESOLVED_BUILTINS: &[&str] = &[
-    "len", "to_string", "to_f64", "to_i64", "trim", "slice", "split",
+    "len", "to_string", "to_f64", "to_i64", "trim", "slice", "slice_view", "split",
     "contains", "starts_with", "ends_with", "parse_int", "find",
     "json_get", "json_int", "json_bool", "json_len", "json_has",
 ];
@@ -407,11 +407,25 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Assign { target, operator, value } => {
             match &target.kind {
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
-                    resolved.scalar_writes.get(&target.range.start)
-                        .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.owned_vectors.contains(id)
-                            && !resolved.owned_text_bindings.contains(id) && !resolved.token_cursor_definitions.contains(id)
-                            && !resolved.enum_bindings.contains(id))
-                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                    resolved.scalar_writes.get(&target.range.start).is_some_and(|&id| {
+                        if resolved.array_definitions.contains(&id) || resolved.owned_vectors.contains(&id)
+                            || resolved.token_cursor_definitions.contains(&id) || resolved.enum_bindings.contains(&id)
+                        {
+                            return false;
+                        }
+                        if !resolved.owned_text_bindings.contains(&id) {
+                            return scalar_body_expression(value, resolved, supports_call, supports_field);
+                        }
+                        // Reassigning an owned string: a fresh literal or
+                        // another owned string moves in, and the lowering
+                        // releases the old value (the Assign codegen's flag).
+                        matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                            || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(other))
+                                if other != "self" && resolved.scalar_reads.get(&value.range.start)
+                                    .is_some_and(|other_id| other_id != &id
+                                        && (resolved.owned_text_bindings.contains(other_id)
+                                            || resolved.owned_string_bindings.contains(other_id))))
+                    })
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
                 // the plain operator: a compound store stays on the typed
@@ -453,6 +467,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
                 || (matches!(value.kind, ae_syntax::expression::ExpressionKind::Field { .. })
                     && resolved.struct_field_views.contains(&value.range.start))
+                // Printing an owned string reads a view of it; nothing moves.
+                || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                    if name != "self" && resolved.scalar_reads.get(&value.range.start)
+                        .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                            || resolved.owned_string_bindings.contains(id)))
                 || scalar_body_expression(value, resolved, supports_call, supports_field)
         }
         StatementKind::Assert(value) => {
@@ -1508,7 +1527,12 @@ impl<'a> Parser<'a> {
         }
         let resolved_cell = Rc::clone(&self.resolved_expressions);
         let resolved = resolved_cell.get_or_init(|| self.build_resolved_expressions());
-        let Some(body) = resolved.scalar_bodies.get(&self.tokens[self.pos].offset).cloned() else { return None };
+        let Some(body) = resolved.scalar_bodies.get(&self.tokens[self.pos].offset).cloned() else {
+            if std::env::var_os("AE_ROUTE_REASONS").is_some() {
+                eprintln!("route blocked function at {}: not collected", self.tokens.get(self.pos).map(|t| t.offset).unwrap_or(0));
+            }
+            return None
+        };
         let supports_call = |name: &str, offset: usize| {
             // The pure value builtins lower natively (lower_resolved_builtin);
             // every other reserved name keeps the typed body.
@@ -1523,7 +1547,7 @@ impl<'a> Parser<'a> {
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
-                        || matches!(signature.ret, Type::String)
+                        || matches!(signature.ret, Type::String | Type::Enum(..))
                         || owned_field_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
@@ -1534,7 +1558,7 @@ impl<'a> Parser<'a> {
                         // other borrows take the argument's address
                         // (`Argument::Borrow`) with the typed route's own
                         // classify rules.
-                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView
+                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::Array(_)
                             | Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_))
                     })
             })
@@ -1583,7 +1607,12 @@ impl<'a> Parser<'a> {
             .filter(|&&(slot, _, ty)| ty.owned() && !capture_starts.iter().any(|&(capture, _)| capture == slot))
             .map(|&(slot, _, ty)| (slot, ty))
             .collect();
-        if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
+        if let Some(statement) = body.iter().position(|statement| {
+                !scalar_body_statement(statement, resolved, &supports_call, &supports_field)
+            }).and_then(|index| body.get(index)) {
+            // The body was collected, so the scan admitted it; this statement
+            // fails the lowering's own gates (callee signatures, slot types).
+            self.report_route_reason("blocked", statement, &|s| !scalar_body_statement(s, resolved, &supports_call, &supports_field));
             self.owned_params.clear();
             return None;
         }
@@ -1824,6 +1853,17 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(target.range.end);
                     return Err(self.fail(&format!("cannot assign to '{name}' itself through a '&mut' borrow; write its fields instead")));
                 }
+                // Writing an owned value while a view of it may still be read
+                // frees the bytes the view points at. A string's view
+                // conflicts defer to the graph's ordered adjudication (the
+                // typed rule); every other owned type rejects on sight.
+                if ty.owned() && self.is_borrowed(slot) {
+                    if !(matches!(ty, Type::String) && self.all_borrows_are_views(slot)) {
+                        self.seek_scalar_offset(target.range.end);
+                        return Err(self.fail(&format!("cannot assign to '{name}' while it is borrowed")));
+                    }
+                    self.deferred_write_conflicts.push((slot, target.range.start, name.clone(), "assign to", None));
+                }
                 self.seek_scalar_offset(target.range.end);
                 let compound = compound_assignment_operator(operator);
                 if let Some(op) = &compound {
@@ -1836,6 +1876,16 @@ impl<'a> Parser<'a> {
                 // re-initialization, so the flag clears either way.
                 let moved_before = self.moved.contains(&slot);
                 let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
+                // An owned right-hand side moves into the target: the source
+                // slot's Frees is trimmed, and assigning the target to itself
+                // fails as a same-statement move (the typed rule).
+                if rhs_ty.owned() {
+                    if let Expr::Variable(source, ..) = &rhs {
+                        self.seek_scalar_offset(value.range.end);
+                        self.check_variable_move(*source)?;
+                        self.moved.insert(*source);
+                    }
+                }
                 self.seek_scalar_offset(statement.range.end);
                 self.check_assignment_type(name, ty, rhs_ty, Some(&value.range))?;
                 if self.moved.contains(&slot) && !moved_before {
@@ -1849,7 +1899,9 @@ impl<'a> Parser<'a> {
                 } else {
                     rhs
                 };
-                Statement::Assign(slot, value, false)
+                // Overwriting an owned value releases the old one first (the
+                // Assign codegen's flag); scalars need no release.
+                Statement::Assign(slot, value, ty.owned())
             }
             StatementKind::PointerStore { pointer, pointer_range, value } => {
                 self.seek_scalar_offset(statement.range.start);
@@ -2412,7 +2464,7 @@ impl<'a> Parser<'a> {
                     // typed route's expression parser rejects it (a pointer
                     // cast is the only legal use of `&expr`).
                     if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                        && !matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_))
+                        && !matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_))
                     {
                         self.seek_scalar_offset(argument.range.start);
                         return Err(self.fail("a borrow expression must be cast to a pointer"));
@@ -2421,7 +2473,7 @@ impl<'a> Parser<'a> {
                     // address (`Argument::Borrow`); the same classify rules,
                     // messages and statement-scoped borrow registers the typed
                     // route uses.
-                    if matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_)) {
+                    if matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
                         let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
                             self.seek_scalar_offset(argument.range.end);
                             return Err(self.fail("expected Amp, found the argument"));
@@ -2471,12 +2523,15 @@ impl<'a> Parser<'a> {
                                     if !self.only_view_borrows_active(slot) {
                                         return Err(self.fail(&format!("cannot borrow '{borrowed}' mutably while it is borrowed in this statement")));
                                     }
-                                    self.deferred_write_conflicts.push((slot, argument.range.start, borrowed.clone(), "mutate", None));
+                                    // The conflict points at the borrowed name, the token the
+                                    // typed parser's cursor ends on (col of `d`
+                                    // in `&mut d`, not the `&`).
+                                    self.deferred_write_conflicts.push((slot, name_range.start, borrowed.clone(), "mutate", None));
                                 }
                                 self.mut_borrows.push((slot, self.scopes.len()));
                                 args.push(Argument::Borrow(slot, address));
                             }
-                            (Type::VecRef | Type::VecFRef | Type::StrVecRef, borrow) => {
+                            (Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_), borrow) => {
                                 // An owned vector takes the address; a
                                 // parameter already spelled `&vec` forwards
                                 // its pointer unchanged.
@@ -2721,6 +2776,47 @@ impl<'a> Parser<'a> {
                         _ => Expr::EndsWith(Box::new(first), Box::new(second)),
                     };
                     Ok((value, Type::Bool))
+                }
+                "slice_view" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let (base, base_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    // The view borrows its base: a bare string variable, or a
+                    // string field of a struct *variable* (the whole variable
+                    // is what the borrow protects — ADR-52). Mirrors the typed
+                    // route's checks and messages.
+                    let (vid, field) = match (&base, base_ty) {
+                        (Expr::Variable(id, Type::String, ..), Type::String) => (*id, None),
+                        (Expr::Field(inner, fname, Type::String), Type::String) => match **inner {
+                            Expr::Variable(id, Type::Struct(_), ..) => (id, Some(fname.clone())),
+                            _ => {
+                                self.seek_scalar_offset(arguments[0].range.end);
+                                return Err(self.fail("slice_view can follow a string field only on a struct variable, not on a nested expression"));
+                            }
+                        },
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail("slice_view expects a string variable or a string field of a struct variable (views borrow their base)"));
+                        }
+                    };
+                    if self.moved.contains(&vid) {
+                        return Err(self.binding_label(self.fail("cannot use a moved string in slice_view").with_code("E0102"), vid));
+                    }
+                    let (start, start_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if start_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("slice_view start must be i64"));
+                    }
+                    let (end, end_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                    if end_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[2].range.end);
+                        return Err(self.fail("slice_view end must be i64"));
+                    }
+                    let depth = self.scopes.len();
+                    if !self.borrows.iter().any(|&(id, _, _)| id == vid) {
+                        self.borrows.push((vid, depth, BorrowKind::View));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::SliceView(vid, field, Box::new(start), Box::new(end), line, column), Type::StrView))
                 }
                 "to_i64" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;

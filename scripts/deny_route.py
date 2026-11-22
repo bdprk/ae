@@ -16,6 +16,11 @@ import sys
 
 # Sorted so the manifest reads like a checklist; add new entries in place.
 FILES = [
+    "examples/borrow.ae",
+    "examples/concat.ae",
+    "examples/field_view.ae",
+    "examples/option_propagate.ae",
+    "examples/strings.ae",
     "tests/run/mut_param_fields.ae",
     "tests/run/owned_string_fields.ae",
     "tests/run/struct_value_params.ae",
