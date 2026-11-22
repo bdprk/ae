@@ -4007,6 +4007,88 @@ fn cache_prunes_entries_beyond_the_configured_limit() {
     let _ = fs::remove_dir_all(&dir);
 }
 #[test]
+fn cache_prune_keeps_the_entry_that_was_just_used() {
+    // Pruning is least-recently-used, so the entry a build just served must
+    // outlive an older one. Without a `used` marker refreshed on a frontend
+    // hit, every entry looks as old as its store time and the sweep can drop
+    // the hot one, turning the cache into a rebuild loop once the limit is hit.
+    let dir = std::env::temp_dir().join(format!("ae-cache-lru-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let cache = dir.join("cache");
+    fs::create_dir(&dir).unwrap();
+
+    let hot = dir.join("hot.ae");
+    let cold = dir.join("cold.ae");
+    fs::write(&hot, "fn main() { print(\"hot\"); }").unwrap();
+    fs::write(&cold, "fn main() { print(\"cold\"); }").unwrap();
+
+    let build = |source: &std::path::Path, out: &std::path::Path, limit: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ae"));
+        cmd.arg("build").arg(source).arg("-o").arg(out)
+            .env("AE_CACHE", &cache).env_remove("AE_CACHE_LIMIT");
+        if let Some(value) = limit { cmd.env("AE_CACHE_LIMIT", value); }
+        let result = cmd.output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    };
+    let frontend_dirs = || fs::read_dir(cache.join("frontend")).map(|d| d.count()).unwrap_or(0);
+    // Which entry holds a given program, found through its generated C: the
+    // directory name is a hash of the canonical source path, which this test
+    // cannot reproduce without re-implementing sha256.
+    let entry_for = |needle: &str| {
+        fs::read_dir(cache.join("frontend")).into_iter().flatten().flatten()
+            .map(|e| e.path())
+            .find(|p| fs::read_to_string(p.join("program.c")).map(|t| t.contains(needle)).unwrap_or(false))
+    };
+
+    build(&hot, &dir.join(if cfg!(windows) { "hot.exe" } else { "hot" }), None);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    build(&cold, &dir.join(if cfg!(windows) { "cold.exe" } else { "cold" }), None);
+    assert_eq!(frontend_dirs(), 2, "both programs are cached");
+
+    // Rebuild the hot program: a hit, which must refresh its recency.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    build(&hot, &dir.join(if cfg!(windows) { "hot2.exe" } else { "hot2" }), None);
+    let hot_dir = entry_for("\"hot\"").expect("hot entry exists");
+    assert!(hot_dir.join("used").exists(), "a hit marks the entry used");
+
+    // The cap has to force a real choice: keep the hot entry and drop the cold
+    // one. The sweep walks oldest-first and stops the moment the total fits, so
+    // the cap must be tight enough to require eviction, but with enough slack
+    // that the cold pair alone satisfies it.
+    let dir_bytes = |p: &std::path::Path| -> u64 {
+        fs::read_dir(p).into_iter().flatten().flatten()
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len()).sum()
+    };
+    let cold_dir = entry_for("\"cold\"").expect("cold entry exists");
+    let hot_bytes = dir_bytes(&hot_dir);
+    let cold_bytes = dir_bytes(&cold_dir);
+    assert!(hot_bytes > 0 && cold_bytes > 0, "both entries carry content");
+
+    let all_frontend: Vec<_> = fs::read_dir(cache.join("frontend")).into_iter().flatten().flatten()
+        .map(|e| e.path()).collect();
+    let all_exec: Vec<_> = fs::read_dir(cache.join("entries")).into_iter().flatten().flatten()
+        .map(|e| e.path()).collect();
+    let exec_bytes: u64 = all_exec.iter().map(|p| dir_bytes(p)).sum();
+    let stored: u64 = all_frontend.iter().map(|p| dir_bytes(p)).sum::<u64>() + exec_bytes;
+
+    // The third program contributes one frontend entry and one executable entry
+    // before the sweep runs. Publishing it, then requiring the total to drop
+    // back under `stored + one cold entry` forces exactly the cold pair out.
+    let third_frontend = hot_bytes;
+    let third_exec = dir_bytes(&all_exec[0]);
+    let limit = stored + third_frontend + third_exec - cold_bytes;
+
+    let third = dir.join("third.ae");
+    fs::write(&third, "fn main() { print(\"third\"); }").unwrap();
+    build(&third, &dir.join(if cfg!(windows) { "third.exe" } else { "third" }), Some(&limit.to_string()));
+
+    assert!(entry_for("\"hot\"").is_some(), "the recently used entry survives the sweep");
+    assert!(entry_for("\"cold\"").is_none(), "the stale entry is the one evicted");
+    let _ = fs::remove_dir_all(&dir);
+}
+#[test]
 fn string_vectors_start_empty_and_copy_borrowed_elements() {
     // `args()` hands back owned strings, but indexing it gives a borrow. Pushing
     // a borrow must copy it: moving the element would empty the slot it was read

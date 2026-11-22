@@ -113,6 +113,14 @@ pub fn lookup(cache_root: &Path, root: &Path, imports: &str) -> Option<Hit> {
     let bytes = fs::read(&c_path).ok()?;
     if sha256::hex(&bytes) != c_digest { return None; }
     let c = String::from_utf8(bytes).ok()?;
+    // Mark the entry as just used. Pruning orders entries by `dir_used`, which
+    // prefers a `used` marker and falls back to the directory's own mtime.
+    // Reading a directory never moves that mtime, so without this marker a hot
+    // entry keeps the timestamp it got at store time and becomes the first
+    // thing evicted once the size limit is reached. Same marker, same meaning
+    // as `touch_used` for the executable cache. Best effort: losing the touch
+    // only costs recency information, never the hit itself.
+    let _ = fs::write(dir.join("used"), b"");
     Some(Hit { c, key, units })
 }
 
@@ -278,5 +286,23 @@ mod tests {
         let mut reversed = tracked(&[&a, &b], "c");
         reversed.units.reverse();
         assert_eq!(query_key(&forward.units, "tool"), query_key(&reversed.units, "tool"));
+    }
+
+    #[test]
+    fn hit_refreshes_the_used_marker() {
+        // Pruning evicts by `used` marker, falling back to the directory mtime.
+        // A hit that does not touch the marker would leave a hot entry looking
+        // as old as its store time, so the LRU sweep would drop it first.
+        let tmp = TempDir::new();
+        let src = tmp.path().join("main.ae");
+        write(&src, "fn main() { print(1) }");
+        store(tmp.path(), &src, "", &tracked(&[&src], "c")).unwrap();
+        let dir = entry_dir(tmp.path(), &canonical_root(&src).unwrap());
+
+        // A fresh store must not leave a marker: only real use should count.
+        assert!(!dir.join("used").exists(), "store alone must not mark the entry used");
+
+        assert!(lookup(tmp.path(), &src, "").is_some());
+        assert!(dir.join("used").exists(), "a hit marks the entry used");
     }
 }
