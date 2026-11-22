@@ -31,8 +31,17 @@ fn scalar_type(ty: Type) -> bool {
 /// handles), so the body needs no borrow-argument machinery for them. Every
 /// other reserved name keeps its typed body until its surface is reviewed.
 const RESOLVED_BUILTINS: &[&str] = &[
-    "len", "to_string", "to_f64", "trim", "slice", "split",
-    "contains", "starts_with", "ends_with",
+    "len", "to_string", "to_f64", "to_i64", "trim", "slice", "split",
+    "contains", "starts_with", "ends_with", "parse_int", "find",
+    "json_get", "json_int", "json_bool", "json_len", "json_has",
+];
+
+/// Builtins whose result is a prelude enum value: a binding initialized by
+/// one is enum-typed even when the resolver leaves its spelling open.
+const ENUM_RESULT_BUILTINS: &[(&str, &str)] = &[
+    ("parse_int", "IntResult"), ("to_i64", "IntResult"), ("find", "IntResult"),
+    ("json_get", "ReadResult"), ("json_int", "IntResult"),
+    ("json_bool", "BoolResult"), ("json_len", "IntResult"),
 ];
 
 fn resolved_builtin(name: &str) -> bool {
@@ -1164,7 +1173,21 @@ impl<'a> Parser<'a> {
                                         expressions.vector_definitions.insert(id);
                                         expressions.owned_vectors.insert(id);
                                     }
-                                    _ => {}
+                                    _ => {
+                                        // A builtin returning a prelude enum
+                                        // (parse_int, json_get, find, ...)
+                                        // types its binding even when the
+                                        // resolver leaves the spelling open;
+                                        // `match` needs to know the subject
+                                        // is an enum.
+                                        if let ExpressionKind::Call { callee, .. } = &initializer.kind {
+                                            if let ExpressionKind::Atom(Kind::Ident(builtin)) = &callee.kind {
+                                                if ENUM_RESULT_BUILTINS.iter().any(|(name, _)| *name == builtin.as_str()) {
+                                                    expressions.enum_bindings.insert(id);
+                                                }
+                                            }
+                                        }
+                                    }
                                 },
                             }
                         }
@@ -2698,6 +2721,72 @@ impl<'a> Parser<'a> {
                         _ => Expr::EndsWith(Box::new(first), Box::new(second)),
                     };
                     Ok((value, Type::Bool))
+                }
+                "to_i64" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (value, actual) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if actual != Type::F64 {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("to_i64 expects an f64"));
+                    }
+                    let ty = self.prelude_type("IntResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ToI64(Box::new(value), ty, line, column), ty))
+                }
+                "parse_int" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (value, actual) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(actual, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("parse_int expects a string or string view"));
+                    }
+                    let ty = self.prelude_type("IntResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ParseInt(Box::new(value), ty, line, column), ty))
+                }
+                "find" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (doc, doc_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(doc_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("find expects a string to search in"));
+                    }
+                    let (needle, needle_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(needle_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("find expects a string to search for"));
+                    }
+                    let ty = self.prelude_type("IntResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Find(Box::new(doc), Box::new(needle), ty, line, column), ty))
+                }
+                "json_get" | "json_int" | "json_bool" | "json_len" | "json_has" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (doc, doc_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(doc_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a JSON document string")));
+                    }
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    let ty = match name {
+                        "json_get" => self.prelude_type("ReadResult"),
+                        "json_has" => Type::Bool,
+                        "json_bool" => self.prelude_type("BoolResult"),
+                        _ => self.prelude_type("IntResult"),
+                    };
+                    let value = match name {
+                        "json_get" => Expr::JsonGet(Box::new(doc), Box::new(path), ty, line, column),
+                        "json_int" => Expr::JsonInt(Box::new(doc), Box::new(path), ty, line, column),
+                        "json_bool" => Expr::JsonBool(Box::new(doc), Box::new(path), ty, line, column),
+                        "json_len" => Expr::JsonLen(Box::new(doc), Box::new(path), ty, line, column),
+                        _ => Expr::JsonHas(Box::new(doc), Box::new(path), line, column),
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
                 }
                 _ => {
                     // A math builtin: fixed arity, every argument already f64.

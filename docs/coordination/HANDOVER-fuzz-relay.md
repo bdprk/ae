@@ -1150,3 +1150,22 @@ the CI ratchet (bump only downward).
 
 Fleet: 866,374 seeds / 91 segments, zero failures; InstaBox certificates
 were renewed 2026-11-23 00:45 (valid 24h).
+
+## P1.1 slice 11 landed: enum-result builtins
+
+- `parse_int`, `to_i64`, `find` and the `json_*` family lower natively:
+  existing `Expr` variants, the typed route's argument checks/messages, and
+  the prelude enum result types (`IntResult`, `ReadResult`, `BoolResult`,
+  or plain `Bool` for `json_has`).
+- `ENUM_RESULT_BUILTINS` marks a binding initialized by one of them as
+  enum-typed even when the resolver leaves the spelling open (`let parsed =
+  parse_int(...)`), so `match parsed` routes.
+
+Coverage: 416 → **410**, files with fallbacks 124 → 123. `examples/maybe.ae`
+is fully routed now; `json_report.ae` keeps one typed function whose match
+subject is a `try_create_dir` result (an effectful builtin, deliberately
+still typed).
+
+Next: effectful `try_*` builtins (need the typed route's effect/result
+handling), closure-valued bindings, generic-instance structs (`Cell[T]`),
+for-in over borrowed vectors, trait-method calls, nested store bases.
