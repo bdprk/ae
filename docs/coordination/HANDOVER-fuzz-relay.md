@@ -592,6 +592,7 @@ record their effects at their respective commit points.
 
 Struct field initializers and stores share the same type diagnostic. A
 resolved scalar constructor now reports a mismatch at the initializer
-boundary, where the token route would report it. The next slice covers
-constructor field names and enum payloads.
+boundary, where the token route would report it. Eligible constructors on both
+routes validate field names and duplicates in source order, then report
+missing fields in layout order. The next slice covers enum payloads.
 

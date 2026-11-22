@@ -163,7 +163,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
             .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)),
         // A construction of a drop-free file-local struct with scalar
-        // fields: marked complete at collection time.
+        // fields: the layout is known at collection time.
         ExpressionKind::Struct { target, fields } => {
             matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.drop_free_constructions.contains(&expression.range.start)
@@ -867,20 +867,16 @@ impl<'a> Parser<'a> {
                             }
                             // A construction of a file-local, non-generic,
                             // drop-free struct with only scalar fields joins
-                            // the body route. The complete-shape gate keeps
-                            // malformed constructions on the typed route,
-                            // whose diagnostics stay canonical.
-                            if let ae_syntax::expression::ExpressionKind::Struct { target, fields } = &expression.kind {
+                            // the body route. Initializers are validated in
+                            // source order when the expression is lowered.
+                            if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &expression.kind {
                                 if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
                                     if expressions.struct_constructors.contains(&target.range.start) {
                                         if let Some(&sid) = self.struct_names.get(name) {
                                             let defn = &self.structs[sid];
-                                            let complete = defn.drop_fn.is_none()
-                                                && fields.len() == defn.fields.len()
+                                            if (defn.file == self.file || defn.public) && defn.drop_fn.is_none()
                                                 && defn.fields.iter().all(|(_, ty)| scalar_type(*ty))
-                                                && fields.iter().all(|field| defn.fields.iter().any(|(declared, _)| declared == &field.name))
-                                                && fields.iter().map(|field| &field.name).collect::<std::collections::HashSet<&String>>().len() == fields.len();
-                                            if complete {
+                                            {
                                                 expressions.drop_free_constructions.insert(expression.range.start);
                                             }
                                         }
@@ -1432,23 +1428,20 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Group(inner) => self.lower_scalar_body_expression(inner, slots)?,
             ExpressionKind::Struct { target, fields } => {
-                // A drop-free file-local struct construction: collection
-                // confirmed the complete shape, so the field table lookup
-                // and the ordering cannot fail here.
+                // Validate in source order and emit in layout order.
                 let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
                     unreachable!("scalar construction eligibility");
                 };
                 let &sid = self.struct_names.get(name).expect("scalar construction target");
-                let declared_fields = self.structs[sid].fields.clone();
-                let mut values: Vec<Option<Expr>> = (0..declared_fields.len()).map(|_| None).collect();
+                let mut values: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
                 for field in fields {
-                    let slot = declared_fields.iter().position(|(declared, _)| declared == &field.name)
-                        .expect("scalar construction field");
+                    let next = self.tokens.partition_point(|token| token.offset < field.name_range.end);
+                    let (slot, expected) = self.constructor_field(sid, &field.name, &values, Some(self.tokens[next].offset))?;
                     let (value, actual) = self.lower_scalar_body_expression(&field.value, slots)?;
-                    self.check_field_value_type(&field.name, declared_fields[slot].1, actual, Some(&field.value.range))?;
+                    self.check_field_value_type(&field.name, expected, actual, Some(&field.value.range))?;
                     values[slot] = Some(value);
                 }
-                (Expr::StructLit(sid, values.into_iter().collect::<Option<Vec<_>>>().expect("complete construction")), Type::Struct(sid))
+                self.finish_struct_literal(sid, target.range.start, values)?
             }
             ExpressionKind::Field { base, name } => {
                 if let ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind {
@@ -3278,6 +3271,7 @@ mod tests {
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
         let source = format!("{source} fn bad_point() -> i64 {{ let wrong = Point {{ x: false, y: 1 }}; return wrong.y; }}");
+        let source = format!("{source} fn bad_fields() -> i64 {{ let extra = Point {{ z: 1 }}; return 0; }} fn dup_fields() -> i64 {{ let dup = Point {{ x: 1, x: false }}; return 0; }} fn missing_fields() -> i64 {{ let missing = Point {{ x: 1 }}; return 0; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3664,6 +3658,15 @@ mod tests {
         let error = parser.lower_resolved_scalar_body().expect("resolved constructor field error").err().unwrap();
         assert_eq!(error.message, "field 'x' must be i64");
         assert_eq!(*parser.current(), Kind::Comma);
+        for (binding, message) in [
+            ("{ let extra", "struct 'Point' has no field 'z'"),
+            ("{ let dup", "field 'x' specified twice"),
+            ("{ let missing", "missing field 'y' in 'Point' construction"),
+        ] {
+            parser.seek_scalar_offset(source.find(binding).unwrap());
+            let error = parser.lower_resolved_scalar_body().expect("resolved constructor shape error").err().unwrap();
+            assert_eq!(error.message, message);
+        }
         parser.names.remove("g");
 
         parser.seek_scalar_offset(source.find("{ let q = Point { x: 3").unwrap());

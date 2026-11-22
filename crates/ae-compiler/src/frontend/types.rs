@@ -182,6 +182,39 @@ impl Parser<'_> {
         }
         Ok((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid)))
     }
+    pub(super) fn constructor_field(
+        &self,
+        sid: usize,
+        name: &str,
+        slots: &[Option<Expr>],
+        diagnostic_pos: Option<usize>,
+    ) -> Result<(usize, Type), ae_span::Diagnostic> {
+        let def = &self.structs[sid];
+        let diagnostic = |message: String| match diagnostic_pos {
+            Some(offset) => self.error_at(offset, &message),
+            None => self.fail(&message),
+        };
+        let (index, (_, ty)) = def.fields.iter().enumerate().find(|(_, (field, _))| field == name)
+            .ok_or_else(|| diagnostic(format!("struct '{}' has no field '{}'", def.name, name)))?;
+        if slots[index].is_some() {
+            return Err(diagnostic(format!("field '{}' specified twice", name)));
+        }
+        Ok((index, *ty))
+    }
+
+    pub(super) fn finish_struct_literal(
+        &self,
+        sid: usize,
+        offset: usize,
+        slots: Vec<Option<Expr>>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let def = &self.structs[sid];
+        let values = slots.into_iter().enumerate().map(|(i, slot)| {
+            slot.ok_or_else(|| self.error_at(offset, &format!("missing field '{}' in '{}' construction", def.fields[i].0, def.name)))
+        }).collect::<Result<_, _>>()?;
+        Ok((Expr::StructLit(sid, values), Type::Struct(sid)))
+    }
+
     // `Name { field: expr, ... }` once the layout is known. Fields may appear
     // in any order but each exactly once; owned fields are moved in.
     pub(super) fn struct_literal(&mut self, sid: usize, offset: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
@@ -190,29 +223,18 @@ impl Parser<'_> {
             eprintln!("struct literal debug: sid {} name '{}' at token {}", sid, name, self.pos);
         }
         self.take(Kind::LBrace)?;
-        let def_fields = self.structs[sid].fields.clone();
-        let mut slots: Vec<Option<Expr>> = (0..def_fields.len()).map(|_| None).collect();
-        let mut seen = std::collections::HashSet::new();
+        let mut slots: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
         while *self.current() != Kind::RBrace {
             let fname = self.identifier()?;
-            let fidx = def_fields.iter().position(|(n, _)| *n == fname)
-                .ok_or_else(|| self.fail(&format!("struct '{}' has no field '{}'", name, fname)))?;
-            if !seen.insert(fname.clone()) { return Err(self.fail(&format!("field '{}' specified twice", fname))); }
+            let (fidx, expected) = self.constructor_field(sid, &fname, &slots, None)?;
             self.take(Kind::Colon)?;
             let (value, vty) = self.expression(0, true)?;
-            self.check_field_value_type(&fname, def_fields[fidx].1, vty, None)?;
+            self.check_field_value_type(&fname, expected, vty, None)?;
             slots[fidx] = Some(value);
             if *self.current() == Kind::Comma { self.pos += 1; }
         }
         self.take(Kind::RBrace)?;
-        let mut values = Vec::new();
-        for (i, slot) in slots.into_iter().enumerate() {
-            match slot {
-                Some(v) => values.push(v),
-                None => return Err(self.error_at(offset, &format!("missing field '{}' in '{}' construction", def_fields[i].0, name))),
-            }
-        }
-        Ok((Expr::StructLit(sid, values), Type::Struct(sid)))
+        self.finish_struct_literal(sid, offset, slots)
     }
     // `enum Name { ... }` or `enum Name[T, U] { ... }`. A generic declaration
     // produces no layout at all; only instantiations do (ADR-21).
