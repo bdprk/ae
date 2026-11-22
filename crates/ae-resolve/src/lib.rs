@@ -318,6 +318,24 @@ fn main() {
             Some("i64".to_owned()), Some("bool".to_owned()), Some("f64".to_owned()),
             None, None, None,
         ]);
+
+        use crate::resolve::ExpressionType::{Checked, Deferred, Rejected};
+        use crate::typecheck::{OperatorError, Scalar};
+
+        let source = "fn scale(x: i64) -> i64 {\n    let n = x + 2;\n    let good = -(n * 3);\n    let bad = (1.5 % 2.0) + 3.0;\n    let later = scale(9) + 1;\n    return good;\n}\n";
+        let resolution = resolve_source(source);
+        let facts = &resolution.functions[0].expression_types;
+        let fact = |fragment: &str| {
+            let start = source.find(fragment).unwrap();
+            facts.get(&(start..start + fragment.len())).copied()
+        };
+        assert_eq!(fact("x + 2"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("n * 3"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("-(n * 3)"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("1.5 % 2.0"), Some(Rejected(OperatorError::FloatRemainder)));
+        assert_eq!(fact("(1.5 % 2.0) + 3.0"), Some(Deferred));
+        assert_eq!(fact("scale(9) + 1"), Some(Deferred));
+        assert!(resolution.diagnostics.is_empty());
     }
 
     #[test]

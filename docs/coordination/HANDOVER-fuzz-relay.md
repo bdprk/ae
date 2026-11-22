@@ -565,6 +565,13 @@ still produce E0104.
 The resolver and compiler now use the same operator checks for `i64`, `f64`,
 and `bool`. Resolver inference covers integer bitwise operators and withholds
 types for rejected scalar expressions. The compiler retains its diagnostic
-positions and string lowering. The next slice records checked expression
-types for downstream consumers.
+positions and string lowering.
+
+Resolved function bodies now record checked scalar types, rejected operators,
+and deferred expressions by full byte range. The walk checks children before
+their parents and carries local scalar types by definition identity. Rejection
+stays at the operator that failed; enclosing operators defer. The compiler
+still owns user-facing operator diagnostics. The next slice can consume these
+facts in eligible compiler bodies and compare diagnostic locations on rejected
+inputs.
 

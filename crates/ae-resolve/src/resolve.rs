@@ -14,6 +14,7 @@ use ae_syntax::statement::{parse_statements_until_close, ElseBranch, Statement, 
 use ae_syntax::{Kind, Token};
 
 use crate::module::Module;
+use crate::typecheck::{self, OperatorError, Scalar};
 use crate::types::{classify, SpellingEntry, SpellingRole, TypeSpelling};
 use crate::{DefEntry, DefId, DefKind, Occurrence, Role};
 
@@ -48,6 +49,15 @@ pub struct FnOccurrences {
     pub pointer_cast_targets: HashMap<usize, bool>,
     /// Closure syntax keyed by the opening pipe token offset.
     pub closure_headers: HashMap<usize, Arc<Expression>>,
+    /// Scalar type-check results, indexed by full expression byte range.
+    pub expression_types: HashMap<Range<usize>, ExpressionType>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionType {
+    Checked(Scalar),
+    Rejected(OperatorError),
+    Deferred,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -465,6 +475,8 @@ impl<'m> Pass<'m> {
                 specialization_arguments: HashMap::new(),
                 pointer_cast_targets: HashMap::new(),
                 closure_headers: HashMap::new(),
+                expression_types: HashMap::new(),
+                scalar_bindings: HashMap::new(),
                 diagnostics: Vec::new(),
             };
             if let DeclarationKind::Function { parameters, .. } = &unit.declaration.kind {
@@ -534,11 +546,11 @@ impl<'m> Pass<'m> {
                     }
                 }
             }
-            let Walker { locals, occurrences, binding_visibility, spellings, diagnostics, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, .. } = walker;
+            let Walker { locals, occurrences, binding_visibility, spellings, diagnostics, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, expression_types, .. } = walker;
             self.defs.extend(locals);
             self.spellings.extend(spellings);
             self.diagnostics.extend(diagnostics);
-            self.functions.push(FnOccurrences { function: index, function_def, occurrences, binding_visibility, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers });
+            self.functions.push(FnOccurrences { function: index, function_def, occurrences, binding_visibility, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, expression_types });
         }
     }
 }
@@ -594,11 +606,13 @@ struct Walker<'w> {
     specialization_arguments: HashMap<usize, Arc<[Range<usize>]>>,
     pointer_cast_targets: HashMap<usize, bool>,
     closure_headers: HashMap<usize, Arc<Expression>>,
+    expression_types: HashMap<Range<usize>, ExpressionType>,
+    scalar_bindings: HashMap<DefId, Scalar>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl Walker<'_> {
-    fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>, visible_from: usize) {
+    fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>, visible_from: usize) -> DefId {
         let id = DefId(self.base + self.locals.len() as u32);
         self.locals.push(DefEntry { id, name: name.clone(), kind, range: range.clone(), owner: Some(self.function_def), mutable, writable_through, inferred, imported: false });
         if kind != DefKind::ClosureParameter && self.live.contains_key(&name) {
@@ -615,6 +629,7 @@ impl Walker<'_> {
                 self.binding_visibility.push((id, visible_from.max(scope.start)..scope.end));
             }
         }
+        id
     }
 
     fn occurrence(&mut self, name: &str, range: Range<usize>, role: Role, mode: Lookup) -> Option<DefId> {
@@ -1072,7 +1087,10 @@ impl Walker<'_> {
             StatementKind::Binding { mutable, name, name_range, initializer } => {
                 self.expr(initializer, Role::Read);
                 let inferred = self.infer_expression(initializer);
-                self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred, statement.range.end);
+                let binding = self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred, statement.range.end);
+                if let Some(ExpressionType::Checked(scalar)) = self.expression_types.get(&initializer.range) {
+                    self.scalar_bindings.insert(binding, *scalar);
+                }
             }
             StatementKind::Assign { target, value, .. } => {
                 self.assign_target(target);
@@ -1336,6 +1354,52 @@ impl Walker<'_> {
     /// `Qualified` member can look up its qualifier. Only name-rooted shapes
     /// forward a target; composites return `None`.
     fn expr(&mut self, expression: &Expression, role: Role) -> Option<DefId> {
+        let target = self.walk_expression(expression, role);
+        let checked = self.check_scalar_expression(expression, target);
+        self.expression_types.insert(expression.range.clone(), checked);
+        target
+    }
+
+    fn check_scalar_expression(&self, expression: &Expression, target: Option<DefId>) -> ExpressionType {
+        use ExpressionType::{Checked, Deferred, Rejected};
+        let checked_child = |child: &Expression| match self.expression_types.get(&child.range) {
+            Some(Checked(scalar)) => Some(*scalar),
+            _ => None,
+        };
+        let result = match &expression.kind {
+            ExpressionKind::Atom(Kind::Number(_)) => return Checked(Scalar::Int),
+            ExpressionKind::Atom(Kind::Float(_)) => return Checked(Scalar::Float),
+            ExpressionKind::Atom(Kind::True | Kind::False) => return Checked(Scalar::Bool),
+            ExpressionKind::Atom(Kind::Ident(_)) => {
+                let scalar = target.and_then(|id| {
+                    if let Some(scalar) = self.scalar_bindings.get(&id) {
+                        return Some(*scalar);
+                    }
+                    let entry = self.defs_local(id)?;
+                    let Some(TypeSpelling::Primitive(name)) = entry.inferred.as_ref() else { return None };
+                    if matches!(entry.kind, DefKind::Parameter | DefKind::ClosureParameter) {
+                        Scalar::from_spelling(name)
+                    } else {
+                        None
+                    }
+                });
+                return scalar.map_or(Deferred, Checked);
+            }
+            ExpressionKind::Group(inner) => return checked_child(inner).map_or(Deferred, Checked),
+            ExpressionKind::Prefix { operator, operand } if matches!(operator, Kind::Bang | Kind::Minus) => {
+                let Some(operand) = checked_child(operand) else { return Deferred };
+                typecheck::prefix(operator, Some(operand))
+            }
+            ExpressionKind::Binary { left, operator, right } => {
+                let (Some(left), Some(right)) = (checked_child(left), checked_child(right)) else { return Deferred };
+                typecheck::infix(operator, Some(left), Some(right))
+            }
+            _ => return Deferred,
+        };
+        result.map_or_else(Rejected, Checked)
+    }
+
+    fn walk_expression(&mut self, expression: &Expression, role: Role) -> Option<DefId> {
         match &expression.kind {
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 let mode = match role {
