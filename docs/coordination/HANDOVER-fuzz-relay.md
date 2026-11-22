@@ -790,3 +790,8 @@ The resolved closure route now accepts reads of captured string literals
 when the compiler binds the capture slot as a read-only string view.
 Resolution records outer local definitions and scopes the read to the
 closure body. The owning capture form still uses the typed path.
+
+The resolved closure route also lowers indexed reads of captured numeric
+vectors through the concrete read-only capture slots. Integer and float
+elements use the same vector-index expressions as the typed parser.
+Owning and string-vector captures still use the typed path.
