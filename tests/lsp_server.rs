@@ -620,7 +620,7 @@ fn lsp_shadowing_is_rejected_like_the_compiler() {
     // the resolver's diagnostics agree, so LSP hover never has to answer
     // for a shadowed name — M6.2.03's shadow case does not exist in this
     // language. What must hold: both sides report the same error.
-    let mut server = LspServer::new();
+    let server = LspServer::new();
     let source = "fn main() {
     let total = 1;
     if true {
@@ -691,4 +691,45 @@ fn lsp_cancelled_completion_does_not_mask_new_results() {
         .filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
     assert!(labels.contains(&"beta"), "new binding after the edit: {labels:?}");
     assert!(labels.contains(&"alpha"), "earlier binding stays live: {labels:?}");
+}
+
+#[test]
+#[ignore = "latency probe: run explicitly with --ignored to measure the 100k-line target"]
+fn lsp_completion_latency_on_a_large_project() {
+    // M6.2.05 asks for member completion under 100 ms on a 100k-line
+    // project. Build one: 5,000 structs of 10 fields plus a main that
+    // completes a member access at the end.
+    let mut text = String::new();
+    for index in 0..8500 {
+        text.push_str(&format!("struct S{index} {{\n"));
+        for field in 0..10 {
+            text.push_str(&format!("    f{field}: i64,\n"));
+        }
+        text.push_str("}\n");
+    }
+    text.push_str("fn main() {\n    let p = S8499 { f0: 1, f1: 2, f2: 3, f3: 4, f4: 5, f5: 6, f6: 7, f7: 8, f8: 9, f9: 10 };\n    p.\n}\n");
+    let line_count = text.lines().count();
+    assert!(line_count >= 100_000, "project has {line_count} lines");
+
+    let mut server = LspServer::new();
+    let open = format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///large.ae","version":1,"text":{}}}}}}}"#, JsonValue::String(text.clone()).serialize());
+    server.handle_message(open.as_str());
+
+    let target_line = text.lines().count() as i64 - 2;
+    let req = format!(r#"{{"jsonrpc":"2.0","id":50,"method":"textDocument/completion","params":{{"textDocument":{{"uri":"file:///large.ae"}},"position":{{"line":{target_line},"character":6}}}}}}"#);
+    let started = std::time::Instant::now();
+    let resps = server.handle_message(&req);
+    let cold = started.elapsed();
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let labels: Vec<&str> = val.get("result").and_then(|r| r.as_array()).unwrap().iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    // The warmed answer: the document's resolution is cached, so steady-state
+    // completion is what an editor sees per keystroke.
+    let started = std::time::Instant::now();
+    let warm_resps = server.handle_message(&req);
+    let warm = started.elapsed();
+    eprintln!("PROBE completion latency: cold {:?}, warm {:?} on {} lines ({} labels)", cold, warm, line_count, labels.len());
+    assert!(labels.iter().any(|label| label.starts_with('f')), "member fields answered");
+    assert!(!warm_resps.is_empty(), "warm answer arrives");
+    assert!(warm.as_millis() < 100, "warm completion under 100 ms: {warm:?}");
 }

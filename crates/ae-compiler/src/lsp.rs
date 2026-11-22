@@ -342,7 +342,7 @@ pub struct Document {
     /// read the def table instead of matching text). The imports resolve
     /// from disk next to the document, so imported defs carry their own
     /// file's name for cross-file definition.
-    pub resolution: OnceCell<std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>>,
+    pub resolution: OnceCell<Option<std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>>>,
 }
 
 impl Document {
@@ -371,15 +371,16 @@ impl Document {
     /// (lex or declaration diagnostics) have none: their features fall
     /// back to the text heuristics.
     pub fn resolution(&self) -> Option<&std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>> {
-        if let Some(cached) = self.resolution.get() {
-            return Some(cached);
-        }
-        let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
-        let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
-        let imports = self.disk_imports();
-        let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &imports, tokens.as_slice());
-        self.resolution.set(std::sync::Arc::new((module, imports, resolution))).ok()?;
-        self.resolution.get()
+        // A failed parse caches its failure: an unparseable buffer (a
+        // half-typed `p.`, say) must not re-lex and re-parse on every
+        // request — that cost 160 ms per completion on a 100k-line file.
+        self.resolution.get_or_init(|| {
+            let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
+            let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
+            let imports = self.disk_imports();
+            let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &imports, tokens.as_slice());
+            Some(std::sync::Arc::new((module, imports, resolution)))
+        }).as_ref()
     }
 
     /// The use headers' modules, loaded from disk next to this document.
@@ -467,55 +468,59 @@ fn symbol_kind_number(kind: ae_resolve::DefKind) -> u32 {
     }
 }
 
-fn textual_member_fields(text: &str, receiver: &str) -> Option<Vec<(String, String)>> {
-    let mut struct_name = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix("let ").or_else(|| trimmed.strip_prefix("var ")) else { continue };
-        let Some(rest) = rest.strip_prefix(receiver) else { continue };
-        let Some(after_equal) = rest.split_once('=').map(|pair| pair.1) else { continue };
-        let after_equal = after_equal.trim_start();
-        let name_end = after_equal.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_equal.len());
-        let candidate = &after_equal[..name_end];
-        if candidate.is_empty() { continue; }
-        if after_equal[name_end..].trim_start().starts_with('{') {
-            struct_name = Some(candidate.to_owned());
+fn textual_member_fields(text: &str, receiver: &str, cursor: usize) -> Option<Vec<(String, String)>> {
+    // String searches (memchr-backed) instead of a line walk: a 100k-line
+    // document was scanned line-by-line several times per completion, which
+    // blew the M6.2.05 latency target.
+    let before = &text[..cursor.min(text.len())];
+    let let_marker = format!("let {receiver}");
+    let var_marker = format!("var {receiver}");
+    let decl_at = before.rfind(&let_marker).or_else(|| before.rfind(&var_marker))?;
+    let decl = &text[decl_at..];
+    let equal = decl.find('=')?;
+    let after_equal = decl[equal + 1..].trim_start();
+    let name_end = after_equal.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_equal.len());
+    if name_end == 0 || !after_equal[name_end..].trim_start().starts_with('{') {
+        return None;
+    }
+    let struct_name = &after_equal[..name_end];
+    let marker = format!("struct {struct_name}");
+    let mut search_from = 0usize;
+    let body = loop {
+        let at = text[search_from..].find(&marker)? + search_from;
+let boundary_ok = text[at..].get(marker.len()..).is_some_and(|rest| {
+            rest.starts_with(|c: char| c == ' ' || c == '{' || c == char::from(10) || c == char::from(13))
+        });
+        if boundary_ok {
+            break &text[at..];
+        }
+        search_from = at + marker.len();
+    };
+    let open = body.find('{')?;
+    let inline = &body[open + 1..];
+    let mut fields = Vec::new();
+    let mut remaining = inline;
+    loop {
+        let trimmed = remaining.trim_start();
+        if trimmed.starts_with('}') {
             break;
         }
-    }
-    let struct_name = struct_name?;
-    let mut fields = Vec::new();
-    let mut inside = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if !inside {
-            if trimmed.starts_with("struct ") && trimmed[7..].starts_with(&struct_name) {
-                inside = true;
-                // A single-line declaration carries its fields inline.
-                if let Some((open, rest)) = trimmed.split_once('{') {
-                    if let Some((body, _)) = rest.split_once('}') {
-                        for part in body.split(',') {
-                            if let Some((field, ty)) = part.split_once(':') {
-                                let field = field.trim();
-                                if is_ident(field) {
-                                    fields.push((field.to_owned(), ty.trim().to_owned()));
-                                }
-                            }
-                        }
-                        return Some(fields);
-                    }
-                    let _ = open;
-                }
-            }
-            continue;
+        let Some((field, rest)) = trimmed.split_once(':') else { break };
+        let field = field.trim();
+        if !is_ident(field) {
+            return None;
         }
-        if let Some((field, ty)) = trimmed.split_once(':') {
-            let field = field.trim();
-            if is_ident(field) && !trimmed.starts_with("//") {
-                fields.push((field.to_owned(), ty.trim().trim_end_matches(',').trim_end_matches('}').trim().to_owned()));
-            }
+        let rest_trimmed = rest.trim_start();
+let ty_end = rest_trimmed.find(|c: char| c == ',' || c == '}' || c == char::from(10) || c == char::from(13))
+            .unwrap_or(rest_trimmed.len());
+        fields.push((field.to_owned(), rest_trimmed[..ty_end].trim().to_owned()));
+        if rest_trimmed[ty_end..].trim_start().starts_with('}') {
+            break;
         }
-        if trimmed.starts_with('}') { break; }
+        remaining = rest_trimmed.get(ty_end + 1..).unwrap_or("");
+        if remaining.trim_start().starts_with('}') {
+            break;
+        }
     }
     (!fields.is_empty()).then_some(fields)
 }
@@ -1044,7 +1049,7 @@ impl LspServer {
         // struct's fields from the text. Still type-driven — never a sweep
         // over every field in the file.
         let Some(cached) = doc.resolution() else {
-            return textual_member_fields(&doc.text, receiver);
+            return textual_member_fields(&doc.text, receiver, offset);
         };
         let resolution = &cached.2;
         // The receiver's occurrence resolves by offset when the statement is
@@ -1496,7 +1501,6 @@ impl LspServer {
     fn definition_from_defs(&self, doc: &Document, offset: usize) -> Option<Location> {
         let cached = doc.resolution()?;
         let resolution = &cached.2;
-        eprintln!("PROBE defs={} imports={} at={:?}", resolution.defs.len(), cached.1.len(), def_at(resolution, offset).map(|d| (d.id.0, d.name.clone(), d.imported)));
         let def = def_at(resolution, offset)?;
         if def.imported {
             return self.imported_definition(doc, &cached, def);
@@ -1646,6 +1650,21 @@ impl LspServer {
         // their declared signatures.
         if let Some(cached) = doc.resolution() {
             let resolution = &cached.2;
+            // The identifier prefix being typed (empty right after a space).
+            // Bulk items answer prefix matches only, and a cap keeps the
+            // candidate list bounded on very large files: a 100k-line file
+            // holds tens of thousands of structs, and rendering every one
+            // blew the completion latency target.
+            let prefix_start = {
+                let bytes = doc.text.as_bytes();
+                let mut start = offset.min(bytes.len());
+                while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+                    start -= 1;
+                }
+                start
+            };
+            let prefix = &doc.text[prefix_start..offset.min(doc.text.len())];
+            let mut structs_seen = 0usize;
             let mut seen = std::collections::HashSet::new();
             let visible: Vec<_> = resolution.functions.iter().flat_map(|function| &function.binding_visibility)
                 .rev().filter(|(_, range)| range.contains(&offset))
@@ -1688,7 +1707,13 @@ impl LspServer {
                         }
                         (3, format!("fn {}({params}){returns}", def.name))
                     }
-                    ae_resolve::DefKind::Struct => (7, format!("struct {}", def.name)),
+                    ae_resolve::DefKind::Struct => {
+                        if (!prefix.is_empty() && !def.name.starts_with(prefix)) || structs_seen >= 200 {
+                            continue;
+                        }
+                        structs_seen += 1;
+                        (7, format!("struct {}", def.name))
+                    }
                     _ => continue,
                 };
                 out.push((def.name.clone(), kind, Some(detail)));
