@@ -1019,3 +1019,36 @@ What remains in fake_io is the owned-field struct slice: constructing
 `IoReq { buf: src, .. }`/`BytePipe { buf: "", .. }` (a string moves into a
 field) and storing an owned string through a field (`p.buf = p.buf +
 slice(...)`), plus borrow arguments in callers.
+
+## P1.1 slice 7 landed: owned strings and owned-field structs
+
+- A `string` parameter is owned by the callee. The guard admits it and
+  `live_owned` now carries parameters into every `return`, deduplicated
+  against the entry scope (the receiver lives there already), so a body
+  releases the parameters it did not move out. A closure's owned *string
+  capture* stays typed — reading it would move the capture.
+- `owned_field_struct`: a struct whose fields are scalar-or-`string`, no
+  `Drop` impl. Constructions of that shape are marked in
+  `owned_constructions`; string field values (literals, moved owned strings
+  and parameters, string field views, concats, `to_string` results) move in,
+  and the generated `ae_tN_release` frees them later. `make(...) -> Req`,
+  `return Req { buf: src, .. }`, and `let r = make(...)` all route.
+- `let other = owned;` moves the source (E0102 on later reads) — the general
+  Binding path now records the move.
+- `p.buf = p.buf + slice(...)` stores an owned string through a `&mut`
+  receiver: `owned_field_writes` marks the target, and the existing
+  FieldStore codegen releases the old value and consumes the right-hand
+  side.
+
+Coverage: 461 → **435** fallbacks. In the fake_io program every std function
+now routes (io_submit_read/write, io_step, io_transferred, pipe_new/send/
+recv/close, source_new/track/post, oracle_*); only the fixture's own `main`
+remains typed because it passes `&mut r` (borrow arguments are the next
+slice). `tests/run/owned_string_fields.ae` pins construction, field store,
+length, and a string-returning function end to end.
+
+Gates: 510/0 on Windows and WSL2, ab_gate 0 failed (byte parity held even
+with the new parameter releases), sanitize+leak PASS, fuzz 0 failures.
+
+Next: borrow arguments — `Argument::View`/`Borrow` on the resolved route.
+That is what keeps every caller body typed.

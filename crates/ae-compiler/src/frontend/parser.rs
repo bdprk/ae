@@ -50,6 +50,15 @@ fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none() && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)))
 }
 
+/// A struct whose fields are scalar or `string`: it carries one owned value
+/// per string field, and the generated `ae_tN_release` frees them. The body
+/// route may build one (each string value moves in) and own it.
+fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
+    let Type::Struct(sid) = ty else { return false };
+    structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String)))
+}
+
 /// The registry struct a field expression reads from: a parameter's
 /// immutable borrowed spelling names a file-local struct item; a nested
 /// field's struct is the declared type of the field it reads. Generic
@@ -216,12 +225,24 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 && !resolved.token_cursor_definitions.contains(id)
                 || (resolved.owned_text_bindings.contains(id)
                     && resolved.closure_capture_reads.contains(&expression.range.start))),
-        // A construction of a drop-free file-local struct with scalar
-        // fields: the layout is known at collection time.
+        // A construction of a file-local struct: the drop-free scalar
+        // shape lowers as a value, and the scalar-or-`string` shape owns its
+        // string field values (a literal, a moved owned string, or an
+        // expression the scalar arm already admits such as a concat or a
+        // `to_string` call). Field types are checked when the literal lowers.
         ExpressionKind::Struct { target, fields } => {
+            let marked = resolved.drop_free_constructions.contains(&expression.range.start)
+                || resolved.owned_constructions.contains(&expression.range.start);
             matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.drop_free_constructions.contains(&expression.range.start)
-                && fields.iter().all(|field| scalar_body_expression(&field.value, resolved, supports_call, supports_field))
+                && marked
+                && fields.iter().all(|field| {
+                    scalar_body_expression(&field.value, resolved, supports_call, supports_field)
+                        || matches!(field.value.kind, ExpressionKind::Atom(Kind::Text(_)))
+                        || matches!(&field.value.kind, ExpressionKind::Atom(Kind::Ident(name))
+                            if name != "self" && resolved.scalar_reads.get(&field.value.range.start)
+                                .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                    || resolved.owned_string_bindings.contains(id)))
+                })
         }
         // A struct parameter's field read, possibly nested (`o.inner.x`):
         // the chain's base may be a scalar read or a struct-typed chain
@@ -839,7 +860,16 @@ impl<'a> Parser<'a> {
         }
     }
     pub(super) fn live_owned(&self) -> Vec<(usize, Type)> {
-        self.scopes.iter().flatten().filter(|(_, ty)| ty.owned()).map(|&(id, ty)| (id, ty)).collect()
+        // Parameters are owned by the callee but live outside the block
+        // scopes; a `return` must release them exactly like a local unless
+        // the body moved them out (the drops pass trims by `moved`). A slot
+        // present in both lists (the receiver, which the entry scope already
+        // holds) is released once.
+        let mut seen = std::collections::HashSet::new();
+        self.scopes.iter().flatten().copied()
+            .chain(self.owned_params.iter().copied())
+            .filter(|(id, ty)| ty.owned() && seen.insert(*id))
+            .collect()
     }
     // A loop body runs again, so a value moved out of a variable declared
     // outside the loop must be re-initialized before the body ends; otherwise
@@ -884,8 +914,14 @@ impl<'a> Parser<'a> {
     }
 
     fn resolved_expressions(&self) -> &ResolvedExpressions {
-        self.resolved_expressions.get_or_init(|| {
-            let mut expressions = ResolvedExpressions::default();
+        self.resolved_expressions.get_or_init(|| self.build_resolved_expressions())
+    }
+
+    /// Builds the module's resolved-expression index. Separate from the cell
+    /// so a caller that also needs `&mut self` can pin the Rc locally and
+    /// keep the reference off `self`.
+    fn build_resolved_expressions(&self) -> ResolvedExpressions {
+        let mut expressions = ResolvedExpressions::default();
             let Ok(module) = ae_resolve::module::parse_module_tokens(&self.file, self.source, &self.tokens) else {
                 return expressions;
             };
@@ -968,6 +1004,12 @@ impl<'a> Parser<'a> {
             expressions.scalar_definitions.extend(resolution.defs.iter()
                 .filter(|definition| definition.kind.is_local())
                 .map(|definition| (definition.range.start, definition.id)));
+            // A local whose spelling is a plain `string` owns one by value:
+            // the parameter shape a construction may move into a field.
+            expressions.owned_string_bindings.extend(resolution.defs.iter()
+                .filter(|entry| entry.kind.is_local()
+                    && matches!(entry.inferred, Some(ae_resolve::TypeSpelling::Primitive("string"))))
+                .map(|entry| entry.id));
             // Struct parameters (borrowed or by value) and local bindings (owned,
             // constructed in-route from a drop-free struct) are field-read
             // receivers for the body route: the resolver's inferred spelling
@@ -1145,19 +1187,23 @@ impl<'a> Parser<'a> {
                                     }
                                 }
                             }
-                            // A construction of a file-local, non-generic,
-                            // drop-free struct with only scalar fields joins
-                            // the body route. Initializers are validated in
-                            // source order when the expression is lowered.
+                            // A construction of a file-local, non-generic struct joins the
+                            // body route: the drop-free scalar shape as a
+                            // value, and the scalar-or-`string` shape as an
+                            // owned construction whose string values move in.
+                            // Initializers are validated in source order when
+                            // the expression is lowered.
                             if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &expression.kind {
                                 if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
                                     if expressions.struct_constructors.contains(&target.range.start) {
                                         if let Some(&sid) = self.struct_names.get(name) {
                                             let defn = &self.structs[sid];
-                                            if (defn.file == self.file || defn.public) && defn.drop_fn.is_none()
-                                                && defn.fields.iter().all(|(_, ty)| scalar_type(*ty))
-                                            {
-                                                expressions.drop_free_constructions.insert(expression.range.start);
+                                            if (defn.file == self.file || defn.public) && defn.drop_fn.is_none() {
+                                                if defn.fields.iter().all(|(_, ty)| scalar_type(*ty)) {
+                                                    expressions.drop_free_constructions.insert(expression.range.start);
+                                                } else if defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String)) {
+                                                    expressions.owned_constructions.insert(expression.range.start);
+                                                }
                                             }
                                         }
                                     }
@@ -1184,8 +1230,15 @@ impl<'a> Parser<'a> {
                                             Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })));
                                 if mutable_base {
                                     if let Some(sid) = field_owner_struct(base, &expressions, &resolution, self.struct_names, self.structs) {
-                                        if field_ty_in(sid, name, self.structs).is_some_and(scalar_type) {
-                                            expressions.struct_field_writes.insert(target.range.start);
+                                        if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
+                                            if scalar_type(field_ty) {
+                                                expressions.struct_field_writes.insert(target.range.start);
+                                            } else if matches!(field_ty, Type::String) {
+                                                // An owned field store releases the
+                                                // old string and consumes the new
+                                                // one (the FieldStore codegen).
+                                                expressions.owned_field_writes.insert(target.range.start);
+                                            }
                                         }
                                     }
                                 }
@@ -1266,7 +1319,8 @@ impl<'a> Parser<'a> {
                     }
                     match role {
                         ae_resolve::Role::Read => expressions.struct_field_reads.contains(&expression.range.start),
-                        ae_resolve::Role::Write => expressions.struct_field_writes.contains(&expression.range.start),
+                        ae_resolve::Role::Write => expressions.struct_field_writes.contains(&expression.range.start)
+                            || expressions.owned_field_writes.contains(&expression.range.start),
                         _ => false,
                     }
                 };
@@ -1280,7 +1334,6 @@ impl<'a> Parser<'a> {
                 }
             }
             expressions
-        })
     }
 
     pub(super) fn shared_specialization_arguments(&self, offset: usize) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
@@ -1322,9 +1375,11 @@ impl<'a> Parser<'a> {
         if !self.subst.values().copied().all(scalar_type)
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
-            || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..))
+            || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
                 || (matches!(self.return_type, Type::Struct(_))
-                    && (self.receiver == Some(self.return_type) || owned_plain_struct(self.return_type, self.structs))))
+                    && (self.receiver == Some(self.return_type)
+                        || owned_plain_struct(self.return_type, self.structs)
+                        || owned_field_struct(self.return_type, self.structs))))
             || !self.names.iter().all(|(name, &(slot, _, ty))| {
                 let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
                 // A value capture moves into the closure's slot; the body's
@@ -1335,9 +1390,14 @@ impl<'a> Parser<'a> {
                 // writes are FieldStore on a StructMut slot (the Checked arm
                 // already lowers them), and nothing moves or drops through
                 // the borrow.
+                // A `string` *parameter* is owned by this body; `live_owned`
+                // carries it in every `return`, so the callee releases what it
+                // did not move out. A closure's owned string capture stays
+                // typed: reading it would move the capture.
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
+                    || (matches!(ty, Type::String) && !captured)
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
-                    || (ty == Type::StrView && captured)
+                    || ty == Type::StrView
                     // A by-value plain struct parameter is owned here, but it
                     // carries nothing a release routine walks, so the callee
                     // needs no exit drop: reads (and moving it back out) are
@@ -1348,7 +1408,8 @@ impl<'a> Parser<'a> {
         {
             return None;
         }
-        let resolved = self.resolved_expressions();
+        let resolved_cell = Rc::clone(&self.resolved_expressions);
+        let resolved = resolved_cell.get_or_init(|| self.build_resolved_expressions());
         let Some(body) = resolved.scalar_bodies.get(&self.tokens[self.pos].offset).cloned() else { return None };
         let supports_call = |name: &str, offset: usize| {
             // The pure value builtins lower natively (lower_resolved_builtin);
@@ -1363,12 +1424,14 @@ impl<'a> Parser<'a> {
                     signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
-                    && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs))
+                    && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
+                        || matches!(signature.ret, Type::String)
+                        || owned_field_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
                         // moves the argument, tracked in `moved`, and the
                         // drops pass trims the Frees lists.
-                        scalar_type(ty) || matches!(ty, Type::Struct(_))
+                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String)
                     })
             })
         };
@@ -1401,13 +1464,28 @@ impl<'a> Parser<'a> {
                 // The whole value: only an owned struct moves as one.
                 matches!(ty, Type::Struct(_))
             } else {
-                receiver_field_type(expression, ty, self.structs).is_some_and(scalar_type)
+                // A string field joins the write surface (the FieldStore
+                // codegen releases the old value and consumes the new one);
+                // reads stay scalar-only here and reach the scan through the
+                // view and read marks.
+                receiver_field_type(expression, ty, self.structs)
+                    .is_some_and(|field| scalar_type(field) || (role == ae_resolve::Role::Write && matches!(field, Type::String)))
             }
         };
+        // Parameters owned by this body, minus capture slots (the closure
+        // lowering already accounts for those): `live_owned` releases them at
+        // every return unless the body moved one out.
+        self.owned_params = self.names.values()
+            .filter(|&&(slot, _, ty)| ty.owned() && !capture_starts.iter().any(|&(capture, _)| capture == slot))
+            .map(|&(slot, _, ty)| (slot, ty))
+            .collect();
         if !body.iter().all(|statement| scalar_body_statement(statement, resolved, &supports_call, &supports_field)) {
+            self.owned_params.clear();
             return None;
         }
-        Some(self.lower_scalar_statements(&body, &mut slots))
+        let lowered = self.lower_scalar_statements(&body, &mut slots);
+        self.owned_params.clear();
+        Some(lowered)
     }
 
     fn lower_scalar_statements(
@@ -1555,6 +1633,15 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(initializer.range.end);
                         lowered
                     };
+                    // Binding an owned value moves it: the new slot owns what
+                    // the old one did, and later reads of the source fail with
+                    // E0102 (the typed route's rule).
+                    if ty.owned() {
+                        if let Expr::Variable(source, ..) = &value {
+                            self.check_variable_move(*source)?;
+                            self.moved.insert(*source);
+                        }
+                    }
                     self.check_view_binding(*mutable, ty)?;
                     self.take(Kind::Semi)?;
                     self.check_borrowed_binding(ty)?;
@@ -2097,6 +2184,16 @@ impl<'a> Parser<'a> {
                     let (slot, expected) = self.constructor_field(sid, &field.name, &values, Some(self.tokens[next].offset))?;
                     let (value, actual) = self.lower_scalar_body_expression(&field.value, slots)?;
                     self.check_field_value_type(&field.name, expected, actual, Some(&field.value.range))?;
+                    // An owned field value moves into the struct: the literal
+                    // owns it, so the source slot's Frees is trimmed (the same
+                    // rule the typed struct literal applies).
+                    if actual.owned() {
+                        if let Expr::Variable(slot, ..) = &value {
+                            self.seek_scalar_offset(field.value.range.end);
+                            self.check_variable_move(*slot)?;
+                            self.moved.insert(*slot);
+                        }
+                    }
                     values[slot] = Some(value);
                 }
                 self.finish_struct_literal(sid, target.range.start, values)?
