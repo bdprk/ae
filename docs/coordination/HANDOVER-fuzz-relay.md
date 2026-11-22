@@ -621,3 +621,7 @@ The existing instantiator still owns allocation order, bounds checks and
 instance identities. Unsupported or malformed type arguments use the
 typed reader and its diagnostics.
 
+The C backend uses the concrete vector type in forward declarations and
+definitions. The owned-return regression covers a generic identity function
+instantiated with `vec[f64]`, whose returned buffer remains live in the caller.
+

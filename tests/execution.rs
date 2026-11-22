@@ -1460,12 +1460,23 @@ fn vector_growth_during_iteration_is_rejected() {
 
 #[test]
 fn returning_a_live_owned_local_keeps_the_buffer_valid() {
-    // Regression: the exit release list must skip slots the return moved
-    // out of, for both owned types.
-    let source = "fn pick_v() -> vec { var v = vec[7, 8]; return v; } fn pick_s() -> string { let s = \"live\"; return s; } fn main() { var v = pick_v(); print(len(v)); print(v[1]); print(pick_s()); }";
+    // Returned slots transfer ownership and must survive the callee's drops.
+    let source = r#"
+        fn pick_v() -> vec { var v = vec[7, 8]; return v; }
+        fn pick_s() -> string { let s = "live"; return s; }
+        fn identity[T](value: T) -> T { return value; }
+        fn main() {
+            var v = pick_v();
+            print(len(v));
+            print(v[1]);
+            print(pick_s());
+            let floats = identity[vec[f64]](vec[1.5, 2.5]);
+            print(floats[1]);
+        }
+    "#;
     let output = execute(source);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "2\n8\nlive\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "2\n8\nlive\n2.5\n");
 }
 #[test]
 fn len_works_in_binary_and_condition_contexts() {
