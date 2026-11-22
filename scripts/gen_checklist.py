@@ -18,10 +18,16 @@ LEDGER = ROOT / "docs" / "implementation-ledger.md"
 CHECKLIST = ROOT / "docs" / "checklist.md"
 
 ITEM = re.compile(r"^- \[( |x)\] (\S+)[.:] (.*)$")
+# A prototype-done item that is still short of Charter-1.0 semantics carries
+# an explicit marker naming the phase that closes the gap (audit §8):
+#   [1.0-gap: P2.2]
+# The checklist then reports two progress numbers instead of one, so
+# 70%-on-paper cannot be mistaken for 70%-toward-1.0 (Hard Rule 10).
+GAP = re.compile(r"\[1\.0-gap:\s*([^\]]+)\]")
 
 
 def parse_items(ledger_text: str):
-    """Yield (section, done, item_id, first_line, wrapped) per ledger item.
+    """Yield (section, done, item_id, first_line, wrapped, gap) per ledger item.
 
     An item is a `- [ ]` / `- [x]` line; continuation lines belong to the
     item's body in the ledger and are not mirrored here — the checklist
@@ -36,13 +42,18 @@ def parse_items(ledger_text: str):
         if match:
             done, item_id, title = match.groups()
             wrapped = not line.rstrip().endswith((".", ":", "）", ")"))
-            yield section, done == "x", item_id.rstrip(".:"), title, wrapped
+            gap = GAP.search(title)
+            yield section, done == "x", item_id.rstrip(".:"), title, wrapped, gap.group(1).strip() if gap else None
 
 
 def render(ledger_text: str) -> str:
     """The full checklist document for the given ledger text."""
     items = list(parse_items(ledger_text))
-    done_count = sum(1 for _, done, _, _, _ in items if done)
+    done_count = sum(1 for _, done, _, _, _, _ in items if done)
+    # Charter-1.0 progress: a prototype-done item whose marker names a gap
+    # phase does not count as 1.0-done. Two numbers keep the report honest.
+    gap_count = sum(1 for _, done, _, _, _, gap in items if done and gap)
+    charter_done = done_count - gap_count
     out = []
     out.append("# ae master checklist")
     out.append("")
@@ -50,10 +61,14 @@ def render(ledger_text: str) -> str:
                "(R5.1): do not edit by hand. Item bodies, evidence links and progress notes")
     out.append("live in the ledger; this file mirrors only the checkbox state and titles.")
     out.append("")
-    out.append(f"{done_count} of {len(items)} items done.")
+    out.append(f"Prototype progress: {done_count} of {len(items)} items done.")
+    gap_note = ("1" if gap_count == 1 else "s")
+    out.append(f"Charter-1.0 progress: {charter_done} of {len(items)} items done "
+               f"({gap_count} prototype-done item{gap_note} still name an open "
+               f"gap, marked `[1.0-gap: …]`).")
     out.append("")
     current_section = None
-    for section, done, item_id, title, wrapped in items:
+    for section, done, item_id, title, wrapped, gap in items:
         if section != current_section:
             if current_section is not None:
                 out.append("")
