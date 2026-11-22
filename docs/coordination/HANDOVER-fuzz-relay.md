@@ -1218,3 +1218,23 @@ option_propagate, strings (manifest now 8 files, CI-gated).
 Next: `push`/`pop` statement builtins (`tokens.ae`, `io/reader.ae`), map
 stores (`counts[word] = ...`), effectful `try_*`/`read_file`, generic-instance
 structs (`Cell[T]`), method calls on `self`, function-pointer calls.
+
+## P1.1 slice 14 landed: vector statement builtins and join
+
+- `push`/`pop`/`sort`/`reverse` lower natively to the existing statements
+  (`VecPush`/`StrVecPush`/`VecFPush`, `*Pop`, `Sort`, `Reverse`) with the
+  typed route's rules: moved target, vec-kind check, mutability and borrow
+  rejection, element typing, f64 sort rejection, and the pinned diagnostic
+  positions (just past the target name — the `,` or `)`).
+- `join` lowers natively (`Expr::Join`), borrowing a bare `vec[string]`
+  variable; other shapes keep the typed message.
+- `tokenize`-fed loops (`for f in cursor { push(kept, f); }`) route as a
+  whole now.
+
+Coverage: 397 → **394**, files with fallbacks 113 → 110. Two more examples
+are legacy-free and joined the deny manifest (tokens, heart — 10 files
+total, CI-gated).
+
+Next: map stores (`counts[word] = ...`), effectful `try_*`/`read_file`,
+generic-instance structs (`Cell[T]`/`ListNode[T]`), method calls on `self`,
+function-value calls, `task_yield`/`cell_load` in bodies.

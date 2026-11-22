@@ -32,7 +32,7 @@ fn scalar_type(ty: Type) -> bool {
 /// other reserved name keeps its typed body until its surface is reviewed.
 const RESOLVED_BUILTINS: &[&str] = &[
     "len", "to_string", "to_f64", "to_i64", "trim", "slice", "slice_view", "split",
-    "contains", "starts_with", "ends_with", "parse_int", "find",
+    "contains", "starts_with", "ends_with", "join", "parse_int", "find",
     "json_get", "json_int", "json_bool", "json_len", "json_has",
 ];
 
@@ -519,7 +519,38 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Break | StatementKind::Continue => true,
         StatementKind::Expr { .. } => exit_status_operand(statement)
             .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field))
-            || propagation_call(statement).is_some(),
+            || propagation_call(statement).is_some()
+            || vector_statement_builtin(statement, resolved)
+                .is_some_and(|(_, value)| scalar_body_expression(value, resolved, supports_call, supports_field)
+                    || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                    || resolved.struct_field_views.contains(&value.range.start)
+                    || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                        if name != "self" && resolved.scalar_reads.get(&value.range.start)
+                            .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                || resolved.owned_string_bindings.contains(id)))),
+    }
+}
+
+/// A `push`/`pop`/`sort`/`reverse` statement over an owned vector binding:
+/// (the builtin's name, the pushed value expression when it has one). Shape
+/// only — the lowering enforces mutability, element types and borrow rules.
+fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::Statement, resolved: &ResolvedExpressions) -> Option<(&'static str, &'a ae_syntax::expression::Expression)> {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: false } = &statement.kind else { return None };
+    let ExpressionKind::Call { callee, arguments } = &value.kind else { return None };
+    let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
+    let builtin = match name.as_str() {
+        "push" => "push", "pop" => "pop", "sort" => "sort", "reverse" => "reverse",
+        _ => return None,
+    };
+    let Some(ExpressionKind::Atom(Kind::Ident(_))) = arguments.first().map(|argument| &argument.kind) else { return None };
+    let def = resolved.scalar_reads.get(&arguments[0].range.start)?;
+    if !resolved.owned_vectors.contains(def) { return None }
+    match (builtin, arguments.len()) {
+        ("push", 2) => Some((builtin, &arguments[1])),
+        ("pop" | "sort" | "reverse", 1) => Some((builtin, &arguments[0])),
+        _ => None,
     }
 }
 
@@ -2014,6 +2045,11 @@ impl<'a> Parser<'a> {
                 }
                 Statement::Unsafe(inner)
             }
+            StatementKind::Expr { propagates: false, .. }
+                if vector_statement_builtin(statement, self.resolved_expressions()).is_some() =>
+            {
+                return self.lower_vector_builtin_statement(statement, slots);
+            }
             StatementKind::Expr { propagates: true, .. } => {
                 let operand = propagation_call(statement).expect("resolved propagation eligibility");
                 self.seek_scalar_offset(operand.range.start);
@@ -2777,6 +2813,28 @@ impl<'a> Parser<'a> {
                     };
                     Ok((value, Type::Bool))
                 }
+                "join" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    // join borrows a bare string-vector variable.
+                    let (parts, parts_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    let vid = match (&parts, parts_ty) {
+                        (Expr::Variable(id, Type::StrVec, ..), Type::StrVec) => *id,
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail("join expects a bare vec[string] variable"));
+                        }
+                    };
+                    if self.moved.contains(&vid) {
+                        return Err(self.binding_label(self.fail("cannot use a moved vector in join").with_code("E0102"), vid));
+                    }
+                    let (sep, sep_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(sep_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("join expects a string or string view separator"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Join(vid, Box::new(sep), line, column), Type::String))
+                }
                 "slice_view" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 3)?;
                     let (base, base_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
@@ -2939,6 +2997,98 @@ impl<'a> Parser<'a> {
             self.take(Kind::RParen)?;
         }
         Ok(())
+    }
+
+    fn lower_vector_builtin_statement(
+        &mut self,
+        statement: &ae_syntax::statement::Statement,
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Statement, ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        let resolved_cell = Rc::clone(&self.resolved_expressions);
+        let resolved = resolved_cell.get_or_init(|| self.build_resolved_expressions());
+        let (builtin, value) = vector_statement_builtin(statement, resolved).expect("vector builtin eligibility");
+        let ae_syntax::statement::StatementKind::Expr { value: call, .. } = &statement.kind else { unreachable!("vector builtin statement") };
+        let ExpressionKind::Call { callee, arguments } = &call.kind else { unreachable!("vector builtin call") };
+        let ExpressionKind::Atom(Kind::Ident(target)) = &arguments[0].kind else { unreachable!("vector builtin target") };
+        self.seek_scalar_offset(callee.range.start);
+        let (line, column) = self.position();
+        let def = resolved.scalar_reads[&arguments[0].range.start];
+        let (slot, ty) = slots[&def];
+        if self.moved.contains(&slot) {
+            return Err(moved_value_hint(self.binding_label(
+                self.fail(&format!("cannot use '{target}' because it was moved")).with_code("E0102"), slot)));
+        }
+        if !matches!(ty, Type::Vec | Type::StrVec | Type::VecF) {
+            self.seek_scalar_offset(arguments[0].range.end);
+            return Err(self.fail(&format!("{builtin} expects a vec, found {}", ty.name())));
+        }
+        if self.is_borrowed(slot) {
+            self.seek_scalar_offset(arguments[0].range.end);
+            return Err(self.fail(&format!("cannot modify '{target}' while it is borrowed")));
+        }
+        // The immutability diagnostic is emitted per branch: the typed route
+        // reports a `push` target at the value's token (the shared expression
+        // path lowers the value first) and the others at the closing paren.
+        // Ordering happens in place (qsort for i64, byte order for strings);
+        // f64 has no total order, so sort/reverse reject it.
+        if matches!(builtin, "sort" | "reverse") {
+            if !self.names[target].1 {
+                self.seek_scalar_offset(arguments[0].range.end);
+                return Err(self.immutable_binding_error(
+                    self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
+            }
+            if ty == Type::VecF {
+                self.seek_scalar_offset(arguments[0].range.end);
+                return Err(self.fail(&format!("{builtin} is not supported for vec[f64]; NaN has no total order")));
+            }
+            self.seek_scalar_offset(call.range.end);
+            self.take(Kind::Semi)?;
+            let strings = ty == Type::StrVec;
+            return Ok(if builtin == "sort" { Statement::Sort(slot, strings, line, column) } else { Statement::Reverse(slot, strings, line, column) });
+        }
+        if builtin == "push" {
+            // The immutability diagnostic points just past the target name
+            // (the `,`), the token the typed parser's cursor ends on.
+            if !self.names[target].1 {
+                self.seek_scalar_offset(arguments[0].range.end);
+                return Err(self.immutable_binding_error(
+                    self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
+            }
+            let (lowered, value_ty) = self.lower_scalar_body_expression(value, slots)?;
+            let ok = match ty {
+                Type::Vec => value_ty == Type::Int,
+                Type::VecF => value_ty == Type::F64,
+                _ => matches!(value_ty, Type::String | Type::StrView),
+            };
+            if !ok {
+                self.seek_scalar_offset(value.range.end);
+                return Err(self.fail(&format!("vector elements must be {}", match ty { Type::Vec => "i64", Type::VecF => "f64", _ => "string" })));
+            }
+            self.seek_scalar_offset(call.range.end);
+            self.take(Kind::Semi)?;
+            return Ok(if ty == Type::StrVec {
+                Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView)
+            } else if ty == Type::VecF {
+                Statement::VecFPush(slot, lowered, line, column)
+            } else {
+                Statement::VecPush(slot, lowered, line, column)
+            });
+        }
+        if !self.names[target].1 {
+            self.seek_scalar_offset(arguments[0].range.end);
+            return Err(self.immutable_binding_error(
+                self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
+        }
+        self.seek_scalar_offset(call.range.end);
+        self.take(Kind::Semi)?;
+        Ok(if ty == Type::StrVec {
+            Statement::StrVecPop(slot, line, column)
+        } else if ty == Type::VecF {
+            Statement::VecFPop(slot, line, column)
+        } else {
+            Statement::VecPop(slot, line, column)
+        })
     }
 
     fn lower_scalar_array_index(
