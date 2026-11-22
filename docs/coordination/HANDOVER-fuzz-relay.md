@@ -559,3 +559,10 @@ shows only the most recent binding visible at the cursor, and definition
 jumps distinguish the inner and outer names. Duplicate ordinary locals
 still produce E0104.
 
+## R3c shared type rules (2026-11-22)
+
+[ADR-0231](../adr/0231-shared-type-checking.md) identifies the first shared
+type-checking slice. Primitive operator rules will supply both resolver
+inference and compiler lowering, with the compiler's diagnostics preserved
+at its own cursor. The type-checking and parser-cutover milestones stay open.
+
