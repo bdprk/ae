@@ -273,6 +273,10 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Print(value) | StatementKind::Assert(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
         }
+        StatementKind::PointerStore { pointer_range, value, .. } => {
+            resolved.scalar_writes.contains_key(&pointer_range.start)
+                && scalar_body_expression(value, resolved, supports_call, supports_field)
+        }
         StatementKind::If { condition, then_body, else_body } => {
             scalar_body_expression(condition, resolved, supports_call, supports_field)
                 && then_body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
@@ -734,7 +738,7 @@ impl<'a> Parser<'a> {
                             expressions.scalar_reads.insert(occurrence.range.start, definition.id);
                         }
                     }
-                    ae_resolve::Role::Write if definition.kind.is_local() => {
+                    ae_resolve::Role::Write | ae_resolve::Role::DerefWrite if definition.kind.is_local() => {
                         expressions.scalar_writes.insert(occurrence.range.start, definition.id);
                     }
                     ae_resolve::Role::Call if definition.kind == ae_resolve::DefKind::Function
@@ -1013,6 +1017,7 @@ impl<'a> Parser<'a> {
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(_, _, ty))| {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_))
+                    || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
         {
@@ -1241,6 +1246,19 @@ impl<'a> Parser<'a> {
                     rhs
                 };
                 Statement::Assign(slot, value, false)
+            }
+            StatementKind::PointerStore { pointer, pointer_range, value } => {
+                self.seek_scalar_offset(statement.range.start);
+                let (line, column) = self.position();
+                let def = self.resolved_expressions().scalar_writes[&pointer_range.start];
+                let (slot, ty) = slots[&def];
+                self.seek_scalar_offset(pointer_range.end);
+                let pointee = self.pointer_store_pointee(pointer, Some(ty), line)?;
+                let (lowered, actual) = self.lower_scalar_body_expression(value, slots)?;
+                self.seek_scalar_offset(value.range.end);
+                self.check_pointer_store_value(actual, pointee)?;
+                self.take(Kind::Semi)?;
+                Statement::PtrStore(slot, lowered, line, column)
             }
             StatementKind::Print(argument) => {
                 let (value, _) = self.lower_scalar_body_expression(argument, slots)?;
@@ -1581,6 +1599,26 @@ impl<'a> Parser<'a> {
         let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
         self.check_array_index(scalar, Some(index.range.end))?;
         Ok(value)
+    }
+
+    fn pointer_store_pointee(&self, name: &str, ty: Option<Type>, line: usize) -> Result<Type, ae_span::Diagnostic> {
+        let Some(Type::PtrMut(id)) = ty else {
+            return Err(self.fail(&format!("'*{name}' requires a *mut pointer variable")));
+        };
+        if self.unsafe_depth == 0 {
+            return Err(self.error_at(line, "writing through a raw pointer requires 'unsafe'").with_code("E0700"));
+        }
+        Ok(super::ptr_pointee(id))
+    }
+
+    fn check_pointer_store_value(&self, actual: Type, pointee: Type) -> Result<(), ae_span::Diagnostic> {
+        if actual != pointee {
+            return Err(self.fail(&format!("cannot write a {} value through *mut {}", actual.name(), pointee.name())));
+        }
+        if pointee.owned() {
+            return Err(self.fail("writing an owned value through a pointer is not supported yet; the pointer would take over its release"));
+        }
+        Ok(())
     }
 
     fn checked_scalar(&self, range: Option<&std::ops::Range<usize>>) -> Option<ae_resolve::typecheck::Scalar> {
@@ -2994,24 +3032,15 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         }
                         None => self.identifier()?,
                     };
-                    let Some((var_id, _, Type::PtrMut(pointee_id))) = self.names.get(&name).cloned() else {
-                        return Err(self.fail(&format!("'*{name}' requires a *mut pointer variable")));
-                    };
-                    if self.unsafe_depth == 0 {
-                        return Err(self.error_at(line, "writing through a raw pointer requires 'unsafe'").with_code("E0700"));
-                    }
+                    let target = self.names.get(&name).copied();
+                    let pointee = self.pointer_store_pointee(&name, target.map(|(_, _, ty)| ty), line)?;
+                    let (var_id, _, _) = target.expect("validated pointer store target");
                     self.take(Kind::Equal)?;
                     let (value, value_ty) = match self.lower_shared_value(None, false) {
                         Some(pair) => pair,
                         None => self.expression(0, false)?,
                     };
-                    let pointee = super::ptr_pointee(pointee_id);
-                    if value_ty != pointee {
-                        return Err(self.fail(&format!("cannot write a {} value through *mut {}", value_ty.name(), pointee.name())));
-                    }
-                    if pointee.owned() {
-                        return Err(self.fail("writing an owned value through a pointer is not supported yet; the pointer would take over its release"));
-                    }
+                    self.check_pointer_store_value(value_ty, pointee)?;
                     self.take(Kind::Semi)?;
                     result.push(Statement::PtrStore(var_id, value, line, column));
                 }
@@ -3464,6 +3493,7 @@ mod tests {
         let source = format!("{source} struct CachedRecord[T] {{ value: T, count: i64 }} fn record(record_text: string) -> CachedRecord[string] {{ return CachedRecord[string] {{ count: 2, value: record_text }}; }}");
         let source = format!("{source} fn relay(call_text: string) -> string {{ return generic_scalar[string](call_text); }}");
         let source = format!("{source} fn use_import() -> i64 {{ return imported_generic[i64](7); }}");
+        let source = format!("{source} fn write_ptr(raw_param: *mut i64) -> i64 {{ unsafe {{ *raw_param = 7; }} return 0; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3508,6 +3538,15 @@ mod tests {
             "case.ae", source, tokens, &mut functions, &mut structs,
             &mut struct_names, &mut enums, &mut enum_names, &mut generics,
         );
+        let start = source.find("raw_param:").unwrap();
+        parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(intern_pointee(Type::Int))));
+        parser.binding_ranges.insert(85, start..start + "raw_param".len());
+        parser.seek_scalar_offset(source.find("{ unsafe { *raw_param").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved pointer store").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Unsafe(inner), Statement::Return(..)]
+            if matches!(inner.as_slice(), [Statement::PtrStore(85, Expr::Number(7), ..)])));
+        parser.names.remove("raw_param");
+        parser.binding_ranges.remove(&85);
         parser.generics.names.insert("CachedBox".into(), 0);
         parser.generics.defs.push(GenericEnum {
             name: "CachedBox".into(), params: vec!["T".into()],

@@ -658,3 +658,8 @@ the existing capture analysis directly. Bound closures can use the
 indexed local read. Both routes still apply the same signature and capture
 checks at the spawn site. Other callable expressions retain the Pratt path.
 
+Resolved bodies can store through a bound raw pointer with a scalar
+pointee. Both body routes use the same mutability, unsafe-context and
+value-type checks. Pointer-producing expressions still determine body
+eligibility independently.
+
