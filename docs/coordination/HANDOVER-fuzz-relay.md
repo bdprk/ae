@@ -517,3 +517,10 @@ Generic methods with scalar substitutions can read scalar fields through
 write occurrence must target the receiver slot. The typed path still
 handles owned receivers, nested stores, and non-scalar field writes.
 
+## Resolved generic owned receiver reads (2026-11-22)
+
+Generic methods taking a struct receiver by value can lower scalar field
+reads. The receiver stays in the parameter cleanup scope, so early returns
+carry its drop and the existing drops pass owns cleanup. Whole-receiver
+moves, receiver stores, and non-scalar field results retain the typed path.
+
