@@ -299,9 +299,20 @@ impl Parser<'_> {
     fn specialization_type_arguments(
         &mut self,
         name_offset: usize,
+        limit: usize,
         parse_argument: impl Fn(&mut Self, usize) -> Result<Type, ae_span::Diagnostic>,
     ) -> Result<Vec<Type>, ae_span::Diagnostic> {
         let shared = self.shared_specialization_arguments(name_offset);
+        if let Some(ranges) = shared.as_deref() {
+            if ranges.len() <= limit {
+                if let Some(end) = self.resolved_specialization_end(ranges) {
+                    if let Some(arguments) = self.shared_specialization_types(ranges) {
+                        self.pos = end;
+                        return Ok(arguments);
+                    }
+                }
+            }
+        }
         self.pos += 1;
         let mut arguments = Vec::new();
         if let Some(ranges) = shared {
@@ -341,8 +352,31 @@ impl Parser<'_> {
         Ok(arguments)
     }
 
+    // Verify the exact token boundaries before trusting the indexed types.
+    // The caller remains at the committed specialization site.
+    fn resolved_specialization_end(&self, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
+        if ranges.is_empty() || *self.current() != Kind::LBracket {
+            return None;
+        }
+        let mut cursor = self.pos + 1;
+        for (index, range) in ranges.iter().enumerate() {
+            if self.tokens.get(cursor)?.offset != range.start {
+                return None;
+            }
+            let end = self.tokens.partition_point(|token| token.offset < range.end);
+            let delimiter = if index + 1 == ranges.len() { Kind::RBracket } else { Kind::Comma };
+            if end <= cursor || self.tokens[end - 1].end != range.end || self.tokens.get(end)?.kind != delimiter {
+                return None;
+            }
+            cursor = end + 1;
+        }
+        Some(cursor)
+    }
+
+    const MAX_GENERIC_CALL_TYPE_ARGUMENTS: usize = 8;
+
     fn generic_call_type_argument(&mut self, count: usize) -> Result<Type, ae_span::Diagnostic> {
-        if count >= 8 {
+        if count >= Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS {
             return Err(self.fail("type argument limit exceeded (8)"));
         }
         self.named_type()
@@ -570,7 +604,7 @@ impl Parser<'_> {
                     // Option[string]::Some and Option[i64]::Some are different
                     // variants of different types (ADR-21).
                     let gid = self.generics.names[&name];
-                    let args = self.specialization_type_arguments(name_offset, |parser, _| parser.type_argument())?;
+                    let args = self.specialization_type_arguments(name_offset, usize::MAX, |parser, _| parser.type_argument())?;
                     let eid = self.instantiate_enum(gid, args.clone(), name_offset)?;
                     // `::` after the arguments: a variant name stays a variant
                     // path (enum_literal consumes `::` itself); anything else
@@ -615,7 +649,7 @@ impl Parser<'_> {
                     // Generic struct literal: the arguments pick the layout, so
                     // Pair[string, i64] and Pair[i64, i64] are different types.
                     let gid = self.generics.struct_names[&name];
-                    let args = self.specialization_type_arguments(name_offset, |parser, _| parser.named_type())?;
+                    let args = self.specialization_type_arguments(name_offset, usize::MAX, |parser, _| parser.named_type())?;
                     let sid = self.instantiate_struct(gid, args, name_offset)?;
                     self.require_public("struct", &self.structs[sid].name.clone(), &self.structs[sid].file.clone(), self.structs[sid].public)?;
                     if *self.current() == Kind::ColonColon {
@@ -1415,7 +1449,9 @@ impl Parser<'_> {
                     if *self.current() != Kind::LBracket {
                         return Err(self.error_at(name_offset, &format!("'{name}' is a generic function; write its type arguments, e.g. {name}[i64](...)")));
                     }
-                    let type_args = self.specialization_type_arguments(name_offset, Self::generic_call_type_argument)?;
+                    let type_args = self.specialization_type_arguments(
+                        name_offset, Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS, Self::generic_call_type_argument,
+                    )?;
                     let (id, types, ret) = self.instantiate_fn(gid, type_args, name_offset)?;
                     let args = self.call_arguments(&name, &types)?;
                     (Expr::Call(id, args, ret), ret)

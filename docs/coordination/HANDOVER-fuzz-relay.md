@@ -615,3 +615,9 @@ must identify a public template and local resolution must leave the call
 unbound. A cached private template still falls through to the canonical
 visibility diagnostic.
 
+At the committed specialization site, pure scalar, string and vector
+arguments can be read directly from resolved syntax ranges on first use.
+The existing instantiator still owns allocation order, bounds checks and
+instance identities. Unsupported or malformed type arguments use the
+typed reader and its diagnostics.
+
