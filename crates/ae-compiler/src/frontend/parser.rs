@@ -76,6 +76,13 @@ fn receiver_field_root(expression: &ae_syntax::expression::Expression) -> Option
     }
 }
 
+fn ungroup_expression(mut expression: &ae_syntax::expression::Expression) -> &ae_syntax::expression::Expression {
+    while let ae_syntax::expression::ExpressionKind::Group(inner) = &expression.kind {
+        expression = inner;
+    }
+    expression
+}
+
 fn receiver_value(expression: &ae_syntax::expression::Expression) -> Option<&ae_syntax::expression::Expression> {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
@@ -326,9 +333,10 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             }
         }
         StatementKind::Return(value) => {
+            let operand = ungroup_expression(value);
             scalar_body_expression(value, resolved, supports_call, supports_field)
-                || matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
-                || resolved.closure_string_returns.contains(&value.range.start)
+                || matches!(operand.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                || resolved.closure_string_returns.contains(&operand.range.start)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
         }
@@ -1122,19 +1130,22 @@ impl<'a> Parser<'a> {
                             local_strings.extend(expressions.scalar_definitions.get(&name_range.start)
                                 .copied().filter(|def| expressions.owned_text_bindings.contains(def)));
                         }
-                        StatementKind::Return(value)
-                            if matches!(value.kind, ExpressionKind::Atom(Kind::Ident(_)))
-                                && expressions.scalar_reads.get(&value.range.start)
-                                    .is_some_and(|def| local_strings.contains(def)
-                                        || (body.captures.contains(def) && expressions.owned_text_bindings.contains(def))) =>
-                        {
-                            expressions.closure_string_returns.insert(value.range.start);
-                        }
                         StatementKind::Return(value) => {
-                            if let ExpressionKind::Call { callee, .. } = &value.kind
-                                && expressions.direct_calls.contains(&callee.range.start)
-                            {
-                                expressions.closure_return_calls.insert(callee.range.start);
+                            let operand = ungroup_expression(value);
+                            match &operand.kind {
+                                ExpressionKind::Atom(Kind::Ident(_))
+                                    if expressions.scalar_reads.get(&operand.range.start)
+                                        .is_some_and(|def| local_strings.contains(def)
+                                            || (body.captures.contains(def) && expressions.owned_text_bindings.contains(def))) =>
+                                {
+                                    expressions.closure_string_returns.insert(operand.range.start);
+                                }
+                                ExpressionKind::Call { callee, .. }
+                                    if expressions.direct_calls.contains(&callee.range.start) =>
+                                {
+                                    expressions.closure_return_calls.insert(callee.range.start);
+                                }
+                                _ => {}
                             }
                         }
                         _ => {}
@@ -1304,7 +1315,9 @@ impl<'a> Parser<'a> {
                         | StatementKind::Return(value) => value,
                         _ => return,
                     };
-                    let view_base = match &value.kind {
+                    let is_return = matches!(statement.kind, StatementKind::Return(_));
+                    let operand = if is_return { ungroup_expression(value) } else { value };
+                    let view_base = match &operand.kind {
                         ExpressionKind::Index { base, .. }
                             if resolved.scalar_reads.get(&base.range.start)
                                 .and_then(|def| slots.get(def))
@@ -1313,10 +1326,7 @@ impl<'a> Parser<'a> {
                     };
                     read_only_offsets.extend(view_base);
                     if matches!(statement.kind, StatementKind::Print(_)) {
-                        let mut operand = value;
-                        while let ExpressionKind::Group(inner) = &operand.kind {
-                            operand = inner;
-                        }
+                        let operand = ungroup_expression(value);
                         if matches!(operand.kind, ExpressionKind::Atom(Kind::Ident(_)))
                             && resolved.scalar_reads.get(&operand.range.start)
                                 .and_then(|def| slots.get(def))
@@ -1325,11 +1335,11 @@ impl<'a> Parser<'a> {
                             read_only_offsets.insert(operand.range.start);
                         }
                     }
-                    if matches!(statement.kind, StatementKind::Return(_)) {
+                    if is_return {
                         let supported = view_base.is_some()
-                            || matches!(value.kind, ExpressionKind::Atom(Kind::Text(_)))
-                            || resolved.closure_string_returns.contains(&value.range.start)
-                            || matches!(&value.kind, ExpressionKind::Call { callee, .. }
+                            || matches!(operand.kind, ExpressionKind::Atom(Kind::Text(_)))
+                            || resolved.closure_string_returns.contains(&operand.range.start)
+                            || matches!(&operand.kind, ExpressionKind::Call { callee, .. }
                                 if resolved.closure_return_calls.contains(&callee.range.start));
                         has_string_return |= supported;
                         has_unsupported_return |= !supported;
@@ -1633,7 +1643,7 @@ impl<'a> Parser<'a> {
                     self.lower_scalar_body_expression(value, slots)?
                 };
                 let moved_atom = moved_receiver.or_else(|| (ty == Type::String && self.resolved_expressions()
-                    .closure_string_returns.contains(&value.range.start)).then_some(value));
+                    .closure_string_returns.contains(&ungroup_expression(value).range.start)).then_some(value));
                 if let (Some(atom), Expr::Variable(slot, ..)) = (moved_atom, &lowered) {
                     self.seek_scalar_offset(atom.range.end);
                     self.check_variable_move(*slot)?;
@@ -4006,7 +4016,7 @@ mod tests {
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
         let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; return 0; }}");
-        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return call_text; }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; let direct = || -> string {{ return capture_source(); }}; let literal = || -> string {{ return \"direct literal\"; }}; return 0; }}");
+        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return ((call_text)); }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; let direct = || -> string {{ return ((capture_source())); }}; let literal = || -> string {{ return ((\"direct literal\")); }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4448,12 +4458,12 @@ mod tests {
             if slot == read && parser.moved.contains(slot)));
         parser.moved.remove(&next_var);
         parser.next_var = next_var;
-        parser.seek_scalar_offset(source.find("{ return capture_source();").unwrap());
+        parser.seek_scalar_offset(source.find("{ return ((capture_source()));").unwrap());
         let closure = parser.lower_resolved_body_with_captures(&[])
             .expect("resolved direct return of a string call").unwrap();
         assert!(matches!(closure.as_slice(),
             [Statement::Return(Expr::Call(98, _, Type::String), owned)] if owned.is_empty()));
-        parser.seek_scalar_offset(source.find("{ return \"direct literal\";").unwrap());
+        parser.seek_scalar_offset(source.find("{ return ((\"direct literal\"));").unwrap());
         let closure = parser.lower_resolved_body_with_captures(&[])
             .expect("resolved direct return of a string literal").unwrap();
         assert!(matches!(closure.as_slice(),
