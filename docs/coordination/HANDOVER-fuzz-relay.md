@@ -701,3 +701,7 @@ Locally constructed enum subjects now enter the same route. Construction
 uses the resolved variant occurrence and the compiler's concrete layout.
 Ordinary enum transfers retain the existing ownership path.
 
+Resolved bodies now lower scalar `exit` statements. Both body drivers
+validate the status at the closing parenthesis and attach the same live
+owned values for cleanup.
+

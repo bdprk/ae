@@ -238,6 +238,15 @@ fn compound_assignment_operator(operator: &Kind) -> Option<Kind> {
     }
 }
 
+fn exit_status_operand(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: false } = &statement.kind else { return None };
+    let ExpressionKind::Call { callee, arguments } = &value.kind else { return None };
+    let [status] = arguments.as_slice() else { return None };
+    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "exit").then_some(status)
+}
+
 fn iterator_constructor(expression: &ae_syntax::expression::Expression) -> Option<Type> {
     use ae_syntax::expression::ExpressionKind;
     let ExpressionKind::Call { callee, arguments } = &expression.kind else { return None };
@@ -342,7 +351,8 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Unsafe(body) => body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field)),
         StatementKind::Break | StatementKind::Continue => true,
-        _ => false,
+        StatementKind::Expr { .. } => exit_status_operand(statement)
+            .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field)),
     }
 }
 
@@ -1482,6 +1492,12 @@ impl<'a> Parser<'a> {
                 }
                 Statement::Unsafe(inner)
             }
+            StatementKind::Expr { .. } => {
+                let status = exit_status_operand(statement).expect("resolved exit eligibility");
+                let (code, ty) = self.lower_scalar_body_expression(status, slots)?;
+                self.seek_scalar_offset(status.range.end);
+                self.finish_exit(code, ty)?
+            }
             StatementKind::Match { subject, arms } => {
                 let (value, ty) = self.lower_scalar_body_expression(subject, slots)?;
                 self.seek_scalar_offset(subject.range.end);
@@ -1925,6 +1941,15 @@ impl<'a> Parser<'a> {
         let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
         self.check_array_index(scalar, Some(index.range.end))?;
         Ok(value)
+    }
+
+    fn finish_exit(&mut self, code: Expr, ty: Type) -> Result<Statement, ae_span::Diagnostic> {
+        if ty != Type::Int {
+            return Err(self.fail("exit expects an i64 status code"));
+        }
+        self.take(Kind::RParen)?;
+        self.take(Kind::Semi)?;
+        Ok(Statement::Exit(code, self.live_owned()))
     }
 
     fn check_view_binding(&self, mutable: bool, ty: Type) -> Result<(), ae_span::Diagnostic> {
@@ -2958,9 +2983,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, false)?,
                         };
-                        if code_ty != Type::Int { return Err(self.fail("exit expects an i64 status code")); }
-                        self.take(Kind::RParen)?; self.take(Kind::Semi)?;
-                        result.push(Statement::Exit(code, self.live_owned()));
+                        result.push(self.finish_exit(code, code_ty)?);
                         continue;
                     }
                     // Built-in mutation statements come before assignment so
@@ -3781,6 +3804,7 @@ mod tests {
         let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
         let source = format!("{source} enum Reading {{ Value(i64), Empty }} fn read_match(input: Reading) -> i64 {{ match input {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
         let source = format!("{source} fn local_match() -> i64 {{ let reading = Reading::Value(42); match reading {{ Reading::Value(value) => {{ return value; }} Reading::Empty => {{ return 0; }} }} }}");
+        let source = format!("{source} fn exits() -> i64 {{ exit(7); return 0; }} fn bad_exit() -> i64 {{ exit(false); return 0; }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3840,6 +3864,13 @@ mod tests {
                 if *slot == arms[0].bindings[0].0)));
         parser.names.remove("input");
         parser.binding_ranges.remove(&89);
+        parser.seek_scalar_offset(source.find("{ exit(7)").unwrap());
+        let body = parser.lower_resolved_scalar_body().expect("resolved exit").unwrap();
+        assert!(matches!(body.as_slice(), [Statement::Exit(Expr::Number(7), _), Statement::Return(..)]));
+        parser.seek_scalar_offset(source.find("{ exit(false)").unwrap());
+        let error = parser.lower_resolved_scalar_body().expect("resolved exit diagnostic").err().unwrap();
+        assert_eq!(error.message, "exit expects an i64 status code");
+        assert_eq!(*parser.current(), Kind::RParen);
         parser.seek_scalar_offset(source.find("{ let reading =").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local enum match").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(slot, Expr::EnumLit(_, 0, 0, _)),
