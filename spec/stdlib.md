@@ -44,6 +44,21 @@ The compiler's reserved-name registry (`RESERVED`, `crates/ae-compiler/src/front
 
 The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-compatible custom-enum contract dissolve into `Result[T, E]` + `Option[T]` (M1.11): fallible built-ins return `Result[T, std::io::Error]`-shaped values, `?` propagates the one generic type, and the one-family-per-function restriction disappears with it.
 
+### Bounded binary file reads
+
+`read_file_bytes(path, offset, limit)` opens a file and reads up to
+`limit` bytes from an absolute byte offset. It returns an owned integer
+vector with one value in `0..255` per byte, including NUL and invalid UTF-8.
+Reads can end early at EOF. A zero limit returns an empty vector after
+opening and seeking. Negative offsets or limits and I/O failures trap,
+following the error behavior of `read_file`.
+
+`std/std/io/file_reader.ae` provides `file_reader_new(path)` and
+`file_reader_read(&mut reader, limit)` for sequential reads. The latter
+advances the cursor by the number of bytes read. Each call reopens the
+stored path, so file replacement and changes to the working directory
+can affect subsequent reads.
+
 ## 4. Migration Policy (plan §5.3)
 
 1. Each slice lands one domain: spec + positive/negative tests → implementation → examples migrated → snapshots blessed → ADR.

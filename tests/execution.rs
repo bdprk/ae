@@ -8559,6 +8559,63 @@ fn task_scope_cancel_and_work_stealing_agree_across_backends() {
 }
 
 #[test]
+fn file_reader_preserves_binary_bytes_and_advances_the_cursor() {
+    let dir = unique_temp_dir("file-byte-reader");
+    let source = dir.join("main.ae");
+    let mut data = vec![42; 4100];
+    data[..3].copy_from_slice(&[0, 255, 128]);
+    data[4099] = 253;
+    std::fs::write(dir.join("data.bin"), data).unwrap();
+    std::fs::write(dir.join("file_reader.ae"), include_str!("../std/std/io/file_reader.ae")).unwrap();
+    std::fs::write(&source, r#"
+use "file_reader.ae";
+
+fn use_path(path: string) -> i64 {
+    return len(path) - 8;
+}
+
+fn main() {
+    var reader = file_reader_new("data.bin");
+    let empty = file_reader_read(&mut reader, 0);
+    assert(len(empty) == 0);
+    let header = file_reader_read(&mut reader, 3);
+    print(header[0]);
+    print(header[1]);
+    print(header[2]);
+    let rest = file_reader_read(&mut reader, 8192);
+    print(len(rest));
+    print(rest[4096]);
+    let eof = file_reader_read(&mut reader, 8);
+    assert(len(eof) == 0);
+
+    let padded = "data.bin ignored";
+    let path = slice_view(padded, 0, 8);
+    let offset = 4099;
+    let limit = 1;
+    let last = || -> i64 {
+        let chunk = read_file_bytes(path, offset, limit);
+        return chunk[0];
+    };
+    print(last());
+
+    let moved_path = "data.bin";
+    let copied_path = read_file_bytes(moved_path, use_path(moved_path), 1);
+    assert(copied_path[0] == 0);
+}
+"#).unwrap();
+    for flags in [&[][..], &["--interp"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .current_dir(&dir).arg("run").arg(&source).args(flags).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            "0\n255\n128\n4097\n253\n253\n",
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn byte_streams_and_buffered_readers_agree_across_backends() {
     // M3.2.01 / M3.2.02 (ADR-0221): scripted short-chunk byte stream + buffered
     // line reader spanning multiple buffers while preserving the following byte

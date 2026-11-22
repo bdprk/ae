@@ -563,6 +563,12 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             let right = walk_expr(b, moved);
             left.or(right)
         }
+        Expr::ReadFileBytes(path, offset, limit, ..) => {
+            let path = walk_expr(path, moved);
+            let offset = walk_expr(offset, moved);
+            let limit = walk_expr(limit, moved);
+            path.or(offset).or(limit)
+        }
         Expr::SliceView(id, _, start, end, ..) => {
             let base = moved.read(*id);
             let left = walk_expr(start, moved);

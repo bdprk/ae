@@ -1068,6 +1068,50 @@ static ae_string ae_read_file(const char *path, size_t line, size_t column) {
     ae_string out = { buffer, (int64_t)size };
     return out;
 }
+static ae_vec ae_read_file_bytes(ae_strview path, int64_t offset, int64_t limit, size_t line, size_t column) {
+    if (offset < 0) ae_fail("negative file read offset", line, column);
+    if (limit < 0) ae_fail("negative file read limit", line, column);
+    if (path.len > 0 && memchr(path.ptr, '\0', (size_t)path.len)) ae_fail("cannot open file", line, column);
+    FILE *f = ae_fopen(path.ptr, "rb");
+    if (!f) ae_fail("cannot open file", line, column);
+#ifdef _WIN32
+    const bool seek_failed = _fseeki64(f, offset, SEEK_SET) != 0;
+#else
+    const bool seek_failed = offset > LONG_MAX || fseek(f, (long)offset, SEEK_SET) != 0;
+#endif
+    if (seek_failed) { fclose(f); ae_fail("cannot seek file", line, column); }
+
+    ae_vec out = { NULL, 0, 0 };
+    const char *failure = NULL;
+    const int64_t max_len = (int64_t)(SIZE_MAX / sizeof(*out.data));
+    unsigned char buffer[4096];
+    while (out.len < limit) {
+        const int64_t remaining = limit - out.len;
+        const size_t wanted = remaining < (int64_t)sizeof buffer ? (size_t)remaining : sizeof buffer;
+        const size_t read = fread(buffer, 1, wanted, f);
+        if (ferror(f)) { failure = "cannot read file"; break; }
+        if (read == 0) break;
+        if ((int64_t)read > max_len - out.len) { failure = "vector too large"; break; }
+
+        const int64_t needed = out.len + (int64_t)read;
+        if (needed > out.cap) {
+            int64_t cap = out.cap <= max_len / 2 ? out.cap * 2 : max_len;
+            if (cap < needed) cap = needed;
+            int64_t *data = ae_alloc_try((size_t)cap * sizeof(*data));
+            if (!data) { failure = "out of memory"; break; }
+            if (out.len > 0) memcpy(data, out.data, (size_t)out.len * sizeof(*data));
+            ae_free(out.data);
+            out.data = data;
+            out.cap = cap;
+        }
+        for (size_t i = 0; i < read; i++) out.data[out.len++] = buffer[i];
+        if (read < wanted) break;
+    }
+    fclose(f);
+    if (failure) { ae_vec_release(&out); ae_fail(failure, line, column); }
+    // The ordinary empty vector remains pushable.
+    return out.data ? out : ae_vec_new(line, column);
+}
 static int64_t ae_write_file(ae_string path, ae_strview content, size_t line, size_t column) {
     FILE *f = ae_fopen(path.ptr, "wb");
     if (!f) ae_fail("cannot write file", line, column);

@@ -1,0 +1,19 @@
+// A cursor over the bytes of a file. Each read opens the current file at
+// the stored path, seeks to the cursor, and closes it before returning.
+pub struct FileByteReader {
+    path: string,
+    offset: i64,
+}
+
+// Construct a reader at the start of the file. The first read opens it.
+pub fn file_reader_new(path: string) -> FileByteReader {
+    return FileByteReader { path: path, offset: 0 };
+}
+
+// Read up to max_bytes and advance by the number actually read.
+// EOF yields an empty vector. Invalid counts and I/O failures trap.
+pub fn file_reader_read(reader: &mut FileByteReader, max_bytes: i64) -> vec {
+    let chunk = read_file_bytes(reader.path, reader.offset, max_bytes);
+    reader.offset = reader.offset + len(chunk);
+    return chunk;
+}

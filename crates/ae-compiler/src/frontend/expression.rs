@@ -1025,6 +1025,24 @@ impl Parser<'_> {
                     self.take(Kind::LParen)?;
                     self.take(Kind::RParen)?;
                     (Expr::Args(line, col), Type::StrVec)
+                } else if name == "read_file_bytes" && *self.current() == Kind::LParen {
+                    self.take(Kind::LParen)?;
+                    let (path, path_ty) = self.expression(0, false)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        return Err(self.fail("read_file_bytes expects a string path"));
+                    }
+                    self.take(Kind::Comma)?;
+                    let (offset, offset_ty) = self.expression(0, false)?;
+                    if offset_ty != Type::Int {
+                        return Err(self.fail("read_file_bytes expects an i64 offset"));
+                    }
+                    self.take(Kind::Comma)?;
+                    let (limit, limit_ty) = self.expression(0, false)?;
+                    if limit_ty != Type::Int {
+                        return Err(self.fail("read_file_bytes expects an i64 limit"));
+                    }
+                    self.take(Kind::RParen)?;
+                    (Expr::ReadFileBytes(Box::new(path), Box::new(offset), Box::new(limit), vline, vcol), Type::Vec)
                 } else if name == "try_read_file" && *self.current() == Kind::LParen {
                     let (line, col) = (vline, vcol);
                     let ty = self.prelude_type("ReadResult");

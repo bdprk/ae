@@ -450,6 +450,11 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         }
         // A retag uses the base without consuming it.
         Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) => walk_expr(e, used, mutated),
+        Expr::ReadFileBytes(path, offset, limit, ..) => {
+            walk_expr(path, used, mutated);
+            walk_expr(offset, used, mutated);
+            walk_expr(limit, used, mutated);
+        }
         Expr::Index(id, _, index, ..) | Expr::VecIndex(id, index, ..) | Expr::StrVecIndex(id, index, ..) => {
             used.insert(*id);
             walk_expr(index, used, mutated);

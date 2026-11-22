@@ -396,6 +396,10 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
         Expr::ReadFile(path, ..) => ("read_file", vec![lower_operand(path, bindings, lowering)]),
+        Expr::ReadFileBytes(path, offset, limit, ..) => ("read_file_bytes", vec![
+            lower_operand(path, bindings, lowering), lower_operand(offset, bindings, lowering),
+            lower_operand(limit, bindings, lowering),
+        ]),
         Expr::WriteFile(path, text, ..) => ("write_file", vec![lower_operand(path, bindings, lowering), lower_operand(text, bindings, lowering)]),
         Expr::Bytes(e, ..) => ("bytes", vec![lower_operand(e, bindings, lowering)]),
         Expr::Contains(haystack, needle, ..) => ("contains", vec![lower_operand(haystack, bindings, lowering), lower_operand(needle, bindings, lowering)]),
@@ -507,7 +511,7 @@ pub(super) fn expr_type(expr: &Expr) -> Type {
         | Expr::Slice(..) | Expr::FloatToString(..) | Expr::ToString(..)
         | Expr::PathJoin(..) | Expr::PathName(..) | Expr::PathParent(..)
         | Expr::Utf8Prefix(..) => Type::String,
-        Expr::Bytes(..) => Type::Vec,
+        Expr::Bytes(..) | Expr::ReadFileBytes(..) => Type::Vec,
         Expr::Neg(value, ..) => expr_type(value),
         Expr::ClosureLit(id) => Type::Closure(*id),
         Expr::MapInc(place, ..) if place.f64_value() => Type::F64,

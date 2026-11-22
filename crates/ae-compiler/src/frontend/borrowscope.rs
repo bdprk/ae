@@ -176,6 +176,11 @@ fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
         }
         Expr::Wait(handle, ..) => collect_waits_expr(handle, out),
         Expr::Binary(a, _, b, ..) => { collect_waits_expr(a, out); collect_waits_expr(b, out); }
+        Expr::ReadFileBytes(path, offset, limit, ..) => {
+            collect_waits_expr(path, out);
+            collect_waits_expr(offset, out);
+            collect_waits_expr(limit, out);
+        }
         Expr::Call(_, args, _) | Expr::FnCall(_, args, _, _) => {
             for arg in args {
                 match arg {

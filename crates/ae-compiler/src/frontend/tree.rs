@@ -512,6 +512,15 @@ impl<'a> TreePrinter<'a> {
                 out.push_str(&format!(") @ {}:{}", line, col));
             }
             Expr::MapKeys(place, line, col) => out.push_str(&format!("keys({}) @ {}:{}", self.map_place_text(place), line, col)),
+            Expr::ReadFileBytes(path, offset, limit, line, col) => {
+                out.push_str("read_file_bytes(");
+                self.expression(path, out);
+                out.push_str(", ");
+                self.expression(offset, out);
+                out.push_str(", ");
+                self.expression(limit, out);
+                out.push_str(&format!(") @ {line}:{col}"));
+            }
             Expr::MathCall(index, args, line, col) => {
                 let (name, _, _) = MATH_FNS[*index as usize];
                 out.push_str(&format!("{}(", name));

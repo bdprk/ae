@@ -417,6 +417,21 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             if t.owned { drop_owned_temp(out, &t); }
             Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true }
         }
+        Expr::ReadFileBytes(path, offset, limit, line, col) => {
+            let path = emit_expr(path, out, next, false);
+            // Later arguments may move the string the path borrowed.
+            let path_id = *next; *next += 1;
+            out.push_str(&format!("    ae_string t{path_id} = ae_str_copy_view(AE_VIEW({}), {line}, {col});\n", path.text));
+            if path.owned { drop_owned_temp(out, &path); }
+            let offset = emit_expr(offset, out, next, false);
+            let offset_id = *next; *next += 1;
+            out.push_str(&format!("    int64_t t{offset_id} = {};\n", offset.text));
+            let limit = emit_expr(limit, out, next, false);
+            let id = *next; *next += 1;
+            out.push_str(&format!("    ae_vec t{id} = ae_read_file_bytes(AE_VIEW(t{path_id}), t{offset_id}, {}, {line}, {col});\n", limit.text));
+            out.push_str(&format!("    ae_str_release(&t{path_id});\n"));
+            Emitted { text: format!("t{id}"), ty: Type::Vec, owned: true, moves: Vec::new(), materialized: true }
+        }
         Expr::WriteFile(path, content, line, col) => {
             let p = emit_expr(path, out, next, false);
             let c = emit_expr(content, out, next, false);
