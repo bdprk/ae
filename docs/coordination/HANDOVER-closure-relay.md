@@ -19,12 +19,16 @@ a captured string-vector element as an owned string.
 Returning a local initialized from a string literal uses the resolved
 closure route. The compiler checks the move and records it before the
 existing drop pass trims the return's cleanup list.
+Direct returns of captured string literals use the same move check.
+The borrow probe still fails the owned return type check, so existing
+capture inference selects the by-value slot and the closure remains
+callable once.
 
 ## What is half-done
 
-Returning captured owned strings and returning strings from other
-initializers still use the typed parser. The next slice can admit
-captured owned returns while retaining capture inference and call order.
+Captured strings from other initializers and other uses of an owned
+capture still use the typed parser. The next slice can migrate direct
+reads of owned captures while retaining the distinct move checks.
 
 ## Next step
 
@@ -37,11 +41,11 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `0d3a197` matched 50 examples and 646 CLI
+- The byte comparison against `15921f0` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for local owned-string returns with a borrowed capture, branch
-  returns, and cleanup of another owned local. It matched diagnostics for
-  mutable bindings and element returns.
+  output for local owned-string returns and the closure that chooses
+  between two captured owned strings. It matched diagnostics for calling
+  an owning closure twice and reading the original binding after its move.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

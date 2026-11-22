@@ -327,7 +327,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Return(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
-                || resolved.closure_local_string_returns.contains(&value.range.start)
+                || resolved.closure_string_returns.contains(&value.range.start)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
         }
@@ -1118,9 +1118,10 @@ impl<'a> Parser<'a> {
                         StatementKind::Return(value)
                             if matches!(value.kind, ExpressionKind::Atom(Kind::Ident(_)))
                                 && expressions.scalar_reads.get(&value.range.start)
-                                    .is_some_and(|def| local_strings.contains(def)) =>
+                                    .is_some_and(|def| local_strings.contains(def)
+                                        || (body.captures.contains(def) && expressions.owned_text_bindings.contains(def))) =>
                         {
-                            expressions.closure_local_string_returns.insert(value.range.start);
+                            expressions.closure_string_returns.insert(value.range.start);
                         }
                         _ => {}
                     });
@@ -1214,6 +1215,7 @@ impl<'a> Parser<'a> {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || (ty == Type::StrView && captured)
+                    || (ty == Type::String && captured && string_return)
                     || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
             })
         {
@@ -1270,6 +1272,9 @@ impl<'a> Parser<'a> {
             slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
         }
         let has_string_vector = slots.values().any(|&(_, ty)| ty == Type::StrVecRef);
+        if slots.iter().any(|(def, &(_, ty))| ty == Type::String && !resolved.owned_text_bindings.contains(def)) {
+            return None;
+        }
         if string_return || (!capture_starts.is_empty() && has_string_vector) {
             use ae_syntax::{expression::ExpressionKind, statement::{StatementKind, visit_statements}};
             let mut view_bases = std::collections::HashSet::new();
@@ -1292,7 +1297,7 @@ impl<'a> Parser<'a> {
                     view_bases.extend(view_base);
                     if matches!(statement.kind, StatementKind::Return(_)) {
                         let supported = view_base.is_some()
-                            || resolved.closure_local_string_returns.contains(&value.range.start);
+                            || resolved.closure_string_returns.contains(&value.range.start);
                         has_string_return |= supported;
                         has_unsupported_return |= !supported;
                     }
@@ -1305,8 +1310,13 @@ impl<'a> Parser<'a> {
             let end = body.last().map_or(start, |statement| statement.range.end);
             if resolved.scalar_reads.iter().any(|(&offset, def)| {
                 (start..end).contains(&offset)
-                    && slots.get(def).is_some_and(|&(_, ty)| ty == Type::StrVecRef)
-                    && !view_bases.contains(&offset)
+                    && match slots.get(def) {
+                        Some((_, Type::StrVecRef)) => !view_bases.contains(&offset),
+                        // The owned capture can only be read by a return that
+                        // performs the move. Other uses retain typed effects.
+                        Some((_, Type::String)) => !resolved.closure_string_returns.contains(&offset),
+                        _ => false,
+                    }
             }) {
                 return None;
             }
@@ -1581,8 +1591,7 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
                 }
-                let moved_atom = receiver_value(value).or_else(|| self.resolved_expressions()
-                    .closure_local_string_returns.contains(&value.range.start).then_some(value));
+                let moved_receiver = receiver_value(value);
                 let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
                     self.seek_scalar_offset(value.range.start);
                     let result = self.expression(0, true)?;
@@ -1591,6 +1600,8 @@ impl<'a> Parser<'a> {
                 } else {
                     self.lower_scalar_body_expression(value, slots)?
                 };
+                let moved_atom = moved_receiver.or_else(|| (ty == Type::String && self.resolved_expressions()
+                    .closure_string_returns.contains(&value.range.start)).then_some(value));
                 if let (Some(atom), Expr::Variable(slot, ..)) = (moved_atom, &lowered) {
                     self.seek_scalar_offset(atom.range.end);
                     self.check_variable_move(*slot)?;
@@ -3962,6 +3973,7 @@ mod tests {
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }} fn closure_text() -> i64 {{ let keep = \"world\"; let g = || -> i64 {{ print(keep); return 0; }}; return g(); }} fn closure_vector() -> i64 {{ let numbers = vec[10, 20]; let get = || -> i64 {{ print(numbers[1]); return 0; }}; return get(); }}");
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
+        let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); return captured_text; }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4353,8 +4365,25 @@ mod tests {
             if slot == read && owned.contains(&(*slot, Type::String)) && parser.moved.contains(slot)));
         parser.moved.remove(&next_var);
         parser.next_var = next_var;
-        parser.return_type = Type::Int;
+        let text_start = source.find("let captured_text =").unwrap() + 4;
+        let text_body = source.find("{ return captured_text;").unwrap();
         parser.names.remove("return_words");
+        parser.names.insert("captured_text".into(), (82, false, Type::StrView));
+        parser.seek_scalar_offset(text_body);
+        let error = parser.lower_resolved_body_with_captures(&[(82, text_start)])
+            .expect("resolved borrowing capture probe").unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("E0204"));
+        assert!(!parser.moved.contains(&82));
+        parser.names.insert("captured_text".into(), (82, false, Type::String));
+        parser.seek_scalar_offset(text_body);
+        let closure = parser.lower_resolved_body_with_captures(&[(82, text_start)])
+            .expect("resolved owned capture return").unwrap();
+        assert!(matches!(closure.as_slice(), [Statement::Return(Expr::Variable(82, Type::String, ..), _)]));
+        assert!(parser.moved.remove(&82));
+        parser.seek_scalar_offset(source.find("{ print(captured_text);").unwrap());
+        assert!(parser.lower_resolved_body_with_captures(&[(82, text_start)]).is_none());
+        parser.names.remove("captured_text");
+        parser.return_type = Type::Int;
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
         for ty in [Type::Int, Type::Bool] {
