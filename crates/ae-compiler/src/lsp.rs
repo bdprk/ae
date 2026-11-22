@@ -553,6 +553,17 @@ impl LspServer {
                 caps.insert("foldingRangeProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("codeActionProvider".to_owned(), JsonValue::Bool(true));
                 caps.insert("inlayHintProvider".to_owned(), JsonValue::Bool(true));
+                let token_types = ["variable", "parameter", "function", "struct", "enum", "property"];
+                caps.insert("semanticTokensProvider".to_owned(), {
+                    let mut legend = BTreeMap::new();
+                    legend.insert("tokenTypes".to_owned(), JsonValue::Array(
+                        token_types.iter().map(|t| JsonValue::String((*t).to_owned())).collect()));
+                    legend.insert("tokenModifiers".to_owned(), JsonValue::Array(Vec::new()));
+                    let mut provider = BTreeMap::new();
+                    provider.insert("legend".to_owned(), JsonValue::Object(legend));
+                    provider.insert("full".to_owned(), JsonValue::Bool(true));
+                    JsonValue::Object(provider)
+                });
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -642,6 +653,17 @@ impl LspServer {
                     Some(signature) => Self::make_response(id, signature),
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/semanticTokens/full" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let tokens = self.semantic_tokens(uri);
+                let mut result = BTreeMap::new();
+                result.insert("data".to_owned(), JsonValue::Array(
+                    tokens.into_iter().map(|value| JsonValue::Number(value as f64)).collect()));
+                Self::make_response(id, JsonValue::Object(result))
             }
             "textDocument/inlayHint" => {
                 let Some(params) = params else {
@@ -902,6 +924,59 @@ impl LspServer {
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
         }
+    }
+
+    /// R3d: semantic tokens — each resolved occurrence becomes a token whose
+/// type follows the def it names (variable/parameter/function/struct/
+/// enum/property for a field read). The LSP wire form is the delta-encoded
+/// quintuple array: [deltaLine, deltaStartChar, length, tokenType, mods].
+    fn semantic_tokens(&self, uri: &str) -> Vec<u32> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(cached) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &cached.2;
+        let mut located: Vec<(u32, u32, u32, u32)> = Vec::new();
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                let Some(target) = occurrence.target else { continue };
+                let Some(def) = resolution.defs.get(target.0 as usize) else { continue };
+                if def.imported && def.kind == ae_resolve::DefKind::Variant {
+                    continue;
+                }
+                let token_type = match def.kind {
+                    ae_resolve::DefKind::Function => 2,
+                    ae_resolve::DefKind::Struct => 3,
+                    ae_resolve::DefKind::Enum => 4,
+                    ae_resolve::DefKind::Parameter | ae_resolve::DefKind::ClosureParameter => 1,
+                    ae_resolve::DefKind::Binding
+                    | ae_resolve::DefKind::ForBinding
+                    | ae_resolve::DefKind::PatternBinding => 0,
+                    _ => continue,
+                };
+                let start = doc.line_index.offset_to_position(&doc.text, occurrence.range.start);
+                let end = doc.line_index.offset_to_position(&doc.text, occurrence.range.end);
+                if start.line != end.line {
+                    continue;
+                }
+                located.push((start.line, start.character, end.character.saturating_sub(start.character), token_type));
+            }
+        }
+        located.sort_unstable();
+        located.dedup();
+        let mut data = Vec::with_capacity(located.len() * 5);
+        let mut previous_line = 0u32;
+        let mut previous_character = 0u32;
+        for (line, character, length, token_type) in located {
+            let delta_line = line - previous_line;
+            let delta_start = if delta_line == 0 { character.saturating_sub(previous_character) } else { character };
+            data.extend([delta_line, delta_start, length, token_type, 0]);
+            previous_line = line;
+            previous_character = character;
+        }
+        data
     }
 
     /// R3d: inlay hints — every file-local binding with a resolved type gets

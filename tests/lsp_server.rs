@@ -528,3 +528,21 @@ fn lsp_inlay_hints_show_inferred_binding_types() {
     assert!(labelled.iter().any(|(line, label)| *line == 1 && label.contains("i64")), "count hint: {labelled:?}");
     assert!(labelled.iter().any(|(line, label)| *line == 2 && label.contains("string")), "name hint: {labelled:?}");
 }
+
+#[test]
+fn lsp_semantic_tokens_classify_resolved_occurrences() {
+    let mut server = LspServer::new();
+    let open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ae","version":1,"text":"struct Point { x: i64 }\nfn area(p: &Point) -> i64 { return p.x; }\nfn main() {\n    let pt = Point { x: 1 };\n    let s = area(&pt);\n}"}}}"#;
+    server.handle_message(open);
+
+    let tok_req = r#"{"jsonrpc":"2.0","id":22,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///test.ae"}}}"#;
+    let resps = server.handle_message(tok_req);
+    let val = JsonValue::parse(&resps[0]).unwrap();
+    let data = val.get("result").and_then(|r| r.get("data")).and_then(|d| d.as_array()).unwrap();
+    assert_eq!(data.len() % 5, 0, "delta quintuples");
+    assert!(!data.is_empty(), "tokens present");
+    // Function names classify as token type 2 (function), 3 is struct.
+    let kinds: Vec<i64> = data.chunks(5).filter_map(|q| q[3].as_i64()).collect();
+    assert!(kinds.contains(&2), "a function token is present: {kinds:?}");
+    assert!(kinds.contains(&3), "a struct token is present: {kinds:?}");
+}
