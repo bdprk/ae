@@ -2453,6 +2453,39 @@ impl<'a> Parser<'a> {
         self.lower_shared_expression(expression, remaining, nodes_left, effects)
     }
 
+    fn lower_shared_concat_operand(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<(Expr, Type)> {
+        use ae_syntax::expression::ExpressionKind;
+        match &expression.kind {
+            ExpressionKind::Group(inner) => {
+                *nodes_left = nodes_left.checked_sub(1)?;
+                self.lower_shared_concat_operand(inner, remaining.checked_sub(1)?, nodes_left, effects)
+            }
+            ExpressionKind::Atom(Kind::Ident(name))
+                if self.names.get(name).is_some_and(|&(_, _, ty)| matches!(ty, Type::String | Type::StrView)) =>
+            {
+                remaining.checked_sub(1)?;
+                *nodes_left = nodes_left.checked_sub(1)?;
+                let (value, ty) = self.lower_resolved_local(name, expression.range.start)?;
+                if let Expr::Variable(slot, Type::String, ..) = &value {
+                    if effects.moves.contains(slot) || effects.call_borrows.contains(slot)
+                        || effects.mut_borrows.contains(slot) || self.variable_move_needs_deferral(*slot) != Some(false)
+                    {
+                        return None;
+                    }
+                    effects.moves.push(*slot);
+                }
+                Some((value, ty))
+            }
+            _ => self.lower_shared_read(expression, remaining, nodes_left, effects),
+        }
+    }
+
     fn lower_shared_variant(
         &mut self,
         target: &ae_syntax::expression::Expression,
@@ -2712,13 +2745,21 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let position = (token.line, token.column);
-                let lower_operand = if matches!(operator, Kind::Plus | Kind::EqEq | Kind::NotEq) {
+                let lower_operand = if *operator == Kind::Plus {
+                    Self::lower_shared_concat_operand
+                } else if matches!(operator, Kind::EqEq | Kind::NotEq) {
                     Self::lower_shared_read
                 } else {
                     Self::lower_shared_expression
                 };
                 let left = lower_operand(self, left, remaining, nodes_left, effects)?;
                 let right = lower_operand(self, right, remaining, nodes_left, effects)?;
+                if *operator == Kind::Plus && matches!(left.1, Type::String | Type::StrView)
+                    && matches!(right.1, Type::String | Type::StrView)
+                {
+                    return Some((Expr::Binary(Box::new(left.0), Kind::Plus, Box::new(right.0),
+                        position.0, position.1, Type::String), Type::String));
+                }
                 self.lower_infix(left, operator.clone(), right, position, None).ok()
             }
             _ => None,
@@ -4052,6 +4093,7 @@ mod tests {
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
         let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; let concat = || -> string {{ return captured_text + \"!\"; }}; return 0; }}");
+        let source = format!("{source} fn shared_string_concat() -> string {{ let prefix_text = \"left\"; let suffix_text = \"right\"; if true {{ return prefix_text + false; }} return (prefix_text) + suffix_text; }}");
         let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return ((call_text)); }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; let direct = || -> string {{ return ((capture_source())); }}; let literal = || -> string {{ return ((\"direct literal\")); }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
@@ -4470,6 +4512,25 @@ mod tests {
         parser.seek_scalar_offset(source.find("{ let copy = captured_text;").unwrap());
         assert!(parser.lower_resolved_body_with_captures(&[(82, text_start)]).is_none());
         parser.names.remove("captured_text");
+        for (name, slot) in [("prefix_text", 82), ("suffix_text", 83)] {
+            let start = source.find(&format!("let {name} =")).unwrap() + 4;
+            parser.names.insert(name.into(), (slot, false, Type::String));
+            parser.binding_ranges.insert(slot, start..start + name.len());
+        }
+        let invalid = source.find("prefix_text + false").unwrap();
+        parser.seek_scalar_offset(invalid);
+        assert!(parser.lower_shared_value(None, true).is_none());
+        assert_eq!(parser.tokens[parser.pos].offset, invalid);
+        assert!(!parser.moved.contains(&82));
+        parser.seek_scalar_offset(source.find("(prefix_text) + suffix_text").unwrap());
+        assert!(matches!(parser.lower_shared_value(None, true), Some((Expr::Binary(lhs, Kind::Plus, rhs, ..), Type::String))
+            if matches!(*lhs, Expr::Variable(82, Type::String, ..)) && matches!(*rhs, Expr::Variable(83, Type::String, ..))));
+        assert!(parser.moved.remove(&82));
+        assert!(parser.moved.remove(&83));
+        for (name, slot) in [("prefix_text", 82), ("suffix_text", 83)] {
+            parser.names.remove(name);
+            parser.binding_ranges.remove(&slot);
+        }
         let call_text = source.find("let call_text =").unwrap() + 4;
         parser.names.insert("call_text".into(), (82, false, Type::String));
         parser.seek_scalar_offset(source.find("{ print(call_text);").unwrap());
