@@ -1184,7 +1184,11 @@ impl<'a> Parser<'a> {
                 || (matches!(self.return_type, Type::Struct(_)) && self.receiver == Some(self.return_type)))
             || !self.names.iter().all(|(name, &(slot, _, ty))| {
                 let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
-                if captured && matches!(ty, Type::Vec | Type::VecF | Type::StrVec | Type::StrVecRef) {
+                // A value capture of a numeric vector moves into the
+                // closure's slot; the body's own Frees releases it after
+                // the call, which is the FnOnce shape. String vectors stay
+                // on the typed path (their elements own drops).
+                if captured && matches!(ty, Type::StrVec | Type::StrVecRef) {
                     return false;
                 }
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
@@ -2016,16 +2020,17 @@ impl<'a> Parser<'a> {
                         let value = self.lower_scalar_array_index(index, slots)?;
                         (Expr::Index(slot, len, Box::new(value), line, column), Type::Int)
                     }
-                    Type::VecRef | Type::VecFRef => {
+                    Type::VecRef | Type::VecFRef | Type::Vec | Type::VecF => {
                         let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
                         if index_ty != Type::Int {
                             self.seek_scalar_offset(index.range.end);
                             return Err(self.fail("vector index must be an integer"));
                         }
-                        let element = if ty == Type::VecFRef { Type::F64 } else { Type::Int };
-                        (Expr::VecIndex(slot, Box::new(value), line, column, true, element), element)
+                        let element = if matches!(ty, Type::VecFRef | Type::VecF) { Type::F64 } else { Type::Int };
+                        let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
+                        (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
                     }
-                    _ => unreachable!("resolved array or borrowed numeric vector binding"),
+                    _ => unreachable!("resolved array, borrowed or owned numeric vector binding"),
                 }
             }
             _ => unreachable!("scalar expression eligibility"),
@@ -4239,9 +4244,16 @@ mod tests {
                 [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, true, actual))),
                  Statement::Return(Expr::Number(0), _)] if *actual == element));
         }
+        // An owning value capture moves the vector into the closure's slot;
+        // the element read is a borrowed index into that slot, and the
+        // body's own Frees releases the slot after the call (FnOnce).
         parser.names.insert("numbers".into(), (82, false, Type::Vec));
         parser.seek_scalar_offset(vector_body);
-        assert!(parser.lower_resolved_body_with_captures(&[(82, numbers_start)]).is_none());
+        let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
+            .expect("resolved owning numeric vector-capture closure body").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, false, Type::Int))),
+             Statement::Return(Expr::Number(0), _)]), "{closure:?}");
         parser.names.remove("numbers");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
