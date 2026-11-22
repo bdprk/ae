@@ -31,12 +31,14 @@ The resolved closure route can also lower that call inside a local
 binding and transfer ownership when the closure returns the binding.
 Direct returns of the same file-local calls now lower the call as the
 return value without introducing a temporary binding.
+Direct string literal returns now lower through the same resolved
+return path in eligible closures and ordinary functions.
 
 ## What is half-done
 
 Captured strings from other initializers and other uses of an owned
-capture still use the typed parser. The next slice can support returning
-a string literal directly from the closure.
+capture still use the typed parser. The next slice can migrate direct
+returns with a parenthesized string expression.
 
 ## Next step
 
@@ -49,11 +51,11 @@ git log -5 --oneline
 
 - Windows and Ubuntu workspace tests each passed 495 tests with no warnings.
 - All 21 Python tests passed.
-- The byte comparison against `683fb26` matched 50 examples and 646 CLI
+- The byte comparison against `d3138f3` matched 50 examples and 646 CLI
   invocations. The focused comparator also matched generated C, MIR, and
-  output for direct returns of calls from branches of a closure with a
-  captured scalar and an owned local. Argument count and type diagnostics
-  matched as well.
+  output for literal returns from a function and a closure, including
+  Unicode text, an empty string, and cleanup of an owned local. The
+  return-type mismatch diagnostic matched as well.
 - The Ubuntu generated-C sanitizer and leak check passed for `bounds.ae`.
 
 ## Risks and blockers

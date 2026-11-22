@@ -327,6 +327,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Return(value) => {
             scalar_body_expression(value, resolved, supports_call, supports_field)
+                || matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
                 || resolved.closure_string_returns.contains(&value.range.start)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
@@ -1326,6 +1327,7 @@ impl<'a> Parser<'a> {
                     }
                     if matches!(statement.kind, StatementKind::Return(_)) {
                         let supported = view_base.is_some()
+                            || matches!(value.kind, ExpressionKind::Atom(Kind::Text(_)))
                             || resolved.closure_string_returns.contains(&value.range.start)
                             || matches!(&value.kind, ExpressionKind::Call { callee, .. }
                                 if resolved.closure_return_calls.contains(&callee.range.start));
@@ -4004,7 +4006,7 @@ mod tests {
         let source = format!("{source} fn closure_words() -> i64 {{ let words = strvec_new(); let show = || -> i64 {{ print(words[1]); return 0; }}; let bind = || -> i64 {{ let view = words[1]; print(view); return 0; }}; return show(); }}");
         let source = format!("{source} fn closure_word_return() -> i64 {{ let return_words = strvec_new(); let invalid = || -> string {{ return return_words[1]; }}; let valid = || -> string {{ print(return_words[1]); let owned = \"owned\"; return owned; }}; return 0; }}");
         let source = format!("{source} fn closure_capture_return() -> i64 {{ let captured_text = \"owned\"; let give = || -> string {{ return captured_text; }}; let read = || -> string {{ print(captured_text); print((captured_text)); return captured_text; }}; let alias = || -> string {{ let copy = captured_text; return captured_text; }}; return 0; }}");
-        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return call_text; }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; let direct = || -> string {{ return capture_source(); }}; return 0; }}");
+        let source = format!("{source} fn capture_source() -> string {{ return \"from call\"; }} fn closure_call_capture() -> i64 {{ let call_text = capture_source(); let take = || -> string {{ print(call_text); return call_text; }}; let local = || -> string {{ let result_text = capture_source(); return result_text; }}; let direct = || -> string {{ return capture_source(); }}; let literal = || -> string {{ return \"direct literal\"; }}; return 0; }}");
         let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} fn consume_box(self) -> T {{ return self.item; }} }}");
         let source = format!("{source} impl ScalarBox[T] {{ fn round_trip(self, route: bool) -> Self {{ if route {{ return self; }} else {{ return (self); }} }} }}");
         let source = format!("{source} fn take_box(taken: ScalarBox[i64]) -> i64 {{ return taken.item; }} impl ScalarBox[T] {{ fn send(self) -> i64 {{ return take_box((self)); }} fn send_twice(self) -> i64 {{ let sent = take_box(self); return self.item; }} }}");
@@ -4451,6 +4453,12 @@ mod tests {
             .expect("resolved direct return of a string call").unwrap();
         assert!(matches!(closure.as_slice(),
             [Statement::Return(Expr::Call(98, _, Type::String), owned)] if owned.is_empty()));
+        parser.seek_scalar_offset(source.find("{ return \"direct literal\";").unwrap());
+        let closure = parser.lower_resolved_body_with_captures(&[])
+            .expect("resolved direct return of a string literal").unwrap();
+        assert!(matches!(closure.as_slice(),
+            [Statement::Return(Expr::StrLit(value, ..), owned)]
+            if value == "direct literal" && owned.is_empty()));
         parser.return_type = Type::Int;
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
