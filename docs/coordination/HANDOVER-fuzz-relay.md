@@ -709,4 +709,7 @@ Bare direct-call propagation can now be lowered from a resolved body.
 Both drivers use the same result-shape and enclosing-return checks. Enum
 constructor returns still use the existing ownership-aware operand path.
 Propagation that binds the success payload remains a follow-up.
+R3d's textDocument/documentSymbol also reads the def table now: the
+outline lists file-local functions/structs/enums/traits with their
+declared name ranges (capability advertised in initialize).
 
