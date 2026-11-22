@@ -1238,17 +1238,15 @@ impl<'a> Parser<'a> {
                     return Err(self.fail("return is not supported in main"));
                 }
                 let returned_receiver = receiver_value(value);
-                let (value, ty) = self.lower_scalar_body_expression(value, slots)?;
-                if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &value) {
+                let (lowered, ty) = self.lower_scalar_body_expression(value, slots)?;
+                if let (Some(atom), Expr::Variable(slot, ..)) = (returned_receiver, &lowered) {
                     self.seek_scalar_offset(atom.range.end);
                     self.check_variable_move(*slot)?;
                     self.moved.insert(*slot);
                 }
                 self.seek_scalar_offset(statement.range.end);
-                if ty != self.return_type {
-                    return Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"));
-                }
-                Statement::Return(value, self.live_owned())
+                self.check_return_type(ty, Some(&value.range))?;
+                Statement::Return(lowered, self.live_owned())
             }
             StatementKind::If { condition, then_body, else_body } => {
                 let value = self.lower_scalar_condition(condition, slots)?;
@@ -1585,6 +1583,20 @@ impl<'a> Parser<'a> {
         Err(self.fail(&format!("compound assignment is not supported for type '{}'", target.name())))
     }
 
+    fn matches_value_type(&self, expected: Type, actual: Type, range: Option<&std::ops::Range<usize>>) -> bool {
+        match self.checked_scalar(range) {
+            Some(scalar) => super::expression::operator_scalar(expected) == Some(scalar),
+            None => actual == expected,
+        }
+    }
+
+    fn check_return_type(&self, value: Type, range: Option<&std::ops::Range<usize>>) -> Result<(), ae_span::Diagnostic> {
+        if self.matches_value_type(self.return_type, value, range) {
+            return Ok(());
+        }
+        Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"))
+    }
+
     fn check_assignment_type(
         &self,
         name: &str,
@@ -1592,11 +1604,7 @@ impl<'a> Parser<'a> {
         value: Type,
         range: Option<&std::ops::Range<usize>>,
     ) -> Result<(), ae_span::Diagnostic> {
-        let compatible = match self.checked_scalar(range) {
-            Some(scalar) => super::expression::operator_scalar(target) == Some(scalar),
-            None => value == target,
-        };
-        if compatible {
+        if self.matches_value_type(target, value, range) {
             return Ok(());
         }
         Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value.name(), target.name())))
@@ -2772,7 +2780,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                     };
                     self.take(Kind::Semi)?;
                     if matches!(ty, Type::Closure(_)) { return Err(self.fail("a closure cannot be returned: it has no storage, and its captures live in this frame")); }
-                    if ty != self.return_type { return Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204")); }
+                    self.check_return_type(ty, None)?;
                     // Every live owned value that is not returned is released.
                     result.push(Statement::Return(value, self.live_owned()));
                 }
@@ -3440,6 +3448,7 @@ mod tests {
         parser.seek_scalar_offset(source.find("{ return true").unwrap());
         let mismatch = parser.lower_resolved_scalar_body().expect("resolved error route").err().unwrap();
         assert_eq!(mismatch.message, "return type must be i64");
+        assert_eq!(mismatch.code.as_deref(), Some("E0204"));
 
         parser.seek_scalar_offset(source.find("{ if false").unwrap());
         let branches = parser.lower_resolved_scalar_body().expect("resolved branches").unwrap();

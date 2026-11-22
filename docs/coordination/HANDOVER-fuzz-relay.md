@@ -581,6 +581,7 @@ the compiler's E0201 location.
 
 Plain and compound local assignments share compatibility checks. The resolved
 route uses checked RHS types by byte range, and the compiler handles string
-concatenation and ownership. The next slice applies checked types to returns
-and direct call arguments.
+concatenation and ownership. Both routes also share the return type check,
+using resolved scalar facts when available and the active compiler signature
+for concrete types. The next slice covers direct call arguments.
 
