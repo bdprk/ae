@@ -279,9 +279,15 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             // A string-typed field reads as a borrowed view inside a `+`
             // (the typed route's plus-operand rule): the field itself never
             // moves, so the concat may use it even though a bare read of the
-            // field is not a value.
+            // field is not a value. An owned string variable is consumed by
+            // the same `+`, so it is admissible here too.
             let view = |expression: &ae_syntax::expression::Expression| {
-                *operator == Kind::Plus && resolved.struct_field_views.contains(&expression.range.start)
+                if *operator != Kind::Plus { return false };
+                if resolved.struct_field_views.contains(&expression.range.start) { return true }
+                matches!(&expression.kind, ExpressionKind::Atom(Kind::Ident(name))
+                    if name != "self" && resolved.scalar_reads.get(&expression.range.start)
+                        .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                            || resolved.owned_string_bindings.contains(id)))
             };
             (scalar_body_expression(left, resolved, supports_call, supports_field) || view(left))
                 && (scalar_body_expression(right, resolved, supports_call, supports_field) || view(right))
@@ -307,7 +313,14 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     // A string-typed field in argument position reads as its
                     // view (builtins and `&string` parameters only ever
                     // borrow it).
-                    || resolved.struct_field_views.contains(&argument.range.start))
+                    || resolved.struct_field_views.contains(&argument.range.start)
+                    // An owned string in argument position: a `&string`
+                    // parameter views it, a `string` parameter moves it (the
+                    // lowering records which).
+                    || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                        if name != "self" && resolved.scalar_reads.get(&argument.range.start)
+                            .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                || resolved.owned_string_bindings.contains(id))))
         }
         _ => false,
     }
@@ -1430,8 +1443,10 @@ impl<'a> Parser<'a> {
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
                         // moves the argument, tracked in `moved`, and the
-                        // drops pass trims the Frees lists.
-                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String)
+                        // drops pass trims the Frees lists. A `&string`
+                        // parameter (the resolver's `StrView`) is a read-only
+                        // view: the argument lowers as `Argument::View`.
+                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView)
                     })
             })
         };
@@ -2241,21 +2256,26 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Binary { left, operator, right } => {
                 let lhs = self.lower_scalar_body_expression(left, slots)?;
+                // A string `+` consumes its left operand before the right
+                // side is even read: the typed route's postfix layer marks it
+                // when the operator follows, so `s + s` fails on the second
+                // read with E0102 (the source's move is already in effect).
+                if *operator == Kind::Plus && matches!(lhs.1, Type::String | Type::StrView) {
+                    if let Expr::Variable(id, Type::String, ..) = &lhs.0 {
+                        self.check_variable_move(*id)?;
+                        self.moved.insert(*id);
+                    }
+                }
                 self.seek_scalar_offset(left.range.end);
                 let position = self.position();
                 let rhs = self.lower_scalar_body_expression(right, slots)?;
                 self.seek_scalar_offset(expression.range.end);
-                // A string `+` consumes both owned variables, exactly as the
-                // typed postfix layer does: the left slot's move is checked
-                // before lowering (and marked by `lower_infix`), the right
-                // slot's here. Borrowed views copy.
+                // The right operand is consumed by the same `+`; the left
+                // one's move is already recorded above.
                 let concat = *operator == Kind::Plus
                     && matches!(lhs.1, Type::String | Type::StrView)
                     && matches!(rhs.1, Type::String | Type::StrView);
                 if concat {
-                    if let Expr::Variable(id, Type::String, ..) = &lhs.0 {
-                        self.check_variable_move(*id)?;
-                    }
                     if let Expr::Variable(id, Type::String, ..) = &rhs.0 {
                         self.check_variable_move(*id)?;
                         self.moved.insert(*id);
@@ -2294,6 +2314,17 @@ impl<'a> Parser<'a> {
                     let &expected = signature.params.get(index)
                         .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    // A `&string` parameter is a read-only view: the argument
+                    // lowers as `Argument::View` and nothing moves (the typed
+                    // route's `typed_call_argument` for a `StrView`).
+                    if matches!(expected, Type::StrView) {
+                        if !matches!(actual, Type::String | Type::StrView) {
+                            self.seek_scalar_offset(argument.range.end);
+                            return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name())));
+                        }
+                        args.push(Argument::View(value));
+                        continue;
+                    }
                     if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
                         self.seek_scalar_offset(atom.range.end);
                         self.check_variable_move(*slot)?;

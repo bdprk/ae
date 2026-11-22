@@ -1052,3 +1052,24 @@ with the new parameter releases), sanitize+leak PASS, fuzz 0 failures.
 
 Next: borrow arguments — `Argument::View`/`Borrow` on the resolved route.
 That is what keeps every caller body typed.
+
+## P1.1 slice 8 landed: `&string` arguments and concat move order
+
+- A `&string` parameter is `Type::StrView` in the signature. `supports_call`
+  admits it, and the resolved Call arm lowers that argument as
+  `Argument::View` with the typed route's own check and message
+  ("argument must be a string or string view, found ..."). A view never
+  moves; owned string idents are admissible in argument position.
+- A string `+` consumes its left operand *before* the right side is read:
+  the resolved Binary arm marks the left `Expr::Variable(String)` moved
+  before lowering the right, so `let t = s + s;` fails with E0102 on the
+  second read exactly as the typed route says. Owned string idents are
+  admissible as `+` operands for the same reason (the concat consumes them).
+
+Coverage: 435 → **434**. Byte parity held (50 examples + 663 CLI
+invocations), 510/0 on Windows and WSL2.
+
+Still typed: `Argument::Borrow` for `&vec`/`&vec[string]`/`&struct`
+parameters (the address-taking/forwarding and the call-borrow register),
+closure-valued bindings, `match` on non-ident subjects, generic-instance
+structs, for-in over borrowed vectors, trait-method calls.
