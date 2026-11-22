@@ -1098,3 +1098,30 @@ Byte parity held (50 examples + 663 CLI invocations), 510/0 Windows/WSL2.
 Next: closure-valued bindings and closure bodies over owned captures,
 `match` on non-ident subjects, generic-instance structs (`Cell[T]`,
 `ListNode[T]`), for-in over borrowed vectors, trait-method calls.
+
+## P1.1 slice 10 landed: prelude/generic enums and owned-vector positions
+
+- A `Qualified` constructor (`Option[i64]::None`, `Option[string]::Some(x)`)
+  is marked as an enum constructor when its base names a known enum after
+  peeling `T[...]`/bracket wrappers — `enum_names` plus `generics.names`
+  (prelude generic enums). `return Option[...]::...;` routes.
+- `enum_bindings` now recognises the resolver's third enum spelling,
+  `Prelude { name, arguments }`, so `match line` over an `Option[string]`
+  parameter routes (the arms' string bodies already did).
+- Owned vectors join `len` arguments and indexing (`len(all[i])`): a builtin
+  or `&vec` parameter only borrows the vector, and indexing copies/views an
+  element.
+- The route-reason report now descends into compound statements (if/while/
+  for/match/unsafe bodies) and names the innermost failing statement, which
+  is what made this slice's shapes visible.
+
+Coverage: 428 → **416**, files with fallbacks 125 → 124. `match parsed`
+(`let parsed = parse_int(...)`) still falls back: that binding's resolver
+spelling is `None`, so the scan cannot prove it is enum-typed; the lowering
+would know. Next: teach the scan the initializer's type, or route the
+builtin call's known prelude return through a mark.
+
+Next themes: closure-valued bindings and closure bodies over owned captures,
+generic-instance structs (`Cell[T]`, `ListNode[T]`), for-in over borrowed
+vectors, trait-method calls (`num_traits`, `default_trait`), nested store
+bases.

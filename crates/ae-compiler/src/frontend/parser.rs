@@ -263,8 +263,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.scalar_reads.get(&base.range.start)
                     .is_some_and(|id| resolved.array_definitions.contains(id)
-                        || (resolved.owned_vectors.contains(id)
-                            && resolved.closure_capture_reads.contains(&base.range.start)))
+                        // An owned vector indexes as element copies/views;
+                        // the vector itself never moves.
+                        || resolved.owned_vectors.contains(id))
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_)) => true,
@@ -320,7 +321,11 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                         if name != "self" && resolved.scalar_reads.get(&argument.range.start)
                             .is_some_and(|id| resolved.owned_text_bindings.contains(id)
-                                || resolved.owned_string_bindings.contains(id)))
+                                || resolved.owned_string_bindings.contains(id)
+                                // An owned vector in argument position: a
+                                // builtin (`len`) or a `&vec` parameter only
+                                // borrows it.
+                                || resolved.owned_vectors.contains(id)))
                     || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }))
         }
         _ => false,
@@ -916,14 +921,36 @@ impl<'a> Parser<'a> {
 
     // Planning aid for the P1.1 slices: with AE_ROUTE_REASONS=1 the first
     // statement that keeps a body off the route is printed with its source
-    // line. The route's gates are statement-shaped, so the line names the
-    // shape to support next.
-    fn report_route_reason(&self, label: &str, statement: &ae_syntax::statement::Statement) {
+    // line. A compound statement fails because one of the statements inside
+    // it fails, so the walk descends into blocks and reports the innermost
+    // failing statement — the shape to support next.
+    fn report_route_reason(&self, label: &str, statement: &ae_syntax::statement::Statement, fails: &dyn Fn(&ae_syntax::statement::Statement) -> bool) {
         if std::env::var_os("AE_ROUTE_REASONS").is_none() {
             return;
         }
-        let text = self.source.get(statement.range.clone()).unwrap_or("").lines().next().unwrap_or("").trim();
-        let line = 1 + self.source[..statement.range.start.min(self.source.len())].matches('\n').count();
+        use ae_syntax::statement::{ElseBranch, StatementKind};
+        let mut current = statement;
+        loop {
+            let nested: Option<&ae_syntax::statement::Statement> = match &current.kind {
+                StatementKind::If { then_body, else_body, .. } => then_body.iter().find(|s| fails(s)).or_else(|| match else_body {
+                    Some(ElseBranch::Block(body)) => body.iter().find(|s| fails(s)),
+                    Some(ElseBranch::If(branch)) => fails(branch).then_some(branch.as_ref()),
+                    None => None,
+                }),
+                StatementKind::While { body, .. } | StatementKind::ForRange { body, .. } | StatementKind::ForIn { body, .. } => {
+                    body.iter().find(|s| fails(s))
+                }
+                StatementKind::Match { arms, .. } => arms.iter().flat_map(|arm| arm.body.iter()).find(|s| fails(s)),
+                StatementKind::Unsafe(body) => body.iter().find(|s| fails(s)),
+                _ => None,
+            };
+            match nested {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        let text = self.source.get(current.range.clone()).unwrap_or("").lines().next().unwrap_or("").trim();
+        let line = 1 + self.source[..current.range.start.min(self.source.len())].matches('\n').count();
         eprintln!("route reason {label} {}:{line}: {}", self.file, text.chars().take(80).collect::<String>());
     }
 
@@ -943,10 +970,24 @@ impl<'a> Parser<'a> {
             expressions.enum_bindings.extend(resolution.defs.iter().filter_map(|entry| {
                 use ae_resolve::TypeSpelling;
                 if !entry.kind.is_local() { return None }
-                let (TypeSpelling::Named { def } | TypeSpelling::GenericInstance { def, .. }) = entry.inferred.as_ref()? else {
-                    return None;
+                let is_enum = match &entry.inferred {
+                    // A prelude generic enum (`Option[T]`, `Result[T, E]`):
+                    // registered by name, with the definition outside this
+                    // module's resolution table.
+                    Some(TypeSpelling::Prelude { name, .. }) => self.generics.names.contains_key(*name),
+                    Some(TypeSpelling::Named { def }) | Some(TypeSpelling::GenericInstance { def, .. }) => {
+                        match resolution.defs.get(def.0 as usize) {
+                            Some(item) => item.kind == ae_resolve::DefKind::Enum,
+                            // A generic instance whose item is outside this
+                            // table: the body lowering still decides the
+                            // subject is an enum, and a struct instance falls
+                            // back to the typed route there.
+                            None => matches!(entry.inferred, Some(TypeSpelling::GenericInstance { .. })),
+                        }
+                    }
+                    _ => false,
                 };
-                (resolution.defs.get(def.0 as usize)?.kind == ae_resolve::DefKind::Enum).then_some(entry.id)
+                is_enum.then_some(entry.id)
             }));
             for occurrence in resolution.functions.iter().flat_map(|function| &function.occurrences) {
                 let Some(definition) = occurrence.target.and_then(|id| resolution.defs.get(id.0 as usize)) else {
@@ -1136,7 +1177,27 @@ impl<'a> Parser<'a> {
                         };
                         if matches!(&target.kind, ExpressionKind::Qualified { .. }) {
                             let end = self.tokens.partition_point(|token| token.offset < target.range.end);
-                            if end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset) {
+                            // A variant name recorded by the resolver, or a base that names a known
+                            // enum: a generic instance (`Option[i64]::None`)
+                            // resolves to the same constructor and must join
+                            // the route too. The walk peels any bracket or
+                            // specialization wrapper off the base.
+                            let mut names_enum = false;
+                            if let ExpressionKind::Qualified { base, .. } = &target.kind {
+                                let mut node = base.as_ref();
+                                loop {
+                                    match &node.kind {
+                                        ExpressionKind::Atom(Kind::Ident(name)) => {
+                                            names_enum = self.enum_names.contains_key(name) || self.generics.names.contains_key(name);
+                                            break;
+                                        }
+                                        ExpressionKind::Specialization { base, .. }
+                                        | ExpressionKind::BracketedCallTarget { base, .. } => node = base.as_ref(),
+                                        _ => break,
+                                    }
+                                }
+                            }
+                            if names_enum || (end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset)) {
                                 expressions.enum_constructors.insert(top_level.range.start);
                                 if let StatementKind::Binding { name_range, .. } = &statement.kind {
                                     if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
@@ -1315,7 +1376,7 @@ impl<'a> Parser<'a> {
                         eprintln!("route reason closure {}: binding conflict", self.file);
                     }
                 } else if let Some(statement) = failing.and_then(|index| body.statements.get(index)) {
-                    self.report_route_reason("closure", statement);
+                    self.report_route_reason("closure", statement, &|s| !scalar_body_statement(s, &expressions, &|_, _| true, &|_, _| false));
                 }
             }
             for function in module.functions {
@@ -1344,7 +1405,7 @@ impl<'a> Parser<'a> {
                 if failing.is_none() {
                     expressions.scalar_bodies.insert(range.start, body.into());
                 } else if let Some(statement) = failing.and_then(|index| body.get(index)) {
-                    self.report_route_reason("function", statement);
+                    self.report_route_reason("function", statement, &|s| !scalar_body_statement(s, &expressions, &|_, _| true, &supports_field));
                 }
             }
             expressions
