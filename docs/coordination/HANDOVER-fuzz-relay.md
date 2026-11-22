@@ -510,3 +510,10 @@ receiver field reads using the concrete instance layout. The receiver's
 resolved definition must match its live slot, and only scalar field results
 qualify. Owned and mutable receivers retain the typed body path.
 
+## Resolved generic mutable receiver stores (2026-11-22)
+
+Generic methods with scalar substitutions can read scalar fields through
+`&mut self` and store to a directly selected scalar field. The resolver's
+write occurrence must target the receiver slot. The typed path still
+handles owned receivers, nested stores, and non-scalar field writes.
+

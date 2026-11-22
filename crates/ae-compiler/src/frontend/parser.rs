@@ -148,7 +148,7 @@ fn visit_expression_tree(expression: &ae_syntax::expression::Expression, visit: 
     }
 }
 
-fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression) -> bool) -> bool {
+fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression, ae_resolve::Role) -> bool) -> bool {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
         ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
@@ -165,7 +165,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         // receiver, but only a scalar field lowers as a value.
         ExpressionKind::Field { base, .. } => {
             if receiver_field_root(expression).is_some() {
-                return supports_field(expression);
+                return supports_field(expression, ae_resolve::Role::Read);
             }
             let rooted = match &base.kind {
                 ExpressionKind::Atom(Kind::Ident(_)) => true,
@@ -197,8 +197,8 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     // An owned aggregate passed by value is a move, not a
                     // value read: the ident eligibility excludes struct
                     // slots, so the argument position re-admits them.
-                    || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(_))
-                        if resolved.scalar_reads.get(&argument.range.start)
+                    || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                        if name != "self" && resolved.scalar_reads.get(&argument.range.start)
                             .is_some_and(|id| resolved.struct_definitions.contains(id))))
         }
         _ => false,
@@ -216,7 +216,7 @@ fn compound_assignment_operator(operator: &Kind) -> Option<Kind> {
     }
 }
 
-fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression) -> bool) -> bool {
+fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression, ae_resolve::Role) -> bool) -> bool {
     use ae_syntax::statement::{ElseBranch, StatementKind};
     match &statement.kind {
         StatementKind::Binding { name_range, initializer, .. } => {
@@ -229,7 +229,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Assign { target, operator, value } => {
             match &target.kind {
-                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
+                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start)
                         .is_some_and(|id| !resolved.array_definitions.contains(id))
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
@@ -244,6 +244,13 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                         && resolved.scalar_writes.get(&base.range.start)
                             .is_some_and(|id| resolved.array_definitions.contains(id))
                         && scalar_body_expression(index, resolved, supports_call, supports_field)
+                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                }
+                ae_syntax::expression::ExpressionKind::Field { base, .. }
+                    if *operator == Kind::Equal && matches!(&base.kind,
+                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name == "self") =>
+                {
+                    supports_field(target, ae_resolve::Role::Write)
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
                 }
                 _ => false,
@@ -897,7 +904,7 @@ impl<'a> Parser<'a> {
             }
             for body in resolution.functions.iter().flat_map(|function| &function.closure_bodies) {
                 if !body.has_binding_conflict
-                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true, &|_| false))
+                    && body.statements.iter().all(|statement| scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| false))
                 {
                     expressions.scalar_bodies.insert(body.start, body.statements.clone());
                 }
@@ -906,7 +913,7 @@ impl<'a> Parser<'a> {
                 let (Some(range), Some(body)) = (function.declaration.body, function.body) else {
                     continue;
                 };
-                let receiver_field = |expression: &ae_syntax::expression::Expression| {
+                let receiver_field = |expression: &ae_syntax::expression::Expression, _| {
                     function.impl_owner.is_some() && receiver_field_root(expression).is_some()
                 };
                 let eligible = body.iter().all(|statement| {
@@ -955,11 +962,12 @@ impl<'a> Parser<'a> {
         // substituted their signature. Keep non-scalar substitutions on
         // the typed route until their ownership and layout are covered.
         if !self.subst.values().copied().all(scalar_type)
-            || self.receiver.is_some_and(|ty| !matches!(ty, Type::StructRef(_)))
+            || self.receiver.is_some_and(|ty| !matches!(ty, Type::StructRef(_) | Type::StructMut(_)))
             || (self.impl_self.is_some() && self.subst.is_empty())
             || !scalar_type(self.return_type)
-            || !self.names.values().all(|&(_, _, ty)| {
+            || !self.names.iter().all(|(name, &(_, _, ty))| {
                 scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_))
+                    || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::StructMut(_)))
             })
         {
             return None;
@@ -988,10 +996,15 @@ impl<'a> Parser<'a> {
         let receiver_def = self.names.get("self")
             .and_then(|&(slot, _, _)| self.binding_ranges.get(&slot))
             .and_then(|range| resolved.scalar_definitions.get(&range.start));
-        let supports_field = |expression: &ae_syntax::expression::Expression| {
+        let supports_field = |expression: &ae_syntax::expression::Expression, role| {
             self.receiver.is_some_and(|receiver| {
+                let occurrences = match role {
+                    ae_resolve::Role::Read => &resolved.scalar_reads,
+                    ae_resolve::Role::Write if matches!(receiver, Type::StructMut(_)) => &resolved.scalar_writes,
+                    _ => return false,
+                };
                 receiver_field_root(expression).is_some_and(|offset| {
-                    receiver_def.is_some() && resolved.scalar_reads.get(&offset) == receiver_def
+                    receiver_def.is_some() && occurrences.get(&offset) == receiver_def
                 }) && receiver_field_type(expression, receiver, self.structs).is_some_and(scalar_type)
             })
         };
@@ -1109,6 +1122,19 @@ impl<'a> Parser<'a> {
                 statement
             }
             StatementKind::Assign { target, operator, value } => {
+                if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
+                    let def = self.resolved_expressions().scalar_writes[&base.range.start];
+                    let (slot, receiver @ Type::StructMut(sid)) = slots[&def] else {
+                        unreachable!("resolved mutable receiver field");
+                    };
+                    let field = field_ty_in(sid, name, self.structs).expect("eligible receiver field");
+                    let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
+                    self.seek_scalar_offset(statement.range.end);
+                    if actual != field {
+                        return Err(self.fail(&format!("field '{name}' must be {}", field.name())));
+                    }
+                    return Ok(Statement::FieldStore(slot, name.clone(), field, value, receiver));
+                }
                 if let ae_syntax::expression::ExpressionKind::Index { base, index } = &target.kind {
                     // An array element store (`a[i] = v`): eligibility
                     // confirmed a resolved array binding and the plain
@@ -3160,7 +3186,7 @@ mod tests {
         let source = "struct Point { x: i64, y: i64 } struct Inner { x: i64 } struct Outer { inner: Inner, tag: i64 } struct Holder { ready: bool, text: string } struct Guard { id: i64 } fn scalar() -> bool { let local = (2 + 3) * 4; return local == 20; } fn mismatch() -> i64 { return true; } fn branches() -> i64 { if false { let same = 1; return same; } else if true { let same = 2; return same; } else { let same = 3; return same; } } fn loops() -> i64 { while true { while false { continue; } break; } return 7; } fn bad_loop() -> i64 { continue; return 0; } fn ranges() -> i64 { for i in 2..5 { while false { continue; } if i == 3 { continue; } } let i = 7; return i; } fn bad_range() -> i64 { for j in false..5 {} return 0; } fn countdown() -> i64 { var n = 4; n = 2; while n > 0 { n -= 1; } return n; } fn frozen() -> i64 { let n = 1; n = 2; return n; } fn output() -> i64 { print(2); assert(2 == 2); return 0; } fn bad_assert() -> i64 { assert(5); return 0; } fn entry_shape() -> i64 { print(23); } fn calls() -> i64 { return compute(compute(2)); } fn wrong_call() -> i64 { return compute(false); } fn cross_module() -> i64 { return imported_scalar(2); } fn private_module() -> i64 { return imported_private(3); } fn local_array() -> i64 { let a = [4, 5]; return a[1]; } fn bad_array() -> i64 { let a = [4, 5]; return a[false]; } fn local_array_store() -> i64 { var a = [4, 5]; a[1] = 9; return a[1]; } fn bad_store() -> i64 { var a = [4, 5]; a[false] = 1; return a[0]; } fn frozen_store() -> i64 { let a = [4, 5]; a[0] = 9; return a[0]; } fn bad_store_value() -> i64 { var a = [4, 5]; a[0] = false; return a[0]; } fn compound_store() -> i64 { var a = [4, 5]; a[0] += 1; return a[0]; } fn array_param(a: &[i64; 2]) -> i64 { return a[1]; } fn array_param_store(a: &[i64; 2]) -> i64 { a[0] = 3; return 0; } fn field_read(p: &Point) -> i64 { return p.x + p.y; } fn field_text(h: &Holder) -> i64 { return h.text; } fn nested_read(o: &Outer) -> i64 { return o.inner.x; } fn make_point() -> i64 { let p = Point { x: 1, y: 2 }; return p.x + p.y; } fn make_guard() -> i64 { let g = Guard { id: 1 }; return g.id; } fn consume_point(p: Point) -> i64 { return p.x; } fn pass_point() -> i64 { let q = Point { x: 3, y: 4 }; let r = consume_point(q); return r + 1; } fn pass_twice() -> i64 { let q = Point { x: 5, y: 6 }; let r = consume_point(q); let s = consume_point(q); return r + s; } fn loop_move(b: bool) -> i64 { let q = Point { x: 7, y: 8 }; while b { let r = consume_point(q); } return 0; } fn unsafe_wrap() -> i64 { unsafe { let a = 1; } return 2; } fn compute(x: i64) -> i64 { return x; } fn consume(s: string) -> i64 { return 1; } fn main() { let text = \"hello\"; let flag = true; var value = flag; if flag {} print(flag); print(compute(2)); assert(consume(text)); print(consume(text)); let v = vec[1.0, 2.0]; print(vec[1]); print(v[0]); let raw = &value as *const bool; let view = raw as *mut f64; let write = &mut value as *mut bool; print(compute(choose[i64, vec[f64]](2, vec[1.0]))); let pair = Pair[i64, vec[f64]] { first: 1, second: vec[1.0] }; let made = Pair[i64, vec[f64]]::new(); let variant = Choice[i64, vec[f64]]::Some(1); let empty = Choice[i64, vec[f64]]::empty(); let compound = raw as *const shared[i64]; task_spawn(ex, || -> i64 { return 0; }); let closure = |x: i64| -> bool { return x == 0; }; }";
         let source = format!("{source} fn generic_scalar[T](generic_value: T) -> T {{ return generic_value; }}");
         let source = format!("{source} fn closure_owner(captured_scalar: i64) -> i64 {{ let f = || -> i64 {{ return captured_scalar; }}; return f(); }}");
-        let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} }}");
+        let source = format!("{source} struct ScalarBox[T] {{ item: T }} impl ScalarBox[T] {{ fn scalar_identity(method_value: T) -> T {{ return method_value; }} fn get(&self) -> T {{ return self.item; }} fn set(&mut self, new_value: T) -> T {{ self.item = new_value; return self.item; }} }}");
         let source = source.as_str();
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
@@ -3249,6 +3275,29 @@ mod tests {
         let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver body").unwrap();
         assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(base, name, Type::Int), _)]
             if name == "item" && matches!(**base, Expr::Variable(80, actual, ..) if actual == receiver)));
+        let setter_binding = source.find("set(&mut self").unwrap() + "set(&mut ".len();
+        let value_binding = source.find("new_value:").unwrap();
+        let setter_body = source.find("{ self.item = new_value;").unwrap();
+        let mutable_receiver = Type::StructMut(instance);
+        parser.receiver = Some(mutable_receiver);
+        parser.names.insert("self".into(), (80, true, mutable_receiver));
+        parser.names.insert("new_value".into(), (81, false, Type::Int));
+        parser.binding_ranges.insert(80, setter_binding..setter_binding + "self".len());
+        parser.binding_ranges.insert(81, value_binding..value_binding + "new_value".len());
+        parser.seek_scalar_offset(setter_body);
+        let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver store").unwrap();
+        assert!(matches!(lowered.as_slice(), [Statement::FieldStore(80, name, Type::Int, Expr::Variable(81, Type::Int, ..), actual), Statement::Return(Expr::Field(..), _)]
+            if name == "item" && *actual == mutable_receiver));
+        parser.names.insert("new_value".into(), (81, false, Type::Bool));
+        parser.seek_scalar_offset(setter_body);
+        let error = parser.lower_resolved_scalar_body().expect("resolved setter error").err().unwrap();
+        assert_eq!(error.message, "field 'item' must be i64");
+        assert_eq!(*parser.current(), Kind::Return);
+        parser.names.remove("new_value");
+        parser.binding_ranges.remove(&81);
+        parser.receiver = Some(receiver);
+        parser.names.insert("self".into(), (80, false, receiver));
+        parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());
         parser.structs[instance].fields[0].1 = Type::String;
         parser.seek_scalar_offset(receiver_body);
         assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar receiver field stays typed");
