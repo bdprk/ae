@@ -848,6 +848,13 @@ impl<'a> Parser<'a> {
                     for top_level in statement.expressions() {
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
                         visit_expression_tree(top_level, &mut |expression| {
+                            use ae_syntax::expression::ExpressionKind;
+                            if let ExpressionKind::Call { callee, arguments } = &expression.kind {
+                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }) {
+                                    let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
+                                    expressions.specialized_call_arguments.insert(self.tokens[open].offset, arguments.as_slice().into());
+                                }
+                            }
                             // A field read on a struct parameter joins the
                             // body route: the owner struct comes from the
                             // parameter's spelling or a nested marked field.
@@ -1985,58 +1992,7 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let params = params.clone();
-                let mut args = Vec::with_capacity(arguments.len());
-                for (argument, expected) in arguments.iter().zip(params) {
-                    if matches!(expected, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
-                        let ExpressionKind::BorrowArgument { name, name_range, mutable } = &argument.kind else {
-                            return None;
-                        };
-                        if *mutable != matches!(expected, Type::StructMut(_)) {
-                            return None;
-                        }
-                        let (Expr::Variable(slot, ..), actual) = self.lower_resolved_local(name, name_range.start)? else {
-                            return None;
-                        };
-                        if effects.moves.contains(&slot) {
-                            return None;
-                        }
-                        use super::declarations::CallBorrow;
-                        let borrow = CallBorrow::classify(expected, actual)?;
-                        if let CallBorrow::Struct { .. } = borrow {
-                            if !*mutable {
-                                if effects.mut_borrows.contains(&slot)
-                                    || self.mut_borrows.iter().any(|&(borrowed, _)| borrowed == slot)
-                                {
-                                    return None;
-                                }
-                                if !self.is_borrowed(slot) && !effects.call_borrows.contains(&slot) {
-                                    effects.call_borrows.push(slot);
-                                }
-                            } else {
-                                if !self.names.get(name)?.1 || effects.call_borrows.contains(&slot)
-                                    || effects.mut_borrows.contains(&slot)
-                                {
-                                    return None;
-                                }
-                                if self.is_borrowed(slot) {
-                                    if !self.only_view_borrows_active(slot) {
-                                        return None;
-                                    }
-                                    effects.conflicts.push((slot, name_range.start, name.clone(), "mutate", None));
-                                }
-                                effects.mut_borrows.push(slot);
-                            }
-                        }
-                        args.push(Argument::Borrow(slot, borrow.address()));
-                        continue;
-                    }
-                    let value = self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?;
-                    args.push(match (expected, value) {
-                        (Type::StrView, (value, Type::String | Type::StrView)) => Argument::View(value),
-                        (expected, (value, actual)) if self.matches_value_type(expected, actual, Some(&argument.range)) => Argument::Value(value),
-                        _ => return None,
-                    });
-                }
+                let args = self.lower_shared_call_arguments(arguments, &params, remaining, nodes_left, effects)?;
                 Some((Expr::Call(id, args, ret), ret))
             }
             ExpressionKind::Prefix { operator, operand } => {
@@ -2062,6 +2018,106 @@ impl<'a> Parser<'a> {
             }
             _ => None,
         }
+    }
+
+    fn lower_shared_call_arguments(
+        &mut self,
+        arguments: &[ae_syntax::expression::Expression],
+        params: &[Type],
+        remaining: usize,
+        nodes_left: &mut usize,
+        effects: &mut SharedExpressionEffects,
+    ) -> Option<Vec<Argument>> {
+        use ae_syntax::expression::ExpressionKind;
+        let mut args = Vec::with_capacity(arguments.len());
+        for (argument, expected) in arguments.iter().zip(params.iter().copied()) {
+            if matches!(expected, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+                let ExpressionKind::BorrowArgument { name, name_range, mutable } = &argument.kind else {
+                    return None;
+                };
+                if *mutable != matches!(expected, Type::StructMut(_)) {
+                    return None;
+                }
+                let (Expr::Variable(slot, ..), actual) = self.lower_resolved_local(name, name_range.start)? else {
+                    return None;
+                };
+                if effects.moves.contains(&slot) {
+                    return None;
+                }
+                use super::declarations::CallBorrow;
+                let borrow = CallBorrow::classify(expected, actual)?;
+                if let CallBorrow::Struct { .. } = borrow {
+                    if !*mutable {
+                        if effects.mut_borrows.contains(&slot)
+                            || self.mut_borrows.iter().any(|&(borrowed, _)| borrowed == slot)
+                        {
+                            return None;
+                        }
+                        if !self.is_borrowed(slot) && !effects.call_borrows.contains(&slot) {
+                            effects.call_borrows.push(slot);
+                        }
+                    } else {
+                        if !self.names.get(name)?.1 || effects.call_borrows.contains(&slot)
+                            || effects.mut_borrows.contains(&slot)
+                        {
+                            return None;
+                        }
+                        if self.is_borrowed(slot) {
+                            if !self.only_view_borrows_active(slot) {
+                                return None;
+                            }
+                            effects.conflicts.push((slot, name_range.start, name.clone(), "mutate", None));
+                        }
+                        effects.mut_borrows.push(slot);
+                    }
+                }
+                args.push(Argument::Borrow(slot, borrow.address()));
+                continue;
+            }
+            let value = self.lower_shared_argument(argument, expected, remaining, nodes_left, effects)?;
+            args.push(match (expected, value) {
+                (Type::StrView, (value, Type::String | Type::StrView)) => Argument::View(value),
+                (expected, (value, actual)) if self.matches_value_type(expected, actual, Some(&argument.range)) => Argument::Value(value),
+                _ => return None,
+            });
+        }
+        Some(args)
+    }
+
+    pub(super) fn lower_committed_specialized_arguments(&mut self, params: &[Type]) -> Option<Vec<Argument>> {
+        if *self.current() != Kind::LParen {
+            return None;
+        }
+        let offset = self.tokens[self.pos].offset;
+        let arguments = self.resolved_expressions().specialized_call_arguments.get(&offset)?.clone();
+        if arguments.len() != params.len() || arguments.len() > 64 {
+            return None;
+        }
+        let mut cursor = self.pos + 1;
+        for (index, argument) in arguments.iter().enumerate() {
+            if self.tokens.get(cursor)?.offset != argument.range.start {
+                return None;
+            }
+            cursor = self.tokens.partition_point(|token| token.offset < argument.range.end);
+            if index + 1 < arguments.len() {
+                if self.tokens.get(cursor)?.kind != Kind::Comma {
+                    return None;
+                }
+                cursor += 1;
+            }
+        }
+        if self.tokens.get(cursor)?.kind != Kind::RParen {
+            return None;
+        }
+        let depth = 128usize.checked_sub(self.expression_depth)?.min(64);
+        let budget = 128usize.checked_sub(self.expression_nodes)?;
+        let mut nodes_left = budget;
+        let mut effects = SharedExpressionEffects::default();
+        let args = self.lower_shared_call_arguments(&arguments, params, depth, &mut nodes_left, &mut effects)?;
+        self.commit_shared_effects(effects);
+        self.expression_nodes += budget - nodes_left;
+        self.pos = cursor + 1;
+        Some(args)
     }
 
     fn commit_shared_effects(&mut self, effects: SharedExpressionEffects) {
@@ -3416,7 +3472,19 @@ mod tests {
         assert!(parser.lower_shared_value(Some(Kind::Semi), true).is_none());
         assert_eq!(parser.pos, start);
         assert!(!parser.moved.contains(&84));
-        let (id, _, _) = parser.instantiate_fn(0, vec![Type::String], call).unwrap();
+        let (id, params, _) = parser.instantiate_fn(0, vec![Type::String], call).unwrap();
+        parser.seek_scalar_offset(call + "generic_scalar[string]".len());
+        let open = parser.pos;
+        assert!(parser.lower_committed_specialized_arguments(&[Type::Int]).is_none());
+        assert_eq!(parser.pos, open);
+        assert!(!parser.moved.contains(&84));
+        assert!(matches!(
+            parser.lower_committed_specialized_arguments(&params).as_deref(),
+            Some([Argument::Value(Expr::Variable(84, Type::String, ..))])
+        ));
+        assert_eq!(*parser.current(), Kind::Semi);
+        assert!(parser.moved.remove(&84));
+        parser.seek_scalar_offset(call);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
             Some((Expr::Call(actual, arguments, Type::String), Type::String))

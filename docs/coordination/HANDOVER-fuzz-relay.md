@@ -625,3 +625,9 @@ The C backend uses the concrete vector type in forward declarations and
 definitions. The owned-return regression covers a generic identity function
 instantiated with `vec[f64]`, whose returned buffer remains live in the caller.
 
+After first-use generic function instantiation, the committed call site can
+lower its indexed argument list against the concrete signature. The shared
+argument planner commits ownership changes only after the complete list
+passes. Unsupported syntax and rejected arguments are parsed by the typed
+argument reader at the original cursor.
+

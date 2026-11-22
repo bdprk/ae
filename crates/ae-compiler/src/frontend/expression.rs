@@ -1453,7 +1453,10 @@ impl Parser<'_> {
                         name_offset, Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS, Self::generic_call_type_argument,
                     )?;
                     let (id, types, ret) = self.instantiate_fn(gid, type_args, name_offset)?;
-                    let args = self.call_arguments(&name, &types)?;
+                    let args = match self.lower_committed_specialized_arguments(&types) {
+                        Some(args) => args,
+                        None => self.call_arguments(&name, &types)?,
+                    };
                     (Expr::Call(id, args, ret), ret)
                 } else if matches!(self.names.get(&name), Some((_, _, Type::Closure(_)))) && *self.current() == Kind::LParen {
                     // A closure value is a name for its generated function:
