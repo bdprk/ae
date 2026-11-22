@@ -634,3 +634,32 @@ fn lsp_shadowing_is_rejected_like_the_compiler() {
     let message = &diagnostics[0].message;
     assert!(message.contains("duplicate variable 'total'"), "compiler text: {message}");
 }
+
+#[test]
+fn lsp_sequential_edits_match_a_fresh_parse() {
+    // M6.2.01: after sequential unsaved edits (multibyte and emoji
+    // included), the server's answers must equal a server that opened the
+    // final text directly.
+    let mut edited = LspServer::new();
+    let v1 = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///m.ae","version":1,"text":"fn area(w: i64) -> i64 { return w; }\nfn main() { let s = area(1); }"}}}"#;
+    edited.handle_message(v1);
+    let v2 = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///m.ae","version":2},"contentChanges":[{"text":"fn area(w: i64, h: i64) -> i64 { return w; }\nfn main() { let s = \"中文\"; }"}]}}"#;
+    edited.handle_message(v2);
+    let v3 = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///m.ae","version":3},"contentChanges":[{"text":"fn area(w: i64, h: i64) -> i64 { return w; }\nfn main() { let s = \"中文😀\"; print(s); }"}]}}"#;
+    edited.handle_message(v3);
+    let final_text = "fn area(w: i64, h: i64) -> i64 { return w; }\nfn main() { let s = \"中文😀\"; print(s); }";
+
+    let mut fresh = LspServer::new();
+    let open = format!(r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///m.ae","version":1,"text":{}}}}}}}"#, JsonValue::String(final_text.to_owned()).serialize());
+    fresh.handle_message(open.as_str());
+
+    let hover = r#"{"jsonrpc":"2.0","id":30,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///m.ae"},"position":{"line":1,"character":16}}}"#;
+    let a = JsonValue::parse(&edited.handle_message(hover)[0]).unwrap();
+    let b = JsonValue::parse(&fresh.handle_message(hover)[0]).unwrap();
+    assert_eq!(a.get("result"), b.get("result"), "edited state equals fresh parse");
+    let edited_hover = a.get("result").and_then(|r| r.get("contents")).and_then(|c| c.get("value")).and_then(|v| v.as_str()).unwrap();
+    assert!(edited_hover.contains("string"), "binding type survives the edits: {edited_hover}");
+
+    let diagnostics = edited.check_text(final_text);
+    assert!(diagnostics.is_empty(), "final text is clean: {diagnostics:?}");
+}
