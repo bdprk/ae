@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 137 of 193 items done.
-Charter-1.0 progress: 126 of 193 items done (11 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 138 of 194 items done.
+Charter-1.0 progress: 127 of 194 items done (11 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -266,6 +266,7 @@ Charter-1.0 progress: 126 of 193 items done (11 prototype-done items still name 
 ## Audit remediation (2026-11-23, master-checklist §8 phases)
 
 - [x] P0.1: **Repository hygiene and CI gates.** The working tree is clean, the autopush fallback scripts are tracked, and benchmark binaries are gitignored. CI runs `std_layering.py` on every push/PR, `check_commit_ids.py --base origin/<base>` on PRs, and `clippy -W clippy::all` as a reporting gate (392 existing findings stay visible without failing the build until the debt list shrinks). The one hard clippy error (ae-span's intentional reversed-range assertion) carries a targeted allow with its reason. (`7bdb1fa`)
+- [x] P0.4: **Panic-freedom and malformed-input fuzz.** `crates/ae-compiler/src/robustness.rs` mutates nine corpus files deterministically (truncate / flip / insert delimiter / delete slice; 10,000 cases in the default suite, 50,000 behind the CI robustness step) and feeds every mutant through `lex` and the real check entry: zero panics. Twelve hostile JSON-RPC frames (empty, truncated, negative positions, 2^32-1 lines, NUL bytes, an unterminated body) go through the LSP server: zero panics. The sweep found a **real crash**: a complete `main` behind a malformed generic body drove the front end past a 2 MB thread's stack (STATUS_STACK_OVERFLOW). `check_source_diagnostic` now runs its parse on a dedicated 16 MB worker thread, so the same input returns a diagnostic; a structured regression pins it. The structural fix (an explicit recursion limit at the HIR cutover) remains phase P1; replacing every non-test `.unwrap()` with a structured error is tracked with that work.
 - [x] P0.3: **Two-tier ledger calibration.** `docs/checklist.md` now reports Prototype progress and Charter-1.0 progress separately: a prototype-done item whose body still names a narrowed/designed-out limitation carries an explicit `[1.0-gap: P<phase>]` marker naming the audit §8 phase that closes it, and the generator counts those items out of the 1.0 total (`scripts/gen_checklist.py` + tests). The first calibration pass tags ten items against phases P2.1/P2.3/P3.3/P4.4/P4.5/P5.1/P6.4 — 136/192 prototype-done vs 126/192 toward 1.0. The remaining tags land as each phase's remediation is scoped.
 - [x] P0.2: **Per-compilation registry isolation.** `reset_compilation_state()` empties the nine thread-local mirrors (pointee, shared-handle, extern, exposure, unsafe-fn in `frontend/mod.rs`; fn-signature, fn-id, spawned, borrow-captures in `closures.rs`) at every top-level entry (`check_source_diagnostic`, `compile`, `load_program_full`). A leaked `unsafe fn` marker at function id 0 would make the next program's id 0 unsafe; the regression test compiles unsafe/extern/pointee programs and then a plain program, asserting the markers do not answer across compilations. A true per-compile context (parallel compilations, Salsa-style queries) remains phase P6 work. (`fix: reset per-compilation registries...`)
 

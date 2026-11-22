@@ -40,6 +40,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -W clippy::all
       - name: Test
         run: cargo test --workspace --locked
+      - name: Robustness sweep (P0.4 audit gate)
+        # 50,000 mutated sources through the real check entry: malformed
+        # input must produce a diagnostic, never a panic or a stack abort.
+        run: cargo test -p ae-compiler --lib mutated_sources_never_panic_50k -- --ignored
       - name: Verify generated C (Linux sanitizers)
         if: runner.os == 'Linux'
         run: python3 scripts/verify_generated_c.py --sanitize

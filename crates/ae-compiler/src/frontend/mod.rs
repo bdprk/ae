@@ -746,6 +746,26 @@ pub fn check(source: &str) -> Result<(), String> {
 }
 
 pub(crate) fn check_source_diagnostic(source: &str) -> Result<(), FrontendDiagnostic> {
+    // The front end recurses over nesting (expressions, blocks, generic
+    // instances, trait resolution). A pathological input — a malformed
+    // generic body whose enclosing function still parses to a complete
+    // `main`, for instance — can drive that depth past a 2 MB thread's
+    // stack, which aborts the process instead of producing a diagnostic.
+    // A dedicated large stack keeps every malformed input a diagnostic;
+    // the structural fix (an explicit depth limit at the HIR cutover)
+    // belongs to phase P1.
+    const FRONTEND_STACK: usize = 16 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(FRONTEND_STACK)
+            .spawn_scoped(scope, || check_source_here(source))
+            .expect("spawn the front-end worker")
+            .join()
+            .expect("the front-end worker returns a diagnostic, never a panic")
+    })
+}
+
+fn check_source_here(source: &str) -> Result<(), FrontendDiagnostic> {
     reset_compilation_state();
     let mut shared: SharedFunctions = HashMap::new();
     let mut structs: Vec<StructDef> = Vec::new();
