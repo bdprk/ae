@@ -1960,6 +1960,15 @@ parity → 50k → WSL → commit.
   calls, pointer arithmetic/retag, map returns (`word_count`), nested
   generic literals, chained temporary method calls, sync_markers' trait
   markers, box_wrapper.
+
+### Slice 38 — map returns and parameters (landed)
+
+- Guard return/slot clauses and `supports_call` admit `map`/`map[string,f64]`
+  (by value); a call returning a map marks its binding in `map_definitions`
+  so `map_get(counts, ..)` and `return counts;` answer; the Return arm moves
+  an owned map out.
+- `examples/word_count.ae` and `modules/main.ae` are legacy-free; coverage
+  31 → 26, files 24 → 22; deny manifest 154.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

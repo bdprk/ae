@@ -742,7 +742,9 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                             // `return owned_string;` moves the string out the
                             // same way.
                             || resolved.owned_text_bindings.contains(id)
-                            || resolved.owned_string_bindings.contains(id)))
+                            || resolved.owned_string_bindings.contains(id)
+                            // `return counts;` for a map the body owns.
+                            || resolved.map_definitions.contains(id)))
         }
         // A literal print is the typed route's `Printed::Text` (no expression
         // to lower); a string field prints as its view; everything else must
@@ -1708,6 +1710,14 @@ impl<'a> Parser<'a> {
                                                     if matches!(signature.ret, Type::Enum(..)) {
                                                         expressions.enum_bindings.insert(id);
                                                     }
+                                                    // A map-returning call owns its
+                                                    // map: `map_get(counts, ..)` and
+                                                    // `return counts;` answer by this
+                                                    // mark when the resolver leaves
+                                                    // the spelling open.
+                                                    if matches!(signature.ret, Type::Map | Type::MapF) {
+                                                        expressions.map_definitions.insert(id);
+                                                    }
                                                     // A call returning a struct (often an
                                                     // imported one, e.g. a std constructor)
                                                     // types the binding from the signature:
@@ -2133,7 +2143,7 @@ impl<'a> Parser<'a> {
         // in a way the marking pass cannot classify falls back at the scan.
         let impl_body_supported = true;
         let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
-            || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF)
+            || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF)
             || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
             || (matches!(self.return_type, Type::Struct(_))
                 && (self.receiver == Some(self.return_type)
@@ -2153,7 +2163,7 @@ impl<'a> Parser<'a> {
             // carries it in every `return`, so the callee releases what it
             // did not move out. A closure's owned string capture stays
             // typed: reading it would move the capture.
-            let ok = scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
+            let ok = scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
                 || (matches!(ty, Type::String) && !captured)
                 || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                 || ty == Type::StrView
@@ -2367,7 +2377,7 @@ impl<'a> Parser<'a> {
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
-                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF)
+                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF)
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                         || owned_field_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
@@ -2381,9 +2391,10 @@ impl<'a> Parser<'a> {
                         // classify rules.
                         scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::Array(_)
                             | Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_)
-                            // A by-value vector parameter owns the argument:
-                            // the call moves it (tracked in `moved`).
-                            | Type::Vec | Type::StrVec | Type::VecF
+                            // A by-value vector or map parameter owns the
+                            // argument: the call moves it (tracked in
+                            // `moved`).
+                            | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF
                             // An enum parameter owns a value argument the
                             // same way (a result enum, an Option payload).
                             | Type::Enum(..)
