@@ -8209,7 +8209,10 @@ mod tests {
         let body = parser.lower_resolved_scalar_body().expect("resolved cross-module call").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(10, _, Type::Int), _)]));
         parser.seek_scalar_offset(source.find("{ return imported_private").unwrap());
-        assert!(parser.lower_resolved_scalar_body().is_none());
+        // A private import is admitted by the scan; the lowering reports the
+        // typed route's visibility rule.
+        let error = parser.lower_resolved_scalar_body().expect("resolved private import").err().unwrap();
+        assert!(error.message.contains("is private to"), "{}", error.message);
 
         parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[1]").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local array").unwrap();
