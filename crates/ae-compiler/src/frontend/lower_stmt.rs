@@ -44,7 +44,7 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(operand.range.start);
                     let (value, call_ty) = match self.lower_shared_value(Some(Kind::Question), true) {
                         Some(pair) => pair,
-                        None => self.expression(0, true)?,
+                        None => self.fallback_expression(0, true)?,
                     };
                     if *self.current() != Kind::Question {
                         return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
@@ -107,7 +107,7 @@ impl<'a> Parser<'a> {
                         || self.resolved_expressions().enum_constructors.contains(&initializer.range.start)
                     {
                         self.seek_scalar_offset(initializer.range.start);
-                        self.expression(0, false)?
+                        self.fallback_expression(0, false)?
                     } else {
                         let lowered = self.lower_scalar_body_expression(initializer, slots)?;
                         self.seek_scalar_offset(initializer.range.end);
@@ -395,7 +395,7 @@ impl<'a> Parser<'a> {
                     // (`current = Message::Number(9);`): the typed expression
                     // parser owns the variant layout and payload lowering.
                     self.seek_scalar_offset(value.range.start);
-                    self.expression(0, true)?
+                    self.fallback_expression(0, true)?
                 } else {
                     self.lower_scalar_body_expression(value, slots)?
                 };
@@ -473,7 +473,7 @@ impl<'a> Parser<'a> {
                 }
                 let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
                     self.seek_scalar_offset(value.range.start);
-                    let result = self.expression(0, true)?;
+                    let result = self.fallback_expression(0, true)?;
                     self.take(Kind::Semi)?;
                     result
                 } else {

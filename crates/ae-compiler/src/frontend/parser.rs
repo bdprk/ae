@@ -25,6 +25,18 @@ pub(super) fn moved_self_assignment_hint(diagnostic: ae_span::Diagnostic) -> ae_
 
 impl<'a> Parser<'a> {
     pub(super) fn current(&self) -> &Kind { &self.tokens[self.pos].kind }
+    /// A lowering site that still hands an expression to the typed Pratt
+    /// parser instead of lowering the shared syntax node. With
+    /// `AE_ROUTE_REPORT` set it names its token, so the dual-parser gap is
+    /// measurable and a ratchet can drive it to zero.
+    pub(super) fn fallback_expression(&mut self, min: u8, moving: bool) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if std::env::var_os("AE_ROUTE_REPORT").is_some() {
+            let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+            eprintln!("route typed-expression at {offset}");
+        }
+        self.expression(min, moving)
+    }
+
     pub(super) fn fail(&self, message: &str) -> ae_span::Diagnostic {
         let token = &self.tokens[self.pos];
         ae_syntax::diagnostic_range(&self.file, self.source, token.offset..token.end, message)

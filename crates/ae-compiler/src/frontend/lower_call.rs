@@ -15,7 +15,7 @@ impl<'a> Parser<'a> {
         self.pos += 2;
         let (ex, ex_ty) = match self.lower_shared_value(Some(Kind::Comma), false) {
             Some(pair) => pair,
-            None => self.expression(0, false)?,
+            None => self.fallback_expression(0, false)?,
         };
         let expected_ty = match name {
             "task_spawn" => Type::Exec,
@@ -260,7 +260,7 @@ impl<'a> Parser<'a> {
     pub(super) fn lower_propagating_call(&mut self) -> Result<Statement, ae_span::Diagnostic> {
         let (value, ty) = match self.lower_shared_value(Some(Kind::Question), true) {
             Some(value) => value,
-            None => self.expression(0, true)?,
+            None => self.fallback_expression(0, true)?,
         };
         if *self.current() != Kind::Question {
             return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
@@ -291,7 +291,7 @@ impl<'a> Parser<'a> {
                 return result;
             }
         }
-        self.expression(0, false)
+        self.fallback_expression(0, false)
     }
 
 }

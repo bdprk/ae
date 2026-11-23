@@ -263,7 +263,7 @@ impl<'a> Parser<'a> {
                         .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
                         .map_or(0, |(left, _)| left + 1);
                     self.seek_scalar_offset(expression.range.start);
-                    let parsed = self.expression(min, true)?;
+                    let parsed = self.fallback_expression(min, true)?;
                     self.seek_scalar_offset(expression.range.end);
                     return Ok(parsed);
                 }
@@ -276,7 +276,7 @@ impl<'a> Parser<'a> {
                         .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
                         .map_or(0, |(left, _)| left + 1);
                     self.seek_scalar_offset(expression.range.start);
-                    let parsed = self.expression(min, true)?;
+                    let parsed = self.fallback_expression(min, true)?;
                     self.seek_scalar_offset(expression.range.end);
                     return Ok(parsed);
                 }
@@ -291,7 +291,7 @@ impl<'a> Parser<'a> {
                             .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
                             .map_or(0, |(left, _)| left + 1);
                         self.seek_scalar_offset(expression.range.start);
-                        let parsed = self.expression(min, true)?;
+                        let parsed = self.fallback_expression(min, true)?;
                         self.seek_scalar_offset(expression.range.end);
                         return Ok(parsed);
                     }
@@ -309,7 +309,7 @@ impl<'a> Parser<'a> {
                             .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
                             .map_or(0, |(left, _)| left + 1);
                         self.seek_scalar_offset(expression.range.start);
-                        let parsed = self.expression(min, true)?;
+                        let parsed = self.fallback_expression(min, true)?;
                         // The typed parse consumed exactly this operand; the
                         // surrounding shared nodes own what follows.
                         self.seek_scalar_offset(expression.range.end);
@@ -522,7 +522,7 @@ impl<'a> Parser<'a> {
                                 .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
                                 .map_or(0, |(left, _)| left + 1);
                             self.seek_scalar_offset(expression.range.start);
-                            let parsed = self.expression(min, true)?;
+                            let parsed = self.fallback_expression(min, true)?;
                             self.seek_scalar_offset(expression.range.end);
                             return Ok(parsed);
                         }
@@ -691,7 +691,7 @@ impl<'a> Parser<'a> {
                         // An enum construction as an argument (`area(Shape::Circle(3))`):
                         // the typed expression parser owns the variant layout.
                         self.seek_scalar_offset(argument.range.start);
-                        self.expression(0, true)?
+                        self.fallback_expression(0, true)?
                     } else {
                         self.lower_scalar_body_expression(argument, slots)?
                     };
@@ -731,7 +731,7 @@ impl<'a> Parser<'a> {
                 // value name (`arr[j]`): the typed expression parser
                 // disambiguates it against the known names and indexes.
                 self.seek_scalar_offset(expression.range.start);
-                self.expression(0, false)?
+                self.fallback_expression(0, false)?
             }
             ExpressionKind::Index { base, index } => {
                 let def = self.resolved_expressions().scalar_reads[&base.range.start];

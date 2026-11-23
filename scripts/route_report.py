@@ -27,6 +27,7 @@ import sys
 
 ROOTS = ["examples", "tests/run", "std/std"]
 MARKER = "route legacy "
+TYPED_MARKER = "route typed-expression "
 
 
 def default_binary(repo):
@@ -61,6 +62,7 @@ def main():
     parser.add_argument("--repo", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     parser.add_argument("--details", action="store_true")
     parser.add_argument("--max", type=int, default=None, help="fail when the fallback total exceeds this ceiling")
+    parser.add_argument("--max-typed", type=int, default=None, help="fail when the typed-expression fallback total exceeds this ceiling")
     options = parser.parse_args()
     ae = options.ae or default_binary(options.repo)
     if os.name == "nt" and not ae.endswith(".exe"):
@@ -68,27 +70,39 @@ def main():
     env = dict(os.environ, AE_ROUTE_REPORT="1")
     fallbacks = 0
     files = 0
+    typed = 0
+    typed_files = 0
     checked = 0
     failed = []
     for source in sorted(sources(options.repo)):
         relative = os.path.relpath(source, options.repo)
         result = subprocess.run([ae, "check", source], capture_output=True, text=True, env=env)
         lines = [line for line in result.stderr.splitlines() if MARKER in line]
+        typed_lines = [line for line in result.stderr.splitlines() if TYPED_MARKER in line]
         if result.returncode != 0:
             failed.append(relative)
             continue
         checked += 1
         fallbacks += len(lines)
+        typed += len(typed_lines)
+        if typed_lines:
+            typed_files += 1
+            if options.details:
+                for line in typed_lines:
+                    print(f"{relative}: {line}")
         if lines:
             files += 1
             if options.details:
                 for line in lines:
                     print(f"{relative}: {line}")
-    print(f"fallbacks={fallbacks} files={files} checked={checked} failed={len(failed)}")
+    print(f"fallbacks={fallbacks} files={files} typed={typed} typed_files={typed_files} checked={checked} failed={len(failed)}")
     for relative in failed:
         print(f"check skipped (fails standalone): {relative}")
     if options.max is not None and fallbacks > options.max:
         print(f"route coverage regressed: {fallbacks} > {options.max}", file=sys.stderr)
+        return 1
+    if options.max_typed is not None and typed > options.max_typed:
+        print(f"typed-expression fallbacks regressed: {typed} > {options.max_typed}", file=sys.stderr)
         return 1
     return 0
 

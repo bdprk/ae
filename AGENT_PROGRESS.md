@@ -355,3 +355,5 @@
 
 - 2026-11-24 10:00 (+08:00): **P1.2 slice 7: `ae_ty::unify` exists.** Structural unification over `Term` (concrete/variable/composite/pointer/borrow) into a `Substitution` with chain resolution and an occurs check; four unit tests pin binding, composite descent, mismatches, chains and occurs. Not wired into the compiler yet — the next slice replaces the shape-only generic instantiation check with it. Evidence: ae-ty 6/6, Windows suite 522/0, clippy clean.
 
+- 2026-11-24 10:30 (+08:00): **P1.4 slice 1: typed-expression fallbacks are counted.** Lowering sites that still call the typed Pratt parser go through `fallback_expression`; under `AE_ROUTE_REPORT` each prints `route typed-expression at <offset>`, `route_report.py` reports `typed=<n> typed_files=<m>`, and CI ratchets the measured **257 fallbacks / 50 files** as the ceiling. This makes the remaining dual-parser gap measurable and regression-proof (the body ladder sits at 0). Evidence: Windows suite 522/0, ratchet typed=257.
+
