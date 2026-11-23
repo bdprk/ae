@@ -252,7 +252,7 @@ impl<'a> Parser<'a> {
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<Expr, ae_span::Diagnostic> {
         let (value, ty) = self.lower_scalar_body_expression(index, slots)?;
-        let scalar = self.checked_scalar(Some(&index.range)).or_else(|| super::expression::operator_scalar(ty));
+        let scalar = self.checked_scalar(Some(&index.range)).or_else(|| ty.scalar());
         self.check_array_index(scalar, Some(index.range.end))?;
         Ok(value)
     }

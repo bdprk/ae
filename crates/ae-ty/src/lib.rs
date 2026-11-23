@@ -11,7 +11,7 @@ pub mod interner;
 pub mod op;
 pub mod spelling;
 
-pub use concrete::{TyKind, Type};
+pub use concrete::{accepts_value, TyKind, Type};
 pub use id::DefId;
 pub use spelling::TypeSpelling;
 pub use interner::TypeInterner;

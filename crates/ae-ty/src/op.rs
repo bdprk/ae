@@ -1,6 +1,7 @@
 //! Type rules shared by name resolution and compiler lowering.
 
 use ae_syntax::Kind;
+use crate::concrete::TyKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scalar {
@@ -27,6 +28,15 @@ impl Scalar {
             "f64" => Some(Self::Float),
             "bool" => Some(Self::Bool),
             _ => None,
+        }
+    }
+
+    /// The concrete type a checked scalar names.
+    pub fn ty(self) -> TyKind {
+        match self {
+            Self::Int => TyKind::Int,
+            Self::Float => TyKind::F64,
+            Self::Bool => TyKind::Bool,
         }
     }
 

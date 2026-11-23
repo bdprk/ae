@@ -64,7 +64,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn check_compound_assignment(&self, target: Type, operator: &Kind) -> Result<(), ae_span::Diagnostic> {
         if (target == Type::String && *operator == Kind::Plus)
-            || ae_ty::scalar_compound_assignment(super::expression::operator_scalar(target), operator)
+            || ae_ty::scalar_compound_assignment(target.scalar(), operator)
         {
             return Ok(());
         }
@@ -72,10 +72,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn matches_value_type(&self, expected: Type, actual: Type, range: Option<&std::ops::Range<usize>>) -> bool {
-        match self.checked_scalar(range) {
-            Some(scalar) => super::expression::operator_scalar(expected) == Some(scalar),
-            None => actual == expected,
-        }
+        ae_ty::accepts_value(expected, actual, self.checked_scalar(range))
     }
 
     pub(super) fn check_return_type(&self, value: Type, range: Option<&std::ops::Range<usize>>) -> Result<(), ae_span::Diagnostic> {

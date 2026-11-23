@@ -63,3 +63,57 @@ impl TyKind {
         matches!(self, TyKind::String | TyKind::Vec | TyKind::StrVec | TyKind::VecF | TyKind::Map | TyKind::MapF | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
     }
 }
+
+impl TyKind {
+    /// The three-value scalar domain the operator rules work in. An absent
+    /// scalar is a known non-scalar type.
+    pub fn scalar(self) -> Option<crate::op::Scalar> {
+        use crate::op::Scalar;
+        match self {
+            TyKind::Int => Some(Scalar::Int),
+            TyKind::F64 => Some(Scalar::Float),
+            TyKind::Bool => Some(Scalar::Bool),
+            _ => None,
+        }
+    }
+}
+
+/// The canonical value-compatibility rule: a checked scalar fact decides the
+/// question (the operand is that scalar type), and otherwise the concrete
+/// types must be identical. Borrows do not coerce and owned values do not
+/// convert implicitly.
+pub fn accepts_value(expected: TyKind, actual: TyKind, checked: Option<crate::op::Scalar>) -> bool {
+    match checked {
+        Some(scalar) => expected.scalar() == Some(scalar),
+        None => expected == actual,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::op::Scalar;
+
+    #[test]
+    fn scalar_bridge_names_the_three_scalars_and_nothing_else() {
+        assert_eq!(TyKind::Int.scalar(), Some(Scalar::Int));
+        assert_eq!(TyKind::F64.scalar(), Some(Scalar::Float));
+        assert_eq!(TyKind::Bool.scalar(), Some(Scalar::Bool));
+        assert_eq!(TyKind::String.scalar(), None);
+        assert_eq!(TyKind::Ptr(3).scalar(), None);
+        assert_eq!(Scalar::Int.ty(), TyKind::Int);
+        assert_eq!(Scalar::Float.ty(), TyKind::F64);
+        assert_eq!(Scalar::Bool.ty(), TyKind::Bool);
+    }
+
+    #[test]
+    fn value_acceptance_prefers_the_checked_fact_and_never_coerces() {
+        assert!(accepts_value(TyKind::Int, TyKind::Bool, Some(Scalar::Int)));
+        assert!(!accepts_value(TyKind::Int, TyKind::Int, Some(Scalar::Bool)));
+        assert!(accepts_value(TyKind::Int, TyKind::Int, None));
+        assert!(!accepts_value(TyKind::Int, TyKind::Bool, None));
+        assert!(accepts_value(TyKind::String, TyKind::String, None));
+        assert!(!accepts_value(TyKind::String, TyKind::StrView, None));
+        assert!(!accepts_value(TyKind::Vec, TyKind::StrVec, None));
+    }
+}

@@ -1491,7 +1491,7 @@ impl Parser<'_> {
                     if let Type::Array(len) = ty {
                         let (line, col) = self.position(); self.take(Kind::LBracket)?;
                         let (index, index_ty) = self.expression(0, false)?;
-                        self.check_array_index(operator_scalar(index_ty), None)?;
+                        self.check_array_index(index_ty.scalar(), None)?;
                         self.take(Kind::RBracket)?;
                         (Expr::Index(id, len, Box::new(index), line, col), Type::Int)
                     } else if (ty == Type::StrVec || ty == Type::StrVecRef) && *self.current() == Kind::LBracket {
@@ -1918,7 +1918,7 @@ impl Parser<'_> {
             Some(ExpressionType::Rejected(error)) => Err(error),
             Some(ExpressionType::Deferred) | None => check(),
         };
-        result.map(concrete_scalar).map_err(|error| self.operator_error(error))
+        result.map(|scalar| scalar.ty()).map_err(|error| self.operator_error(error))
     }
 
     pub(super) fn lower_prefix(
@@ -1928,7 +1928,7 @@ impl Parser<'_> {
         (line, column): (usize, usize),
         fact: Option<ae_resolve::resolve::ExpressionType>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let ty = self.operator_type(fact, || ae_ty::prefix(&operator, operator_scalar(ty)))?;
+        let ty = self.operator_type(fact, || ae_ty::prefix(&operator, ty.scalar()))?;
         let value = if operator == Kind::Minus {
             Expr::Neg(Box::new(operand), line, column)
         } else {
@@ -1961,28 +1961,10 @@ impl Parser<'_> {
             Type::String
         } else {
             self.operator_type(fact, || {
-                ae_ty::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
+                ae_ty::infix(&op, lhs_ty.scalar(), rhs_ty.scalar())
             })?
         };
         Ok((Expr::Binary(Box::new(lhs_expr), op, Box::new(rhs), line, column, ty), ty))
     }
 }
 
-pub(super) fn operator_scalar(ty: Type) -> Option<ae_ty::Scalar> {
-    use ae_ty::Scalar;
-    match ty {
-        Type::Int => Some(Scalar::Int),
-        Type::F64 => Some(Scalar::Float),
-        Type::Bool => Some(Scalar::Bool),
-        _ => None,
-    }
-}
-
-fn concrete_scalar(ty: ae_ty::Scalar) -> Type {
-    use ae_ty::Scalar;
-    match ty {
-        Scalar::Int => Type::Int,
-        Scalar::Float => Type::F64,
-        Scalar::Bool => Type::Bool,
-    }
-}

@@ -351,3 +351,5 @@
 
 - 2026-11-24 09:00 (+08:00): **P1.2 slice 5: `DefId` and `TypeSpelling` moved into `ae-ty`.** Both definitions now live in the shared type crate; `ae-resolve` re-exports them so every path, dump and snapshot stays identical, and the spelling vocabulary's `describe`/`is_unknown` moved with it (the def-table-reading classifier and `PRELUDE_TYPES` stay in the resolver). Evidence: Windows suite 522/0, clippy clean.
 
+- 2026-11-24 09:30 (+08:00): **P1.2 slice 6: canonical scalar bridge and value acceptance.** `TyKind::scalar()` / `Scalar::ty()` and `ae_ty::accepts_value(expected, actual, checked)` now decide every compatibility check (checked scalar fact first, otherwise exact concrete type — no implicit coercions); the compiler's local `operator_scalar`/`concrete_scalar` helpers are deleted and `matches_value_type` delegates. Two ae-ty unit tests pin the rule. Evidence: ae-ty 2/2, Windows suite 522/0, clippy clean.
+
