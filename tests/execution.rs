@@ -8881,11 +8881,21 @@ fn area(shape: Shape) -> i64 {
     }
 }
 
+fn pick(flag: bool) -> Option[i64] {
+    if flag { return Option[i64]::Some(7); }
+    return Option[i64]::None();
+}
+
 fn main() {
     let circle = Shape::Circle(3);
     print(area(circle));
     let empty = Shape::Empty;
     print(area(empty));
+    let picked = pick(true);
+    match picked {
+        Option::Some(value) => { print(value); }
+        Option::None => { print(0); }
+    }
 }"#;
     let path = std::env::temp_dir().join(format!("ae-enum-construction-route-{}.ae", std::process::id()));
     fs::write(&path, source).unwrap();

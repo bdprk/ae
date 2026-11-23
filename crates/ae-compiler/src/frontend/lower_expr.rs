@@ -817,24 +817,66 @@ impl<'a> Parser<'a> {
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
         use ae_syntax::expression::ExpressionKind;
+        // The shared variant lowering already answers generic instances
+        // (`Option[i64]::Some`) and tracks argument effects; reuse it first.
+        let mut nodes_left = 128;
+        let mut effects = SharedExpressionEffects::default();
+        if let Some((value, ty)) = self.lower_shared_variant(expression, arguments, 64, &mut nodes_left, &mut effects) {
+            self.commit_shared_effects(effects);
+            self.seek_scalar_offset(expression.range.end);
+            return Ok(Some((value, ty)));
+        }
         let ExpressionKind::Qualified { base, name: vname } = &expression.kind else {
             return Ok(None);
         };
-        let ExpressionKind::Atom(Kind::Ident(enum_name)) = &base.kind else {
-            // A generic enum instance (`Opt[i64]::Some(..)`) keeps the typed
-            // parser's instantiation path for now.
-            return Ok(None);
-        };
-        let eid = if enum_name == "Self" {
-            match self.impl_self {
-                Some(Type::Enum(_, eid)) => eid,
-                _ => return Ok(None),
+        let eid = match &base.kind {
+            ExpressionKind::Atom(Kind::Ident(enum_name)) => {
+                if enum_name == "Self" {
+                    match self.impl_self {
+                        Some(Type::Enum(_, eid)) => eid,
+                        _ => return Ok(None),
+                    }
+                } else {
+                    match self.enum_names.get(enum_name) {
+                        Some(&eid) => eid,
+                        None => return Ok(None),
+                    }
+                }
             }
-        } else {
-            match self.enum_names.get(enum_name) {
-                Some(&eid) => eid,
-                None => return Ok(None),
+            // A generic instance (`Option[i64]::Some(..)`): the cached
+            // instance answers first; otherwise instantiate it here, exactly
+            // like the shared struct-literal arm. A shape the reader cannot
+            // finish returns None and keeps the typed delegation.
+            ExpressionKind::Specialization { base, arguments }
+            | ExpressionKind::BracketedCallTarget { base, arguments } => {
+                let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
+                    return Ok(None);
+                };
+                if let Some(eid) = self.cached_enum_specialization(name, arguments) {
+                    eid
+                } else {
+                    let Some(&gid) = self.generics.names.get(name) else {
+                        return Ok(None);
+                    };
+                    let Some(shapes) = self.loose_shape_arguments(arguments) else {
+                        return Ok(None);
+                    };
+                    let Some(args) = shapes.iter().map(|shape| self.shape_type(shape, base.range.start)).collect::<Option<Vec<_>>>() else {
+                        return Ok(None);
+                    };
+                    // The typed route admits only the flat payload-capable
+                    // arguments for a generic enum; a struct or enum argument
+                    // is a diagnostic, not an instantiation.
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
+                        return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, string, vec, or vec[string]"));
+                    }
+                    match self.instantiate_enum(gid, args, base.range.start) {
+                        Ok(eid) => eid,
+                        Err(_) => return Ok(None),
+                    }
+                }
             }
+            _ => return Ok(None),
         };
         let def = self.enums[eid].clone();
         let Some((vidx, fields)) = def.variant_payload(vname) else {

@@ -359,3 +359,5 @@
 
 - 2026-11-24 11:15 (+08:00): **P1.4 slice 2: enum constructions lower from the shared tree; typed fallbacks 257 -> 96.** `lower_shared_enum_construction` builds `EnumLit` from `Enum::Variant(...)` nodes (plain enums, `Self::Variant`, prelude result enums), checks payload types and moves owned payloads like struct fields; associated calls keep the typed delegation via a `None` return. Removed the three lower_stmt delegation branches and the argument branch; CI ceiling now 96. A new route regression test pins zero typed-expression fallbacks for enum constructions. Evidence: Windows suite 523/0, deny 176/176, clippy clean.
 
+- 2026-11-24 11:45 (+08:00): **P1.4 slice 3: generic enum constructions on the shared route; typed fallbacks 96 -> 67.** The enum-construction path reuses `lower_shared_variant` (cached instances + effects) and instantiates `Specialization`/`BracketedCallTarget` bases itself otherwise, enforcing the typed route's flat-argument whitelist so `Option[P]` stays rejected. The route regression fixture now covers `Option[i64]::Some/None`. Evidence: Windows suite 523/0, deny 176/176, clippy clean.
+
