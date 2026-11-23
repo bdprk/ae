@@ -85,6 +85,14 @@ fn resolved_builtin(name: &str) -> bool {
     RESOLVED_BUILTINS.contains(&name) || MATH_FNS.iter().any(|(math, _, _)| *math == name)
 }
 
+/// Intrinsics the typed expression parser dispatches by name and the resolved
+/// body route delegates whole to that layer: the pointer pair and `bytes`.
+/// The scan admits their calls, and the lowering parses them with the typed
+/// postfix code (whose operational checks and shapes are authoritative).
+fn typed_intrinsic(name: &str) -> bool {
+    matches!(name, "ptr_write" | "ptr_drop_in_place" | "bytes")
+}
+
 /// A struct the body route can own outright: no `Drop` impl and only scalar
 /// fields. Constructing one allocates nothing a release routine would walk,
 /// so a construction, a by-value argument, and a by-value return all move the
@@ -487,6 +495,21 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 && resolved.unknown_calls.contains(&callee.range.start) {
                 return true;
             }
+            if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind
+                && typed_intrinsic(name) {
+                return true;
+            }
+            // `len` of a bare fixed array is a compile-time constant and of a
+            // vector or map a borrow of the slot: the builtin's fast path
+            // reads the binding's definition, not a value, so the scan admits
+            // the name even where the value-position rules exclude it.
+            if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind
+                && name == "len"
+                && let [argument] = arguments.as_slice()
+                && matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.scalar_reads.contains_key(&argument.range.start) {
+                return true;
+            }
             // An associated call (`Point::new(..)`, `Type[..]::new(..)`): the
             // typed postfix layer owns instance construction, arity, and the
             // pinned associated-function diagnostics; the lowering delegates
@@ -667,11 +690,24 @@ fn bare_call_statement(statement: &ae_syntax::statement::Statement) -> Option<&a
     use ae_syntax::statement::StatementKind;
     let StatementKind::Expr { value, propagates: false } = &statement.kind else { return None };
     let ExpressionKind::Call { callee, .. } = &value.kind else { return None };
-    // `exit` and the statement builtins are handled by their own arms; any
-    // other bare call is evaluated (borrow and move diagnostics included) and
+    // The statement builtins have their own arms (they precede this one, and
+    // a rejected shape of theirs must keep the typed route's message); any
+    // other bare call — a function, a builtin value call (`find(..);`) or an
+    // unknown name — is evaluated (borrow and move diagnostics included) and
     // then rejected with the typed route's "must end with '?'" rule.
     let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
-    (!RESERVED.contains(&name.as_str())).then_some(value)
+    (!statement_builtin_name(name)).then_some(value)
+}
+
+/// A name whose bare-call statement form has a dedicated arm in the body
+/// lowering (`exit`, the vector and handle statement builtins, the spawn
+/// forms, the yield). A bare call to one of these is never the generic
+/// "must end with '?'" shape.
+fn statement_builtin_name(name: &str) -> bool {
+    matches!(name,
+        "exit" | "push" | "pop" | "sort" | "reverse"
+        | "shared_set" | "chan_close" | "cell_store"
+        | "task_spawn" | "scope_spawn" | "pool_spawn" | "task_yield")
 }
 
 fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
@@ -1449,9 +1485,9 @@ impl<'a> Parser<'a> {
     /// `resolve_trait_call` (the typed route's E0207).
     fn call_has_signature(&self, name: &str) -> bool {
         if RESERVED.contains(&name) { return true; }
-        // The pointer intrinsics are dispatched by the typed expression parser
-        // by name and live in neither table; a call to one is known.
-        if matches!(name, "ptr_write" | "ptr_drop_in_place") { return true; }
+        // Intrinsics the typed expression parser dispatches by name and live
+        // in neither table: a call to one is known.
+        if typed_intrinsic(name) { return true; }
         if self.functions.contains_key(name) || self.generics.fn_names.contains_key(name) { return true; }
         self.trait_bounds.values().flatten().any(|&tid| {
             self.generics.traits.get(tid).is_some_and(|defn| defn.methods.iter().any(|method| method.name == name))
@@ -3889,6 +3925,20 @@ impl<'a> Parser<'a> {
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
             ExpressionKind::Call { callee, arguments } => {
+                // A typed-only intrinsic (`ptr_write`, `ptr_drop_in_place`,
+                // `bytes`): the typed expression parser owns the operational
+                // checks and the shape. Bounded by the following operator.
+                if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind
+                    && typed_intrinsic(name) {
+                    let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                    let min = self.tokens.get(end)
+                        .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
+                        .map_or(0, |(left, _)| left + 1);
+                    self.seek_scalar_offset(expression.range.start);
+                    let parsed = self.expression(min, true)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    return Ok(parsed);
+                }
                 // An associated call (`Point::new(1)`): the typed postfix layer
                 // builds the instance and owns the pinned diagnostics. Bounded
                 // by the following operator, like a chained method receiver.
@@ -7501,9 +7551,11 @@ mod tests {
                 && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int))) if source == vector)));
         parser.seek_scalar_offset(source.find("{ spawn(").unwrap());
         // A spawn statement still keeps the body on the typed route; the
-        // negative check also pins that a fallback leaves no move state
-        // behind.
-        assert!(parser.lower_resolved_scalar_body().is_none());
+        // A bare `spawn(..)` statement is evaluated (the spawn machinery) and
+        // then rejected with the typed route's `?` rule; the path leaves no
+        // move state behind.
+        let error = parser.lower_resolved_scalar_body().expect("resolved spawn statement").err().unwrap();
+        assert!(error.message.contains("must end with '?'"), "{}", error.message);
         let start = source.find("words: &vec[string]").unwrap();
         parser.names.insert("words".into(), (88, false, Type::StrVecRef));
         parser.binding_ranges.insert(88, start..start + "words".len());
