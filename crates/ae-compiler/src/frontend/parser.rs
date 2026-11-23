@@ -461,12 +461,28 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             if let ExpressionKind::BracketedCallTarget { base, .. } = &callee.kind {
                 let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return false };
                 return supports_call(name, base.range.start)
-                    && arguments.iter().all(|argument| {
-                        scalar_body_expression(argument, resolved, supports_call, supports_field)
-                            || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
-                            || resolved.struct_field_views.contains(&argument.range.start)
-                            || resolved.struct_field_handles.contains(&argument.range.start)
-                    });
+                    && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call, supports_field)
+                        || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
+                        || resolved.struct_field_views.contains(&argument.range.start)
+                        || resolved.struct_field_handles.contains(&argument.range.start)
+                        || resolved.struct_field_reads.contains(&argument.range.start)
+                        || (matches!(argument.kind, ExpressionKind::Field { .. })
+                            && supports_field(argument, ae_resolve::Role::Read))
+                        || resolved.enum_constructors.contains(&argument.range.start)
+                        || matches!(&argument.kind, ExpressionKind::Closure { body, .. }
+                            if resolved.scalar_bodies.contains_key(&body.start))
+                        // An owned aggregate passed by value moves into the
+                        // instance's substituted parameter.
+                        || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                            if name != "self" && resolved.scalar_reads.get(&argument.range.start)
+                                .is_some_and(|id| resolved.struct_definitions.contains(id)
+                                    || resolved.enum_bindings.contains(id)
+                                    || resolved.owned_text_bindings.contains(id)
+                                    || resolved.owned_string_bindings.contains(id)
+                                    || resolved.owned_vectors.contains(id)
+                                    || resolved.map_definitions.contains(id)
+                                    || resolved.owned_struct_bindings.contains(id)))
+                        || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }));
             }
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
@@ -2059,12 +2075,16 @@ impl<'a> Parser<'a> {
         // Every clause is named so `AE_ROUTE_REASONS=1` can say which one kept the
         // body off the route: the guard is the one rejection path with no
         // statement to point at.
-        let subst_supported = self.subst.values().copied().all(|ty| scalar_type(ty) || matches!(ty, Type::String));
+        let subst_supported = self.subst.values().copied().all(|ty| {
+            scalar_type(ty) || matches!(ty, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF)
+                || owned_plain_struct(ty, self.structs)
+                || owned_field_struct(ty, self.structs)
+        });
         let receiver_supported = !self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Enum(..)));
-        // A receiver-less inherent associated function routes
-        // (`fn circle(r: i64) -> Self`); a receiver-less trait-impl body
-        // stays typed, because `Self` there is the trait's implementer.
-        let impl_body_supported = !(self.impl_self.is_some() && self.subst.is_empty() && self.receiver.is_none() && !self.inherent_impl);
+        // A receiver-less impl body (an associated function, or a trait impl's
+        // concrete method) routes like any function: a body that spells `Self`
+        // in a way the marking pass cannot classify falls back at the scan.
+        let impl_body_supported = true;
         let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
             || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF)
             || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
@@ -2281,6 +2301,14 @@ impl<'a> Parser<'a> {
             if self.generics.fn_names.contains_key(name) {
                 let index = self.tokens.partition_point(|token| token.offset < offset);
                 return self.tokens.get(index + 1).is_some_and(|token| token.kind == Kind::LBracket);
+            }
+            // A trait method of one of this function's constrained type
+            // parameters: the instance's substitution picks the impl, so the
+            // call lowers as a plain (monomorphized) call.
+            if self.trait_bounds.values().flatten().any(|&tid| {
+                self.generics.traits.get(tid).is_some_and(|defn| defn.methods.iter().any(|method| method.name == name))
+            }) {
+                return true;
             }
             !RESERVED.contains(&name) && self.functions.get(name).is_some_and(|signature| {
                 // File-local resolution leaves imports open. The compiler's
@@ -3599,8 +3627,12 @@ impl<'a> Parser<'a> {
                     // anything else is a call form the route does not take.
                     return Err(self.fail("this call form is not supported by the body route"));
                 };
-                let Some(signature) = self.functions.get(name).cloned() else {
-                    return Err(self.fail(&format!("unknown function '{name}'")).with_code("E0101"));
+                let signature = match self.functions.get(name).cloned() {
+                    Some(signature) => signature,
+                    // Not a plain function: a trait method of one of this
+                    // instance's constrained parameters. The substitution picks
+                    // the concrete impl, so the call stays monomorphized.
+                    None => self.resolve_trait_call(name, callee.range.start)?,
                 };
                 let mut args = Vec::with_capacity(arguments.len());
                 for (index, argument) in arguments.iter().enumerate() {

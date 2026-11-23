@@ -1905,6 +1905,27 @@ parity → 50k → WSL → commit.
   cursor contract identical (cursor on the name, helper advances `pos + 2`
   or takes the `(` itself); the typed caller and the resolved caller differ
   only in what they seek to first.
+
+### Slice 35 — trait impl bodies and monomorphized trait calls (landed)
+
+- The guard no longer excludes receiver-less impl bodies: a trait impl's
+  concrete method routes like a function. A body that spells `Self` (which
+  the declaration-based marking cannot classify for a trait impl) falls
+  back at the scan.
+- Trait-method calls of constrained parameters (`display(item)` in
+  `format_value[T: Display]`) lower as plain monomorphized calls:
+  `supports_call` answers for trait method names and the callee lookup falls
+  back to `resolve_trait_call`, which reads `subst` and returns the concrete
+  impl signature.
+- A type substitution can be any value type the body handles (scalar,
+  string, enum, vector, plain/field struct); the explicit generic-call scan
+  arm mirrors the plain call's argument forms.
+- `display_trait.ae` and `convert_traits.ae` are fully legacy-free;
+  coverage 126 → 47, files 44 → 36; deny manifest 140.
+- Still typed: field reads on a call result that is not a plain call
+  (`compute_mag[Delta](d1).offset`), locals bound from an explicit generic
+  call (`let cfg2 = duplicate[Config](cfg1);` → `cfg2.port`), map returns
+  from user calls, and trait-object-ish uses.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and
