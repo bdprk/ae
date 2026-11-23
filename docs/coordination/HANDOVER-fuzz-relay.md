@@ -1577,3 +1577,17 @@ Field-callee branch** — `&mut self` is legitimate there, and a binding like
 time `p.count()` lowers — with the recheck made permissive for struct
 receivers instead of consulting a precomputed instance map. The pure
 `inherent` precompute stays as it is.
+
+Follow-up on the hazard note: `instantiate_impl_method` actually parses the
+method body in a **sub Parser** (`declarations.rs`, `let mut sub = Parser {
+... }`), so the enclosing `names` are not the direct victim. The observed
+order-dependence instead looks like **second-pass state**: the CLI parses the
+file more than once (signature pass, then bodies), and once the generic
+instances exist the precompute's verdict changes between passes, so `main`
+routes on one pass and falls back on the other (the env-var-dependent
+visibility of the `id=0 at 992` line fits that). The lazy-resolution design
+still stands, but the next attempt should also make the gate *stateless with
+respect to instantiation order*: derive the verdict from the receiver's
+already-concrete slot type and the `generic_impls` template only, never from
+whether an instance happens to exist, and run the 50k gate plus the deny gate
+on `examples/generic_impl.ae` before trusting a green unit run.
