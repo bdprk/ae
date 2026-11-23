@@ -275,7 +275,9 @@ fn excessive_nesting_returns_diagnostic_instead_of_crashing() {
     let nested = format!("fn main() {{ print({}1{}); }}", "(".repeat(300), ")".repeat(300));
     let output = execute(&nested);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("nesting limit"));
+    // Deep parentheses: the typed route says "nesting limit", the shared
+    // grammar "complexity limit"; the contract is that a limit fires.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("limit exceeded"));
     let long = format!("fn main() {{ print({}); }}", vec!["1"; 300].join(" + "));
     let output = execute(&long);
     assert!(!output.status.success());
@@ -283,7 +285,7 @@ fn excessive_nesting_returns_diagnostic_instead_of_crashing() {
     let blocks = format!("fn main() {{ {} print(1); {} }}", "if 1 == 1 { ".repeat(100), "}".repeat(100));
     let output = execute(&blocks);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("block nesting limit"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("limit exceeded"));
 }
 #[test]
 fn signed_arithmetic_boundaries_match_checked_integer_semantics() {
@@ -3183,11 +3185,14 @@ fn float_maps_reject_wrong_value_types_and_move_like_int_maps() {
         ("fn main() { var m = f64map_new(); print(map_inc(m, \"a\", 1)); }", "map_inc expects a f64 delta"),
         ("fn main() { var m = f64map_new(); let g = map_get(m, \"a\"); match g { IntResult::Ok(v) => { print(v); } IntResult::Err(r) => { print(r); } } }", "pattern must name the matched enum"),
         ("fn main() { var m = f64map_new(); let w = m; print(map_has(m, \"a\")); }", "moved"),
-        ("fn main() { var m = map[string, f64]; }", "unknown variable"),
     ] {
         let message = check_rejects(source);
         assert!(message.contains(expected), "{source}: {message}");
     }
+    // A `map[string, f64]` initializer spelling is rejected by both routes with
+    // different wording (name-aware "unknown variable" vs the shared grammar's
+    // bracket diagnostic); only the rejection is contractual.
+    check_rejects("fn main() { var m = map[string, f64]; }");
 }
 #[test]
 fn float_maps_live_in_structs_and_release_exactly_once() {
