@@ -477,7 +477,14 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     return *operator == Kind::Plus
                         || matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq);
                 }
-                if *operator != Kind::Plus { return false };
+                // A comparison only reads the string (the typed route's
+                // equality does not consume); every other operator keeps the
+                // `+`-only rule.
+                if *operator != Kind::Plus
+                    && !matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq)
+                {
+                    return false;
+                }
                 matches!(&expression.kind, ExpressionKind::Atom(Kind::Ident(name))
                     if name != "self" && resolved.scalar_reads.get(&expression.range.start)
                         .is_some_and(|id| resolved.owned_text_bindings.contains(id)
