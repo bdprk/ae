@@ -2034,10 +2034,22 @@ impl<'a> Parser<'a> {
                                 && matches!(callee.kind, ExpressionKind::Qualified { .. }) {
                                     expressions.enum_constructors.insert(expression.range.start);
                                 }
-                            if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind
-                                && self.source.get(pointee.clone()).and_then(super::types::scalar_type).is_some() {
-                                    expressions.scalar_address_casts.insert(expression.range.start);
-                                }
+                            if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind {
+                                // Every spelling the resolver can name is
+                                // admitted: the lowering's `lower_address_cast`
+                                // answers an owned pointee (a struct, a
+                                // string, a vector) with the typed route's own
+                                // "pointer to an owned value" diagnostic, and a
+                                // non-owned one lowers.
+                                let text = self.source.get(pointee.clone());
+                                let known = text.is_some_and(|text| {
+                                    super::types::scalar_type(text).is_some()
+                                        || matches!(text, "string" | "atomic" | "mutex" | "chan" | "exec" | "pool" | "shared" | "task_scope")
+                                        || text.starts_with("vec") || text.starts_with("strvec") || text.starts_with("map")
+                                        || self.struct_names.contains_key(text) || self.enum_names.contains_key(text)
+                                });
+                                if known { expressions.scalar_address_casts.insert(expression.range.start); }
+                            }
                             if let ExpressionKind::Call { callee, arguments } = &expression.kind
                                 && let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
                                     let operand = match (name.as_str(), arguments.as_slice()) {
