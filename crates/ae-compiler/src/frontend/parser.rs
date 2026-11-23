@@ -1512,6 +1512,11 @@ impl<'a> Parser<'a> {
                 .get(name)
                 .map(|&(_, _, ty)| ty)
                 .or_else(|| local_structs.get(name).copied()),
+            // A literal initializer types its binding (the precompute records
+            // it, so an address cast can check its pointee against it).
+            ExpressionKind::Atom(Kind::Number(_)) => Some(Type::Int),
+            ExpressionKind::Atom(Kind::Float(_)) => Some(Type::F64),
+            ExpressionKind::Atom(Kind::True) | ExpressionKind::Atom(Kind::False) => Some(Type::Bool),
             ExpressionKind::Group(inner) => self.chain_call_type(inner, local_structs),
             ExpressionKind::PointerCast { base, mutable, pointee } => {
                 // The address stays; the pointee spelling names the new view.
@@ -1520,6 +1525,19 @@ impl<'a> Parser<'a> {
                 }
                 let name = self.source.get(pointee.clone())?;
                 let pointee = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))?;
+                let id = self.ctx.intern_pointee(pointee);
+                Some(if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
+            }
+            ExpressionKind::AddressCast { binding, mutable, pointee, .. } => {
+                // `&value as *const i64`: the operand's scalar type is the
+                // pointee spelling, and the binding becomes a pointer local.
+                let ty = self.names.get(binding).map(|&(_, _, ty)| ty)
+                    .or_else(|| local_structs.get(binding).copied())?;
+                let name = self.source.get(pointee.clone())?;
+                let pointee = super::types::scalar_type(name)?;
+                if pointee != ty {
+                    return None;
+                }
                 let id = self.ctx.intern_pointee(pointee);
                 Some(if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
             }
@@ -2697,8 +2715,8 @@ impl<'a> Parser<'a> {
                     // a parameter or an earlier local roots the chain, so each
                     // link's declared type answers statelessly and the gate can
                     // ask before the lowering declares the binding.
-                    if let Some(ret @ (Type::Enum(..) | Type::Struct(_) | Type::Ptr(_) | Type::PtrMut(_))) =
-                        self.chain_call_type(initializer, &local_structs)
+                    if let Some(ret @ (Type::Enum(..) | Type::Struct(_) | Type::Ptr(_) | Type::PtrMut(_)
+                        | Type::Int | Type::F64 | Type::Bool)) = self.chain_call_type(initializer, &local_structs)
                     {
                         local_structs.insert(name.clone(), ret);
                     }
