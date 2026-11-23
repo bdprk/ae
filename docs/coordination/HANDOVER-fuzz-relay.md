@@ -1591,3 +1591,37 @@ respect to instantiation order*: derive the verdict from the receiver's
 already-concrete slot type and the `generic_impls` template only, never from
 whether an instance happens to exist, and run the 50k gate plus the deny gate
 on `examples/generic_impl.ae` before trusting a green unit run.
+
+### Complete recipe for the stateless lazy generic-method slice
+
+Pinned diagnostics the lowering must reproduce once the recheck accepts a
+struct receiver (checked in `tests/ui/`, positions are the `(` after the
+method name = `error_at(callee.range.end)`):
+
+- no impl at all: `type 'Point' has no methods; declare one in 'impl Point { ... }'`
+  (`method_missing_impl`, 5:22);
+- impl without the method: `type 'Point' has no method 'magnitue'; it has magnitude`
+  (`method_unknown_name`, 11:21, names sorted);
+- generic impl without the method:
+  `the impl for 'Pair' has no method 'nope'; it has count`
+  (`generic_impl_unknown_method`, 11:17).
+
+Steps:
+1. Recheck `Role::Call`: accept a bare-ident receiver whose slot type is
+   `Struct(_)/StructMut(_)/StructRef(_)/Enum(..)` unconditionally (stateless;
+   no instance-existence dependence).
+2. Lowering Field-callee branch, after the inherent resolve:
+   a. `let sid = match ty { Struct(s)|StructMut(s)|StructRef(s) => Some(s), Enum(_,s) => Some(s), _ => None }`;
+   b. if `struct_origin[sid]`/`enum_origin[sid]` exists → template name →
+      `generic_impls[template]`: a method with this name and a receiver →
+      `instantiate_impl_method(template, method, sid, gid, &origin_args,
+      callee.range.start)` → build `Signature { id, params, ret, .. }` →
+      `lower_method_call` (receiver bookkeeping + args unchanged);
+      a missing name → the generic message above;
+   c. no origin (plain type) → the two plain messages above from
+      `generics.inherent` keys `"{type}#{method}"`.
+3. do NOT instantiate in the precompute; keep the inherent-only verdict map.
+4. Verification order: unit suite → deny gate on `generic_impl.ae` and
+   `enum_generic_impls.ae` (they must pass and join the manifest) → byte
+   parity → **50k mutation gate** → WSL sync. Any env-dependent difference
+   in route/dny output is a red flag (the hazard seen on 2026-11-23).
