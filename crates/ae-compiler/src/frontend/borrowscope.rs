@@ -51,9 +51,9 @@ use super::movewalk::{expr_reads, statement_move_effects, statement_reads, walk_
 /// path that exits without joining would run the thread past the frame.
 /// Blocks containing the join end every path through them, so the walk
 /// explores only unjoined paths and rejects on the first exit it reaches.
-pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Vec<usize>, usize)]) -> Result<(), String> {
+pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Vec<usize>, usize)], ctx: &CompileContext) -> Result<(), String> {
     if spawns.is_empty() { return Ok(()); }
-    let graph = build_cfg(function);
+    let graph = build_cfg(function, ctx);
     for (cid, _borrowed, _offset) in spawns {
         // The joins: blocks containing a `wait` of this spawn's handle; the
         // spawn site: the `Declare` binding a handle from THIS closure's
@@ -63,8 +63,8 @@ pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Ve
         let mut spawn_site: Option<(usize, usize, usize)> = None;
         for block in &graph.blocks {
             for (index, statement) in block.statements.iter().enumerate() {
-                if let Statement::Declare(id, expr) = statement {
-                    if let Expr::Spawn(_, callable, ..) = expr {
+                if let Statement::Declare(id, expr) = statement
+                    && let Expr::Spawn(_, callable, ..) = expr {
                         let spawned_here = match &**callable {
                             Expr::ClosureLit(lit) => lit == cid,
                             Expr::Variable(_, Type::Closure(lit), ..) => lit == cid,
@@ -74,7 +74,6 @@ pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Ve
                             spawn_site = Some((block.id, index + 1, *id));
                         }
                     }
-                }
             }
         }
         let Some((spawn_block, spawn_index, handle)) = spawn_site else {
@@ -164,11 +163,10 @@ fn collect_waits_stmt(statement: &Statement, out: &mut Vec<usize>) {
 }
 
 fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
-    if let Expr::Wait(handle, ..) = expr {
-        if let Expr::Variable(id, Type::Thread(_), ..) = &**handle {
+    if let Expr::Wait(handle, ..) = expr
+        && let Expr::Variable(id, Type::Thread(_), ..) = &**handle {
             out.push(*id);
         }
-    }
     match expr {
         Expr::Spawn(slots, callable, ..) => {
             for slot in slots { collect_waits_expr(slot, out); }
@@ -188,9 +186,9 @@ fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
     }
 }
 
-pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usize, String, &'static str, Option<String>)], mut_sigs: &MutSigs) -> Result<(), String> {
+pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usize, String, &'static str, Option<String>)], mut_sigs: &MutSigs, ctx: &CompileContext) -> Result<(), String> {
     if conflicts.is_empty() { return Ok(()); }
-    let graph = build_cfg(function);
+    let graph = build_cfg(function, ctx);
     let view_borrows: Vec<(usize, usize, Option<String>)> = graph.blocks.iter()
         .flat_map(|block| block.statements.iter())
         .filter_map(view_borrow_introduced)
@@ -231,7 +229,7 @@ pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usiz
             let mut targets = statement_targets(statement);
             let ordered_conflict = statement_releases(statement, mut_sigs, &views_by_base);
             if std::env::var_os("AE_RELEASE_DEBUG").is_some() { eprintln!("DEBUG adjudicate b{} i{} stmt-targets={:?} ordered-rel={:?} viol={:?} view_borrows={:?} mut_sigs={:?}", block.id, index, statement_targets(statement), ordered_conflict.released, ordered_conflict.violated, view_borrows, mut_sigs); }
-            if let Some(_) = ordered_conflict.violated {
+            if ordered_conflict.violated.is_some() {
                 let (_, _, name, verb, _) = &conflicts[0];
                 return Err(format!("cannot {verb} '{name}' while a view binding of it may still be read"));
             }
@@ -260,7 +258,7 @@ pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usiz
 pub(super) fn verify_program_borrows(program: &Program, mut_sigs: &MutSigs) -> Result<(), String> {
     for file in &program.files {
         for function in file {
-            let graph = build_cfg(function);
+            let graph = build_cfg(function, &program.ctx);
             BorrowRegions::run(&graph, mut_sigs)?;
         }
     }

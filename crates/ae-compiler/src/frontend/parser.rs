@@ -507,8 +507,8 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             // A call on a closure value: the typed machinery reads the captures
             // at the call site; the scan admits the shape and the lowering
             // validates the callee and the arguments.
-            if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind {
-                if resolved.call_definitions.get(&callee.range.start)
+            if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind
+                && resolved.call_definitions.get(&callee.range.start)
                     .is_some_and(|id| resolved.closure_bindings.contains(id))
                 {
                     return arguments.iter().all(|argument| {
@@ -518,7 +518,6 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                             || resolved.struct_field_handles.contains(&argument.range.start)
                     });
                 }
-            }
             // An explicit generic call: `identity[i64](41)`. The scan admits
             // the shape permissively; the lowering instantiates the function
             // and re-checks the substituted argument list.
@@ -940,7 +939,7 @@ impl<'a> Parser<'a> {
     // names only, rendered never compared — cycles compare the interned key.
     pub(super) fn instantiation_display(&self, name: &str, args: &[Type]) -> String {
         if args.is_empty() { return name.to_owned(); }
-        format!("{}[{}]", name, args.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))
+        format!("{}[{}]", name, args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "))
     }
     pub(super) fn instantiation_trace(&self, current: &str) -> String {
         let mut chain: Vec<&str> = self.generics.instantiation_trace.iter().map(|(_, _, display)| display.as_str()).collect();
@@ -1045,7 +1044,7 @@ impl<'a> Parser<'a> {
                 // a call through a `fn(T) -> R` pointer whose id comes from
                 // the closure-signature interner, a different id space, and
                 // closures are never unsafe — no registry check there.
-                if crate::frontend::is_unsafe_fn(*id) || crate::frontend::is_extern_fn(*id) {
+                if self.ctx.is_unsafe_fn(*id) || self.ctx.is_extern_fn(*id) {
                     return true;
                 }
                 args.iter().any(|arg| match arg {
@@ -1110,9 +1109,9 @@ impl<'a> Parser<'a> {
         };
         self.take(Kind::Comma)?;
         let (value, value_ty) = self.expression(0, false)?;
-        let expected_ty = shared_types_get(sid);
+        let expected_ty = self.ctx.shared_types_get(sid);
         if value_ty != expected_ty {
-            return Err(self.fail(&format!("shared_set expects {}, found {}", expected_ty.name(), value_ty.name())));
+            return Err(self.fail(&format!("shared_set expects {}, found {}", expected_ty.name(self.ctx), value_ty.name(self.ctx))));
         }
         self.take(Kind::RParen)?;
         self.take(Kind::Semi)?;
@@ -1142,7 +1141,7 @@ impl<'a> Parser<'a> {
         };
         if ex_ty != expected_ty {
             let art = if name == "task_spawn" { "an" } else { "a" };
-            return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name())));
+            return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name(self.ctx))));
         }
         self.take(Kind::Comma)?;
         let (callable, callable_ty) = self.spawn_callable()?;
@@ -1174,8 +1173,8 @@ impl<'a> Parser<'a> {
                     if ty.owned() { self.moved.insert(*outer_id); }
                     slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
                 }
-                crate::frontend::closures::record_spawned(crate::frontend::closures::SpawnedThread::Closure {
-                    fn_id: crate::frontend::closures::closure_fn_id(*cid),
+                self.ctx.record_spawned(crate::frontend::closures::SpawnedThread::Closure {
+                    fn_id: self.ctx.closure_fn_id(*cid),
                     captures: def.value_captures.iter().map(|(_, ty)| *ty).collect(),
                     borrows: Vec::new(),
                     ret: def.ret,
@@ -1304,7 +1303,7 @@ impl<'a> Parser<'a> {
     /// answer (arity included); anything else — a generic instance or a
     /// receiver the scan cannot name — stays typed.
     fn chain_call_type(
-        &self,
+        &mut self,
         expression: &ae_syntax::expression::Expression,
         local_structs: &HashMap<String, Type>,
     ) -> Option<Type> {
@@ -1323,7 +1322,7 @@ impl<'a> Parser<'a> {
                 }
                 let name = self.source.get(pointee.clone())?;
                 let pointee = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))?;
-                let id = super::intern_pointee(pointee);
+                let id = self.ctx.intern_pointee(pointee);
                 Some(if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
             }
             ExpressionKind::Call { callee, arguments } => match &callee.kind {
@@ -1334,7 +1333,7 @@ impl<'a> Parser<'a> {
                         // pointer type, `deref` answers with the pointee.
                         return match (name.as_str(), arguments.len()) {
                             ("offset" | "byte_offset", 1) => Some(ty),
-                            ("deref", 0) => Some(super::ptr_pointee(id)),
+                            ("deref", 0) => Some(self.ctx.ptr_pointee(id)),
                             _ => None,
                         };
                     }
@@ -1353,7 +1352,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn adjudicate_deferred_conflicts(&mut self, function: &Function) -> Result<(), ae_span::Diagnostic> {
         let mut_sigs = borrowscope::mut_borrow_positions(self.functions, self.generics);
-        let outcome = borrowscope::adjudicate_deferred(function, &self.deferred_write_conflicts, &mut_sigs);
+        let outcome = borrowscope::adjudicate_deferred(function, &self.deferred_write_conflicts, &mut_sigs, self.ctx);
         match outcome {
             Ok(()) => { self.deferred_write_conflicts.clear(); }
             Err(message) => {
@@ -1368,7 +1367,7 @@ impl<'a> Parser<'a> {
     // ADR-0215: the deferred spawn-escape proofs (closure id, the borrowed
     // variable ids, the spawn's byte offset).
     pub(super) fn adjudicate_borrow_spawns(&mut self, function: &Function) -> Result<(), ae_span::Diagnostic> {
-        let outcome = borrowscope::adjudicate_borrow_spawns(function, &self.deferred_borrow_spawns);
+        let outcome = borrowscope::adjudicate_borrow_spawns(function, &self.deferred_borrow_spawns, self.ctx);
         match outcome {
             Ok(()) => { self.deferred_borrow_spawns.clear(); Ok(()) }
             Err(message) => {
@@ -1539,14 +1538,13 @@ impl<'a> Parser<'a> {
                             Some(TypeSpelling::Borrow { mutable: false, inner }) => Some(inner.as_ref()),
                             spelling => spelling.as_ref(),
                         };
-                        if let Some(TypeSpelling::Composite { family: "vec", arguments }) = spelling {
-                            if matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("i64" | "f64" | "string")]) {
+                        if let Some(TypeSpelling::Composite { family: "vec", arguments }) = spelling
+                            && matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("i64" | "f64" | "string")]) {
                                 expressions.vector_definitions.insert(definition.id);
                                 if matches!(definition.inferred, Some(TypeSpelling::Composite { .. })) {
                                     expressions.owned_vectors.insert(definition.id);
                                 }
                             }
-                        }
                     }
                     ae_resolve::Role::Write | ae_resolve::Role::DerefWrite if definition.kind.is_local() => {
                         expressions.scalar_writes.insert(occurrence.range.start, definition.id);
@@ -1589,9 +1587,7 @@ impl<'a> Parser<'a> {
                 function.closure_headers.iter().map(|(&offset, header)| (offset, header.clone()))
             }));
             expressions.scalar_expression_types.extend(resolution.functions.iter().flat_map(|function| {
-                function.expression_types.iter().filter_map(|(range, &fact)| {
-                    (fact != ae_resolve::resolve::ExpressionType::Deferred).then(|| (range.clone(), fact))
-                })
+                function.expression_types.iter().filter(|&(_, &fact)| fact != ae_resolve::resolve::ExpressionType::Deferred).map(|(range, &fact)| (range.clone(), fact))
             }));
             expressions.scalar_definitions.extend(resolution.defs.iter()
                 .filter(|definition| definition.kind.is_local())
@@ -1675,13 +1671,11 @@ impl<'a> Parser<'a> {
                 .chain(closure_statements.map(|statement| (statement, None))) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
-                    if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
-                        if matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Array(_)) {
-                            if let Some(def) = expressions.scalar_definitions.get(&name_range.start) {
+                    if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind
+                        && matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Array(_))
+                            && let Some(def) = expressions.scalar_definitions.get(&name_range.start) {
                                 expressions.array_definitions.insert(*def);
                             }
-                        }
-                    }
                     let kind = match &statement.kind {
                         StatementKind::Binding { name_range, mutable, .. } => Some(IndexedStatement::Binding {
                             name_start: name_range.start,
@@ -1749,21 +1743,18 @@ impl<'a> Parser<'a> {
                                 },
                                 _ => None,
                             };
-                            if let Some(ExpressionKind::Specialization { base: inner, arguments }) = specialization.map(|target| &target.kind) {
-                                if let ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
-                                    if let Some(&gid) = self.generics.struct_names.get(struct_name) {
-                                        if let Some(args) = self.loose_shape_arguments(arguments) {
+                            if let Some(ExpressionKind::Specialization { base: inner, arguments }) = specialization.map(|target| &target.kind)
+                                && let ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind
+                                    && let Some(&gid) = self.generics.struct_names.get(struct_name)
+                                        && let Some(args) = self.loose_shape_arguments(arguments) {
                                             expressions.generic_struct_bindings.insert(id, (gid, args));
                                         }
-                                    }
-                                }
-                            }
                             // A plain struct literal types its binding from the
                             // target name: the resolver may leave the spelling
                             // open, and field reads/writes answer by this entry.
-                            if let ExpressionKind::Struct { target, .. } = &initializer.kind {
-                                if let ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind {
-                                    if let Some(&sid) = self.struct_names.get(struct_name) {
+                            if let ExpressionKind::Struct { target, .. } = &initializer.kind
+                                && let ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind
+                                    && let Some(&sid) = self.struct_names.get(struct_name) {
                                         expressions.struct_definition_names.entry(id).or_insert_with(|| struct_name.clone());
                                         let constructed = Type::Struct(sid);
                                         if owned_plain_struct(constructed, self.structs)
@@ -1772,20 +1763,17 @@ impl<'a> Parser<'a> {
                                             expressions.owned_struct_bindings.insert(id);
                                         }
                                     }
-                                }
-                            }
                             // A binding from an explicit generic call (`let x = f[T](..)`)
                             // or a method call (`let x = r.shifted(..)`): the
                             // instantiated return type exists only at lowering
                             // time, so its fields and methods are admitted
                             // permissively there.
-                            if let ExpressionKind::Call { callee, .. } = &initializer.kind {
-                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }
+                            if let ExpressionKind::Call { callee, .. } = &initializer.kind
+                                && matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }
                                     | ExpressionKind::Field { .. })
                                 {
                                     expressions.generic_call_bindings.insert(id);
                                 }
-                            }
                             match &initializer.kind {
                                 ExpressionKind::Vector(_) => {
                                     expressions.vector_definitions.insert(id);
@@ -1811,8 +1799,8 @@ impl<'a> Parser<'a> {
                                         // `match` needs to know the subject
                                         // is an enum. `keys` returns an owned
                                         // string vector.
-                                        if let ExpressionKind::Call { callee, .. } = &initializer.kind {
-                                            if let ExpressionKind::Atom(Kind::Ident(builtin)) = &callee.kind {
+                                        if let ExpressionKind::Call { callee, .. } = &initializer.kind
+                                            && let ExpressionKind::Atom(Kind::Ident(builtin)) = &callee.kind {
                                                 if ENUM_RESULT_BUILTINS.iter().any(|(name, _)| *name == builtin.as_str()) {
                                                     expressions.enum_bindings.insert(id);
                                                 }
@@ -1851,8 +1839,8 @@ impl<'a> Parser<'a> {
                                                     // types the binding from the signature:
                                                     // field reads, by-value moves and returns
                                                     // answer from this entry.
-                                                    if let Type::Struct(sid) = signature.ret {
-                                                        if let Some(defn) = self.structs.get(sid) {
+                                                    if let Type::Struct(sid) = signature.ret
+                                                        && let Some(defn) = self.structs.get(sid) {
                                                             expressions.struct_definition_names.entry(id).or_insert_with(|| defn.name.clone());
                                                             if owned_plain_struct(signature.ret, self.structs)
                                                                 || owned_field_struct(signature.ret, self.structs)
@@ -1860,10 +1848,8 @@ impl<'a> Parser<'a> {
                                                                 expressions.owned_struct_bindings.insert(id);
                                                             }
                                                         }
-                                                    }
                                                 }
                                             }
-                                        }
                                     }
                                 },
                             }
@@ -1896,16 +1882,14 @@ impl<'a> Parser<'a> {
                                                 // (an earlier pass, or an instantiated impl
                                                 // method's sub-parser) cannot change the
                                                 // answer.
-                                                if let Some(owner) = impl_owner {
-                                                    if let Some(declaration) = module.declarations.get(owner) {
-                                                        if matches!(declaration.kind, ae_syntax::declaration::DeclarationKind::Impl { target: None }) {
+                                                if let Some(owner) = impl_owner
+                                                    && let Some(declaration) = module.declarations.get(owner)
+                                                        && matches!(declaration.kind, ae_syntax::declaration::DeclarationKind::Impl { target: None }) {
                                                             names_enum = self.enum_names.contains_key(&declaration.name)
                                                                 || self.generics.names.contains_key(&declaration.name);
                                                             names_struct_path = self.struct_names.contains_key(&declaration.name)
                                                                 || self.generics.struct_names.contains_key(&declaration.name);
                                                         }
-                                                    }
-                                                }
                                                 break;
                                             }
                                             names_enum = self.enum_names.contains_key(name) || self.generics.names.contains_key(name);
@@ -1927,11 +1911,10 @@ impl<'a> Parser<'a> {
                                 expressions.enum_constructors.insert(top_level.range.start);
                             } else if names_enum || (end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset)) {
                                 expressions.enum_constructors.insert(top_level.range.start);
-                                if let StatementKind::Binding { name_range, .. } = &statement.kind {
-                                    if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                                if let StatementKind::Binding { name_range, .. } = &statement.kind
+                                    && let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
                                         expressions.enum_bindings.insert(id);
                                     }
-                                }
                             }
                         }
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
@@ -1946,18 +1929,16 @@ impl<'a> Parser<'a> {
                             if let ExpressionKind::Qualified { .. } = &expression.kind {
                                 expressions.enum_constructors.insert(expression.range.start);
                             }
-                            if let ExpressionKind::Call { callee, .. } = &expression.kind {
-                                if matches!(callee.kind, ExpressionKind::Qualified { .. }) {
+                            if let ExpressionKind::Call { callee, .. } = &expression.kind
+                                && matches!(callee.kind, ExpressionKind::Qualified { .. }) {
                                     expressions.enum_constructors.insert(expression.range.start);
                                 }
-                            }
-                            if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind {
-                                if self.source.get(pointee.clone()).and_then(super::types::scalar_type).is_some() {
+                            if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind
+                                && self.source.get(pointee.clone()).and_then(super::types::scalar_type).is_some() {
                                     expressions.scalar_address_casts.insert(expression.range.start);
                                 }
-                            }
-                            if let ExpressionKind::Call { callee, arguments } = &expression.kind {
-                                if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
+                            if let ExpressionKind::Call { callee, arguments } = &expression.kind
+                                && let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
                                     let operand = match (name.as_str(), arguments.as_slice()) {
                                         ("spawn", [callable]) => Some(callable),
                                         ("task_spawn" | "scope_spawn" | "pool_spawn", [_, callable]) => Some(callable),
@@ -1967,24 +1948,21 @@ impl<'a> Parser<'a> {
                                         expressions.values.insert(operand.range.start, Rc::new(operand.clone()));
                                     }
                                 }
-                            }
-                            if let ExpressionKind::Struct { target, fields } = &expression.kind {
-                                if matches!(target.kind, ExpressionKind::Specialization { .. }) {
+                            if let ExpressionKind::Struct { target, fields } = &expression.kind
+                                && matches!(target.kind, ExpressionKind::Specialization { .. }) {
                                     let open = self.tokens.partition_point(|token| token.offset < target.range.end);
                                     expressions.specialized_struct_fields.insert(
                                         self.tokens[open].offset, (expression.range.end, fields.as_slice().into()),
                                     );
                                 }
-                            }
-                            if let ExpressionKind::Call { callee, arguments } = &expression.kind {
-                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. })
+                            if let ExpressionKind::Call { callee, arguments } = &expression.kind
+                                && (matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. })
                                     || matches!(&callee.kind, ExpressionKind::Qualified { base, .. }
-                                        if matches!(base.kind, ExpressionKind::Specialization { .. }))
+                                        if matches!(base.kind, ExpressionKind::Specialization { .. })))
                                 {
                                     let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
                                     expressions.specialized_call_arguments.insert(self.tokens[open].offset, arguments.as_slice().into());
                                 }
-                            }
                             // A field read on a struct parameter joins the
                             // body route: the owner struct comes from the
                             // parameter's spelling or a nested marked field.
@@ -1995,7 +1973,7 @@ impl<'a> Parser<'a> {
                                 let field_shape = field_owner_struct(base, &expressions, self.struct_names, self.structs)
                                     .and_then(|sid| field_ty_in(sid, name, self.structs))
                                     .map(ShapeArg::Value)
-                                    .or_else(|| resolved_field_shape(base, name, &expressions, self.struct_names, self.structs, &self.generics));
+                                    .or_else(|| resolved_field_shape(base, name, &expressions, self.struct_names, self.structs, self.generics));
                                 let has_shape = field_shape.is_some();
                                 if let Some(field_shape) = field_shape {
                                     match field_shape {
@@ -2024,14 +2002,13 @@ impl<'a> Parser<'a> {
                                     // segment's type exists only at lowering, so the
                                     // marks are permissive and the lowering validates
                                     // (scalar read or a further chain).
-                                    if let Some(root) = field_chain_root(expression) {
-                                        if expressions.scalar_reads.get(&root.range.start)
+                                    if let Some(root) = field_chain_root(expression)
+                                        && expressions.scalar_reads.get(&root.range.start)
                                             .is_some_and(|id| expressions.generic_call_bindings.contains(id))
                                         {
                                             expressions.struct_field_chains.insert(expression.range.start);
                                             expressions.struct_field_reads.insert(expression.range.start);
                                         }
-                                    }
                                 }
                             }
                             // A construction of a file-local, non-generic struct joins the
@@ -2040,8 +2017,8 @@ impl<'a> Parser<'a> {
                             // owned construction whose string values move in.
                             // Initializers are validated in source order when
                             // the expression is lowered.
-                            if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &expression.kind {
-                                if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
+                            if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &expression.kind
+                                && let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
                                     // `Self { .. }` inside an impl resolves through
                                     // the declaration that owns the body (stateless:
                                     // the owner is the declaration index).
@@ -2076,7 +2053,6 @@ impl<'a> Parser<'a> {
                                         }
                                     }
                                 }
-                            }
                         });
                     }
                     if let ae_syntax::statement::StatementKind::Assign { target, operator, .. } = &statement.kind {
@@ -2089,8 +2065,8 @@ impl<'a> Parser<'a> {
                         // the store needs the base itself in `scalar_writes`
                         // (the lowering indexes that map by the base offset),
                         // and the root's spelling must be a mutable borrow.
-                        if *operator == Kind::Equal {
-                            if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
+                        if *operator == Kind::Equal
+                            && let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
                                 let base_def = expressions.scalar_writes.get(&base.range.start).copied();
                                 let mutable_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                                     && base_def.is_some_and(|def| {
@@ -2102,9 +2078,9 @@ impl<'a> Parser<'a> {
                                 // (from a spelling, a literal or a call return).
                                 let owned_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                                     && base_def.is_some_and(|def| expressions.struct_definition_names.contains_key(&def));
-                                if mutable_base || owned_base {
-                                    if let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs) {
-                                        if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
+                                if (mutable_base || owned_base)
+                                    && let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs)
+                                        && let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                             if scalar_type(field_ty) {
                                                 expressions.struct_field_writes.insert(target.range.start);
                                             } else if matches!(field_ty, Type::String) {
@@ -2114,10 +2090,7 @@ impl<'a> Parser<'a> {
                                                 expressions.owned_field_writes.insert(target.range.start);
                                             }
                                         }
-                                    }
-                                }
                             }
-                        }
                     }
                 });
             }
@@ -2138,11 +2111,10 @@ impl<'a> Parser<'a> {
                     if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::Amp) {
                         index += 1;
                     }
-                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::LBracket) {
-                        if let Some(def) = expressions.scalar_definitions.get(&parameter.name_range.start) {
+                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::LBracket)
+                        && let Some(def) = expressions.scalar_definitions.get(&parameter.name_range.start) {
                             expressions.array_definitions.insert(*def);
                         }
-                    }
                 }
             }
             for (function, body) in resolution.functions.iter().flat_map(|function| {
@@ -2325,7 +2297,7 @@ impl<'a> Parser<'a> {
             // typed: reading it would move the capture.
             let ok = scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
                 || (matches!(ty, Type::String) && !captured)
-                || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
+                || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(self.ctx.ptr_pointee(id)))
                 || ty == Type::StrView
                 // A handle is a copy-semantics value: passing one never
                 // moves or releases anything, so a body whose locals are
@@ -2346,7 +2318,7 @@ impl<'a> Parser<'a> {
                 || owned_field_struct(ty, self.structs)
                 || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)));
             if !ok && std::env::var_os("AE_ROUTE_REASONS").is_some() {
-                eprintln!("route reason blocked function: guard slot '{name}' of type {}", ty.name());
+                eprintln!("route reason blocked function: guard slot '{name}' of type {}", ty.name(self.ctx));
             }
             ok
         });
@@ -2377,45 +2349,38 @@ impl<'a> Parser<'a> {
             ae_syntax::statement::visit_statements(statement, &mut |statement| {
                 if let ae_syntax::statement::StatementKind::Binding { name, initializer, .. } = &statement.kind {
                     if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &initializer.kind {
-                        if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind {
-                            if let Some(&sid) = self.struct_names.get(struct_name) {
+                        if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind
+                            && let Some(&sid) = self.struct_names.get(struct_name) {
                                 local_structs.insert(name.clone(), Type::Struct(sid));
                             }
-                        }
                         // A generic struct literal names its instance's type.
-                        if let ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } = &target.kind {
-                            if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
-                                if let Some(&gid) = self.generics.struct_names.get(struct_name) {
-                                    if let Some(args) = self.shared_specialization_types(arguments) {
-                                        if let Ok(sid) = self.instantiate_struct(gid, args, target.range.start) {
+                        if let ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } = &target.kind
+                            && let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind
+                                && let Some(&gid) = self.generics.struct_names.get(struct_name)
+                                    && let Some(args) = self.shared_specialization_types(arguments)
+                                        && let Ok(sid) = self.instantiate_struct(gid, args, target.range.start) {
                                             local_structs.insert(name.clone(), Type::Struct(sid));
                                         }
-                                    }
-                                }
-                            }
-                        }
                     }
                     // A binding from a struct constructor call (`Point::new(..)`,
                     // `Pair[string, i64]::new(..)`): a layout instantiation only
                     // (no body parse), so it is safe in this precompute.
-                    if let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &initializer.kind {
-                        if let ae_syntax::expression::ExpressionKind::Qualified { base, .. } = &callee.kind {
+                    if let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &initializer.kind
+                        && let ae_syntax::expression::ExpressionKind::Qualified { base, .. } = &callee.kind {
                             match &base.kind {
                                 ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } => {
-                                    if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
-                                        if let Some(args) = self.shared_specialization_types(arguments) {
+                                    if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind
+                                        && let Some(args) = self.shared_specialization_types(arguments) {
                                             if let Some(&gid) = self.generics.struct_names.get(struct_name) {
                                                 if let Ok(sid) = self.instantiate_struct(gid, args, base.range.start) {
                                                     local_structs.insert(name.clone(), Type::Struct(sid));
                                                 }
-                                            } else if let Some(&gid) = self.generics.names.get(struct_name) {
-                                                if let Ok(eid) = self.instantiate_enum(gid, args, base.range.start) {
+                                            } else if let Some(&gid) = self.generics.names.get(struct_name)
+                                                && let Ok(eid) = self.instantiate_enum(gid, args, base.range.start) {
                                                     let display = self.enums[eid].name;
                                                     local_structs.insert(name.clone(), Type::Enum(display, eid));
                                                 }
-                                            }
                                         }
-                                    }
                                 }
                                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) => {
                                     if struct_name == "Self" {
@@ -2431,7 +2396,6 @@ impl<'a> Parser<'a> {
                                 _ => {}
                             }
                         }
-                    }
                     // A bare variant path (`let c = Opt[i64]::None;`) names
                     // the instance's enum type without opening a call.
                     if let ae_syntax::expression::ExpressionKind::Qualified { base, .. } = &initializer.kind {
@@ -2452,12 +2416,11 @@ impl<'a> Parser<'a> {
                                     } else if let Some(&sid) = self.struct_names.get(type_name) {
                                         local_structs.insert(name.clone(), Type::Struct(sid));
                                     } else if let Some(&gid) = self.generics.names.get(type_name) {
-                                        if let Some(args) = arguments {
-                                            if let Ok(eid) = self.instantiate_enum(gid, args, node.range.start) {
+                                        if let Some(args) = arguments
+                                            && let Ok(eid) = self.instantiate_enum(gid, args, node.range.start) {
                                                 let display = self.enums[eid].name;
                                                 local_structs.insert(name.clone(), Type::Enum(display, eid));
                                             }
-                                        }
                                     } else if let Some(&eid) = self.enum_names.get(type_name) {
                                         local_structs.insert(name.clone(), Type::Enum(self.enums[eid].name, eid));
                                     }
@@ -2553,7 +2516,7 @@ impl<'a> Parser<'a> {
                         // ae_std_alloc(..) -> *mut i64`): the binding holds a
                         // copy-semantics handle the pointer ops consume, the
                         // same shape the slot guard admits.
-                        || matches!(signature.ret, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
+                        || matches!(signature.ret, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(self.ctx.ptr_pointee(id)))
                         || owned_field_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
@@ -2597,14 +2560,14 @@ impl<'a> Parser<'a> {
             let Some(start) = start else {
                 if std::env::var_os("AE_ROUTE_REASONS").is_some() {
                     eprintln!("route reason blocked function at {}: slot {slot} ({}) has no binding range",
-                        self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), ty.name());
+                        self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), ty.name(self.ctx));
                 }
                 return None;
             };
             let Some(&def) = resolved.scalar_definitions.get(&start) else {
                 if std::env::var_os("AE_ROUTE_REASONS").is_some() {
                     eprintln!("route reason blocked function at {}: slot {slot} ({}) start {start} is not an indexed binding",
-                        self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), ty.name());
+                        self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), ty.name(self.ctx));
                 }
                 return None;
             };
@@ -2880,12 +2843,11 @@ impl<'a> Parser<'a> {
                     // Binding an owned value moves it: the new slot owns what
                     // the old one did, and later reads of the source fail with
                     // E0102 (the typed route's rule).
-                    if ty.owned() {
-                        if let Expr::Variable(source, ..) = &value {
+                    if ty.owned()
+                        && let Expr::Variable(source, ..) = &value {
                             self.check_variable_move(*source)?;
                             self.moved.insert(*source);
                         }
-                    }
                     // Views borrow their base: `let w = v[0];` registers the vector so a
                     // later `pop(v)`/`push(v, ..)` is rejected while `w` can
                     // still be read (the typed block path's rule).
@@ -2967,7 +2929,7 @@ impl<'a> Parser<'a> {
                         let (stored, value_ty) = self.lower_scalar_body_expression(value, slots)?;
                         if value_ty != map_element_ty(kind) {
                             self.seek_scalar_offset(value.range.end);
-                            return Err(self.fail(&format!("map values must be {}", map_element_ty(kind).name())));
+                            return Err(self.fail(&format!("map values must be {}", map_element_ty(kind).name(self.ctx))));
                         }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
@@ -3010,11 +2972,10 @@ impl<'a> Parser<'a> {
                         }
                         // A value store moves an owned string into the slot;
                         // a view store only borrows it.
-                        if value_ty.owned() {
-                            if let Expr::Variable(source, ..) = &stored {
+                        if value_ty.owned()
+                            && let Expr::Variable(source, ..) = &stored {
                                 self.moved.insert(*source);
                             }
-                        }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
                         return Ok(match ty {
@@ -3095,13 +3056,12 @@ impl<'a> Parser<'a> {
                 // An owned right-hand side moves into the target: the source
                 // slot's Frees is trimmed, and assigning the target to itself
                 // fails as a same-statement move (the typed rule).
-                if rhs_ty.owned() {
-                    if let Expr::Variable(source, ..) = &rhs {
+                if rhs_ty.owned()
+                    && let Expr::Variable(source, ..) = &rhs {
                         self.seek_scalar_offset(value.range.end);
                         self.check_variable_move(*source)?;
                         self.moved.insert(*source);
                     }
-                }
                 self.seek_scalar_offset(statement.range.end);
                 self.check_assignment_type(name, ty, rhs_ty, Some(&value.range))?;
                 if self.moved.contains(&slot) && !moved_before {
@@ -3142,7 +3102,7 @@ impl<'a> Parser<'a> {
                 let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
                 if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView) {
                     self.seek_scalar_offset(argument.range.end);
-                    return Err(self.fail(&format!("cannot print a value of type {}", ty.name())).with_code("E0206"));
+                    return Err(self.fail(&format!("cannot print a value of type {}", ty.name(self.ctx))).with_code("E0206"));
                 }
                 Statement::Print(Printed::Expr(value))
             }
@@ -3174,13 +3134,12 @@ impl<'a> Parser<'a> {
                 // Frees and later reads are rejected (E0102). This covers
                 // `return self;` and `return binding;` for structs, strings
                 // and vectors alike.
-                if let Expr::Variable(slot, ty, ..) = &lowered {
-                    if ty.owned() {
+                if let Expr::Variable(slot, ty, ..) = &lowered
+                    && ty.owned() {
                         self.seek_scalar_offset(value.range.end);
                         self.check_variable_move(*slot)?;
                         self.moved.insert(*slot);
                     }
-                }
                 self.seek_scalar_offset(statement.range.end);
                 self.check_return_type(ty, Some(&value.range))?;
                 Statement::Return(lowered, self.live_owned())
@@ -3450,7 +3409,7 @@ impl<'a> Parser<'a> {
         self.names.remove(var_name);
         self.borrows.retain(|&(id, _, _)| id != v_id);
         let mut body = body?;
-        if self.moved.contains(&v_id) { return Err(self.fail(&format!("cannot move the vector being iterated (a move of it happens in this loop)"))); }
+        if self.moved.contains(&v_id) { return Err(self.fail("cannot move the vector being iterated (a move of it happens in this loop)")); }
         self.close_loop_moves(base, moved_before, loop_offset)?;
         // Per-iteration element binding, then the user's body.
         let element = match elem_ty {
@@ -3581,7 +3540,7 @@ impl<'a> Parser<'a> {
                 let (operand, base_type) = self.lower_scalar_body_expression(base, slots)?;
                 if !matches!(base_type, Type::Ptr(_) | Type::PtrMut(_)) {
                     self.seek_scalar_offset(expression.range.start);
-                    return Err(self.fail(&format!("'as' retags a raw pointer, and {} is not a pointer", base_type.name())));
+                    return Err(self.fail(&format!("'as' retags a raw pointer, and {} is not a pointer", base_type.name(self.ctx))));
                 }
                 let name = self.source.get(pointee.clone())
                     .ok_or_else(|| self.error_at(pointee.start, "cannot read the pointer's pointee type"))?;
@@ -3589,7 +3548,7 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error_at(pointee.start, "a pointer cast retags to a scalar pointee here"))?;
                 let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
                 let token = self.tokens.get(end).ok_or_else(|| self.fail("expected the end of the pointer cast"))?;
-                let id = super::intern_pointee(pointee_type);
+                let id = self.ctx.intern_pointee(pointee_type);
                 let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
                 (Expr::PtrCast(Box::new(operand), *mutable, id, token.line, token.column), ty)
             }
@@ -3644,13 +3603,12 @@ impl<'a> Parser<'a> {
                     // An owned field value moves into the struct: the literal
                     // owns it, so the source slot's Frees is trimmed (the same
                     // rule the typed struct literal applies).
-                    if actual.owned() {
-                        if let Expr::Variable(slot, ..) = &value {
+                    if actual.owned()
+                        && let Expr::Variable(slot, ..) = &value {
                             self.seek_scalar_offset(field.value.range.end);
                             self.check_variable_move(*slot)?;
                             self.moved.insert(*slot);
                         }
-                    }
                     values[slot] = Some(value);
                 }
                 self.finish_struct_literal(sid, target.range.start, values)?
@@ -3691,7 +3649,7 @@ impl<'a> Parser<'a> {
                         }
                         other => {
                             self.seek_scalar_offset(expression.range.start);
-                            return Err(self.fail(&format!("type {} has no fields or methods", other.name())));
+                            return Err(self.fail(&format!("type {} has no fields or methods", other.name(self.ctx))));
                         }
                     };
                     let fty = self.field_ty_checked(sid, name)?;
@@ -3712,12 +3670,11 @@ impl<'a> Parser<'a> {
                 // side is even read: the typed route's postfix layer marks it
                 // when the operator follows, so `s + s` fails on the second
                 // read with E0102 (the source's move is already in effect).
-                if *operator == Kind::Plus && matches!(lhs.1, Type::String | Type::StrView) {
-                    if let Expr::Variable(id, Type::String, ..) = &lhs.0 {
+                if *operator == Kind::Plus && matches!(lhs.1, Type::String | Type::StrView)
+                    && let Expr::Variable(id, Type::String, ..) = &lhs.0 {
                         self.check_variable_move(*id)?;
                         self.moved.insert(*id);
                     }
-                }
                 self.seek_scalar_offset(left.range.end);
                 let position = self.position();
                 let rhs = self.lower_scalar_body_expression(right, slots)?;
@@ -3727,12 +3684,11 @@ impl<'a> Parser<'a> {
                 let concat = *operator == Kind::Plus
                     && matches!(lhs.1, Type::String | Type::StrView)
                     && matches!(rhs.1, Type::String | Type::StrView);
-                if concat {
-                    if let Expr::Variable(id, Type::String, ..) = &rhs.0 {
+                if concat
+                    && let Expr::Variable(id, Type::String, ..) = &rhs.0 {
                         self.check_variable_move(*id)?;
                         self.moved.insert(*id);
                     }
-                }
                 let fact = self.resolved_expressions().scalar_expression_types.get(&expression.range).copied();
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
@@ -3762,9 +3718,9 @@ impl<'a> Parser<'a> {
                     // slot comes from `names`. The re-check admitted only
                     // calls `resolve_inherent_method` answers, so this path
                     // and the gate agree.
-                    if let ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind {
-                        if let Some(&(slot, _, ty)) = self.names.get(receiver) {
-                            if !matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
+                    if let ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind
+                        && let Some(&(slot, _, ty)) = self.names.get(receiver)
+                            && !matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
                                 if let Some((signature, _, _)) = self.resolve_inherent_method(method_name, ty) {
                                     return self.lower_method_call(method_name, slot, ty, signature, expression, arguments, slots);
                                 }
@@ -3818,10 +3774,8 @@ impl<'a> Parser<'a> {
                                     }
                                     return Err(self.error_at(callee.range.end, &format!("type '{type_name}' has no method '{method_name}'; it has {}", names.join(", "))));
                                 }
-                                return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
+                                return Err(self.fail(&format!("type {} has no fields or methods", ty.name(self.ctx))));
                             }
-                        }
-                    }
                     // The receiver's slot comes from `names`: a pointer binding
                     // the resolver could not spell yet (the result of
                     // `buf.offset(1)`, say) still has an authoritative slot by
@@ -3837,7 +3791,7 @@ impl<'a> Parser<'a> {
                         self.lower_scalar_body_expression(base, slots)?
                     };
                     let (Type::Ptr(id) | Type::PtrMut(id)) = ty else {
-                        return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
+                        return Err(self.fail(&format!("type {} has no fields or methods", ty.name(self.ctx))));
                     };
                     let method = self.tokens.partition_point(|token| token.offset < callee.range.end) - 1;
                     let method_offset = self.tokens[method].offset;
@@ -3867,7 +3821,7 @@ impl<'a> Parser<'a> {
                     self.check_pointer_deref(method_offset)?;
                     self.seek_scalar_offset(expression.range.end);
                     let (line, column) = self.position();
-                    return Ok((Expr::DerefPtr(Box::new(operand), line, column), super::ptr_pointee(id)));
+                    return Ok((Expr::DerefPtr(Box::new(operand), line, column), self.ctx.ptr_pointee(id)));
                 }
                 if let ExpressionKind::BracketedCallTarget { base, .. } = &callee.kind {
                     let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
@@ -3940,7 +3894,7 @@ impl<'a> Parser<'a> {
                     // A call through a function-typed value: the binding's
                     // slot names the pointer the caller passed (ADR-0189).
                     if let Some(&(slot, _, Type::Fn(sig))) = self.names.get(name) {
-                        let (params, ret) = super::closures::fn_sig(sig);
+                        let (params, ret) = self.ctx.fn_sig(sig);
                         let mut args = Vec::with_capacity(arguments.len());
                         for (index, argument) in arguments.iter().enumerate() {
                             self.seek_scalar_offset(argument.range.start);
@@ -3954,17 +3908,16 @@ impl<'a> Parser<'a> {
                             if matches!(expected, Type::StrView) {
                                 if !matches!(actual, Type::String | Type::StrView) {
                                     self.seek_scalar_offset(argument.range.end);
-                                    return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name())));
+                                    return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name(self.ctx))));
                                 }
                                 args.push(Argument::View(value));
                                 continue;
                             }
                             self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
-                            if actual.owned() {
-                                if let Expr::Variable(source, ..) = &value {
+                            if actual.owned()
+                                && let Expr::Variable(source, ..) = &value {
                                     self.moved.insert(*source);
                                 }
-                            }
                             args.push(Argument::Value(value));
                         }
                         if args.len() != params.len() {
@@ -3986,7 +3939,7 @@ impl<'a> Parser<'a> {
                     // the concrete impl, so the call stays monomorphized.
                     None => self.resolve_trait_call(name, callee.range.start)?,
                 };
-                if (signature.extern_c || crate::frontend::is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
+                if (signature.extern_c || self.ctx.is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
                     return Err(self.error_at(callee.range.start, &format!("call to unsafe function '{name}' requires 'unsafe'")).with_code("E0701"));
                 }
                 let mut args = Vec::with_capacity(arguments.len());
@@ -4037,7 +3990,7 @@ impl<'a> Parser<'a> {
                             let shape = match expected {
                                 Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
                             };
-                            return Err(self.fail(&format!("argument must be {}, found {}", shape.name(), actual.name())));
+                            return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
                         };
                         if self.moved.contains(&slot) {
                             return Err(moved_value_hint(self.binding_label(
@@ -4088,7 +4041,7 @@ impl<'a> Parser<'a> {
                                 let shape = match expected {
                                     Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
                                 };
-                                return Err(self.fail(&format!("argument must be {}, found {}", shape.name(), actual.name())));
+                                return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
                             }
                         }
                         continue;
@@ -4107,7 +4060,7 @@ impl<'a> Parser<'a> {
                     if matches!(expected, Type::StrView) {
                         if !matches!(actual, Type::String | Type::StrView) {
                             self.seek_scalar_offset(argument.range.end);
-                            return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name())));
+                            return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name(self.ctx))));
                         }
                         args.push(Argument::View(value));
                         continue;
@@ -4120,11 +4073,10 @@ impl<'a> Parser<'a> {
                     // An owned aggregate passed by value moves: later uses
                     // are rejected (E0102), and the drops pass trims the
                     // Frees lists for this slot.
-                    if actual.owned() {
-                        if let Expr::Variable(slot, ..) = &value {
+                    if actual.owned()
+                        && let Expr::Variable(slot, ..) = &value {
                             self.moved.insert(*slot);
                         }
-                    }
                     args.push(Argument::Value(value));
                 }
                 self.seek_scalar_offset(expression.range.end);
@@ -4212,7 +4164,7 @@ impl<'a> Parser<'a> {
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         use ae_syntax::expression::ExpressionKind;
-        let builtin = (|| -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let _builtin = (|| -> Result<(Expr, Type), ae_span::Diagnostic> {
             self.seek_scalar_offset(callee.range.start);
             let (line, column) = self.position();
             match name {
@@ -4223,9 +4175,9 @@ impl<'a> Parser<'a> {
                     // is a compile-time constant, and a vector or map length
                     // borrows the slot. Either way the variable must not be
                     // moved.
-                    if let ExpressionKind::Atom(Kind::Ident(argument_name)) = &argument.kind {
-                        if let Some(&def) = self.resolved_expressions().scalar_reads.get(&argument.range.start) {
-                            if let Some(&(slot, ty)) = slots.get(&def) {
+                    if let ExpressionKind::Atom(Kind::Ident(argument_name)) = &argument.kind
+                        && let Some(&def) = self.resolved_expressions().scalar_reads.get(&argument.range.start)
+                            && let Some(&(slot, ty)) = slots.get(&def) {
                                 self.seek_scalar_offset(argument.range.start);
                                 if self.moved.contains(&slot) {
                                     return Err(moved_value_hint(self.binding_label(
@@ -4243,8 +4195,6 @@ impl<'a> Parser<'a> {
                                     return Ok((Expr::Len(Box::new(value), line, column), Type::Int));
                                 }
                             }
-                        }
-                    }
                     let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
                     if ty == Type::Tokens {
                         // The typed route consumes len's `)` before it checks
@@ -4402,7 +4352,7 @@ impl<'a> Parser<'a> {
                         let (delta, delta_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
                         if delta_ty != map_element_ty(kind) {
                             self.seek_scalar_offset(arguments[2].range.end);
-                            return Err(self.fail(&format!("map_inc expects a {} delta", map_element_ty(kind).name())));
+                            return Err(self.fail(&format!("map_inc expects a {} delta", map_element_ty(kind).name(self.ctx))));
                         }
                         self.seek_scalar_offset(expression.range.end);
                         return Ok((Expr::MapInc(place, Box::new(key), Box::new(delta), line, column), map_element_ty(kind)));
@@ -4486,7 +4436,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("shared_new in v1 expects a copy-semantics value (i64, bool, f64, or atomic)"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    let sid = intern_shared(value_ty);
+                    let sid = self.ctx.intern_shared(value_ty);
                     Ok((Expr::SharedNew(Box::new(value), sid), Type::Shared(sid)))
                 }
                 "shared_get" => {
@@ -4500,7 +4450,7 @@ impl<'a> Parser<'a> {
                         }
                     };
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::SharedGet(Box::new(handle), sid), shared_types_get(sid)))
+                    Ok((Expr::SharedGet(Box::new(handle), sid), self.ctx.shared_types_get(sid)))
                 }
                 "mutex_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
@@ -5025,7 +4975,818 @@ impl<'a> Parser<'a> {
                 }
             }
         })();
-        builtin
+        (|| -> Result<(Expr, Type), ae_span::Diagnostic> {
+            self.seek_scalar_offset(callee.range.start);
+            let (line, column) = self.position();
+            match name {
+                "len" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    // The typed route's fast path: a bare local's array length
+                    // is a compile-time constant, and a vector or map length
+                    // borrows the slot. Either way the variable must not be
+                    // moved.
+                    if let ExpressionKind::Atom(Kind::Ident(argument_name)) = &argument.kind
+                        && let Some(&def) = self.resolved_expressions().scalar_reads.get(&argument.range.start)
+                        && let Some(&(slot, ty)) = slots.get(&def)
+                    {
+                                self.seek_scalar_offset(argument.range.start);
+                                if self.moved.contains(&slot) {
+                                    return Err(moved_value_hint(self.binding_label(
+                                        self.fail(&format!("cannot use '{argument_name}' because it was moved")).with_code("E0102"), slot)));
+                                }
+                                if let Type::Array(n) = ty {
+                                    self.seek_scalar_offset(expression.range.end);
+                                    return Ok((Expr::Number(n as i64), Type::Int));
+                                }
+                                if matches!(ty, Type::Vec | Type::StrVec | Type::VecRef | Type::StrVecRef | Type::Map) {
+                                    // The typed fast path stamps the operand with
+                                    // the `len` call's position, not the variable's.
+                                    let value = Expr::Variable(slot, ty, line, column);
+                                    self.seek_scalar_offset(expression.range.end);
+                                    return Ok((Expr::Len(Box::new(value), line, column), Type::Int));
+                                }
+                    }
+                    let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                    if ty == Type::Tokens {
+                        // The typed route consumes len's `)` before it checks
+                        // the operand type, so the cursor is one token past it.
+                        self.seek_scalar_offset(expression.range.end);
+                        return Err(self.fail("a token cursor has no len: counting would consume the stream, so use split(text, sep) when the count is needed"));
+                    }
+                    if !matches!(ty, Type::String | Type::StrView | Type::Vec | Type::StrVec | Type::StrVecRef | Type::VecF | Type::VecRef | Type::VecFRef | Type::Map | Type::MapF) {
+                        self.seek_scalar_offset(expression.range.end);
+                        return Err(self.fail("len expects a string, vec, map, or array variable"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Len(Box::new(value), line, column), Type::Int))
+                }
+                "to_string" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    let value = match actual {
+                        Type::Int => Expr::ToString(Box::new(value), line, column),
+                        Type::F64 => Expr::FloatToString(Box::new(value), line, column),
+                        _ => {
+                            self.seek_scalar_offset(argument.range.end);
+                            return Err(self.fail("to_string expects an i64 or f64"));
+                        }
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, Type::String))
+                }
+                "to_f64" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    if actual != Type::Int {
+                        self.seek_scalar_offset(argument.range.end);
+                        return Err(self.fail("to_f64 expects an i64"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ToF64(Box::new(value), line, column), Type::F64))
+                }
+                "trim" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let argument = &arguments[0];
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    if !matches!(actual, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(argument.range.end);
+                        return Err(self.fail("trim expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Trim(Box::new(value), line, column), Type::String))
+                }
+                "slice" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let (text, start, end) = (&arguments[0], &arguments[1], &arguments[2]);
+                    let (first, first_ty) = self.lower_scalar_body_expression(text, slots)?;
+                    if !matches!(first_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(text.range.end);
+                        return Err(self.fail("slice expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(start.range.start);
+                    let (from, from_ty) = self.lower_scalar_body_expression(start, slots)?;
+                    if from_ty != Type::Int {
+                        self.seek_scalar_offset(start.range.end);
+                        return Err(self.fail("slice start must be i64"));
+                    }
+                    self.seek_scalar_offset(end.range.start);
+                    let (to, to_ty) = self.lower_scalar_body_expression(end, slots)?;
+                    if to_ty != Type::Int {
+                        self.seek_scalar_offset(end.range.end);
+                        return Err(self.fail("slice end must be i64"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Slice(Box::new(first), Box::new(from), Box::new(to), line, column), Type::String))
+                }
+                "split" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (text, separator) = (&arguments[0], &arguments[1]);
+                    let (first, first_ty) = self.lower_scalar_body_expression(text, slots)?;
+                    if !matches!(first_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(text.range.end);
+                        return Err(self.fail("split expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(separator.range.start);
+                    let (second, second_ty) = self.lower_scalar_body_expression(separator, slots)?;
+                    if !matches!(second_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(separator.range.end);
+                        return Err(self.fail("split expects a string or string view separator"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Split(Box::new(first), Box::new(second), line, column), Type::StrVec))
+                }
+                "contains" | "starts_with" | "ends_with" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (text, pattern) = (&arguments[0], &arguments[1]);
+                    let (first, first_ty) = self.lower_scalar_body_expression(text, slots)?;
+                    if !matches!(first_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(text.range.end);
+                        return Err(self.fail(&format!("{name} expects a string or string view argument")));
+                    }
+                    self.seek_scalar_offset(pattern.range.start);
+                    let (second, second_ty) = self.lower_scalar_body_expression(pattern, slots)?;
+                    if !matches!(second_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(pattern.range.end);
+                        return Err(self.fail(&format!("{name} expects a string or string view pattern")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    let value = match name {
+                        "contains" => Expr::Contains(Box::new(first), Box::new(second), line, column),
+                        "starts_with" => Expr::StartsWith(Box::new(first), Box::new(second)),
+                        _ => Expr::EndsWith(Box::new(first), Box::new(second)),
+                    };
+                    Ok((value, Type::Bool))
+                }
+                "map_new" | "f64map_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    let (kind, ty) = if name == "map_new" { (MapKind::Int, Type::Map) } else { (MapKind::Float, Type::MapF) };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::MapNew(line, column, kind), ty))
+                }
+                "map_get" | "map_has" | "map_remove" | "map_inc" | "keys" => {
+                    let expected = if matches!(name, "map_inc") { 3 } else if matches!(name, "keys") { 1 } else { 2 };
+                    self.expect_resolved_builtin_arity(expression, arguments, expected)?;
+                    // The map argument is a bare map variable, or a map field of
+                    // a struct *variable* (the borrow stays statement-scoped).
+                    let (map, map_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    let kind = map_kind_of(map_ty);
+                    let place = match (&map, map_ty) {
+                        (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::Map | Type::MapF) => MapPlace::Var(*id, kind),
+                        (Expr::Field(base, fname, t), _) if matches!(*t, Type::Map | Type::MapF) => match **base {
+                            Expr::Variable(id, ..) => MapPlace::Field(id, fname.clone(), kind),
+                            _ => {
+                                self.seek_scalar_offset(arguments[0].range.end);
+                                return Err(self.fail(&format!("{name} needs a map variable or a field of one")));
+                            }
+                        },
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail(&format!("{name} expects a map variable or a field of one")));
+                        }
+                    };
+                    if self.moved.contains(&place.slot()) {
+                        return Err(self.binding_label(self.fail(&format!("cannot use '{name}' on a moved map")).with_code("E0102"), place.slot()));
+                    }
+                    if matches!(name, "keys") {
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::MapKeys(place, line, column), Type::StrVec));
+                    }
+                    let (key, key_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(key_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        let message = if matches!(name, "map_inc") { "map_inc expects a string key".to_owned() } else { format!("{name} expects a string key") };
+                        return Err(self.fail(&message));
+                    }
+                    if matches!(name, "map_inc") {
+                        let (delta, delta_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                        if delta_ty != map_element_ty(kind) {
+                            self.seek_scalar_offset(arguments[2].range.end);
+                            return Err(self.fail(&format!("map_inc expects a {} delta", map_element_ty(kind).name(self.ctx))));
+                        }
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::MapInc(place, Box::new(key), Box::new(delta), line, column), map_element_ty(kind)));
+                    }
+                    let ty = match name {
+                        "map_get" => self.prelude_type(if kind == MapKind::Float { "FloatResult" } else { "IntResult" }),
+                        _ => Type::Bool,
+                    };
+                    let value = match name {
+                        "map_get" => Expr::MapGet(place, Box::new(key), ty, line, column),
+                        "map_has" => Expr::MapHas(place, Box::new(key), line, column),
+                        _ => Expr::MapRemove(place, Box::new(key), line, column),
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
+                }
+                "cell_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (seed, seed_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if seed_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_new expects an i64 seed"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicNew(Box::new(seed)), Type::Atomic))
+                }
+                "cell_load" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Atomic {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_load expects an atomic handle"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicLoad(Box::new(handle)), Type::Int))
+                }
+                "cell_add" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Atomic {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_add expects an atomic handle"));
+                    }
+                    let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if value_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("cell_add expects an i64 delta"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicAdd(Box::new(handle), Box::new(value)), Type::Int))
+                }
+                "cell_cas" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Atomic {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_cas expects an atomic handle"));
+                    }
+                    let (expect, expect_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if expect_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("cell_cas expects an i64 expected value"));
+                    }
+                    let (new, new_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                    if new_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[2].range.end);
+                        return Err(self.fail("cell_cas expects an i64 new value"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicCas(Box::new(handle), Box::new(expect), Box::new(new)), Type::Bool))
+                }
+                "shared_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (value, value_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if matches!(value_ty, Type::Shared(_)) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("shared_new cannot wrap another shared handle (no handle towers)"));
+                    }
+                    if !matches!(value_ty, Type::Int | Type::Bool | Type::F64 | Type::Atomic) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("shared_new in v1 expects a copy-semantics value (i64, bool, f64, or atomic)"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    let sid = self.ctx.intern_shared(value_ty);
+                    Ok((Expr::SharedNew(Box::new(value), sid), Type::Shared(sid)))
+                }
+                "shared_get" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    let sid = match handle_ty {
+                        Type::Shared(sid) => sid,
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail("shared_get expects a shared handle"));
+                        }
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::SharedGet(Box::new(handle), sid), self.ctx.shared_types_get(sid)))
+                }
+                "mutex_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::MutexNew, Type::Mutex))
+                }
+                "mutex_lock" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Mutex {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("mutex_lock expects a mutex handle"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::MutexLock(Box::new(handle)), Type::Guard))
+                }
+                "chan_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (capacity, capacity_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if capacity_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("chan_new expects an i64 capacity"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ChanNew(Box::new(capacity)), Type::Chan))
+                }
+                "chan_send" | "chan_try_send" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (channel, channel_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if channel_ty != Type::Chan {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a chan handle")));
+                    }
+                    let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if value_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail(&format!("{name} expects an i64 value")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok(if name == "chan_send" {
+                        (Expr::ChanSend(Box::new(channel), Box::new(value)), Type::Bool)
+                    } else {
+                        (Expr::ChanTrySend(Box::new(channel), Box::new(value)), Type::Bool)
+                    })
+                }
+                "chan_recv" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (channel, channel_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if channel_ty != Type::Chan {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("chan_recv expects a chan handle"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ChanRecv(Box::new(channel)), Type::Int))
+                }
+                "chan_select" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (first, first_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if first_ty != Type::Chan {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("chan_select expects chan handles"));
+                    }
+                    let (second, second_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if second_ty != Type::Chan {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("chan_select expects chan handles"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ChanSelect(Box::new(first), Box::new(second)), Type::Int))
+                }
+                "exec_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ExecNew, Type::Exec))
+                }
+                "exec_run" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Exec {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("exec_run expects an exec handle"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ExecRun(Box::new(handle)), Type::Int))
+                }
+                "scope_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ScopeNew, Type::TaskScope))
+                }
+                "pool_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (workers, workers_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if workers_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("pool_new expects an i64 worker count"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::PoolNew(Box::new(workers)), Type::Pool))
+                }
+                "pool_join" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Pool {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("pool_join expects a pool handle"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::PoolJoin(Box::new(handle)), Type::Int))
+                }
+                "c_size_of" | "c_align_of" | "c_offset_of" => {
+                    // Only the bracketed form exists; the bracket path is
+                    // intercepted before this arm, so a plain call lands here.
+                    Err(self.fail(&format!("{name} is a layout query; write {name}[Type](..)")))
+                }
+                "spawn" => {
+                    // Cursor after the name: the typed spawn helper parses the
+                    // callable, moves its captures, and interns the thread.
+                    self.pos += 1;
+                    let (value, ty) = self.spawn_expr(line, column)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
+                }
+                "wait" => {
+                    self.pos += 1;
+                    let (value, ty) = self.wait_expr(line, column)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
+                }
+                "now_ms" | "now_s" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((if name == "now_ms" { Expr::NowMs } else { Expr::NowS }, Type::Int))
+                }
+                "args" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Args(line, column), Type::StrVec))
+                }
+                "read_stdin" | "cwd" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    let ty = self.prelude_type("ReadResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((if name == "read_stdin" { Expr::ReadStdin(ty, line, column) } else { Expr::Cwd(ty, line, column) }, ty))
+                }
+                "read_file" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("read_file expects a string or string view argument"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ReadFile(Box::new(path), line, column), Type::String))
+                }
+                "write_file" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("write_file expects a string or string view argument"));
+                    }
+                    let (content, content_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(content_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("write_file expects a string or string view content"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::WriteFile(Box::new(path), Box::new(content), line, column), Type::Int))
+                }
+                "path_exists" | "path_is_dir" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((if name == "path_exists" {
+                        Expr::PathExists(Box::new(path), line, column)
+                    } else {
+                        Expr::PathIsDir(Box::new(path), line, column)
+                    }, Type::Bool))
+                }
+                "path_join" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (directory, directory_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(directory_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("path_join expects a string directory"));
+                    }
+                    let (part, part_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(part_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("path_join expects a string name"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::PathJoin(Box::new(directory), Box::new(part), line, column), Type::String))
+                }
+                "path_name" | "path_parent" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((if name == "path_name" {
+                        Expr::PathName(Box::new(path), line, column)
+                    } else {
+                        Expr::PathParent(Box::new(path), line, column)
+                    }, Type::String))
+                }
+                "try_read_file" | "try_list_dir" | "try_file_info" | "env" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (ty, message) = match name {
+                        "try_read_file" => (self.prelude_type("ReadResult"), "try_read_file expects a string path"),
+                        "try_list_dir" => (self.prelude_type("DirResult"), "try_list_dir expects a string path"),
+                        "try_file_info" => (self.prelude_type("FileResult"), "try_file_info expects a string path"),
+                        _ => (self.prelude_type("ReadResult"), "env expects a string variable name"),
+                    };
+                    let (operand, operand_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(operand_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(message));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((match name {
+                        "try_read_file" => Expr::TryReadFile(Box::new(operand), ty, line, column),
+                        "try_list_dir" => Expr::TryListDir(Box::new(operand), ty, line, column),
+                        "try_file_info" => Expr::TryFileInfo(Box::new(operand), ty, line, column),
+                        _ => Expr::Env(Box::new(operand), ty, line, column),
+                    }, ty))
+                }
+                "try_write_file" | "try_append_file" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let ty = self.prelude_type("WriteResult");
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    let (content, content_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(content_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail(&format!("{name} expects a string or string view content")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((if name == "try_write_file" {
+                        Expr::TryWriteFile(Box::new(path), Box::new(content), ty, line, column)
+                    } else {
+                        Expr::TryAppendFile(Box::new(path), Box::new(content), ty, line, column)
+                    }, ty))
+                }
+                "try_copy_file" | "try_rename_path" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let ty = self.prelude_type("StatusResult");
+                    let (from, from_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(from_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string source path")));
+                    }
+                    let (to, to_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(to_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail(&format!("{name} expects a string destination path")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((if name == "try_copy_file" {
+                        Expr::TryCopyFile(Box::new(from), Box::new(to), ty, line, column)
+                    } else {
+                        Expr::TryRenamePath(Box::new(from), Box::new(to), ty, line, column)
+                    }, ty))
+                }
+                "try_remove_file" | "try_remove_dir" | "try_create_dir" | "set_cwd" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let ty = self.prelude_type("StatusResult");
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((match name {
+                        "try_remove_file" => Expr::TryRemoveFile(Box::new(path), ty, line, column),
+                        "try_remove_dir" => Expr::TryRemoveDir(Box::new(path), ty, line, column),
+                        "try_create_dir" => Expr::TryCreateDir(Box::new(path), ty, line, column),
+                        _ => Expr::SetCwd(Box::new(path), ty, line, column),
+                    }, ty))
+                }
+                "utf8_len" | "utf8_prefix" => {
+                    let arity = if name == "utf8_len" { 1 } else { 2 };
+                    self.expect_resolved_builtin_arity(expression, arguments, arity)?;
+                    let (text, text_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(text_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string or string view")));
+                    }
+                    if name == "utf8_len" {
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::Utf8Len(Box::new(text), line, column), Type::Int));
+                    }
+                    let (count, count_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if count_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("utf8_prefix expects an i64 character count"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Utf8Prefix(Box::new(text), Box::new(count), line, column), Type::String))
+                }
+                "count_lines_with" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (text, text_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(text_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("count_lines_with expects a string or string view"));
+                    }
+                    let (pattern, pattern_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(pattern_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("count_lines_with expects a string or string view pattern"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::CountLinesWith(Box::new(text), Box::new(pattern), line, column), Type::Int))
+                }
+                "run_command" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let ty = self.prelude_type("CommandResult");
+                    let (program, program_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(program_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("run_command expects a string program name"));
+                    }
+                    let (arguments_value, arguments_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    let vector = match (&arguments_value, arguments_ty) {
+                        (Expr::Variable(id, Type::StrVec, ..), Type::StrVec) => *id,
+                        _ => {
+                            self.seek_scalar_offset(arguments[1].range.end);
+                            return Err(self.fail("run_command expects a bare vec[string] variable for its arguments"));
+                        }
+                    };
+                    if self.moved.contains(&vector) {
+                        return Err(self.binding_label(self.fail("cannot use a moved vector in run_command").with_code("E0102"), vector));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::RunCommand(Box::new(program), vector, ty, line, column), ty))
+                }
+                "strvec_new" | "f64vec_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 0)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok(if name == "f64vec_new" {
+                        (Expr::F64VecNew(line, column), Type::VecF)
+                    } else {
+                        (Expr::StrVecNew(line, column), Type::StrVec)
+                    })
+                }
+                "lines" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (text, text_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(text_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("lines expects a string or string view"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Lines(Box::new(text), line, column), Type::StrVec))
+                }
+                "join" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    // join borrows a bare string-vector variable.
+                    let (parts, parts_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    let vid = match (&parts, parts_ty) {
+                        (Expr::Variable(id, Type::StrVec, ..), Type::StrVec) => *id,
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail("join expects a bare vec[string] variable"));
+                        }
+                    };
+                    if self.moved.contains(&vid) {
+                        return Err(self.binding_label(self.fail("cannot use a moved vector in join").with_code("E0102"), vid));
+                    }
+                    let (sep, sep_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(sep_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("join expects a string or string view separator"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Join(vid, Box::new(sep), line, column), Type::String))
+                }
+                "slice_view" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let (base, base_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    // The view borrows its base: a bare string variable, or a
+                    // string field of a struct *variable* (the whole variable
+                    // is what the borrow protects — ADR-52). Mirrors the typed
+                    // route's checks and messages.
+                    let (vid, field) = match (&base, base_ty) {
+                        (Expr::Variable(id, Type::String, ..), Type::String) => (*id, None),
+                        (Expr::Field(inner, fname, Type::String), Type::String) => match **inner {
+                            Expr::Variable(id, Type::Struct(_), ..) => (id, Some(fname.clone())),
+                            _ => {
+                                self.seek_scalar_offset(arguments[0].range.end);
+                                return Err(self.fail("slice_view can follow a string field only on a struct variable, not on a nested expression"));
+                            }
+                        },
+                        _ => {
+                            self.seek_scalar_offset(arguments[0].range.end);
+                            return Err(self.fail("slice_view expects a string variable or a string field of a struct variable (views borrow their base)"));
+                        }
+                    };
+                    if self.moved.contains(&vid) {
+                        return Err(self.binding_label(self.fail("cannot use a moved string in slice_view").with_code("E0102"), vid));
+                    }
+                    let (start, start_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if start_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("slice_view start must be i64"));
+                    }
+                    let (end, end_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                    if end_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[2].range.end);
+                        return Err(self.fail("slice_view end must be i64"));
+                    }
+                    let depth = self.scopes.len();
+                    if !self.borrows.iter().any(|&(id, _, _)| id == vid) {
+                        self.borrows.push((vid, depth, BorrowKind::View));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::SliceView(vid, field, Box::new(start), Box::new(end), line, column), Type::StrView))
+                }
+                "to_i64" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (value, actual) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if actual != Type::F64 {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("to_i64 expects an f64"));
+                    }
+                    let ty = self.prelude_type("IntResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ToI64(Box::new(value), ty, line, column), ty))
+                }
+                "parse_int" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (value, actual) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(actual, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("parse_int expects a string or string view"));
+                    }
+                    let ty = self.prelude_type("IntResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ParseInt(Box::new(value), ty, line, column), ty))
+                }
+                "find" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (doc, doc_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(doc_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("find expects a string to search in"));
+                    }
+                    let (needle, needle_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(needle_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("find expects a string to search for"));
+                    }
+                    let ty = self.prelude_type("IntResult");
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::Find(Box::new(doc), Box::new(needle), ty, line, column), ty))
+                }
+                "json_get" | "json_int" | "json_bool" | "json_len" | "json_has" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (doc, doc_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(doc_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a JSON document string")));
+                    }
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    let ty = match name {
+                        "json_get" => self.prelude_type("ReadResult"),
+                        "json_has" => Type::Bool,
+                        "json_bool" => self.prelude_type("BoolResult"),
+                        _ => self.prelude_type("IntResult"),
+                    };
+                    let value = match name {
+                        "json_get" => Expr::JsonGet(Box::new(doc), Box::new(path), ty, line, column),
+                        "json_int" => Expr::JsonInt(Box::new(doc), Box::new(path), ty, line, column),
+                        "json_bool" => Expr::JsonBool(Box::new(doc), Box::new(path), ty, line, column),
+                        "json_len" => Expr::JsonLen(Box::new(doc), Box::new(path), ty, line, column),
+                        _ => Expr::JsonHas(Box::new(doc), Box::new(path), line, column),
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
+                }
+                _ => {
+                    // A math builtin: fixed arity, every argument already f64.
+                    let Some((index, _, arity)) = MATH_FNS.iter().enumerate().find_map(|(index, (math, _, arity))| (*math == name).then_some((index, *math, *arity))) else {
+                        unreachable!("resolved builtin dispatch");
+                    };
+                    if arguments.len() < arity {
+                        self.seek_scalar_offset(expression.range.end);
+                        self.pos = self.pos.saturating_sub(1);
+                        return Err(self.fail(&format!("{name} expects {arity} f64 argument(s)")));
+                    }
+                    if arguments.len() > arity {
+                        self.seek_scalar_offset(arguments[arity - 1].range.end);
+                        return Err(self.fail(&format!("{name} takes {arity} argument(s)")));
+                    }
+                    let mut values = Vec::with_capacity(arity);
+                    for argument in arguments {
+                        self.seek_scalar_offset(argument.range.start);
+                        let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                        if ty != Type::F64 {
+                            self.seek_scalar_offset(argument.range.end);
+                            return Err(self.fail(&format!("{name} expects an f64 argument; convert integers explicitly with to_f64")));
+                        }
+                        values.push(Box::new(value));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::MathCall(index as u8, values, line, column), Type::F64))
+                }
+            }
+        })()
     }
 
     /// The typed route's own arity behaviour for a builtin that parses
@@ -5113,10 +5874,10 @@ impl<'a> Parser<'a> {
             }
         };
         let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-        let expected = shared_types_get(sid);
+        let expected = self.ctx.shared_types_get(sid);
         if value_ty != expected {
             self.seek_scalar_offset(arguments[1].range.end);
-            return Err(self.fail(&format!("shared_set expects {}, found {}", expected.name(), value_ty.name())));
+            return Err(self.fail(&format!("shared_set expects {}, found {}", expected.name(self.ctx), value_ty.name(self.ctx))));
         }
         self.seek_scalar_offset(call.range.end);
         self.take(Kind::Semi)?;
@@ -5148,7 +5909,7 @@ impl<'a> Parser<'a> {
         }
         if !matches!(ty, Type::Vec | Type::StrVec | Type::VecF) {
             self.seek_scalar_offset(arguments[0].range.end);
-            return Err(self.fail(&format!("{builtin} expects a vec, found {}", ty.name())));
+            return Err(self.fail(&format!("{builtin} expects a vec, found {}", ty.name(self.ctx))));
         }
         if self.is_borrowed(slot) {
             self.seek_scalar_offset(arguments[0].range.end);
@@ -5222,6 +5983,7 @@ impl<'a> Parser<'a> {
     /// `signature.params[0]` is the receiver; the argument list follows it.
     /// The receiver bookkeeping mirrors the typed postfix path, so the
     /// borrow graph and the pinned diagnostics stay identical.
+    #[allow(clippy::too_many_arguments)]
     fn lower_method_call(
         &mut self,
         method_name: &str,
@@ -5295,11 +6057,10 @@ impl<'a> Parser<'a> {
             };
             let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
             self.check_value_argument_type(method_name, index, expected, actual, Some(&argument.range))?;
-            if actual.owned() {
-                if let Expr::Variable(source, ..) = &value {
+            if actual.owned()
+                && let Expr::Variable(source, ..) = &value {
                     self.moved.insert(*source);
                 }
-            }
             args.push(Argument::Value(value));
         }
         self.seek_scalar_offset(expression.range.end);
@@ -5364,7 +6125,7 @@ impl<'a> Parser<'a> {
         if self.unsafe_depth == 0 {
             return Err(self.error_at(line, "writing through a raw pointer requires 'unsafe'").with_code("E0700"));
         }
-        Ok(super::ptr_pointee(id))
+        Ok(self.ctx.ptr_pointee(id))
     }
 
     pub(super) fn check_pointer_deref(&self, offset: usize) -> Result<(), ae_span::Diagnostic> {
@@ -5376,7 +6137,7 @@ impl<'a> Parser<'a> {
 
     fn check_pointer_store_value(&self, actual: Type, pointee: Type) -> Result<(), ae_span::Diagnostic> {
         if actual != pointee {
-            return Err(self.fail(&format!("cannot write a {} value through *mut {}", actual.name(), pointee.name())));
+            return Err(self.fail(&format!("cannot write a {} value through *mut {}", actual.name(self.ctx), pointee.name(self.ctx))));
         }
         if pointee.owned() {
             return Err(self.fail("writing an owned value through a pointer is not supported yet; the pointer would take over its release"));
@@ -5397,7 +6158,7 @@ impl<'a> Parser<'a> {
         {
             return Ok(());
         }
-        Err(self.fail(&format!("compound assignment is not supported for type '{}'", target.name())))
+        Err(self.fail(&format!("compound assignment is not supported for type '{}'", target.name(self.ctx))))
     }
 
     pub(super) fn matches_value_type(&self, expected: Type, actual: Type, range: Option<&std::ops::Range<usize>>) -> bool {
@@ -5411,7 +6172,7 @@ impl<'a> Parser<'a> {
         if self.matches_value_type(self.return_type, value, range) {
             return Ok(());
         }
-        Err(self.fail(&format!("return type must be {}", self.return_type.name())).with_code("E0204"))
+        Err(self.fail(&format!("return type must be {}", self.return_type.name(self.ctx))).with_code("E0204"))
     }
 
     pub(super) fn check_value_argument_type(
@@ -5428,7 +6189,7 @@ impl<'a> Parser<'a> {
         if let Some(range) = range {
             self.seek_scalar_offset(range.end);
         }
-        Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name())))
+        Err(self.fail(&format!("argument {} to '{name}' must be {}", index + 1, expected.name(self.ctx))))
     }
 
     pub(super) fn check_field_value_type(
@@ -5444,7 +6205,7 @@ impl<'a> Parser<'a> {
         if let Some(range) = range {
             self.seek_scalar_offset(range.end);
         }
-        Err(self.fail(&format!("field '{name}' must be {}", expected.name())))
+        Err(self.fail(&format!("field '{name}' must be {}", expected.name(self.ctx))))
     }
 
     fn check_assignment_type(
@@ -5457,7 +6218,7 @@ impl<'a> Parser<'a> {
         if self.matches_value_type(target, value, range) {
             return Ok(());
         }
-        Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value.name(), target.name())))
+        Err(self.fail(&format!("cannot assign a {} value to {} variable '{name}'", value.name(self.ctx), target.name(self.ctx))))
     }
 
     fn lower_resolved_local(&mut self, name: &str, offset: usize) -> Option<(Expr, Type)> {
@@ -5484,8 +6245,8 @@ impl<'a> Parser<'a> {
     ) -> Option<(Expr, Type)> {
         use ae_syntax::expression::ExpressionKind;
 
-        if expected.owned() || expected == Type::StrView {
-            if let ExpressionKind::Atom(Kind::Ident(name)) = &argument.kind {
+        if (expected.owned() || expected == Type::StrView)
+            && let ExpressionKind::Atom(Kind::Ident(name)) = &argument.kind {
                 remaining.checked_sub(1)?;
                 *nodes_left = nodes_left.checked_sub(1)?;
                 let (value, ty) = self.lower_resolved_local(name, argument.range.start)?;
@@ -5504,7 +6265,6 @@ impl<'a> Parser<'a> {
                 }
                 return Some((value, ty));
             }
-        }
         if expected == Type::StrView {
             self.lower_shared_read(argument, remaining, nodes_left, effects)
         } else {
@@ -5738,7 +6498,7 @@ impl<'a> Parser<'a> {
                 }
                 let start = self.tokens.partition_point(|token| token.offset < expression.range.start);
                 let token = self.tokens.get(start)?;
-                let id = super::intern_pointee(ty);
+                let id = self.ctx.intern_pointee(ty);
                 let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
                 Some((Expr::BorrowAs(Box::new(operand), *mutable, token.line, token.column), ty))
             }
@@ -5751,7 +6511,7 @@ impl<'a> Parser<'a> {
                 let pointee = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))?;
                 let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
                 let token = self.tokens.get(end)?;
-                let id = super::intern_pointee(pointee);
+                let id = self.ctx.intern_pointee(pointee);
                 let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
                 Some((Expr::PtrCast(Box::new(operand), *mutable, id, token.line, token.column), ty))
             }
@@ -5799,7 +6559,7 @@ impl<'a> Parser<'a> {
                     }
                     (signature.id, &signature.params, signature.ret)
                 };
-                if is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
+                if self.ctx.is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
                     || !params.iter().all(|ty| {
                         matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView
                             | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
@@ -6166,15 +6926,14 @@ impl<'a> Parser<'a> {
                 ExpressionKind::Index { base, .. } => base.as_ref(),
                 _ => root.as_ref(),
             };
-            if let ExpressionKind::Field { base, name } = &field.kind {
-                if matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+            if let ExpressionKind::Field { base, name } = &field.kind
+                && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
                     && matches!(self.current(), Kind::Ident(token_name) if token_name == name)
                 {
                     let name = name.clone();
                     self.pos += 1;
                     return Ok(name);
                 }
-            }
         }
         self.identifier()
     }
@@ -6405,7 +7164,7 @@ impl<'a> Parser<'a> {
                         let target = self.identifier()?;
                         let (id, mutable, ty) = *self.names.get(&target).ok_or_else(|| self.fail(&format!("unknown variable '{target}'")).with_code("E0101"))?;
                         if self.moved.contains(&id) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot use '{target}' because it was moved")).with_code("E0102"), id))); }
-                        if !matches!(ty, Type::Vec | Type::StrVec | Type::VecF) { return Err(self.fail(&format!("{name} expects a vec, found {}", ty.name()))); }
+                        if !matches!(ty, Type::Vec | Type::StrVec | Type::VecF) { return Err(self.fail(&format!("{name} expects a vec, found {}", ty.name(self.ctx)))); }
                         if !mutable { return Err(self.immutable_binding_error(self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), id)); }
                         if self.is_borrowed(id) { return Err(self.fail(&format!("cannot modify '{target}' while it is borrowed"))); }
                         // Ordering in place: qsort for i64, byte order for
@@ -6479,7 +7238,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, false)?,
                         }; self.take(Kind::Semi)?;
-                        if value_ty != map_element_ty(map_kind_of(ty)) { return Err(self.fail(&format!("map values must be {}", map_element_ty(map_kind_of(ty)).name()))); }
+                        if value_ty != map_element_ty(map_kind_of(ty)) { return Err(self.fail(&format!("map values must be {}", map_element_ty(map_kind_of(ty)).name(self.ctx)))); }
                         result.push(Statement::MapPut(MapPlace::Var(id, map_kind_of(ty)), key, value, line, col));
                     } else if let Type::Array(len) = ty {
                         let (line, col) = self.position(); self.take(Kind::LBracket)?;
@@ -6547,7 +7306,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                        if value_ty != ty { return Err(self.fail(&format!("cannot assign a {} value to {} variable", value_ty.name(), ty.name()))); }
+                        if value_ty != ty { return Err(self.fail(&format!("cannot assign a {} value to {} variable", value_ty.name(self.ctx), ty.name(self.ctx)))); }
                         if self.moved.contains(&id) && !moved_before {
                             return Err(moved_self_assignment_hint(self.binding_label(self.error_at(name_offset, &format!("cannot assign to '{name}' because it was moved in the same statement")).with_code("E0102"), id)));
                         }
@@ -6620,7 +7379,7 @@ impl<'a> Parser<'a> {
                             Some(pair) => pair,
                             None => self.expression(0, false)?,
                         }; self.take(Kind::Semi)?;
-                                if value_ty != map_element_ty(map_kind_of(fty)) { return Err(self.fail(&format!("map values must be {}", map_element_ty(map_kind_of(fty)).name()))); }
+                                if value_ty != map_element_ty(map_kind_of(fty)) { return Err(self.fail(&format!("map values must be {}", map_element_ty(map_kind_of(fty)).name(self.ctx)))); }
                                 result.push(Statement::MapPut(MapPlace::Field(id, fname, map_kind_of(fty)), key, value, line, col));
                                 continue;
                             }
@@ -6649,7 +7408,7 @@ impl<'a> Parser<'a> {
                                     || (matches!(fty, Type::F64) && op != Kind::Percent)
                                     || (fty == Type::String && op == Kind::Plus);
                                 if !allowed {
-                                    return Err(self.fail(&format!("compound assignment is not supported for field type '{}'", fty.name())));
+                                    return Err(self.fail(&format!("compound assignment is not supported for field type '{}'", fty.name(self.ctx))));
                                 }
                                 self.pos += 1;
                                 let (line, col) = self.position();
@@ -6686,7 +7445,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                             Some(pair) => pair,
                             None => self.expression(0, true)?,
                         }; self.take(Kind::Semi)?;
-                        if value_ty != ty { return Err(self.fail(&format!("cannot assign a {} value to {} variable", value_ty.name(), ty.name()))); }
+                        if value_ty != ty { return Err(self.fail(&format!("cannot assign a {} value to {} variable", value_ty.name(self.ctx), ty.name(self.ctx)))); }
                         if self.moved.contains(&id) && !moved_before {
                             return Err(moved_self_assignment_hint(self.binding_label(self.error_at(name_offset, &format!("cannot assign to '{name}' because it was moved in the same statement")).with_code("E0102"), id)));
                         }
@@ -6936,7 +7695,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                         None => self.expression(0, false)?,
                     };
                     if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView) {
-                        return Err(self.fail(&format!("cannot print a value of type {}", ty.name())).with_code("E0206"));
+                        return Err(self.fail(&format!("cannot print a value of type {}", ty.name(self.ctx))).with_code("E0206"));
                     }
                     self.take(Kind::RParen)?; self.take(Kind::Semi)?;
                     result.push(Statement::Print(Printed::Expr(value)));
@@ -6970,7 +7729,7 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
     pub(super) fn propagate_statement(&mut self, value: Expr, ty: Type, binding: Option<usize>) -> Result<(Statement, Option<Type>), ae_span::Diagnostic> {
         let eid = match ty {
             Type::Enum(_, eid) => eid,
-            _ => return Err(self.fail(&format!("'?' needs a result or option value, found {}", ty.name()))),
+            _ => return Err(self.fail(&format!("'?' needs a result or option value, found {}", ty.name(self.ctx)))),
         };
         let def = self.enums[eid].clone();
         // Both two-variant shapes can be propagated: a result hands its Err
@@ -7209,6 +7968,7 @@ mod tests {
             id: 11, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
             public: false, extern_c: false,
         });
+        #[allow(clippy::vec_init_then_push)]
         let mut structs = Vec::new();
         structs.push(StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
         structs.push(StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None });
@@ -7237,9 +7997,10 @@ mod tests {
             public: false, extern_c: false,
         });
         let mut generics = Generics::default();
+        let mut ctx = CompileContext::new();
         let mut parser = make_parser(
             "case.ae", source, tokens, &mut functions, &mut structs,
-            &mut struct_names, &mut enums, &mut enum_names, &mut generics,
+            &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx,
         );
         let next_var = parser.next_var;
         let input = source.find("input: Reading").unwrap();
@@ -7285,7 +8046,7 @@ mod tests {
             Statement::Match(subject, Type::Enum(_, 0), arms), ..] if slot == subject && arms.len() == 2));
         parser.next_var = next_var;
         let start = source.find("raw_param:").unwrap();
-        parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(intern_pointee(Type::Int))));
+        parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(parser.ctx.intern_pointee(Type::Int))));
         parser.binding_ranges.insert(85, start..start + "raw_param".len());
         parser.seek_scalar_offset(source.find("{ unsafe { *raw_param").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved pointer store").unwrap();
@@ -7294,7 +8055,7 @@ mod tests {
         parser.names.remove("raw_param");
         parser.binding_ranges.remove(&85);
         let start = source.find("read_param:").unwrap();
-        parser.names.insert("read_param".into(), (86, false, Type::Ptr(intern_pointee(Type::Int))));
+        parser.names.insert("read_param".into(), (86, false, Type::Ptr(parser.ctx.intern_pointee(Type::Int))));
         parser.binding_ranges.insert(86, start..start + "read_param".len());
         parser.seek_scalar_offset(source.find("{ unsafe { return read_param").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved pointer read").unwrap();
@@ -7342,7 +8103,7 @@ mod tests {
         parser.seek_scalar_offset(source.find("{ let text_base").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved token loop").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(base, Expr::StrLit(..)),
-            Statement::Declare(cursor, Expr::Tokens(source, None, ..)), Statement::ForTokens(read, _, _, ..), ..]
+            Statement::Declare(cursor, Expr::Tokens(source, None, ..)), Statement::ForTokens(read, ..), ..]
             if base == source && cursor == read));
         assert!(parser.borrows.is_empty());
         parser.seek_scalar_offset(source.find("{ let pieces = split").unwrap());
@@ -7956,7 +8717,7 @@ mod tests {
         let target = source.find("*const shared").unwrap();
         parser.pos = parser.tokens.partition_point(|token| token.offset < target);
         assert_eq!(parser.shared_pointer_cast_qualifier(), Some(false));
-        assert_eq!(parser.pointer_cast_pointee(None).unwrap(), (false, Type::Shared(intern_shared(Type::Int))));
+        assert_eq!(parser.pointer_cast_pointee(None).unwrap(), (false, Type::Shared(parser.ctx.intern_shared(Type::Int))));
         assert_eq!(*parser.current(), Kind::Semi);
 
         for (prefix, expected) in [("|| -> i64", "i64"), ("|x: i64|", "bool")] {
@@ -8106,7 +8867,7 @@ mod tests {
         assert_eq!(parser.pos, start);
 
         let binding = source.find("let raw").unwrap() + 4;
-        let raw = Type::Ptr(super::super::intern_pointee(Type::Bool));
+        let raw = Type::Ptr(parser.ctx.intern_pointee(Type::Bool));
         parser.names.insert("raw".into(), (13, false, raw));
         parser.binding_ranges.insert(13, binding..binding + 3);
         let cast = source.find("raw as").unwrap();
@@ -8115,7 +8876,7 @@ mod tests {
             parser.lower_shared_value(Some(Kind::Semi), false),
             Some((Expr::PtrCast(operand, true, id, _, column), Type::PtrMut(pointee)))
                 if matches!(*operand, Expr::Variable(13, ty, _, _) if ty == raw)
-                    && id == pointee && super::super::ptr_pointee(id) == Type::F64
+                    && id == pointee && parser.ctx.ptr_pointee(id) == Type::F64
                     && column == cast + "raw as *mut f64;".len()
         ));
         assert_eq!(*parser.current(), Kind::Semi);

@@ -6,11 +6,12 @@ section it belongs to. The generated file is deterministic and is verified
 against the ledger by `scripts/test_gen_checklist.py` and by a CI step, so
 the checklist is never edited by hand.
 
-Usage: python scripts/gen_checklist.py [--ledger PATH] [--out PATH]
+Usage: python scripts/gen_checklist.py [--ledger PATH] [--out PATH] [--check]
 """
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,9 +22,11 @@ ITEM = re.compile(r"^- \[( |x)\] (\S+)[.:] (.*)$")
 # A prototype-done item that is still short of Charter-1.0 semantics carries
 # an explicit marker naming the phase that closes the gap (audit §8):
 #   [1.0-gap: P2.2]
+# Require a concrete phase ID (e.g. P2.5, P5) so prose placeholders such as
+# `[1.0-gap: P<phase>]` are not miscounted.
 # The checklist then reports two progress numbers instead of one, so
 # 70%-on-paper cannot be mistaken for 70%-toward-1.0 (Hard Rule 10).
-GAP = re.compile(r"\[1\.0-gap:\s*([^\]]+)\]")
+GAP = re.compile(r"\[1\.0-gap:\s*(P\d+(?:\.\d+)?)\]")
 
 
 def parse_items(ledger_text: str):
@@ -62,9 +65,10 @@ def render(ledger_text: str) -> str:
     out.append("live in the ledger; this file mirrors only the checkbox state and titles.")
     out.append("")
     out.append(f"Prototype progress: {done_count} of {len(items)} items done.")
-    gap_note = ("1" if gap_count == 1 else "s")
+    item_plural = "" if gap_count == 1 else "s"
+    verb_plural = "s" if gap_count == 1 else ""
     out.append(f"Charter-1.0 progress: {charter_done} of {len(items)} items done "
-               f"({gap_count} prototype-done item{gap_note} still name an open "
+               f"({gap_count} prototype-done item{item_plural} still name{verb_plural} an open "
                f"gap, marked `[1.0-gap: …]`).")
     out.append("")
     current_section = None
@@ -82,13 +86,29 @@ def render(ledger_text: str) -> str:
     return "\n".join(out)
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger", default=str(LEDGER))
     parser.add_argument("--out", default=str(CHECKLIST))
-    options = parser.parse_args()
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify the output file is up to date without writing it.",
+    )
+    options = parser.parse_args(argv)
     ledger_text = Path(options.ledger).read_text(encoding="utf-8")
-    Path(options.out).write_text(render(ledger_text), encoding="utf-8", newline="\n")
+    rendered = render(ledger_text)
+    out_path = Path(options.out)
+    if options.check:
+        if not out_path.exists():
+            print(f"{out_path} does not exist; run scripts/gen_checklist.py", file=sys.stderr)
+            return 1
+        on_disk = out_path.read_text(encoding="utf-8")
+        if on_disk != rendered:
+            print(f"{out_path} is stale; run scripts/gen_checklist.py", file=sys.stderr)
+            return 1
+        return 0
+    out_path.write_text(rendered, encoding="utf-8", newline="\n")
     return 0
 
 

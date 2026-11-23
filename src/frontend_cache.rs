@@ -12,7 +12,7 @@
 //! graph runs the whole frontend, exactly as before. It removes the work of a
 //! build that has nothing to do, and nothing more.
 
-use std::{fs, path::{Path, PathBuf}, time::UNIX_EPOCH};
+use std::{fmt::Write as _, fs, path::{Path, PathBuf}, time::UNIX_EPOCH};
 
 use ae_compiler::{frontend, sha256};
 
@@ -52,15 +52,19 @@ fn entry_dir(cache_root: &Path, canonical: &Path) -> PathBuf {
 /// sorted order, so the value depends on what was compiled and not on the order
 /// the loader happened to visit files in.
 fn query_key(units: &[frontend::SourceUnit], tool: &str) -> String {
-    let mut lines: Vec<String> = units.iter()
-        .map(|unit| format!("{}\0{}", unit.label, unit.digest))
+    let mut pairs: Vec<(&str, &str)> = units.iter()
+        .map(|unit| (unit.label.as_str(), unit.digest.as_str()))
         .collect();
-    lines.sort();
-    let mut material = String::from("frontend-codegen\0");
+    pairs.sort_unstable();
+    let extra: usize = pairs.iter().map(|(l, d)| l.len() + d.len() + 2).sum();
+    let mut material = String::with_capacity(17 + tool.len() + extra);
+    material.push_str("frontend-codegen\0");
     material.push_str(tool);
-    for line in &lines {
+    for (label, digest) in pairs {
         material.push('\0');
-        material.push_str(line);
+        material.push_str(label);
+        material.push('\0');
+        material.push_str(digest);
     }
     sha256::hex(material.as_bytes())
 }
@@ -84,9 +88,9 @@ pub fn lookup(cache_root: &Path, root: &Path, imports: &str) -> Option<Hit> {
     let text = fs::read_to_string(dir.join("entry")).ok()?;
     let mut lines = text.lines();
 
-    if lines.next()? != format!("format {FORMAT}").as_str() { return None; }
+    if lines.next()?.strip_prefix("format ")? != FORMAT { return None; }
     let tool = tool_identity(imports);
-    if lines.next()? != format!("tool {tool}").as_str() { return None; }
+    if lines.next()?.strip_prefix("tool ")? != tool { return None; }
     let recorded_root = lines.next()?.strip_prefix("root ")?;
     if recorded_root != canonical.to_string_lossy().as_ref() { return None; }
     let key = lines.next()?.strip_prefix("key ")?.to_owned();
@@ -119,23 +123,29 @@ pub fn lookup(cache_root: &Path, root: &Path, imports: &str) -> Option<Hit> {
 /// Publishes an entry. Best effort by design: a failed cache write must never
 /// turn a successful compile into a failed build, so every error here is
 /// swallowed and the next build simply misses.
+#[allow(dead_code)]
 pub fn store(cache_root: &Path, root: &Path, imports: &str, tracked: &frontend::TrackedC) -> Option<String> {
+    let c = format!("{}{}", tracked.runtime, tracked.user);
+    store_c(cache_root, root, imports, tracked, &c)
+}
+
+pub(crate) fn store_c(cache_root: &Path, root: &Path, imports: &str, tracked: &frontend::TrackedC, c: &str) -> Option<String> {
     let canonical = canonical_root(root)?;
     let dir = entry_dir(cache_root, &canonical);
     let tool = tool_identity(imports);
     let key = query_key(&tracked.units, &tool);
-    let c = format!("{}{}", tracked.runtime, tracked.user);
     let c_digest = sha256::hex(c.as_bytes());
 
     fs::create_dir_all(&dir).ok()?;
     let stamp = std::process::id();
 
     let c_staging = dir.join(format!("program.c.{stamp}.tmp"));
-    if fs::write(&c_staging, &c).is_err() { let _ = fs::remove_file(&c_staging); return None; }
+    if fs::write(&c_staging, c).is_err() { let _ = fs::remove_file(&c_staging); return None; }
 
-    let mut entry = format!("format {FORMAT}\ntool {tool}\nroot {}\nkey {key}\nc {c_digest}\n", canonical.display());
+    let mut entry = String::with_capacity(128 + tracked.units.len() * 96);
+    let _ = writeln!(entry, "format {FORMAT}\ntool {tool}\nroot {}\nkey {key}\nc {c_digest}", canonical.display());
     for unit in &tracked.units {
-        entry.push_str(&format!("unit\t{}\t{}\t{}\n", unit.digest, unit.label, unit.path.display()));
+        let _ = writeln!(entry, "unit\t{}\t{}\t{}", unit.digest, unit.label, unit.path.display());
     }
     let e_staging = dir.join(format!("entry.{stamp}.tmp"));
     if fs::write(&e_staging, entry).is_err() {

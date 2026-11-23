@@ -21,8 +21,8 @@ use super::cfg::{build_cfg, CfgFunction, CfgTerminator};
 pub(super) fn verify_program_moves(program: &Program) -> Result<(), String> {
     for file in &program.files {
         for function in file {
-            let graph = build_cfg(function);
-            let walk = MoveWalk::run(&graph);
+            let graph = build_cfg(function, &program.ctx);
+            let walk = MoveWalk::run(&graph, &program.ctx);
             if let Some((block, var_id)) = walk {
                 return Err(format!(
                     "internal: fn #{} block {} uses a variable after it was moved on every path (v{}); the parser's move rules and the CFG disagree",
@@ -39,7 +39,7 @@ pub(super) fn verify_program_moves(program: &Program) -> Result<(), String> {
 struct MoveWalk;
 
 impl MoveWalk {
-    fn run(function: &CfgFunction) -> Option<(usize, usize)> {
+    fn run(function: &CfgFunction, ctx: &CompileContext) -> Option<(usize, usize)> {
         let mut state: Vec<std::collections::HashSet<usize>> = vec![std::collections::HashSet::new(); function.blocks.len()];
         let entry = 0;
         // Worklist over blocks in id order; ids are assigned so a block's
@@ -65,7 +65,7 @@ impl MoveWalk {
                 }
                 meet
             };
-            let (end_state, violation) = MoveWalk::walk_block(function, block_id, start_state.clone());
+            let (end_state, violation) = MoveWalk::walk_block(function, block_id, start_state.clone(), ctx);
             if let Some(violation) = violation {
                 return Some(violation);
             }
@@ -86,21 +86,21 @@ impl MoveWalk {
 
     // Walk one block's statements with the entry state; returns the exit
     // state and the first use-after-move, if any.
-    fn walk_block(function: &CfgFunction, block_id: usize, mut moved: std::collections::HashSet<usize>) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
+    fn walk_block(function: &CfgFunction, block_id: usize, mut moved: std::collections::HashSet<usize>, ctx: &CompileContext) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
         let block = &function.blocks[block_id];
         for statement in &block.statements {
-            if let Some(violation) = walk_statement(statement, &mut Checked(&mut moved)) {
+            if let Some(violation) = walk_statement(statement, &mut Checked(&mut moved, ctx)) {
                 return (moved, Some((block_id, violation)));
             }
         }
         match &block.terminator {
             CfgTerminator::Return(expr) => {
-                if let Some(violation) = walk_moving_expr(expr, &mut Checked(&mut moved)) {
+                if let Some(violation) = walk_moving_expr(expr, &mut Checked(&mut moved, ctx)) {
                     return (moved, Some((block_id, violation)));
                 }
             }
             CfgTerminator::Exit(code) => {
-                if let Some(violation) = walk_moving_expr(code, &mut Checked(&mut moved)) {
+                if let Some(violation) = walk_moving_expr(code, &mut Checked(&mut moved, ctx)) {
                     return (moved, Some((block_id, violation)));
                 }
             }
@@ -116,7 +116,7 @@ fn predecessors(function: &CfgFunction, block_id: usize) -> Vec<usize> {
         let hits = match &block.terminator {
             CfgTerminator::Goto(target) => *target == block_id,
             CfgTerminator::Branch(_, a, b) => *a == block_id || *b == block_id,
-            CfgTerminator::Switch(_, _, targets) => targets.iter().any(|t| *t == block_id),
+            CfgTerminator::Switch(_, _, targets) => targets.contains(&block_id),
             CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => false,
         };
         if hits { preds.push(block.id); }
@@ -150,10 +150,11 @@ pub(super) trait MoveTracker {
     // unchanged; the borrow adjudication is the consumer.
     fn mut_release(&mut self, _sig: usize, _position: usize, _slot: usize) {}
     fn release_borrowed_base(&mut self, _slot: usize) {}
+    fn fn_sig(&self, _sig: usize) -> Option<(Vec<Type>, Type)> { None }
 }
 
 // Checks every read against the moved set; a violation is the id returned.
-struct Checked<'a>(&'a mut std::collections::HashSet<usize>);
+struct Checked<'a>(&'a mut std::collections::HashSet<usize>, &'a CompileContext);
 
 impl MoveTracker for Checked<'_> {
     fn read(&mut self, id: usize) -> Option<usize> {
@@ -166,6 +167,7 @@ impl MoveTracker for Checked<'_> {
     }
     fn mark(&mut self, id: usize) { self.0.insert(id); }
     fn revive(&mut self, id: usize) { self.0.remove(&id); }
+    fn fn_sig(&self, sig: usize) -> Option<(Vec<Type>, Type)> { Some(self.1.fn_sig(sig)) }
 }
 
 // The moves and re-initializations one statement performs, in the order they
@@ -270,9 +272,9 @@ pub(super) fn walk_statement(statement: &Statement, moved: &mut dyn MoveTracker)
             if let Some(violation) = walk_expr(value, moved) { return Some(violation); }
             None
         }
-        Statement::VecPush(_, value, ..) | Statement::StrVecPush(_, value, .., _) | Statement::VecFPush(_, value, ..) => walk_expr(value, moved),
+        Statement::VecPush(_, value, ..) | Statement::StrVecPush(_, value, ..) | Statement::VecFPush(_, value, ..) => walk_expr(value, moved),
         Statement::Sort(..) | Statement::Reverse(..) | Statement::VecPop(..) | Statement::StrVecPop(..) | Statement::VecFPop(..) => None,
-        Statement::VecStore(_, index, value, ..) | Statement::StrVecStore(_, index, value, .., _) | Statement::VecFStore(_, index, value, ..) => {
+        Statement::VecStore(_, index, value, ..) | Statement::StrVecStore(_, index, value, ..) | Statement::VecFStore(_, index, value, ..) => {
             if let Some(violation) = walk_expr(index, moved) { return Some(violation); }
             if let Some(violation) = walk_expr(value, moved) { return Some(violation); }
             None
@@ -497,10 +499,10 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
                     }
                     Argument::View(e) => { if let Some(violation) = walk_expr(e, moved) { return Some(violation); } }
                     Argument::Borrow(id, _) => {
-                        let (params, _) = super::closures::fn_sig(*sig);
-                        if matches!(params.get(position), Some(Type::StructMut(_))) {
-                            moved.release_borrowed_base(*id);
-                        }
+                        if let Some((params, _)) = moved.fn_sig(*sig)
+                            && matches!(params.get(position), Some(Type::StructMut(_))) {
+                                moved.release_borrowed_base(*id);
+                            }
                         if let Some(violation) = moved.read(*id) { return Some(violation); }
                     }
                     Argument::FnPtr(_) => {}

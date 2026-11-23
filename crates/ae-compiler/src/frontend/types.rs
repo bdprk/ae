@@ -9,8 +9,8 @@ impl EnumDef {
     }
 }
 
-pub(super) fn specialization_key(gid: usize, arguments: &[Type]) -> String {
-    format!("{gid}:{}", arguments.iter().map(|ty| ty.name()).collect::<Vec<_>>().join(","))
+pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileContext) -> String {
+    format!("{gid}:{}", arguments.iter().map(|ty| ty.name(ctx)).collect::<Vec<_>>().join(","))
 }
 
 pub(super) fn scalar_type(name: &str) -> Option<Type> {
@@ -79,7 +79,7 @@ impl Parser<'_> {
                 if !matches!(elem, Type::Int | Type::Bool | Type::F64 | Type::Atomic) {
                     return Err(self.fail("shared[T] in v1 requires a copy-semantics element type (i64, bool, f64, or atomic)"));
                 }
-                Ok(Type::Shared(intern_shared(elem)))
+                Ok(Type::Shared(self.ctx.intern_shared(elem)))
             }
             "vec" => {
                 // `vec` alone is the i64 vector; `vec[string]` and `vec[f64]`
@@ -139,7 +139,7 @@ impl Parser<'_> {
                 if other == "Self" {
                     // `Self` (ADR-0186) stands for the type the enclosing impl
                     // block targets; outside one, there is nothing to stand for.
-                    return self.impl_self.clone().ok_or_else(|| {
+                    return self.impl_self.ok_or_else(|| {
                         self.fail("'Self' is only available inside an impl block")
                     });
                 }
@@ -182,7 +182,7 @@ impl Parser<'_> {
                 // String payloads are moved into the variant.
                 let (value, value_ty) = self.expression(0, *field == Type::String)?;
                 if !self.matches_value_type(*field, value_ty, None) {
-                    return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name())));
+                    return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name(self.ctx))));
                 }
                 values.push(value);
                 if index + 1 < fields.len() { self.take(Kind::Comma)?; }
@@ -318,6 +318,7 @@ impl Parser<'_> {
     // uppercase letters keep a parameter from being mistaken for a real type.
     // `[T, U]` or `[T: Add + Ord, U: Copy]`. Constraints are parsed here for
     // every generic declaration, but only generic functions may use them.
+    #[allow(clippy::type_complexity)]
     pub(super) fn type_params_with_bounds(&mut self) -> Result<Vec<(String, Vec<Bound>, Vec<usize>)>, ae_span::Diagnostic> {
         use ae_syntax::declaration::{type_bound_tokens, validate_type_parameter, MAX_TYPE_PARAMETERS};
 
@@ -382,12 +383,11 @@ impl Parser<'_> {
         Ok(params.into_iter().map(|(name, _, _)| name).collect())
     }
     pub(super) fn variant_payload(&mut self, params: &[String]) -> Result<Payload, ae_span::Diagnostic> {
-        if let Kind::Ident(name) = self.current() {
-            if let Some(index) = params.iter().position(|p| p == name) {
+        if let Kind::Ident(name) = self.current()
+            && let Some(index) = params.iter().position(|p| p == name) {
                 self.pos += 1;
                 return Ok(Payload::Param(index));
             }
-        }
         let fty = self.named_type()?;
         // Payloads stay flat: a variant may carry scalars, strings or a vector,
         // but not a struct or another enum (no layout recursion).
@@ -403,7 +403,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = specialization_key(gid, &args);
+        let key = specialization_key(gid, &args, self.ctx);
         if let Some(&eid) = self.generics.done.get(&key) { return Ok(eid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "enum" && *active == key) {
@@ -429,7 +429,7 @@ impl Parser<'_> {
         })();
         self.generics.instantiation_trace.pop();
         let variants = variants?;
-        let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "));
+        let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "));
         let interned: &'static str = Box::leak(display.into_boxed_str());
         let eid = self.enums.len();
         self.enums.push(EnumDef { name: interned, variants, file: def.file, public: def.public, pattern: def.name });
@@ -445,13 +445,13 @@ impl Parser<'_> {
     pub(super) fn cached_enum_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
         let &gid = self.generics.names.get(name)?;
         let arguments = self.shared_specialization_types(ranges)?;
-        self.generics.done.get(&specialization_key(gid, &arguments)).copied()
+        self.generics.done.get(&specialization_key(gid, &arguments, self.ctx)).copied()
     }
 
     pub(super) fn cached_struct_specialization(&self, name: &str, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
         let &gid = self.generics.struct_names.get(name)?;
         let arguments = self.shared_specialization_types(ranges)?;
-        self.generics.struct_done.get(&specialization_key(gid, &arguments)).copied()
+        self.generics.struct_done.get(&specialization_key(gid, &arguments, self.ctx)).copied()
     }
 
     pub(super) fn shared_specialization_types(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<Type>> {
@@ -505,8 +505,8 @@ impl Parser<'_> {
                 let mut arguments = Vec::new();
                 let mut piece_start = start + 2;
                 let mut depth = 0usize;
-                let mut index = start + 2;
-                for token in inner {
+                for (index, token) in inner.iter().enumerate() {
+                    let index = start + 2 + index;
                     match token.kind {
                         Kind::LBracket => depth += 1,
                         Kind::RBracket => depth = depth.saturating_sub(1),
@@ -516,7 +516,6 @@ impl Parser<'_> {
                         }
                         _ => {}
                     }
-                    index += 1;
                 }
                 arguments.push(self.shape_argument(piece_start, end - 1)?);
                 if name == "vec" && arguments.len() == 1 {
@@ -640,7 +639,7 @@ impl Parser<'_> {
         if args.len() != def.params.len() {
             return Err(self.error_at(offset, &format!("'{}' takes {} type argument(s), found {}", def.name, def.params.len(), args.len())));
         }
-        let key = specialization_key(gid, &args);
+        let key = specialization_key(gid, &args, self.ctx);
         if let Some(&sid) = self.generics.struct_done.get(&key) { return Ok(sid); }
         let display = self.instantiation_display(&def.name, &args);
         if self.generics.instantiation_trace.iter().any(|(kind, active, _)| *kind == "struct" && *active == key) {
@@ -663,7 +662,7 @@ impl Parser<'_> {
         })();
         self.generics.instantiation_trace.pop();
         let fields = fields?;
-        let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "));
+        let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "));
         let sid = self.structs.len();
         self.structs.push(StructDef { name: display, fields, file: def.file, public: def.public, repr_c: false, drop_fn: None });
         self.generics.struct_done.insert(key, sid);
@@ -761,17 +760,16 @@ impl Parser<'_> {
     // test — the pointee's ownership is the deref-side's problem (U11).
     pub(super) fn pointer_type(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let (mutable, pointee) = self.pointer_pointee(None)?;
-        let id = super::intern_pointee(pointee);
+        let id = self.ctx.intern_pointee(pointee);
         Ok(if mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
     }
 
     pub(super) fn pointer_cast_pointee(&mut self, required: Option<bool>) -> Result<(bool, Type), ae_span::Diagnostic> {
-        if let Some(mutable) = self.shared_pointer_cast_qualifier() {
-            if required.is_none() || required == Some(mutable) {
+        if let Some(mutable) = self.shared_pointer_cast_qualifier()
+            && (required.is_none() || required == Some(mutable)) {
                 self.pos += 2;
                 return Ok((mutable, self.named_type()?));
             }
-        }
         self.pointer_pointee(required)
     }
 
@@ -833,7 +831,7 @@ impl Parser<'_> {
             if matches!(ret, Type::StructRef(_) | Type::StructMut(_) | Type::Fn(_)) {
                 return Err(self.fail("a function type cannot return a borrow or another function type"));
             }
-            let sig = super::closures::intern_fn_sig(params, ret);
+            let sig = self.ctx.intern_fn_sig(params, ret);
             return Ok(Type::Fn(sig));
         }
         if *self.current() == Kind::Amp {
@@ -856,7 +854,7 @@ impl Parser<'_> {
                     Type::VecF => Ok(Type::VecFRef),
                     _ => Err(self.error_at(amp_offset, &format!(
                         "'&{name}' is '{}' here, which has no read-only borrow; only string, vec, vec[string] and vec[f64] can be borrowed",
-                        concrete.name()))),
+                        concrete.name(self.ctx)))),
                 };
             }
             if matches!(self.current(), Kind::Ident(name) if name == "string") {

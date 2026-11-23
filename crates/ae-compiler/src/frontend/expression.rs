@@ -1,6 +1,6 @@
 //! Expression parsing and type checking.
 use super::*;
-use super::closures::{closure_fn_id, record_spawned, SpawnedThread};
+use super::closures::SpawnedThread;
 use super::parser::moved_value_hint;
 
 impl Parser<'_> {
@@ -148,14 +148,14 @@ impl Parser<'_> {
                 _ => None,
             },
         };
-        Ok(if name != "c_offset_of" && scalar.is_some() {
+        if name != "c_offset_of" && let Some((size, align)) = scalar {
             self.take(Kind::RBracket)?;
             self.take(Kind::LParen)?;
             if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Type]()"))); }
             self.pos += 1;
-            let (size, align) = scalar.unwrap();
-            self.value_number(if name == "c_align_of" { align } else { size })
-        } else {
+            return Ok(self.value_number(if name == "c_align_of" { align } else { size }));
+        }
+        Ok({
             let type_name = match self.subst.get(&type_name) {
                 Some(Type::Struct(sid)) => self.structs[*sid].name.clone(),
                 _ => type_name,
@@ -170,7 +170,7 @@ impl Parser<'_> {
                     return Err(self.fail(&format!("{name} takes no arguments; write {name}[Enum]()")));
                 }
                 self.pos += 1;
-                let (size, align) = self.enums[eid].c_layout(&self.structs);
+                let (size, align) = self.enums[eid].c_layout(self.structs);
                 self.value_number(if name == "c_align_of" { align } else { size })
             } else {
                 let Some(&sid) = self.struct_names.get(&type_name) else {
@@ -184,7 +184,7 @@ impl Parser<'_> {
                 if name == "c_size_of" || name == "c_align_of" {
                     if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Struct]()"))); }
                     self.pos += 1;
-                    let Some((size, align, _)) = self.structs[sid].c_layout(&self.structs) else {
+                    let Some((size, align, _)) = self.structs[sid].c_layout(self.structs) else {
                         return Err(self.fail("internal: a repr(C) struct without a layout"));
                     };
                     self.value_number(if name == "c_align_of" { align } else { size })
@@ -195,7 +195,7 @@ impl Parser<'_> {
                         return Err(self.fail("offset_of's field is written as a string literal"));
                     };
                     self.take(Kind::RParen)?;
-                    let Some((_, _, offsets)) = self.structs[sid].c_layout(&self.structs) else {
+                    let Some((_, _, offsets)) = self.structs[sid].c_layout(self.structs) else {
                         return Err(self.fail("internal: a repr(C) struct without a layout"));
                     };
                     let index = self.structs[sid].fields.iter().position(|(n, _)| n == fname)
@@ -254,8 +254,8 @@ impl Parser<'_> {
                     slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
                 }
                 let tid = self.intern_thread(def.ret);
-                record_spawned(SpawnedThread::Closure {
-                    fn_id: closure_fn_id(*cid),
+                self.ctx.record_spawned(SpawnedThread::Closure {
+                    fn_id: self.ctx.closure_fn_id(*cid),
                     captures: def.value_captures.iter().map(|(_, ty)| *ty).collect(),
                     borrows: def.borrow_captures.clone(),
                     ret: def.ret,
@@ -263,12 +263,12 @@ impl Parser<'_> {
                 tid
             }
             (Expr::Variable(_, Type::Fn(sig), ..), _) => {
-                let (params, ret) = crate::frontend::closures::fn_sig(*sig);
+                let (params, ret) = self.ctx.fn_sig(*sig);
                 if !params.is_empty() {
                     return Err(self.fail("the spawned function value must take no parameters"));
                 }
                 let tid = self.intern_thread(ret);
-                record_spawned(SpawnedThread::FnValue { sig: *sig, ret });
+                self.ctx.record_spawned(SpawnedThread::FnValue { sig: *sig, ret });
                 tid
             }
             _ => return Err(self.fail("spawn needs a closure value; move the data the thread needs through its captures")),
@@ -303,7 +303,7 @@ impl Parser<'_> {
             return Err(self.fail("shared_new in v1 expects a copy-semantics value (i64, bool, f64, or atomic)"));
         }
         self.take(Kind::RParen)?;
-        let sid = intern_shared(val_ty);
+        let sid = self.ctx.intern_shared(val_ty);
         Ok((Expr::SharedNew(Box::new(val), sid), Type::Shared(sid)))
     }
     #[inline(never)]
@@ -315,7 +315,7 @@ impl Parser<'_> {
             _ => return Err(self.fail("shared_get expects a shared handle")),
         };
         self.take(Kind::RParen)?;
-        Ok((Expr::SharedGet(Box::new(handle), sid), shared_types_get(sid)))
+        Ok((Expr::SharedGet(Box::new(handle), sid), self.ctx.shared_types_get(sid)))
     }
     #[inline(never)]
     fn mutex_new_expr(&mut self, _line: usize, _col: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
@@ -469,16 +469,13 @@ impl Parser<'_> {
         parse_argument: impl Fn(&mut Self, usize) -> Result<Type, ae_span::Diagnostic>,
     ) -> Result<Vec<Type>, ae_span::Diagnostic> {
         let shared = self.shared_specialization_arguments(name_offset);
-        if let Some(ranges) = shared.as_deref() {
-            if ranges.len() <= limit {
-                if let Some(end) = self.resolved_specialization_end(ranges) {
-                    if let Some(arguments) = self.shared_specialization_types(ranges) {
+        if let Some(ranges) = shared.as_deref()
+            && ranges.len() <= limit
+                && let Some(end) = self.resolved_specialization_end(ranges)
+                    && let Some(arguments) = self.shared_specialization_types(ranges) {
                         self.pos = end;
                         return Ok(arguments);
                     }
-                }
-            }
-        }
         self.pos += 1;
         let mut arguments = Vec::new();
         if let Some(ranges) = shared {
@@ -560,11 +557,10 @@ impl Parser<'_> {
             self.expression_nodes = 0;
         }
         if self.expression_depth >= 128 { return Err(self.fail("expression nesting limit exceeded (128)")); }
-        if min == 0 {
-            if let Some(value) = self.lower_shared_value(None, moving) {
+        if min == 0
+            && let Some(value) = self.lower_shared_value(None, moving) {
                 return Ok(value);
             }
-        }
         self.expression_depth += 1;
         let result = self.expression_inner(min, moving);
         self.expression_depth -= 1;
@@ -675,13 +671,13 @@ impl Parser<'_> {
                     // variant name is a variant path, anything else reaches
                     // the impl — shallow, deterministic, no guessing.
                     if name == "Self" {
-                        let Some(target) = self.impl_self.clone() else {
+                        let Some(target) = self.impl_self else {
                             return Err(self.error_at(name_offset, "'Self' is only available inside an impl block"));
                         };
                         let type_name = match target {
                             Type::Struct(sid) => self.structs[sid].name.clone(),
                             Type::Enum(ename, _) => ename.to_owned(),
-                            other => return Err(self.error_at(name_offset, &format!("'Self' is {} here and has no associated functions", other.name()))),
+                            other => return Err(self.error_at(name_offset, &format!("'Self' is {} here and has no associated functions", other.name(self.ctx)))),
                         };
                         // For an enum Self, a variant name after `::` is a
                         // variant path, exactly like a bare enum name; an
@@ -832,7 +828,7 @@ impl Parser<'_> {
                 } else if name == "Self" && (*self.current() == Kind::LBrace || *self.current() == Kind::ColonColon) {
                     // `Self` in an expression (ADR-0186): the impl's type as a
                     // constructor — `Self { ... }` or `Self::assoc(...)`.
-                    let Some(target) = self.impl_self.clone() else {
+                    let Some(target) = self.impl_self else {
                         return Err(self.error_at(name_offset, "'Self' is only available inside an impl block"));
                     };
                     match target {
@@ -844,9 +840,9 @@ impl Parser<'_> {
                             return self.associated_call(&sname, name_offset);
                         }
                         Type::Enum(ename, _) => {
-                            return self.associated_call(&ename, name_offset);
+                            return self.associated_call(ename, name_offset);
                         }
-                        other => return Err(self.error_at(name_offset, &format!("'Self' is {} here and has no constructor", other.name()))),
+                        other => return Err(self.error_at(name_offset, &format!("'Self' is {} here and has no constructor", other.name(self.ctx)))),
                     }
                 } else if let Some(&sid) = self.struct_names.get(&name) {
                     self.require_public("struct", &self.structs[sid].name, &self.structs[sid].file, self.structs[sid].public)?;
@@ -867,8 +863,8 @@ impl Parser<'_> {
                     let mut fast: Option<(Expr, Type)> = None;
                     if let Kind::Ident(arg_name) = self.current().clone() {
                         let after = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
-                        if after == Some(Kind::RParen) {
-                            if let Some(&(id, _, ty)) = self.names.get(&arg_name) {
+                        if after == Some(Kind::RParen)
+                            && let Some(&(id, _, ty)) = self.names.get(&arg_name) {
                                 if self.moved.contains(&id) { return Err(moved_value_hint(self.binding_label(self.error_at(name_offset, &format!("cannot use '{arg_name}' because it was moved")).with_code("E0102"), id))); }
                                 match ty {
                                     Type::Array(n) => { self.pos += 2; fast = Some((Expr::Number(n as i64), Type::Int)); }
@@ -879,7 +875,6 @@ impl Parser<'_> {
                                     _ => {}
                                 }
                             }
-                        }
                     }
                     match fast {
                         Some(pair) => pair,
@@ -906,9 +901,9 @@ impl Parser<'_> {
                     let Type::PtrMut(pid) = ptr_ty else {
                         return Err(self.error_at(name_offset, "ptr_write expects a '*mut T' pointer as its first argument"));
                     };
-                    let pointee = super::ptr_pointee(pid);
+                    let pointee = self.ctx.ptr_pointee(pid);
                     if val_ty != pointee {
-                        return Err(self.error_at(name_offset, &format!("ptr_write value type mismatch: expected '{}', got '{}'", pointee.name(), val_ty.name())));
+                        return Err(self.error_at(name_offset, &format!("ptr_write value type mismatch: expected '{}', got '{}'", pointee.name(self.ctx), val_ty.name(self.ctx))));
                     }
                     let (line, column) = self.position();
                     (Expr::PtrWrite(Box::new(ptr_expr), Box::new(val_expr), pointee, line, column), Type::Int)
@@ -922,7 +917,7 @@ impl Parser<'_> {
                     let Type::PtrMut(pid) = ptr_ty else {
                         return Err(self.error_at(name_offset, "ptr_drop_in_place expects a '*mut T' pointer"));
                     };
-                    let pointee = super::ptr_pointee(pid);
+                    let pointee = self.ctx.ptr_pointee(pid);
                     let (line, column) = self.position();
                     (Expr::PtrDropInPlace(Box::new(ptr_expr), pointee, line, column), Type::Int)
                 } else if (name == "c_size_of" || name == "c_align_of" || name == "c_offset_of") && *self.current() == Kind::LBracket {
@@ -1212,7 +1207,7 @@ impl Parser<'_> {
                         if !matches!(key_ty, Type::String | Type::StrView) { return Err(self.fail("map_inc expects a string key")); }
                         self.take(Kind::Comma)?;
                         let (delta, delta_ty) = self.expression(0, false)?;
-                        if delta_ty != map_element_ty(kind) { return Err(self.fail(&format!("map_inc expects a {} delta", map_element_ty(kind).name()))); }
+                        if delta_ty != map_element_ty(kind) { return Err(self.fail(&format!("map_inc expects a {} delta", map_element_ty(kind).name(self.ctx)))); }
                         self.take(Kind::RParen)?;
                         (Expr::MapInc(place, Box::new(key), Box::new(delta), line, col), map_element_ty(kind))
                     } else {
@@ -1458,7 +1453,7 @@ impl Parser<'_> {
                     // caller passed in (ADR-0189): the signature is interned.
                     let Some((_, _, Type::Fn(sig))) = self.names.get(&name) else { unreachable!() };
                     let sig = *sig;
-                    let (params, ret) = super::closures::fn_sig(sig);
+                    let (params, ret) = self.ctx.fn_sig(sig);
                     let args = self.call_arguments(&name, &params)?;
                     let (id, _, _) = *self.names.get(&name).unwrap();
                     (Expr::FnCall(id, args, ret, sig), ret)
@@ -1473,7 +1468,7 @@ impl Parser<'_> {
                     if !signature.public && signature.file != PRELUDE && signature.file != self.file {
                         return Err(self.error_at(name_offset, &format!("function '{name}' is private to {} (mark it 'pub' to export it)", signature.file)));
                     }
-                    if (signature.extern_c || crate::frontend::is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
+                    if (signature.extern_c || self.ctx.is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
                         // Calling C is the unchecked operation: the compiler
                         // knows none of the callee's preconditions (M2.12
                         // slice 4, spec/unsafe.md 4.1). An `unsafe fn` is the
@@ -1544,7 +1539,7 @@ impl Parser<'_> {
                 let (base, _) = lhs;
                 self.pos += 1;
                 let (mutable, pointee) = self.pointer_cast_pointee(None)?;
-                let pointee_id = super::intern_pointee(pointee);
+                let pointee_id = self.ctx.intern_pointee(pointee);
                 let target = if mutable { Type::PtrMut(pointee_id) } else { Type::Ptr(pointee_id) };
                 let (line, column) = self.position();
                 lhs = (Expr::PtrCast(Box::new(base), mutable, pointee_id, line, column), target);
@@ -1584,7 +1579,7 @@ impl Parser<'_> {
                 self.take(Kind::LParen)?;
                 self.take(Kind::RParen)?;
                 let (line, column) = self.position();
-                lhs = (Expr::DerefPtr(Box::new(base), line, column), super::ptr_pointee(pointee_id));
+                lhs = (Expr::DerefPtr(Box::new(base), line, column), self.ctx.ptr_pointee(pointee_id));
                 continue;
             }
             // Field access works on owned structs and on read-only borrows of
@@ -1598,7 +1593,7 @@ impl Parser<'_> {
                 // enum instantiations resolve methods through their
                 // declaration's template, same as structs (ADR-0196).
                 Type::Enum(name, eid) => (name.to_owned(), Some(eid)),
-                other => return Err(self.fail(&format!("type {} has no fields or methods", other.name()))),
+                other => return Err(self.fail(&format!("type {} has no fields or methods", other.name(self.ctx)))),
             };
             // `value.method(args)` resolves to the method's ordinary function,
             // with the receiver as argument 0 (M1.2). Nothing is added to the
@@ -1860,9 +1855,9 @@ impl Parser<'_> {
     pub(super) fn check_numeric_vector_element(&self, previous: Option<Type>, actual: Type) -> Result<Type, ae_span::Diagnostic> {
         match previous {
             Some(expected) if expected == actual => Ok(actual),
-            Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(), actual.name()))),
+            Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(self.ctx), actual.name(self.ctx)))),
             None if matches!(actual, Type::Int | Type::F64) => Ok(actual),
-            None => Err(self.fail(&format!("vector elements must be i64 or f64, found {}", actual.name()))),
+            None => Err(self.fail(&format!("vector elements must be i64 or f64, found {}", actual.name(self.ctx)))),
         }
     }
 
@@ -1878,17 +1873,17 @@ impl Parser<'_> {
     }
 
     pub(super) fn lower_address_cast(
-        &self, operand: Expr, ty: Type, pointee: Type, mutable: bool, (line, column): (usize, usize),
+        &mut self, operand: Expr, ty: Type, pointee: Type, mutable: bool, (line, column): (usize, usize),
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         if pointee != ty {
-            return Err(self.fail(&format!("cannot cast &{} to *{}{}; reinterpret casts do not exist yet", ty.name(), if mutable { "mut " } else { "const " }, pointee.name())));
+            return Err(self.fail(&format!("cannot cast &{} to *{}{}; reinterpret casts do not exist yet", ty.name(self.ctx), if mutable { "mut " } else { "const " }, pointee.name(self.ctx))));
         }
         // Raw pointer borrows are untracked, so moving an owned pointee
         // would let safe code leave the pointer dangling.
         if ty.owned() {
             return Err(self.fail("a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
         }
-        let id = super::intern_pointee(ty);
+        let id = self.ctx.intern_pointee(ty);
         let pointer = if mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
         Ok((Expr::BorrowAs(Box::new(operand), mutable, line, column), pointer))
     }

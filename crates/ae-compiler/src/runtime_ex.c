@@ -956,10 +956,15 @@ static AE_INT_RESULT ae_map_get(const ae_map *m, ae_strview key, size_t line, si
 // Keys are copied and sorted by bytes, so iteration is reproducible and the
 // caller owns a plain string vector.
 static ae_strvec ae_map_keys(const ae_map *m, size_t line, size_t column) {
-    ae_strvec keys = ae_strvec_new(line, column);
+    ae_strvec keys;
+    keys.len = 0;
+    keys.cap = m->len > 4 ? m->len : 4;
+    keys.data = ae_alloc((size_t)keys.cap * sizeof(ae_string), line, column);
+    keys.arena = NULL;
+    keys.arena_len = 0;
     for (int64_t i = 0; i < m->cap; i++) {
         if (m->states[i] != AE_MAP_FULL) continue;
-        ae_strvec_push(&keys, ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column), line, column);
+        keys.data[keys.len++] = ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column);
     }
     if (keys.len > 1) qsort(keys.data, (size_t)keys.len, sizeof(ae_string), ae_name_compare);
     return keys;
@@ -1062,12 +1067,25 @@ static bool ae_mapf_remove(ae_mapf *m, ae_strview key, size_t line, size_t colum
     return true;
 }
 static double ae_mapf_inc(ae_mapf *m, ae_strview key, double delta, size_t line, size_t column) {
-    int64_t at = ae_mapf_find(m, key);
-    if (at >= 0) {
-        m->slots[at].value = m->slots[at].value + delta;
-        return m->slots[at].value;
+    ae_mapf_grow(m, line, column);
+    int64_t at = ae_map_slot_of(key, m->cap);
+    int64_t reuse = -1;
+    for (;;) {
+        const unsigned char state = m->states[at];
+        if (state == AE_MAP_EMPTY) break;
+        if (state == AE_MAP_DELETED) {
+            if (reuse < 0) reuse = at;
+        } else if (ae_str_eq(AE_VIEW(m->slots[at].key), key)) {
+            m->slots[at].value = m->slots[at].value + delta;
+            return m->slots[at].value;
+        }
+        at = (at + 1) & (m->cap - 1);
     }
-    ae_mapf_put(m, key, delta, line, column);
+    if (reuse >= 0) at = reuse; else m->used = m->used + 1;
+    m->slots[at].key = ae_str_from_len(key.ptr, key.len, line, column);
+    m->slots[at].value = delta;
+    m->states[at] = AE_MAP_FULL;
+    m->len = m->len + 1;
     return delta;
 }
 static int64_t ae_mapf_len(const ae_mapf *m, size_t line, size_t column) {
@@ -1096,10 +1114,15 @@ static void ae_mapf_forfeit(ae_mapf *m) {
     m->used = 0;
 }
 static ae_strvec ae_mapf_keys(const ae_mapf *m, size_t line, size_t column) {
-    ae_strvec keys = ae_strvec_new(line, column);
+    ae_strvec keys;
+    keys.len = 0;
+    keys.cap = m->len > 4 ? m->len : 4;
+    keys.data = ae_alloc((size_t)keys.cap * sizeof(ae_string), line, column);
+    keys.arena = NULL;
+    keys.arena_len = 0;
     for (int64_t i = 0; i < m->cap; i++) {
         if (m->states[i] != AE_MAP_FULL) continue;
-        ae_strvec_push(&keys, ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column), line, column);
+        keys.data[keys.len++] = ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column);
     }
     if (keys.len > 1) qsort(keys.data, (size_t)keys.len, sizeof(ae_string), ae_name_compare);
     return keys;
@@ -1290,16 +1313,35 @@ static int ae_json_member(const char *t, int64_t n, int64_t *pos, const char *ke
     if (i < n && t[i] == '}') { *pos = i + 1; return 1; }
     for (;;) {
         ae_json_ws(t, n, &i);
-        ae_string name;
-        if (!ae_json_decode(t, n, &i, &name, line, column)) return 0;
+        if (i >= n || t[i] != '"') return 0;
+        // Fast path: unescaped keys can be matched directly without heap allocation.
+        int64_t j = i + 1;
+        int has_escape = 0;
+        while (j < n) {
+            const unsigned char ch = (unsigned char)t[j];
+            if (ch == '"') break;
+            if (ch == '\\') { has_escape = 1; break; }
+            if (ch < 0x20u) return 0;
+            j += 1;
+        }
+        int match = 0;
+        if (!has_escape) {
+            if (j >= n) return 0;
+            const int64_t raw_len = j - (i + 1);
+            match = raw_len == key_len && (key_len == 0 || memcmp(t + i + 1, key, (size_t)key_len) == 0);
+            i = j + 1;
+        } else {
+            ae_string name;
+            if (!ae_json_decode(t, n, &i, &name, line, column)) return 0;
+            match = name.len == key_len && memcmp(name.ptr, key, (size_t)key_len) == 0;
+            ae_str_release(&name);
+        }
         ae_json_ws(t, n, &i);
-        if (i >= n || t[i] != ':') { ae_str_release(&name); return 0; }
+        if (i >= n || t[i] != ':') return 0;
         i += 1;
         ae_json_ws(t, n, &i);
         const int64_t start = i;
-        if (!ae_json_skip_value(t, n, &i, 0)) { ae_str_release(&name); return 0; }
-        const int match = name.len == key_len && memcmp(name.ptr, key, (size_t)key_len) == 0;
-        ae_str_release(&name);
+        if (!ae_json_skip_value(t, n, &i, 0)) return 0;
         if (match) { *vs = start; *ve = i; *found = 1; return 1; }
         ae_json_ws(t, n, &i);
         if (i >= n) return 0;

@@ -1,7 +1,6 @@
 use std::{env, ffi::{OsStr, OsString}, fs, path::{Path, PathBuf}, process::{Command, ExitCode}, time::Instant};
 
 use ae_compiler::{fmt, frontend, harness, sha256};
-use frontend::compile_path;
 mod package;
 mod render;
 mod frontend_cache;
@@ -93,7 +92,10 @@ fn publish_cache(entry: &Path, exe: &Path) {
     let Some(name) = exe.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
     if fs::create_dir_all(entry).is_err() { return; }
     let staging = entry.join(format!("{name}.{}.tmp", std::process::id()));
-    if fs::copy(exe, &staging).is_err() { return; }
+    if fs::write(&staging, &bytes).is_err() {
+        let _ = fs::remove_file(&staging);
+        return;
+    }
     let manifest = entry.join(format!("manifest.{}.tmp", std::process::id()));
     if fs::write(&manifest, format!("{} {}", bytes.len(), sha256::hex(&bytes))).is_err() {
         let _ = fs::remove_file(&staging);
@@ -257,14 +259,14 @@ fn build_c(c: &str, dir: &Path, release: bool, use_cache: bool) -> Result<PathBu
                 if timings_enabled() { eprintln!("ae cache: disabled (cannot identify the C compiler {cc_name:?})"); }
             }
             Some(identity) => {
-                let key = sha256::hex([
+                let key = sha256::hex_parts(&[
                     c.as_bytes(),
                     optimization.as_bytes(),
                     identity.as_bytes(),
                     cc_name.as_bytes(),
                     env!("CARGO_PKG_VERSION").as_bytes(),
                     if cfg!(windows) { &b"windows"[..] } else { &b"unix"[..] },
-                ].concat().as_slice());
+                ]);
                 let entry = cache_root().join("entries").join(key);
                 let cached = entry.join(exe_name);
                 if cached.is_file() && cache_manifest_matches(&entry, &cached) {
@@ -481,7 +483,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         if is_package {
             path.set_file_name("test.ae");
         }
-        return frontend::with_package_imports(imports, || run_tests(&path, filter.as_deref(), use_interp))
+        return run_tests(&path, filter.as_deref(), use_interp, &imports)
             .map_err(Failure::from);
     }
     if cmd == "update" {
@@ -522,7 +524,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         let started = Instant::now();
         let report = match source.and_then(|path| package::entry_path(&path))
             .map_err(frontend::FrontendError::Legacy)
-            .and_then(|entry| frontend::with_package_imports(entry.imports, || frontend::check_path_diagnostic(&entry.path))) {
+            .and_then(|entry| frontend::check_path_diagnostic_with_imports(&entry.path, &entry.imports)) {
             Ok(()) => "[]".to_owned(),
             Err(frontend::FrontendError::Legacy(message)) => format!("[{}]", diagnostic_json(&message)),
             Err(frontend::FrontendError::Diagnostic(diagnostic)) => format!("[{}]", structured_diagnostic_json(&diagnostic)),
@@ -550,7 +552,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if let Some(source) = render_check {
         let outcome = source.and_then(|path| package::entry_path(&path))
             .map_err(frontend::FrontendError::Legacy)
-            .and_then(|entry| frontend::with_package_imports(entry.imports, || frontend::check_path_diagnostic(&entry.path)));
+            .and_then(|entry| frontend::check_path_diagnostic_with_imports(&entry.path, &entry.imports));
         match outcome {
             Ok(()) => return Ok(0),
             Err(frontend::FrontendError::Legacy(message)) => {
@@ -564,13 +566,17 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
                     | frontend::FrontendError::LexDiagnostics(diagnostics) => diagnostics,
                     frontend::FrontendError::Legacy(_) => unreachable!("handled above"),
                 };
+                let mut file_cache: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
                 for diagnostic in &diagnostics {
                     eprintln!("ae: {diagnostic}");
                     let Some(label) = &diagnostic.primary else { continue };
                     let span = &label.span;
                     let Some(file) = &span.file else { continue };
-                    let Ok(text) = fs::read_to_string(file) else { continue };
-                    if let Some(snippet) = render::render_snippet(&text, span.line, span.range.start, span.range.end) {
+                    let text = file_cache
+                        .entry(file.as_str())
+                        .or_insert_with(|| fs::read_to_string(file).ok());
+                    let Some(text) = text.as_deref() else { continue };
+                    if let Some(snippet) = render::render_snippet(text, span.line, span.range.start, span.range.end) {
                         eprintln!("{snippet}");
                     }
                 }
@@ -613,7 +619,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if interp_run {
         let package::PackageEntry { path: input, imports, .. } = package::entry_path(Path::new(&args[1]))?;
         let input = input.as_path();
-        match frontend::with_package_imports(imports, || frontend::interpret_path(input)) {
+        match frontend::interpret_path_with_imports(input, &imports) {
             Ok((out, code)) => {
                 print!("{out}");
                 return Ok(code);
@@ -642,10 +648,8 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     };
     let package::PackageEntry { path: input, imports, lock } = package::entry_path(Path::new(&args[1]))?;
     let import_key = sha256::hex(format!("{imports:?}").as_bytes());
-    frontend::with_package_imports(imports, || {
-        run_source(&cmd, &input, output, &program_args, release, &import_key, lock.filter(|_| cmd == "build"))
-    })
-    .map_err(Failure::from)
+    run_source(&cmd, &input, output, &program_args, release, &import_key, &imports, lock.filter(|_| cmd == "build"))
+        .map_err(Failure::from)
 }
 
 /// Renders doc comments as Markdown: one section per block, headed by the
@@ -708,12 +712,12 @@ fn doc_test(path: &Path, source: &str) -> Result<u8, Failure> {
     Ok(if failures == 0 { 0 } else { 1 })
 }
 
-fn run_tests(input: &Path, filter: Option<&str>, use_interp: bool) -> Result<u8, String> {
+fn run_tests(input: &Path, filter: Option<&str>, use_interp: bool, imports: &frontend::PackageImports) -> Result<u8, String> {
     let started = Instant::now();
     // The staged copy is dropped (and deleted) on every path below.
     let program = harness::prepare(input, filter)?;
     if use_interp {
-        match frontend::interpret_path(&program.staging) {
+        match frontend::interpret_path_with_imports(&program.staging, imports) {
             Ok((out, code)) => {
                 print!("{out}");
                 if timings_enabled() {
@@ -727,7 +731,7 @@ fn run_tests(input: &Path, filter: Option<&str>, use_interp: bool) -> Result<u8,
             }
         }
     }
-    let c = compile_path(&program.staging)?;
+    let c = frontend::compile_path_with_imports(&program.staging, imports)?;
     let dir = TempDir::create(&env::temp_dir())?;
     let exe = build_c(&c, &dir.0, false, true)?;
     let status = Command::new(&exe).status().map_err(|e| format!("cannot start test program: {e}"))?;
@@ -744,6 +748,7 @@ fn run_source(
     program_args: &[OsString],
     release: bool,
     import_key: &str,
+    imports: &frontend::PackageImports,
     lock: Option<package::PackageLock>,
 ) -> Result<u8, String> {
     let started = Instant::now();
@@ -760,12 +765,12 @@ fn run_source(
         return Ok(0);
     }
     if cmd == "emit-mir" {
-        let mir = frontend::mir_path(input)?;
+        let mir = frontend::mir_path_with_imports(input, imports)?;
         print!("{mir}");
         return Ok(0);
     }
     if cmd == "emit-cfg" {
-        let graph = frontend::cfg_path(input)?;
+        let graph = frontend::cfg_path_with_imports(input, imports)?;
         print!("{graph}");
         return Ok(0);
     }
@@ -773,12 +778,12 @@ fn run_source(
         // The tree always comes from a fresh frontend pass: like `emit-c`,
         // its output IS the frontend's answer, so the reuse cache never
         // stands in for it.
-        let tree = frontend::tree_path(input)?;
+        let tree = frontend::tree_path_with_imports(input, imports)?;
         print!("{tree}");
         return Ok(0);
     }
     if cmd == "check" {
-        frontend::check_path(input)?;
+        frontend::check_path_with_imports(input, imports)?;
         if timings_enabled() {
             eprintln!("ae timing: frontend_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -799,10 +804,10 @@ fn run_source(
             hit.c
         }
         None => {
-            let tracked = frontend::compile_path_tracked(input)?;
+            let tracked = frontend::compile_path_tracked_with_imports(input, imports)?;
             if let Some(lock) = &lock { lock.verify(&tracked.units)?; }
             let c = format!("{}{}", tracked.runtime, tracked.user);
-            let key = frontend_cache::store(&cache_root(), input, import_key, &tracked);
+            let key = frontend_cache::store_c(&cache_root(), input, import_key, &tracked, &c);
             if timings_enabled() {
                 if cacheable {
                     eprintln!("ae frontend-cache: miss (key {})", key.unwrap_or_else(|| "not stored".into()));

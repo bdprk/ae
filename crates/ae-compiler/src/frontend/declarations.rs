@@ -44,6 +44,7 @@ impl Parser<'_> {
     // rejected at the declaration: the C side cannot honor its release
     // logic. The struct's own `#[repr(C)]` attribute is what makes its
     // layout a promise; without it the layout is the compiler's choice.
+    #[allow(clippy::only_used_in_recursion)]
     pub(super) fn c_abi_shape(&self, ty: &Type, offset: usize) -> bool {
         match ty {
             Type::Int | Type::Bool | Type::F64 => true,
@@ -73,7 +74,7 @@ impl Parser<'_> {
                     ("struct", self.structs[id].name.clone(), self.structs[id].public)
                 }
                 Type::Fn(sig) => {
-                    let (params, returns) = super::closures::fn_sig(sig);
+                    let (params, returns) = self.ctx.fn_sig(sig);
                     self.check_export_types(name, &params, returns)?;
                     continue;
                 }
@@ -242,7 +243,7 @@ impl Parser<'_> {
                     if !self.c_abi_shape(ty, sig_offset) {
                         let shown = match ty {
                             Type::Struct(sid) => self.structs[*sid].name.clone(),
-                            _ => ty.name(),
+                            _ => ty.name(self.ctx),
                         };
                         return Err(self.error_at(sig_offset, &format!("'{shown}' cannot cross the C ABI; scalars, '#[repr(C)]' structs, and '*const T'/'*mut T' can")));
                     }
@@ -256,14 +257,14 @@ impl Parser<'_> {
                 // calls from ae are safe — extern_c stays false. The C name
                 // rides the exposure registry, not this flag.
                 let signature = if no_mangle {
-                    Signature { id, params: types.clone(), ret: ret.clone(), file: self.file.clone(), public, extern_c: false }
+                    Signature { id, params: types.clone(), ret, file: self.file.clone(), public, extern_c: false }
                 } else {
-                    Signature { id, params: types.clone(), ret: ret.clone(), file: self.file.clone(), public, extern_c: true }
+                    Signature { id, params: types.clone(), ret, file: self.file.clone(), public, extern_c: true }
                 };
                 if self.functions.insert(name.clone(), signature).is_some() {
                     return Err(self.fail(&format!("duplicate function '{name}' (already defined in an imported file)")));
                 }
-                super::register_extern(id, name.clone(), types, ret);
+                self.ctx.register_extern(id, name.clone(), types, ret);
                 if no_mangle {
                     // An exposure (M2.12 U7): the body parses in the body
                     // pass, under the id this signature registered. The C
@@ -273,7 +274,7 @@ impl Parser<'_> {
                     if *self.current() != Kind::LBrace {
                         return Err(self.error_at(sig_offset, "'#[no_mangle]' applies to an 'extern \"C\" fn' definition; a declaration's symbol is its own name already"));
                     }
-                    super::register_exposure(id, name.clone());
+                    self.ctx.register_exposure(id, name.clone());
                     // The id joins id_order at this position: the body pass
                     // lines up result.len() against it (main included).
                     self.id_order.push(id);
@@ -318,7 +319,7 @@ impl Parser<'_> {
                 } else {
                     self.skip_function_body()?
                 };
-                audit_generic_fn(&self.file, self.source, self.tokens.as_ref(), start, end, &name, &params, &bounds, declared_at)?;
+                audit_generic_fn(&self.file, self.source, self.tokens.as_ref(), start, end, &name, &params, &bounds, declared_at, self.ctx)?;
                 let gid = self.generics.fn_defs.len();
                 self.generics.fn_names.insert(name.clone(), gid);
                 let bindings = parsed_parameters.map(Rc::from);
@@ -361,7 +362,7 @@ impl Parser<'_> {
                 if self.functions.insert(name.clone(), signature).is_some() {
                     return Err(self.fail(&format!("duplicate function '{name}' (already defined in an imported file)")));
                 }
-                if is_unsafe_fn { super::register_unsafe_fn(id); }
+                if is_unsafe_fn { self.ctx.register_unsafe_fn(id); }
             }
             self.skip_signature_body(&function_bodies)?;
         }
@@ -381,12 +382,11 @@ impl Parser<'_> {
         if matches!(self.current(), Kind::Amp) {
             return Err(self.fail(&format!("{what} cannot borrow T in this version; take T by value or use a concrete type")));
         }
-        if let Kind::Ident(text) = self.current() {
-            if text == "T" {
+        if let Kind::Ident(text) = self.current()
+            && text == "T" {
                 self.pos += 1;
                 return Ok(Payload::Param(0));
             }
-        }
         Ok(Payload::Concrete(self.parameter_type()?))
     }
 
@@ -535,11 +535,10 @@ impl Parser<'_> {
             if RESERVED.contains(&method.as_str()) {
                 return Err(self.fail(&format!("'{method}' is a built-in name and cannot be a method")));
             }
-            if let ImplTarget::Struct(sid) = target {
-                if self.structs[sid].fields.iter().any(|(name, _)| *name == method) {
+            if let ImplTarget::Struct(sid) = target
+                && self.structs[sid].fields.iter().any(|(name, _)| *name == method) {
                     return Err(self.fail(&format!("method '{method}' collides with the field of the same name on '{type_name}'; 'value.{method}' has to mean one thing, so rename one")));
                 }
-            }
             let key = format!("{type_name}#{method}");
             if self.generics.inherent.contains_key(&key) {
                 return Err(self.fail(&format!("duplicate method '{method}' for '{type_name}'")));
@@ -581,7 +580,7 @@ impl Parser<'_> {
                             if *self.current() == Kind::Colon {
                                 return Err(self.fail(&format!("write the receiver as 'self'; it already has type '{}'", type_name)));
                             }
-                            receiver = Some(self.impl_self.clone().expect("an impl block always has a target"));
+                            receiver = Some(self.impl_self.expect("an impl block always has a target"));
                         } else if matches!(target, ImplTarget::Enum(_)) {
                             return Err(self.fail(&format!("enum methods take their receiver by value in this version; write 'self', not '{}'", if mutable_borrow { "&mut self" } else { "&self" })));
                         } else if mutable_borrow {
@@ -612,11 +611,10 @@ impl Parser<'_> {
             if matches!(ret, Type::StructRef(_) | Type::StructMut(_)) {
                 return Err(self.fail("a method cannot return a borrow; return a value that outlives the borrow instead, or take the borrow again at the call site"));
             }
-            if method == "drop" {
-                if !matches!(receiver, Some(Type::StructMut(_))) || types.len() != 1 || ret != Type::Int {
+            if method == "drop"
+                && (!matches!(receiver, Some(Type::StructMut(_))) || types.len() != 1 || ret != Type::Int) {
                     return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self) -> i64'"));
                 }
-            }
             self.generics.next_fn_id = self.generics.next_fn_id.max(*next_id);
             let id = self.generics.next_fn_id;
             self.generics.next_fn_id += 1;
@@ -750,9 +748,8 @@ impl Parser<'_> {
         let tid = *self.generics.trait_names.get(&trait_name)
             .ok_or_else(|| self.fail(&format!("impl names unknown trait '{trait_name}'")))?;
         self.take(Kind::For)?;
-        if let Kind::Ident(text) = self.current() {
-            if text == "T" { return Err(self.fail("an impl names the concrete type, not the trait's parameter T")); }
-        }
+        if let Kind::Ident(text) = self.current()
+            && text == "T" { return Err(self.fail("an impl names the concrete type, not the trait's parameter T")); }
         let ty = self.parameter_type()?;
         // `Self` inside a trait impl's signatures stands for the concrete
         // type being implemented, exactly as in an inherent impl.
@@ -770,10 +767,10 @@ impl Parser<'_> {
             let where_must = type_file.unwrap_or_else(|| format!("the file declaring the trait ({trait_file})"));
             return Err(self.fail(&format!(
                 "impl of '{trait_name}' for '{}' must be in the file that declares the trait ({trait_file}) or the type ({}); this file may not add it",
-                ty.name(), where_must)));
+                ty.name(self.ctx), where_must)));
         }
-        if !self.generics.impls.insert((tid, ty.name())) {
-            return Err(self.fail(&format!("duplicate impl of '{trait_name}' for '{}'", ty.name())));
+        if !self.generics.impls.insert((tid, ty.name(self.ctx))) {
+            return Err(self.fail(&format!("duplicate impl of '{trait_name}' for '{}'", ty.name(self.ctx))));
         }
         if self.generics.impls.len() > 256 { return Err(self.fail("impl limit exceeded (256 per program)")); }
         self.take(Kind::LBrace)?;
@@ -796,9 +793,8 @@ impl Parser<'_> {
             if *self.current() != Kind::RParen {
                 loop {
                     if types.len() >= 8 { return Err(self.fail("impl method parameter limit exceeded (8)")); }
-                    if let Kind::Ident(text) = self.current() {
-                        if text == "T" { return Err(self.fail("an impl method signature uses the concrete type, not the trait's parameter T")); }
-                    }
+                    if let Kind::Ident(text) = self.current()
+                        && text == "T" { return Err(self.fail("an impl method signature uses the concrete type, not the trait's parameter T")); }
                     let _param = self.identifier()?;
                     self.take(Kind::Colon)?;
                     types.push(self.parameter_type()?);
@@ -809,21 +805,21 @@ impl Parser<'_> {
             self.take(Kind::RParen)?;
             let expected_params: Vec<Type> = expected.params.iter().map(substitute).collect();
             if types != expected_params {
-                let want = expected_params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
-                let got = types.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+                let want = expected_params.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", ");
+                let got = types.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", ");
                 return Err(self.fail(&format!("impl method '{method}' must take ({want}) to match trait '{trait_name}', found ({got})")));
             }
             self.take(Kind::Arrow)?;
             let ret = self.parameter_type()?;
             if ret != substitute(&expected.returns) {
-                return Err(self.fail(&format!("impl method '{method}' must return {} to match trait '{trait_name}', found {}", substitute(&expected.returns).name(), ret.name())));
+                return Err(self.fail(&format!("impl method '{method}' must return {} to match trait '{trait_name}', found {}", substitute(&expected.returns).name(self.ctx), ret.name(self.ctx))));
             }
             self.generics.next_fn_id = self.generics.next_fn_id.max(*next_id);
             let id = self.generics.next_fn_id;
             self.generics.next_fn_id += 1;
             *next_id = self.generics.next_fn_id;
             self.id_order.push(id);
-            let mangled = format!("{}#{}#{}", trait_name, method, ty.name());
+            let mangled = format!("{}#{}#{}", trait_name, method, ty.name(self.ctx));
             let signature = Signature { id, params: types, ret, file: self.file.clone(), public: true, extern_c: false };
             if self.functions.insert(mangled, signature).is_some() {
                 return Err(self.fail(&format!("duplicate impl method '{method}' for this type")));
@@ -928,9 +924,9 @@ impl Parser<'_> {
         let (param, tid, mid) = found.remove(0);
         let ty = self.subst.get(&param).cloned()
             .ok_or_else(|| self.error_at(offset, &format!("'{method}' dispatches on '{param}', which has no type argument here")))?;
-        let key = format!("{}#{}#{}", self.generics.traits[tid].name, self.generics.traits[tid].methods[mid].name, ty.name());
+        let key = format!("{}#{}#{}", self.generics.traits[tid].name, self.generics.traits[tid].methods[mid].name, ty.name(self.ctx));
         self.functions.get(&key).cloned().ok_or_else(|| {
-            self.error_at(offset, &format!("no impl of trait '{}' for '{}'", self.generics.traits[tid].name, ty.name()))
+            self.error_at(offset, &format!("no impl of trait '{}' for '{}'", self.generics.traits[tid].name, ty.name(self.ctx)))
         })
     }
 
@@ -1100,14 +1096,14 @@ impl Parser<'_> {
             }
         }
         self.take(Kind::RParen)?;
-        let returns_type;
-        if is_main {
+        
+        let returns_type = if is_main {
             if !params.is_empty() { return Err(self.fail("main cannot have parameters")); }
-            returns_type = Type::Int;
+            Type::Int
         } else {
             self.take(Kind::Arrow)?;
-            returns_type = self.return_annotation()?;
-        }
+            self.return_annotation()?
+        };
         self.in_main = is_main;
         self.return_type = returns_type;
         // Parameter scope: lives for the whole body so return paths can
@@ -1151,7 +1147,7 @@ impl Parser<'_> {
             return None;
         }
         let arguments = self.shared_specialization_types(ranges)?;
-        let instance = self.generics.fn_done.get(&super::types::specialization_key(gid, &arguments))?;
+        let instance = self.generics.fn_done.get(&super::types::specialization_key(gid, &arguments, self.ctx))?;
         Some((def, instance))
     }
 
@@ -1169,21 +1165,21 @@ impl Parser<'_> {
                 if !bound.allows(args[index]) {
                     return Err(self.error_at(offset, &format!(
                         "type argument '{}' for '{}' does not satisfy '{}'; that constraint allows {}",
-                        args[index].name(), def.name, bound.name(), bound.allowed_types())));
+                        args[index].name(self.ctx), def.name, bound.name(), bound.allowed_types())));
                 }
             }
         }
         for (index, traits) in def.trait_bounds.iter().enumerate() {
             for &tid in traits {
                 let trait_name = self.generics.traits[tid].name.clone();
-                if !self.generics.impls.contains(&(tid, args[index].name())) {
+                if !self.generics.impls.contains(&(tid, args[index].name(self.ctx))) {
                     return Err(self.error_at(offset, &format!(
                         "no impl of trait '{}' for '{}'; required by '{}'",
-                        trait_name, args[index].name(), def.name)));
+                        trait_name, args[index].name(self.ctx), def.name)));
                 }
             }
         }
-        let key = super::types::specialization_key(gid, &args);
+        let key = super::types::specialization_key(gid, &args, self.ctx);
         if let Some(instance) = self.generics.fn_done.get(&key) { return Ok(instance.clone()); }
         if self.generics.fn_in_progress.contains(&key) {
             let trace = self.instantiation_trace(&self.instantiation_display(&def.name, &args));
@@ -1200,11 +1196,11 @@ impl Parser<'_> {
             trait_bounds.insert(param.clone(), def.trait_bounds[index].clone());
         }
         let mut sub = Parser {
-            file: def.file.clone(), source: &*def.source, tokens: Rc::clone(&def.tokens), shared_source: Rc::clone(&def.source), pos: def.start,
+            file: def.file.clone(), source: &def.source, tokens: Rc::clone(&def.tokens), shared_source: Rc::clone(&def.source), pos: def.start,
             names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: self.expression_index_for(&def.file, &def.tokens), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0,
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
-            enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
+            enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new(),
         };
@@ -1237,15 +1233,15 @@ impl Parser<'_> {
             names.sort();
             return Err(self.error_at(offset, &format!("the impl for '{impl_name}' has no method '{method}'; it has {}", names.join(", "))));
         };
-        let key = format!("{gid}#{method}#{}", args.iter().map(|t| t.name()).collect::<Vec<_>>().join(","));
+        let key = format!("{gid}#{method}#{}", args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(","));
         if let Some(instance) = self.generics.generic_impl_done.get(&key) { return Ok(instance.clone()); }
         if self.generics.impl_in_progress.contains(&key) {
-            let display = format!("{}::{}", self.instantiation_display(impl_name, &args), method);
+            let display = format!("{}::{}", self.instantiation_display(impl_name, args), method);
             let trace = self.instantiation_trace(&display);
             return Err(self.error_at(offset, &format!("'{impl_name}#{method}' is already being instantiated with these type arguments; the expansion would never finish (instantiated: {trace})")));
         }
         self.generics.impl_in_progress.insert(key.clone());
-        self.generics.instantiation_trace.push(("method", key.clone(), format!("{}::{}", self.instantiation_display(impl_name, &args), method)));
+        self.generics.instantiation_trace.push(("method", key.clone(), format!("{}::{}", self.instantiation_display(impl_name, args), method)));
         let id = self.generics.next_fn_id;
         self.generics.next_fn_id += 1;
         // Enum receivers are by value only (ADR-0196): the Shared/Mutable
@@ -1272,11 +1268,11 @@ impl Parser<'_> {
             subst.insert(param.clone(), args[index]);
         }
         let mut sub = Parser {
-            file: def.file.clone(), source: &*mdef.source, tokens: Rc::clone(&mdef.tokens), shared_source: Rc::clone(&mdef.source), pos: mdef.body_start,
+            file: def.file.clone(), source: &mdef.source, tokens: Rc::clone(&mdef.tokens), shared_source: Rc::clone(&mdef.source), pos: mdef.body_start,
             names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: self.expression_index_for(&def.file, &mdef.tokens), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0,
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
-            enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
+            enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(),
             subst, trait_bounds: HashMap::new(), receiver: receiver_ty,
@@ -1298,26 +1294,25 @@ impl Parser<'_> {
     // ordinary calls and generic instantiations).
     pub(super) fn function_value_argument(&mut self, callee: &str, position: usize, sig: usize) -> Result<Argument, ae_span::Diagnostic> {
         let expected = Type::Fn(sig);
-        let (params, returns) = super::closures::fn_sig(sig);
+        let (params, returns) = self.ctx.fn_sig(sig);
         if let Kind::Ident(name) = self.current() {
             let ends_argument = self.tokens.get(self.pos + 1)
                 .is_some_and(|token| matches!(token.kind, Kind::Comma | Kind::RParen));
-            if ends_argument && !self.names.contains_key(name) {
-                if let Some(function) = self.functions.get(name) {
+            if ends_argument && !self.names.contains_key(name)
+                && let Some(function) = self.functions.get(name) {
                     if !function.public && function.file != self.file {
                         return Err(self.fail(&format!("function '{name}' is private to {}", function.file)));
                     }
-                    if function.extern_c || crate::frontend::is_unsafe_fn(function.id) {
+                    if function.extern_c || self.ctx.is_unsafe_fn(function.id) {
                         return Err(self.fail(&format!("function '{name}' cannot be passed as a safe function value")));
                     }
                     if function.params != params || function.ret != returns {
-                        return Err(self.fail(&format!("argument {position} to '{callee}' requires a function of type {}, but '{name}' has a different signature", expected.name())));
+                        return Err(self.fail(&format!("argument {position} to '{callee}' requires a function of type {}, but '{name}' has a different signature", expected.name(self.ctx))));
                     }
                     let id = function.id;
                     self.pos += 1;
                     return Ok(Argument::FnPtr(id));
                 }
-            }
         }
 
         let (value, ty) = self.expression(0, false)?;
@@ -1326,15 +1321,15 @@ impl Parser<'_> {
         }
         let cid = match (value, ty) {
             (Expr::ClosureLit(cid), _) | (Expr::Variable(..), Type::Closure(cid)) => cid,
-            _ => return Err(self.fail(&format!("argument {position} to '{callee}' requires a function value or non-capturing closure of type {}, found {}", expected.name(), ty.name()))),
+            _ => return Err(self.fail(&format!("argument {position} to '{callee}' requires a function value or non-capturing closure of type {}, found {}", expected.name(self.ctx), ty.name(self.ctx)))),
         };
         let def = &self.generics.closures[cid];
         if !def.value_captures.is_empty() || !def.borrow_captures.is_empty() {
             return Err(self.fail("a closure with captures cannot be passed as a function value; make it parameter-only or bind its inputs as arguments"));
         }
         if def.params != params || def.ret != returns {
-            let got = format!("fn({}) -> {}", def.params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "), def.ret.name());
-            return Err(self.fail(&format!("argument {position} to '{callee}' must be a closure of type {}, found {}", expected.name(), got)));
+            let got = format!("fn({}) -> {}", def.params.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "), def.ret.name(self.ctx));
+            return Err(self.fail(&format!("argument {position} to '{callee}' must be a closure of type {}, found {}", expected.name(self.ctx), got)));
         }
         Ok(Argument::FnPtr(def.fn_id))
     }
@@ -1389,7 +1384,7 @@ impl Parser<'_> {
         if expected == Type::StrView {
             let (value, ty) = self.expression(0, false)?;
             if !matches!(ty, Type::String | Type::StrView) {
-                return Err(self.fail(&format!("argument must be a string or string view, found {}", ty.name())));
+                return Err(self.fail(&format!("argument must be a string or string view, found {}", ty.name(self.ctx))));
             }
             Ok(Argument::View(value))
         } else if expected == Type::VecRef || expected == Type::StrVecRef || expected == Type::VecFRef {
@@ -1401,7 +1396,7 @@ impl Parser<'_> {
                 _ => Type::VecF,
             };
             let Some(borrow) = CallBorrow::classify(expected, actual) else {
-                return Err(self.fail(&format!("argument must be {}, found {}", owned_shape.name(), actual.name())));
+                return Err(self.fail(&format!("argument must be {}, found {}", owned_shape.name(self.ctx), actual.name(self.ctx))));
             };
             if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
             // An owned vector needs its address taken; a parameter that
@@ -1445,7 +1440,7 @@ impl Parser<'_> {
                 Some(CallBorrow::Forward) => {
                     Ok(Argument::Borrow(var, false))
                 }
-                _ => return Err(self.fail(&format!("argument must be {}, found {}", expected.name(), actual.name()))),
+                _ => Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx)))),
             }
         } else if matches!(expected, Type::StructMut(_)) {
             // `&mut Struct` (ADR-0185) lends the struct for writing:
@@ -1477,7 +1472,7 @@ impl Parser<'_> {
                     self.mut_borrows.push((var, self.scopes.len()));
                     Ok(Argument::Borrow(var, address))
                 }
-                _ => return Err(self.fail(&format!("argument must be {}, found {}", expected.name(), actual.name()))),
+                _ => Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx)))),
             }
         } else {
             // By-value arguments always consume their value:

@@ -22,13 +22,17 @@
 use super::*;
 
 pub(super) fn cfg_path(path: &Path) -> Result<String, String> {
-    let program = loader::load_program(path)?;
+    cfg_path_with_imports(path, &PackageImports::new())
+}
+
+pub(super) fn cfg_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    let program = loader::load_program_with_imports(path, imports)?;
     let mut out = String::new();
     for file in &program.files {
         for function in file {
-            let graph = build_cfg(function);
+            let graph = build_cfg(function, &program.ctx);
             validate(&graph);
-            print_function(&graph, &mut out);
+            print_function(&graph, &mut out, &program.ctx);
         }
     }
     Ok(out)
@@ -66,8 +70,8 @@ pub(super) enum CfgTerminator {
     Unreachable,
 }
 
-#[derive(Default)]
-struct Lowering {
+struct Lowering<'a> {
+    ctx: &'a CompileContext,
     blocks: Vec<CfgBlock>,
     next_block: usize,
     next_synthetic: usize,
@@ -78,7 +82,17 @@ struct Lowering {
     loop_continues: Vec<usize>,
 }
 
-impl Lowering {
+impl<'a> Lowering<'a> {
+    fn new(ctx: &'a CompileContext) -> Self {
+        Self {
+            ctx,
+            blocks: Vec::new(),
+            next_block: 0,
+            next_synthetic: 0,
+            loop_exits: Vec::new(),
+            loop_continues: Vec::new(),
+        }
+    }
     fn synthetic_local(&mut self) -> usize {
         let id = usize::MAX - self.next_synthetic;
         self.next_synthetic += 1;
@@ -96,8 +110,8 @@ impl Lowering {
     }
 }
 
-pub(super) fn build_cfg(function: &Function) -> CfgFunction {
-    let mut lowering = Lowering::default();
+pub(super) fn build_cfg(function: &Function, ctx: &CompileContext) -> CfgFunction {
+    let mut lowering = Lowering::new(ctx);
     let entry = lowering.new_block();
     lower_statements(&function.body, entry, &mut lowering);
     CfgFunction { id: function.id, is_main: function.is_main, params: function.params.clone(), returns: function.returns, blocks: lowering.blocks }
@@ -166,7 +180,7 @@ fn lower_exit_operand(expr: &Expr, current: usize, lowering: &mut Lowering) -> (
         _ => {
             let result = lowering.synthetic_local();
             lowering.block(current).statements.push(Statement::Declare(result, expr.clone()));
-            (current, Expr::Variable(result, super::mir::expr_type(expr), 0, 0))
+            (current, Expr::Variable(result, super::mir::expr_type(expr, lowering.ctx), 0, 0))
         }
     }
 }
@@ -455,23 +469,23 @@ fn validate(function: &CfgFunction) {
     }
 }
 
-fn print_function(function: &CfgFunction, out: &mut String) {
+fn print_function(function: &CfgFunction, out: &mut String, ctx: &CompileContext) {
     let name = if function.is_main { "main".to_owned() } else { format!("#{}", function.id) };
-    let params = function.params.iter().map(|(id, t)| format!("v{}: {}", id, t.name())).collect::<Vec<_>>().join(", ");
-    out.push_str(&format!("fn {}({}) -> {} ({} blocks)\n", name, params, function.returns.name(), function.blocks.len()));
+    let params = function.params.iter().map(|(id, t)| format!("v{}: {}", id, t.name(ctx))).collect::<Vec<_>>().join(", ");
+    out.push_str(&format!("fn {}({}) -> {} ({} blocks)\n", name, params, function.returns.name(ctx), function.blocks.len()));
     for block in &function.blocks {
         out.push_str(&format!("  block {}:\n", block.id));
         for statement in &block.statements {
             out.push_str("    ");
-            out.push_str(&crate::frontend::tree::statement_text(statement));
+            out.push_str(&crate::frontend::tree::statement_text(statement, ctx));
             out.push('\n');
         }
         let tail = match &block.terminator {
             CfgTerminator::Goto(target) => format!("goto block {}", target),
-            CfgTerminator::Branch(cond, a, b) => format!("branch on {} -> then block {} else block {}", crate::frontend::tree::expression_text(cond), a, b),
+            CfgTerminator::Branch(cond, a, b) => format!("branch on {} -> then block {} else block {}", crate::frontend::tree::expression_text(cond, ctx), a, b),
             CfgTerminator::Switch(subject, eid, targets) => format!("switch v{} (enum #{}) -> {}", subject, eid, targets.iter().map(|t| format!("block {}", t)).collect::<Vec<_>>().join(", ")),
-            CfgTerminator::Return(expr) => format!("return {}", crate::frontend::tree::expression_text(expr)),
-            CfgTerminator::Exit(code) => format!("exit {}", crate::frontend::tree::expression_text(code)),
+            CfgTerminator::Return(expr) => format!("return {}", crate::frontend::tree::expression_text(expr, ctx)),
+            CfgTerminator::Exit(code) => format!("exit {}", crate::frontend::tree::expression_text(code, ctx)),
             // Only main can end this way: the implicit exit-0.
             CfgTerminator::Unreachable if function.is_main && !block.statements.is_empty() => "implicit exit (main)".to_owned(),
             CfgTerminator::Unreachable => "unreachable".to_owned(),
