@@ -50,10 +50,8 @@ pub use imports::{load_and_resolve, load_module_transitive};
 
 use std::ops::Range;
 
-/// One definition in the flat def table. Locals and items share the table so
-/// an occurrence needs a single id to point at its owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DefId(pub u32);
+/// Definition identity now lives in `ae-ty`; the path stays for callers.
+pub use ae_ty::DefId;
 
 /// What a definition is. `is_local` separates the per-function namespace
 /// (lookup first, shadowing nothing outside its block) from the module

@@ -349,3 +349,5 @@
 
 - 2026-11-24 08:30 (+08:00): **P1.3 slice 4: HIR expressions carry scalar facts.** `HirExpr.ty` holds the resolver's `ExpressionType` for the expression's range and `ae emit-hir` prints `ty=checked i64|f64|bool`, `ty=rejected`, `ty=deferred` or `ty=none`; the HIR snapshot corpus now pins semantic facts, not only identities and spans. Evidence: snapshot suite 6/6, Windows suite 522/0, clippy clean.
 
+- 2026-11-24 09:00 (+08:00): **P1.2 slice 5: `DefId` and `TypeSpelling` moved into `ae-ty`.** Both definitions now live in the shared type crate; `ae-resolve` re-exports them so every path, dump and snapshot stays identical, and the spelling vocabulary's `describe`/`is_unknown` moved with it (the def-table-reading classifier and `PRELUDE_TYPES` stay in the resolver). Evidence: Windows suite 522/0, clippy clean.
+

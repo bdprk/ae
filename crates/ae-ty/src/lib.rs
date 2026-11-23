@@ -6,9 +6,13 @@
 //! identities) cannot drift: both call the same rule and own only the
 //! conversion into its three-scalar domain.
 pub mod concrete;
+pub mod id;
 pub mod interner;
 pub mod op;
+pub mod spelling;
 
 pub use concrete::{TyKind, Type};
+pub use id::DefId;
+pub use spelling::TypeSpelling;
 pub use interner::TypeInterner;
 pub use op::{infix, prefix, scalar_compound_assignment, valid_array_index, OperatorError, Scalar};
