@@ -108,6 +108,16 @@ fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
 /// A struct whose fields are scalar or `string`: it carries one owned value
 /// per string field, and the generated `ae_tN_release` frees them. The body
 /// route may build one (each string value moves in) and own it.
+/// A struct that declares `fn drop(&mut self)` and whose fields are plain:
+/// the body route owns it by value exactly like a drop-free struct — the
+/// generated release calls the user's drop and clears the handle, so a
+/// parameter or local of this type releases correctly.
+fn plain_drop_struct(ty: Type, structs: &[StructDef]) -> bool {
+    let Type::Struct(sid) = ty else { return false };
+    structs.get(sid).is_some_and(|defn| defn.drop_fn.is_some()
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || owned_plain_struct(*ty, structs)))
+}
+
 fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
@@ -2510,6 +2520,9 @@ impl<'a> Parser<'a> {
                 // in the closure's generated function; the caller's move
                 // rules already made that capture a value.
                 || owned_field_struct(ty, self.structs)
+                // A drop-carrying struct with plain fields: the exit Frees
+                // runs its generated release, which calls the user's drop.
+                || plain_drop_struct(ty, self.structs)
                 || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)));
             if !ok && std::env::var_os("AE_ROUTE_REASONS").is_some() {
                 eprintln!("route reason blocked function: guard slot '{name}' of type {}", ty.name(self.ctx));
