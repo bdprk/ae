@@ -872,7 +872,12 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         // to lower); a string field prints as its view; everything else must
         // resolve as a printable scalar.
         StatementKind::Print(value) => {
-            matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+            // Any known local reaches the print arm's own type check
+            // (`cannot print a value of type ...`); the arm admits the
+            // printable shapes and rejects the rest exactly as the typed route.
+            matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                if name != "self" && resolved.scalar_reads.contains_key(&value.range.start))
+                || matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
                 || (matches!(value.kind, ae_syntax::expression::ExpressionKind::Field { .. })
                     && resolved.struct_field_views.contains(&value.range.start))
                 // Printing an owned string reads a view of it; nothing moves.
