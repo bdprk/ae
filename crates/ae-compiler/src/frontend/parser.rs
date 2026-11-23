@@ -368,9 +368,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             }
             // A field read on a *plain* call result (`f().x`,
             // `compute_mag[Delta](d).offset`): the call must be admissible and
-            // the lowering checks the return type is a struct. A method-call
-            // result (`p.new(2).x`) stays out: the method resolution's pinned
-            // diagnostics belong to the typed route.
+            // the lowering checks the return type is a struct. A field on a
+            // method-call result (`p.new(2).x`) is admitted permissively: the
+            // method resolution's pinned diagnostics (an associated function
+            // called through a value, a missing method) are the lowering's.
             let plain_call_base = match &base.kind {
                 ExpressionKind::Call { callee, .. } => {
                     matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(_)))
@@ -379,16 +380,26 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 }
                 _ => false,
             };
+            let method_call_base = match &base.kind {
+                ExpressionKind::Call { callee, .. } => {
+                    matches!(&callee.kind, ExpressionKind::Field { base: inner, .. }
+                        if matches!(inner.kind, ExpressionKind::Atom(Kind::Ident(_))))
+                }
+                _ => false,
+            };
             let rooted = match &base.kind {
                 ExpressionKind::Atom(Kind::Ident(_)) => true,
                 ExpressionKind::Field { .. } => resolved.struct_field_reads.contains(&base.range.start)
                     || resolved.struct_field_chains.contains(&base.range.start),
-                ExpressionKind::Call { .. } => plain_call_base
+                ExpressionKind::Call { .. } => (plain_call_base || method_call_base)
                     && scalar_body_expression(base, resolved, supports_call, supports_field),
                 _ => false,
             };
             rooted && (resolved.struct_field_reads.contains(&expression.range.start)
                 || plain_call_base
+                // The lowering's method resolution answers first; a resolved
+                // method call's struct result then reads the field.
+                || method_call_base
                 // A local from an explicit generic call: the instantiated
                 // return type exists only at lowering time.
                 || matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)))
@@ -1319,6 +1330,20 @@ impl<'a> Parser<'a> {
             return None;
         }
         Some((signature, receiver, base_ty))
+    }
+
+    /// Whether the inherent table declares `method` on this receiver type at
+    /// all, receiver-less entries included. The call gate uses it to admit a
+    /// method the route's receiver rules refuse (an associated function called
+    /// through a value); the lowering then reports the typed route's own
+    /// diagnostic instead of a shape rejection.
+    fn inherent_entry_exists(&self, method: &str, base_ty: Type) -> bool {
+        let type_name = match base_ty {
+            Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => self.structs.get(sid).map(|defn| defn.name.clone()),
+            Type::Enum(name, _) => Some(name.to_owned()),
+            _ => None,
+        };
+        type_name.is_some_and(|name| self.generics.inherent.contains_key(&format!("{name}#{method}")))
     }
 
     /// The type a method-call chain computes (`start.shifted(1, 2).shifted(0, -6)`).
@@ -2509,7 +2534,10 @@ impl<'a> Parser<'a> {
                             let ok = match name.as_str() {
                                 "deref" => arguments.is_empty(),
                                 "offset" | "byte_offset" => arguments.len() == 1,
-                                _ => false,
+                                // Any other name reaches the lowering's own
+                                // `pointers have no method '...'`, the typed
+                                // route's diagnostic.
+                                _ => true,
                             };
                             method_calls.insert(callee.range.start, ok);
                             return;
@@ -2519,11 +2547,16 @@ impl<'a> Parser<'a> {
                         let Some(ty) = ty else { return };
                         let ok = if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
                             name == "deref" && arguments.is_empty()
-                        } else {
+                        } else if let Some((signature, _, _)) = self.resolve_inherent_method(name, ty) {
                             // Arity is part of the gate: a mismatched call
                             // falls back instead of reaching the lowering.
-                            self.resolve_inherent_method(name, ty)
-                                .is_some_and(|(signature, _, _)| arguments.len() + 1 == signature.params.len())
+                            arguments.len() + 1 == signature.params.len()
+                        } else {
+                            // A method the table knows but the route's receiver
+                            // rules refuse (an associated function called
+                            // through a value): the lowering's own diagnostic
+                            // answers, so the gate admits it.
+                            self.inherent_entry_exists(name, ty)
                         };
                         method_calls.insert(callee.range.start, ok);
                     });
@@ -3842,6 +3875,15 @@ impl<'a> Parser<'a> {
                                         Type::Enum(name, _) => name.to_owned(),
                                         _ => self.structs[sid].name.clone(),
                                     };
+                                    // The table knows the method but its entry
+                                    // declares no receiver: a value call is the
+                                    // typed route's associated-function error,
+                                    // not a missing method.
+                                    if self.generics.inherent.get(&format!("{type_name}#{method_name}"))
+                                        .is_some_and(|definition| definition.receiver.is_none())
+                                    {
+                                        return Err(self.error_at(callee.range.end, &format!("'{type_name}::{method_name}' is an associated function, so it takes no receiver; call it as '{type_name}::{method_name}(...)'")));
+                                    }
                                     let mut names: Vec<String> = self.generics.inherent.keys()
                                         .filter(|key| key.starts_with(&format!("{type_name}#")))
                                         .filter_map(|key| key.split('#').nth(1).map(|name| name.to_owned()))
@@ -3895,6 +3937,13 @@ impl<'a> Parser<'a> {
                         let (line, column) = self.position();
                         let bytewise = method_name == "byte_offset";
                         return Ok((Expr::PtrOffset(Box::new(operand), Box::new(count_value), bytewise, line, column), ty));
+                    }
+                    if method_name != "deref" {
+                        // The typed route consumes the name and fails on the
+                        // token that follows it (the `(`), so the span lands
+                        // there.
+                        self.seek_scalar_offset(callee.range.end);
+                        return Err(self.fail(&format!("pointers have no method '{method_name}'")));
                     }
                     self.check_pointer_deref(method_offset)?;
                     self.seek_scalar_offset(expression.range.end);
