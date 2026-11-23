@@ -1449,3 +1449,39 @@ Still typed in the concurrency family: `task_spawn`/`scope_spawn`/
 Coverage: 333 → **328**. Still typed in the generic family: associated
 calls (`Pair[string, i64]::new(...)` — `instantiate_impl_method`), generic
 `impl` bodies, and the deep instantiation-budget programs.
+
+### Blueprint: generic associated calls (`Pair[string, i64]::new(...)`)
+
+Next slice after slice 21. The typed recipe is `expression.rs` (the
+`generics.struct_names.contains_key(&name) && current == LBracket` branch):
+
+1. `gid = generics.struct_names[name]`;
+   `args = specialization_type_arguments(...)` (the shared tree gives
+   `Specialization { base: Ident(name), arguments: Vec<Range> }`, so
+   `shared_specialization_types(ranges)` then `instantiate_struct(gid, args,
+   offset)` — the same helper slice 21 added);
+2. `origin` = `generics.struct_origin[sid]` (`(gid, Vec<Type>)`);
+3. `template = generics.struct_defs[origin_gid].name`; look up
+   `generics.generic_impls[template].methods[method]` for `has_receiver`;
+4. `instance = self.instantiate_impl_method(&template, &method, sid, gid,
+   &origin_args, offset)?` → `(id, params, ret)`;
+5. `call_params = if has_receiver { params[1..] } else { params }`;
+   `call_args = call_arguments(...)` — the resolved route's argument
+   lowering (value/view/borrow rules) can serve here;
+6. emit `Expr::Call(id, args, ret)`.
+
+Because `instantiate_impl_method` is `&mut self`, the gate follows the
+method-call pattern: precompute a `generic_calls: HashMap<usize, bool>`
+verdict per call node at lowering time (inside
+`lower_resolved_body_with_captures`, where `&mut self` is available),
+have the scan's Call arm stay permissive for a `Qualified { base:
+Specialization }` callee, and let the recheck consult the precomputed map
+through `supports_field(callee, Role::Call)` (the same carrier the method
+calls use — extend that branch to the Qualified shape). Enum-generic
+`Self::assoc(...)` mirrors the same recipe through
+`generics.enum_origin`/`generics.defs`.
+
+Verification: `examples/generic_impl.ae` (`Pair[string, i64]::new`),
+`tests/run/enum_generic_impls.ae`, then the deny manifest grows by those
+files; parity must stay byte-identical because the emitted `Expr::Call` is
+the same shape the typed route builds.
