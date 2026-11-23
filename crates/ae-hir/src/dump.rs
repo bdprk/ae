@@ -100,9 +100,10 @@ fn dump_statement(statement: &HirStmt<'_>, depth: usize, out: &mut String) {
 }
 
 fn dump_expression(expression: &HirExpr<'_>, depth: usize, out: &mut String) {
-    out.push_str(&format!("{}expr #{} {} {}..{}\n",
+    out.push_str(&format!("{}expr #{} {} {}..{}{}
+",
         "  ".repeat(depth), expression.id.0, expression.kind,
-        expression.span.start, expression.span.end));
+        expression.span.start, expression.span.end, fact(expression.ty)));
     for child in &expression.children {
         dump_expression(child, depth + 1, out);
     }
@@ -114,6 +115,16 @@ fn dump_pattern(pattern: &HirPat<'_>, depth: usize, out: &mut String) {
         pattern.span.start, pattern.span.end, def(pattern.def)));
     for child in &pattern.children {
         dump_pattern(child, depth + 1, out);
+    }
+}
+
+fn fact(fact: Option<ae_resolve::resolve::ExpressionType>) -> String {
+    use ae_resolve::resolve::ExpressionType;
+    match fact {
+        Some(ExpressionType::Checked(scalar)) => format!(" ty=checked {}", scalar.spelling()),
+        Some(ExpressionType::Rejected(_)) => " ty=rejected".to_owned(),
+        Some(ExpressionType::Deferred) => " ty=deferred".to_owned(),
+        None => " ty=none".to_owned(),
     }
 }
 

@@ -347,3 +347,5 @@
 
 - 2026-11-24 08:00 (+08:00): **P1.3 slice 3: DefIds through the HIR tree.** Item headers (struct/enum/trait/impl/function), binding and `for` statements and binding patterns now carry the resolver's `DefId`; `ae emit-hir` prints `def=#N` where one exists. A crate unit test pins unique, dense `HirId`s and `opaque_bodies` empty for a trait-and-impl program. Evidence: ae-hir 1/1, snapshot suite 6/6, Windows suite 522/0, clippy clean.
 
+- 2026-11-24 08:30 (+08:00): **P1.3 slice 4: HIR expressions carry scalar facts.** `HirExpr.ty` holds the resolver's `ExpressionType` for the expression's range and `ae emit-hir` prints `ty=checked i64|f64|bool`, `ty=rejected`, `ty=deferred` or `ty=none`; the HIR snapshot corpus now pins semantic facts, not only identities and spans. Evidence: snapshot suite 6/6, Windows suite 522/0, clippy clean.
+

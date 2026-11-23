@@ -11,11 +11,11 @@ item #4 function area def=#3 107..184
   return: 133..136
   body: 137..184
     stmt #5 return 147..178
-      expr #6 binary 154..177
-        expr #7 field 154..164
-          expr #8 atom 154..159
-        expr #9 field 167..177
-          expr #10 atom 167..172
+      expr #6 binary 154..177 ty=deferred
+        expr #7 field 154..164 ty=deferred
+          expr #8 atom 154..159 ty=deferred
+        expr #9 field 167..177 ty=deferred
+          expr #10 atom 167..172 ty=deferred
       statements: none
 item #11 function report def=#4 188..251
   params:
@@ -23,22 +23,22 @@ item #11 function report def=#4 188..251
   return: 220..223
   body: 224..251
     stmt #12 return 230..249
-      expr #13 call 237..248
-        expr #14 atom 237..241
-        expr #15 atom 242..247
+      expr #13 call 237..248 ty=deferred
+        expr #14 atom 237..241 ty=deferred
+        expr #15 atom 242..247 ty=deferred
       statements: none
 item #16 function main def=#5 253..330
   params: none
   return: (none)
   body: 263..330
     stmt #17 binding 269..301 def=#8
-      expr #18 struct 282..300
-        expr #19 atom 282..288
-        expr #20 atom 297..298
+      expr #18 struct 282..300 ty=deferred
+        expr #19 atom 282..288 ty=deferred
+        expr #20 atom 297..298 ty=checked i64
       statements: none
     stmt #21 print 306..328
-      expr #22 call 312..326
-        expr #23 atom 312..318
-        expr #24 atom 319..325
+      expr #22 call 312..326 ty=deferred
+        expr #23 atom 312..318 ty=deferred
+        expr #24 atom 319..325 ty=deferred
       statements: none
 opaque bodies: none

@@ -8,22 +8,22 @@ item #2 function rename def=#2 58..160
   return: 94..97
   body: 98..160
     stmt #3 assign 108..123
-      expr #4 field 108..117
-        expr #5 atom 108..112
-      expr #6 atom 120..122
+      expr #4 field 108..117 ty=none
+        expr #5 atom 108..112 ty=none
+      expr #6 atom 120..122 ty=deferred
       statements: none
     stmt #7 return 132..154
-      expr #8 call 139..153
-        expr #9 atom 139..142
-        expr #10 field 143..152
-          expr #11 atom 143..147
+      expr #8 call 139..153 ty=deferred
+        expr #9 atom 139..142 ty=deferred
+        expr #10 field 143..152 ty=deferred
+          expr #11 atom 143..147 ty=deferred
       statements: none
 item #12 function static_name def=#3 165..221
   params: none
   return: 185..191
   body: 192..221
     stmt #13 return 202..215
-      expr #14 atom 209..214
+      expr #14 atom 209..214 ty=deferred
       statements: none
 item #15 enum Shape def=#4 225..273
 item #16 function area def=#7 275..444
@@ -32,56 +32,56 @@ item #16 function area def=#7 275..444
   return: 300..303
   body: 304..444
     stmt #17 match 310..442
-      expr #18 atom 316..321
+      expr #18 atom 316..321 ty=deferred
       pat #19 variant 332..353
         pat #20 binding 346..352 def=#12
       pat #25 variant 393..410
         pat #26 binding 404..409 def=#13
       stmt #21 return 359..382
-        expr #22 binary 366..381
-          expr #23 atom 366..372
-          expr #24 atom 375..381
+        expr #22 binary 366..381 ty=deferred
+          expr #23 atom 366..372 ty=deferred
+          expr #24 atom 375..381 ty=deferred
         statements: none
       stmt #27 return 416..434
-        expr #28 call 423..433
-          expr #29 atom 423..426
-          expr #30 atom 427..432
+        expr #28 call 423..433 ty=deferred
+          expr #29 atom 423..426 ty=deferred
+          expr #30 atom 427..432 ty=deferred
         statements: none
 item #31 function main def=#8 446..640
   params: none
   return: (none)
   body: 456..640
     stmt #32 binding 462..506 def=#14
-      expr #33 struct 470..505
-        expr #34 atom 470..473
-        expr #35 atom 482..489
-        expr #36 atom 497..503
+      expr #33 struct 470..505 ty=deferred
+        expr #34 atom 470..473 ty=deferred
+        expr #35 atom 482..489 ty=deferred
+        expr #36 atom 497..503 ty=deferred
       statements: none
     stmt #37 print 511..535
-      expr #38 call 517..533
-        expr #39 field 517..525
-          expr #40 atom 517..518
-        expr #41 atom 526..532
+      expr #38 call 517..533 ty=deferred
+        expr #39 field 517..525 ty=deferred
+          expr #40 atom 517..518 ty=deferred
+        expr #41 atom 526..532 ty=deferred
       statements: none
     stmt #42 print 540..566
-      expr #43 call 546..564
-        expr #44 qualified 546..562
-          expr #45 atom 546..549
+      expr #43 call 546..564 ty=deferred
+        expr #44 qualified 546..562 ty=deferred
+          expr #45 atom 546..549 ty=deferred
       statements: none
     stmt #46 print 571..601
-      expr #47 call 577..599
-        expr #48 atom 577..581
-        expr #49 call 582..598
-          expr #50 qualified 582..595
-            expr #51 atom 582..587
-          expr #52 atom 596..597
+      expr #47 call 577..599 ty=deferred
+        expr #48 atom 577..581 ty=deferred
+        expr #49 call 582..598 ty=deferred
+          expr #50 qualified 582..595 ty=deferred
+            expr #51 atom 582..587 ty=deferred
+          expr #52 atom 596..597 ty=checked i64
       statements: none
     stmt #53 print 606..638
-      expr #54 call 612..636
-        expr #55 atom 612..616
-        expr #56 call 617..635
-          expr #57 qualified 617..627
-            expr #58 atom 617..622
-          expr #59 atom 628..634
+      expr #54 call 612..636 ty=deferred
+        expr #55 atom 612..616 ty=deferred
+        expr #56 call 617..635 ty=deferred
+          expr #57 qualified 617..627 ty=deferred
+            expr #58 atom 617..622 ty=deferred
+          expr #59 atom 628..634 ty=deferred
       statements: none
 opaque bodies: none

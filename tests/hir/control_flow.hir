@@ -5,31 +5,31 @@ item #1 function wrong_condition def=#3 302..382
   return: 326..329
   body: 330..382
     stmt #2 if 336..366
-      expr #3 atom 339..340
+      expr #3 atom 339..340 ty=checked i64
       stmt #4 return 351..360
-        expr #5 atom 358..359
+        expr #5 atom 358..359 ty=checked i64
         statements: none
     stmt #6 return 371..380
-      expr #7 atom 378..379
+      expr #7 atom 378..379 ty=checked i64
       statements: none
 item #8 function wrong_while def=#4 384..468
   params: none
   return: 404..407
   body: 408..468
     stmt #9 while 414..452
-      expr #10 atom 420..426
+      expr #10 atom 420..426 ty=deferred
       stmt #11 return 437..446
-        expr #12 atom 444..445
+        expr #12 atom 444..445 ty=checked i64
         statements: none
     stmt #13 return 457..466
-      expr #14 atom 464..465
+      expr #14 atom 464..465 ty=checked i64
       statements: none
 item #15 function wrong_return def=#5 470..515
   params: none
   return: 491..497
   body: 498..515
     stmt #16 return 504..513
-      expr #17 atom 511..512
+      expr #17 atom 511..512 ty=checked i64
       statements: none
 item #18 function missing_arm def=#6 517..613
   params:
@@ -37,18 +37,18 @@ item #18 function missing_arm def=#6 517..613
   return: 548..551
   body: 552..613
     stmt #19 match 558..611
-      expr #20 atom 564..565
+      expr #20 atom 564..565 ty=deferred
       pat #21 variant 576..588
         pat #22 binding 586..587 def=#9
       stmt #23 return 594..603
-        expr #24 atom 601..602
+        expr #24 atom 601..602 ty=deferred
         statements: none
 item #25 function main def=#7 615..658
   params: none
   return: (none)
   body: 625..658
     stmt #26 print 631..656
-      expr #27 call 637..654
-        expr #28 atom 637..652
+      expr #27 call 637..654 ty=deferred
+        expr #28 atom 637..652 ty=deferred
       statements: none
 opaque bodies: none
