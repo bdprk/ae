@@ -1258,3 +1258,51 @@ sensor_stats — 13 files total, CI-gated).
 Next: effectful `try_*`/`read_file`/`env`, generic-instance structs
 (`Cell[T]`/`ListNode[T]`), method calls on `self`, function-value calls,
 concurrency builtins in bodies (`cell_load`, `task_yield`).
+
+## Blueprint: method calls on the resolved route (next slice, P1.1)
+
+`AE_DENY_LEGACY_ROUTE=1` names the first target: `examples/struct_mut_borrow.ae:17:30`
+(`return self.doubled();` inside `inc_doubled`). What the typed route does,
+and what the resolved route must mirror:
+
+- Method signatures live in `generics.inherent`, keyed `"{TypeName}#{method}"`
+  (`declarations.rs` `collect_inherent_impl`), with
+  `MethodDef { signature: Signature { id, params, ret, .. }, receiver }`.
+  **`params` excludes the receiver**; `receiver` is
+  `Some(Struct/StructMut/StructRef)` for structs and a by-value type for
+  enums (enum receivers are by value only). Methods are *not* in
+  `self.functions`, so the plain-call arm cannot serve them.
+- The shared tree gives a method call as
+  `Call { callee: Field { base, name }, arguments }`. The resolved Call arm
+  currently treats every `Field` callee as the pointer `deref()` case
+  (`parser.rs`'s Call arm, "type ... has no fields or methods"), which is
+  what blocks `self.m()`.
+- Implement `lower_method_call(method, operand, base_ty, expression,
+  arguments, slots) -> Option<Result<...>>` and call it from the Field-callee
+  branch after the pointer case:
+  - `type_name` from `base_ty` (`self.structs[sid].name`, or `Type::Enum`'s
+    name); look up the key; `None` → return `None` so the pointer error stays
+    for real non-methods.
+  - Receiver bookkeeping mirrors the typed postfix branch (expression.rs,
+    the `(Expr::Variable(id), Struct|StructMut)` arm): a `&mut self` method
+    needs a mutable binding (E0103 wording), pushes `mut_borrows`, and defers
+    a view conflict when only view borrows are active; a `&self` method
+    pushes `call_borrows` when not borrowed; a by-value receiver moves the
+    slot (mark `moved`). Receiver argument:
+    `Argument::Borrow(slot, matches!(base_ty, Type::Struct(_)))`.
+  - Remaining arguments lower against `signature.params`; for v1 accept
+    scalar/`string`/owned-struct values (the plain-call argument rules) and
+    return `None` (fall back) for borrow parameters.
+  - Build `Expr::Call(signature.id, args, signature.ret)`; admit returns by
+    the same rule `supports_call` uses.
+- Scan side: `scalar_body_expression`'s Call arm needs a clause for a
+  `Field` callee whose base is a bare ident (permissive; the lowering's
+  re-check decides and falls back safely).
+- Re-check the pinned diagnostics that already mention method receivers:
+  `tests/ui/mut_borrow_of_readonly.ae` (9:26, read-only receiver), and the
+  `struct_mut_borrow.ae` outputs; parity will catch C-shape drift.
+
+After this: effectful `try_*`/`read_file`/`env` (needs the typed `effects`
+path), generic-instance structs (`cached_struct_specialization` + field types
+from the instantiated `StructDef`), and concurrency builtins in bodies
+(`cell_load`/`task_yield`).
