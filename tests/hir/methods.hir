@@ -1,7 +1,7 @@
 hir methods.ae
-item #0 struct Doc 0..41
-item #1 impl Doc 43..223
-item #2 function rename 58..160
+item #0 struct Doc def=#0 0..41
+item #1 impl Doc def=#1 43..223
+item #2 function rename def=#2 58..160
   params:
     self: 73..77
     to: 79..81
@@ -18,15 +18,15 @@ item #2 function rename 58..160
         expr #10 field 143..152
           expr #11 atom 143..147
       statements: none
-item #12 function static_name 165..221
+item #12 function static_name def=#3 165..221
   params: none
   return: 185..191
   body: 192..221
     stmt #13 return 202..215
       expr #14 atom 209..214
       statements: none
-item #15 enum Shape 225..273
-item #16 function area 275..444
+item #15 enum Shape def=#4 225..273
+item #16 function area def=#7 275..444
   params:
     shape: 283..288
   return: 300..303
@@ -34,9 +34,9 @@ item #16 function area 275..444
     stmt #17 match 310..442
       expr #18 atom 316..321
       pat #19 variant 332..353
-        pat #20 binding 346..352
+        pat #20 binding 346..352 def=#12
       pat #25 variant 393..410
-        pat #26 binding 404..409
+        pat #26 binding 404..409 def=#13
       stmt #21 return 359..382
         expr #22 binary 366..381
           expr #23 atom 366..372
@@ -47,11 +47,11 @@ item #16 function area 275..444
           expr #29 atom 423..426
           expr #30 atom 427..432
         statements: none
-item #31 function main 446..640
+item #31 function main def=#8 446..640
   params: none
   return: (none)
   body: 456..640
-    stmt #32 binding 462..506
+    stmt #32 binding 462..506 def=#14
       expr #33 struct 470..505
         expr #34 atom 470..473
         expr #35 atom 482..489

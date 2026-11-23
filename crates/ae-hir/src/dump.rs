@@ -1,7 +1,8 @@
 //! Deterministic text form of the HIR view. `ae emit-hir` prints this and
 //! `tests/hir` snapshots pin it: items, statements, expressions and patterns
-//! in source order, each with its stable HirId and byte span, plus the
-//! opaque bodies the syntax tree still records only as ranges.
+//! in source order, each with its stable HirId, `DefId` when the resolver
+//! ran, and byte span, plus the opaque bodies the syntax tree still records
+//! only as ranges.
 
 use crate::{HirExpr, HirItem, HirModule, HirPat, HirStmt, HirStmtKind};
 
@@ -14,8 +15,8 @@ pub fn dump(module: &HirModule<'_>) -> String {
     for item in &module.items {
         match item {
             HirItem::Function(function) => {
-                out.push_str(&format!("item #{} function {} {}..{}\n",
-                    function.header.id.0, function.header.name,
+                out.push_str(&format!("item #{} function {}{} {}..{}\n",
+                    function.header.id.0, function.header.name, def(function.header.def),
                     function.header.span.start, function.header.span.end));
                 if function.params.is_empty() {
                     out.push_str("  params: none\n");
@@ -43,28 +44,25 @@ pub fn dump(module: &HirModule<'_>) -> String {
                     statements(&closure.body.statements, 2, &mut out);
                 }
             }
-            HirItem::Struct(header) => out.push_str(&format!("item #{} struct {} {}..{}\n",
-                header.id.0, header.name, header.span.start, header.span.end)),
-            HirItem::Enum(header) => out.push_str(&format!("item #{} enum {} {}..{}\n",
-                header.id.0, header.name, header.span.start, header.span.end)),
+            HirItem::Struct(header) => out.push_str(&format!("item #{} struct {}{} {}..{}\n",
+                header.id.0, header.name, def(header.def), header.span.start, header.span.end)),
+            HirItem::Enum(header) => out.push_str(&format!("item #{} enum {}{} {}..{}\n",
+                header.id.0, header.name, def(header.def), header.span.start, header.span.end)),
             HirItem::Trait(trait_item) => {
-                out.push_str(&format!("item #{} trait {} {}..{}
-",
-                    trait_item.header.id.0, trait_item.header.name,
+                out.push_str(&format!("item #{} trait {}{} {}..{}\n",
+                    trait_item.header.id.0, trait_item.header.name, def(trait_item.header.def),
                     trait_item.header.span.start, trait_item.header.span.end));
                 for method in &trait_item.methods {
-                    out.push_str(&format!("  method #{} {} {}..{}
-", method.id.0, method.name, method.span.start, method.span.end));
+                    out.push_str(&format!("  method #{} {} {}..{}\n",
+                        method.id.0, method.name, method.span.start, method.span.end));
                     for (name, span) in &method.params {
-                        out.push_str(&format!("    param {name}: {}..{}
-", span.start, span.end));
+                        out.push_str(&format!("    param {name}: {}..{}\n", span.start, span.end));
                     }
-                    out.push_str(&format!("    return: {}..{}
-", method.returns.start, method.returns.end));
+                    out.push_str(&format!("    return: {}..{}\n", method.returns.start, method.returns.end));
                 }
             }
-            HirItem::Impl(header) => out.push_str(&format!("item #{} impl {} {}..{}\n",
-                header.id.0, header.name, header.span.start, header.span.end)),
+            HirItem::Impl(header) => out.push_str(&format!("item #{} impl {}{} {}..{}\n",
+                header.id.0, header.name, def(header.def), header.span.start, header.span.end)),
         }
     }
     if module.opaque_bodies.is_empty() {
@@ -89,9 +87,9 @@ fn statements(statements: &[HirStmt<'_>], depth: usize, out: &mut String) {
 }
 
 fn dump_statement(statement: &HirStmt<'_>, depth: usize, out: &mut String) {
-    out.push_str(&format!("{}stmt #{} {} {}..{}\n",
+    out.push_str(&format!("{}stmt #{} {} {}..{}{}\n",
         "  ".repeat(depth), statement.id.0, kind(statement.kind),
-        statement.span.start, statement.span.end));
+        statement.span.start, statement.span.end, def(statement.def)));
     for expression in &statement.expressions {
         dump_expression(expression, depth + 1, out);
     }
@@ -111,11 +109,18 @@ fn dump_expression(expression: &HirExpr<'_>, depth: usize, out: &mut String) {
 }
 
 fn dump_pattern(pattern: &HirPat<'_>, depth: usize, out: &mut String) {
-    out.push_str(&format!("{}pat #{} {} {}..{}\n",
+    out.push_str(&format!("{}pat #{} {} {}..{}{}\n",
         "  ".repeat(depth), pattern.id.0, pattern.kind,
-        pattern.span.start, pattern.span.end));
+        pattern.span.start, pattern.span.end, def(pattern.def)));
     for child in &pattern.children {
         dump_pattern(child, depth + 1, out);
+    }
+}
+
+fn def(def: Option<crate::DefId>) -> String {
+    match def {
+        Some(id) => format!(" def=#{}", id.0),
+        None => String::new(),
     }
 }
 

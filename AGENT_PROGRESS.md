@@ -345,3 +345,5 @@
 
 - 2026-11-24 07:20 (+08:00): **P1.3 slice 2: trait bodies parsed into syntax and HIR.** `DeclarationKind::Trait` now carries `Vec<TraitMethod>` with parameter/return ranges and a method span; `ae emit-hir` prints each trait method with its `HirId`, and the HIR fixture reports `opaque bodies: none` (closure bodies were already parsed by the resolver). The compiler's trait semantic pass still reads the same tokens; the resolver pattern matches the new shape. The new parser immediately exposed an invalid invented fixture (`fn area(self) -> i64;`) — rewritten to the real `fn area(shape: T) -> i64;` grammar. Evidence: snapshot suite 6/6, Windows suite 522/0, clippy clean.
 
+- 2026-11-24 08:00 (+08:00): **P1.3 slice 3: DefIds through the HIR tree.** Item headers (struct/enum/trait/impl/function), binding and `for` statements and binding patterns now carry the resolver's `DefId`; `ae emit-hir` prints `def=#N` where one exists. A crate unit test pins unique, dense `HirId`s and `opaque_bodies` empty for a trait-and-impl program. Evidence: ae-hir 1/1, snapshot suite 6/6, Windows suite 522/0, clippy clean.
+

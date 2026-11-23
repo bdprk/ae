@@ -1,10 +1,10 @@
 hir calls.ae
-item #0 function apply 0..109
+item #0 function apply def=#0 0..109
   params:
     value: 9..14
   return: 24..27
   body: 28..109
-    stmt #1 binding 34..81
+    stmt #1 binding 34..81 def=#5
       expr #2 closure 47..80
       statements: none
     stmt #3 return 86..107
@@ -18,7 +18,7 @@ item #0 function apply 0..109
         expr #9 atom 72..73
         expr #10 atom 76..77
       statements: none
-item #12 function bump 111..207
+item #12 function bump def=#1 111..207
   params:
     pointer: 119..126
   return: 141..144
@@ -30,14 +30,14 @@ item #12 function bump 111..207
       stmt #16 return 190..199
         expr #17 atom 197..198
         statements: none
-item #18 function main 209..421
+item #18 function main def=#2 209..421
   params: none
   return: (none)
   body: 219..421
-    stmt #19 binding 225..239
+    stmt #19 binding 225..239 def=#7
       expr #20 atom 237..238
       statements: none
-    stmt #21 binding 244..285
+    stmt #21 binding 244..285 def=#8
       expr #22 call 256..284
         expr #23 atom 256..260
         expr #24 address-cast 261..283
@@ -53,7 +53,7 @@ item #18 function main 209..421
         expr #31 atom 332..337
         expr #32 atom 338..340
       statements: none
-    stmt #33 binding 348..372
+    stmt #33 binding 348..372 def=#9
       expr #34 vector 362..371
         expr #35 atom 366..367
         expr #36 atom 369..370

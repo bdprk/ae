@@ -1,11 +1,11 @@
 hir traits.ae
-item #0 trait Area 0..44
+item #0 trait Area def=#0 0..44
   method #1 area 17..42
     param shape: 25..30
     return: 38..41
-item #2 struct Square 46..78
-item #3 impl Area 80..186
-item #4 function area 107..184
+item #2 struct Square def=#1 46..78
+item #3 impl Area def=#2 80..186
+item #4 function area def=#3 107..184
   params:
     shape: 115..120
   return: 133..136
@@ -17,7 +17,7 @@ item #4 function area 107..184
         expr #9 field 167..177
           expr #10 atom 167..172
       statements: none
-item #11 function report 188..251
+item #11 function report def=#4 188..251
   params:
     shape: 207..212
   return: 220..223
@@ -27,11 +27,11 @@ item #11 function report 188..251
         expr #14 atom 237..241
         expr #15 atom 242..247
       statements: none
-item #16 function main 253..330
+item #16 function main def=#5 253..330
   params: none
   return: (none)
   body: 263..330
-    stmt #17 binding 269..301
+    stmt #17 binding 269..301 def=#8
       expr #18 struct 282..300
         expr #19 atom 282..288
         expr #20 atom 297..298
