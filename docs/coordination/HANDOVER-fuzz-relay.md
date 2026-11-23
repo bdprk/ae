@@ -1675,3 +1675,34 @@ the builder can classify today. Next: teach the Match scan arm to accept
 `self` when the body's `receiver` is an enum (the same `impl_self`/
 receiver knowledge the lowering already has), then the file joins the deny
 manifest.
+
+### Cloud-gate operating notes (fleet, 2026-11-23)
+
+- Reusable entry: `scripts/cloud_gate.sh [log]` (build → workspace tests →
+  script tests → layering → route report → deny manifest → sanitize → 50k
+  mutation gate; every section keeps its raw tail). `ROUTE_MAX` sets the
+  ratchet.
+- `eva` (`$HOME` on the 20 GiB `/data` volume) reached 94% from
+  *other sessions'* data after two gate clones: the third clone died with
+  `No space left on device`. Use `evaluate-3`/`evaluate-1` for clones (16 GiB
+  free on `/data`); keep at most one clone per host, update it with
+  `git fetch /tmp/bundle main && git reset --hard FETCH_HEAD` instead of
+  cloning per HEAD.
+- Host load across the fleet is 7–14 (4 cores) because of other sessions and
+  our own fuzz jobs; gate runs use `nice 10`, fuzz `nice 19`.
+
+### The enum `match self` gap (next slice for `enum_generic_impls`)
+
+The instantiated generic-enum method bodies (`is_some(self)`,
+`unwrap_or(self, ..)`) fall back at `match self`: the scan's Match arm needs
+the subject's def in `enum_bindings`, and a by-value `self` dispatch has no
+spelling the builder classifies as an enum. Do NOT bake a receiver-dependent
+mark into `resolved_expressions` — that cell is shared across a file's
+functions (or reused across instantiation parses), so the mark would be
+order-dependent (exactly the hazard class already recorded above). The
+workable shape: pass the body's receiver-kind knowledge into the eligibility
+check as a parameter (e.g. extend the `supports_field` carrier or add a
+parallel `supports_subject` closure to `scalar_body_statement`), so the Match
+arm can answer "subject is `self` and the body's receiver is an enum" without
+touching the shared cache. Gate order for that slice: unit suite → deny on
+`enum_generic_impls` → parity → 50k.
