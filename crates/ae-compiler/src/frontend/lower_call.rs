@@ -271,9 +271,23 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    pub(super) fn lower_propagating_call(&mut self) -> Result<Statement, ae_span::Diagnostic> {
+    pub(super) fn lower_propagating_call(
+        &mut self,
+        operand: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Statement, ae_span::Diagnostic> {
+        // A direct call or a variant construction the shared route already
+        // lowers needs no typed token parse; anything else keeps the fallback.
+        let shared = self.resolved_expressions().direct_calls.contains(&operand.range.start)
+            || self.resolved_expressions().enum_constructors.contains(&operand.range.start);
         let (value, ty) = match self.lower_shared_value(Some(Kind::Question), true) {
             Some(value) => value,
+            None if shared => {
+                self.seek_scalar_offset(operand.range.start);
+                let lowered = self.lower_scalar_body_expression(operand, slots)?;
+                self.seek_scalar_offset(operand.range.end);
+                lowered
+            }
             None => self.fallback_expression(0, true)?,
         };
         if *self.current() != Kind::Question {

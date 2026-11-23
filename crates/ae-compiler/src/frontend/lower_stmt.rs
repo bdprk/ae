@@ -46,6 +46,13 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(operand.range.start);
                     let (value, call_ty) = match self.lower_shared_value(Some(Kind::Question), true) {
                         Some(pair) => pair,
+                        None if self.resolved_expressions().direct_calls.contains(&operand.range.start)
+                            || self.resolved_expressions().enum_constructors.contains(&operand.range.start) => {
+                                self.seek_scalar_offset(operand.range.start);
+                                let lowered = self.lower_scalar_body_expression(operand, slots)?;
+                                self.seek_scalar_offset(operand.range.end);
+                                lowered
+                            }
                         None => self.fallback_expression(0, true)?,
                     };
                     if *self.current() != Kind::Question {
@@ -105,9 +112,6 @@ impl<'a> Parser<'a> {
                         let literal = self.closure_literal()?;
                         self.seek_scalar_offset(initializer.range.end);
                         literal
-                    } else if iterator_constructor(initializer).is_some() {
-                        self.seek_scalar_offset(initializer.range.start);
-                        self.fallback_expression(0, false)?
                     } else {
                         let lowered = self.lower_scalar_body_expression(initializer, slots)?;
                         self.seek_scalar_offset(initializer.range.end);
@@ -556,7 +560,7 @@ impl<'a> Parser<'a> {
             StatementKind::Expr { propagates: true, .. } => {
                 let operand = propagation_call(statement).expect("resolved propagation eligibility");
                 self.seek_scalar_offset(operand.range.start);
-                self.lower_propagating_call()?
+                self.lower_propagating_call(operand, slots)?
             }
             StatementKind::Expr { .. } if bare_call_statement(statement).is_some() => {
                 let StatementKind::Expr { value, .. } = &statement.kind else { unreachable!("unknown call statement") };

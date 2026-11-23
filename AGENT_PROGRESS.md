@@ -363,3 +363,5 @@
 
 - 2026-11-24 12:15 (+08:00): **P1.4 slice 4: spawn handles lower from the shared tree; typed fallbacks 67 -> 54.** `spawn_statement` now receives the shared call node and lowers `task_spawn`'s handle argument through `lower_scalar_body_expression`, preserving the typed route's comma-position diagnostic (the `task_spawn_non_exec` UI snapshot caught an off-by-one before the fix). The typed closure machinery still owns the callable. Evidence: Windows and WSL suites 532/0, both 50k mutation sweeps green, deny 176/176, clippy clean.
 
+- 2026-11-24 13:10 (+08:00): **P1.4 slice 5: propagating calls and iterator constructors lower from the tree; typed fallbacks 54 -> 35.** Propagating operands marked as direct calls or variant constructions go through the shared lowering; the `iterator_constructor` binding delegation was unnecessary because the builtin lowering already yields the same `Tokens`/`StrVec` types. Evidence: Windows and WSL suites 532/0, both 50k mutation sweeps green, deny 176/176, clippy clean.
+
