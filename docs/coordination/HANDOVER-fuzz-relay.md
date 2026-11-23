@@ -1564,3 +1564,16 @@ Type)>`, default empty in all four constructors), fill it in
 it from the lowering's Field-callee branch, and clear it when the body
 returns (the 50k sweep will catch a stale map across bodies — the default
 10k sample may not, so run the ignored gate with this slice).
+
+### Hazard discovered by the reverted generic-method attempt
+
+`instantiate_impl_method` parses a method body as a side effect, and calling it
+from the body-route *precompute* corrupts the enclosing parser (`names`,
+`binding_ranges`), producing a silent fallback whose visibility depends on
+which probe env vars are set (see `agent-failure-log/2026-11-23.md`). The next
+attempt must resolve generic-instance methods **lazily in the lowering's
+Field-callee branch** — `&mut self` is legitimate there, and a binding like
+`let p = Pair[string, i64]::new(..)` has already created the instance by the
+time `p.count()` lowers — with the recheck made permissive for struct
+receivers instead of consulting a precomputed instance map. The pure
+`inherent` precompute stays as it is.
