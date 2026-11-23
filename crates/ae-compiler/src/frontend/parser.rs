@@ -3000,7 +3000,9 @@ impl<'a> Parser<'a> {
                     let (statement, bound_ty) = self.propagate_statement(value, call_ty, Some(slot))?;
                     self.pos += 1;
                     self.take(Kind::Semi)?;
-                    let bound_ty = bound_ty.expect("a binding propagation always produces a payload type");
+                    let Some(bound_ty) = bound_ty else {
+                        return Err(self.fail("'?' propagates a result enum, but this call does not return one"));
+                    };
                     (statement, bound_ty)
                 } else if let ae_syntax::expression::ExpressionKind::Array(elements) = &initializer.kind {
                     if elements.is_empty() {
@@ -3121,7 +3123,8 @@ impl<'a> Parser<'a> {
                             return Err(self.immutable_binding_error(diagnostic, slot));
                         }
                     }
-                    let field = field_ty_in(sid, name, self.structs).expect("eligible receiver field");
+                    let field = field_ty_in(sid, name, self.structs)
+                        .ok_or_else(|| self.error_at(target.range.start, &format!("struct '{}' has no field '{name}'", self.structs[sid].name)))?;
                     let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
                     self.seek_scalar_offset(statement.range.end);
                     self.check_field_value_type(name, field, actual, None)?;
@@ -3134,11 +3137,12 @@ impl<'a> Parser<'a> {
                     // binding must be mutable (E0103), the index and the
                     // element must be i64 (E0201 for the index).
                     let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
-                        unreachable!("scalar store eligibility");
+                        return Err(self.error_at(base.range.start, "an index store needs a named container"));
                     };
                     let def = self.resolved_expressions().scalar_writes.get(&base.range.start)
                         .or_else(|| self.resolved_expressions().scalar_reads.get(&base.range.start))
-                        .copied().expect("resolved store base");
+                        .copied()
+                        .ok_or_else(|| self.error_at(base.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
                     let (slot, ty) = slots[&def];
                     // `m[key] = v` inserts or overwrites in a map: the key is
                     // copied by the runtime, the value must match the map's
@@ -3458,7 +3462,11 @@ impl<'a> Parser<'a> {
                 return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
             }
             StatementKind::Expr { .. } => {
-                let status = exit_status_operand(statement).expect("resolved exit eligibility");
+                // Not `exit` and not a bare call the earlier arm took (a bare
+                // method call, say): the typed route's statement rule.
+                let Some(status) = exit_status_operand(statement) else {
+                    return Err(self.error_at(statement.range.start, "a statement that only calls a function must end with '?' to propagate its result"));
+                };
                 let (code, ty) = self.lower_scalar_body_expression(status, slots)?;
                 self.seek_scalar_offset(status.range.end);
                 self.finish_exit(code, ty)?
@@ -3495,7 +3503,7 @@ impl<'a> Parser<'a> {
                     Statement::Continue(self.loop_labels.last().copied().flatten())
                 }
             }
-            _ => unreachable!("scalar body eligibility"),
+            _ => return Err(self.error_at(statement.range.start, "this statement is not supported by the body route")),
         };
         self.seek_scalar_offset(statement.range.end);
         Ok(lowered)
@@ -3828,7 +3836,14 @@ impl<'a> Parser<'a> {
                                 _ => return Err(self.fail("'Self' does not name a struct here; write the struct's name")),
                             }
                         } else {
-                            *self.struct_names.get(name).expect("scalar construction target")
+                            // A permissive scan can hand a construction whose
+                            // name the registry does not hold (a mutant, or a
+                            // name bound only as a value): the typed route
+                            // reads it as a variable, so report the same.
+                            match self.struct_names.get(name) {
+                                Some(&sid) => sid,
+                                None => return Err(self.error_at(target.range.start, &format!("unknown variable '{name}'")).with_code("E0101")),
+                            }
                         }
                     }
                     // A generic instance (`Cell[T] { .. }`): the body was parsed
@@ -3836,7 +3851,7 @@ impl<'a> Parser<'a> {
                     // concrete `StructDef` under the instance name.
                     ExpressionKind::Specialization { base, arguments } => {
                         let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
-                            unreachable!("scalar construction eligibility");
+                            return Err(self.error_at(base.range.start, "a generic struct literal needs a named target"));
                         };
                         if let Some(sid) = self.cached_struct_specialization(name, arguments) {
                             sid
@@ -3856,7 +3871,7 @@ impl<'a> Parser<'a> {
                             self.instantiate_struct(gid, args, target.range.start)?
                         }
                     }
-                    _ => unreachable!("scalar construction eligibility"),
+                    _ => return Err(self.error_at(target.range.start, "this construction form is not supported by the body route")),
                 };
                 let mut values: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
                 for field in fields {
@@ -4460,7 +4475,7 @@ impl<'a> Parser<'a> {
                 let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
                 (Expr::VecLit(values, ty, line, column), ty)
             }
-            _ => unreachable!("scalar expression eligibility"),
+            _ => return Err(self.error_at(expression.range.start, "this expression is not supported by the body route")),
         })
     }
 
