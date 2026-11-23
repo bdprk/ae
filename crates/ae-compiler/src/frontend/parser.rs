@@ -3868,12 +3868,19 @@ impl<'a> Parser<'a> {
                 if let ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind {
                     // A struct parameter's scalar field read: the slot carries
                     // the struct type with its registry id, so the field type
-                    // comes straight from the compiler's own table.
-                    let def = self.resolved_expressions().scalar_reads[&base.range.start];
-                    let (slot, struct_ty) = slots[&def];
+                    // comes straight from the compiler's own table. A
+                    // permissive scan can hand the lowering a chain the
+                    // resolver never marked (a mutant, or a name the body
+                    // never bound): that is a diagnostic, never a panic.
+                    let Some(&def) = self.resolved_expressions().scalar_reads.get(&base.range.start) else {
+                        return Err(self.error_at(expression.range.start, &format!("unknown variable '{base_name}'")).with_code("E0101"));
+                    };
+                    let Some(&(slot, struct_ty)) = slots.get(&def) else {
+                        return Err(self.error_at(expression.range.start, &format!("unknown variable '{base_name}'")).with_code("E0101"));
+                    };
                     let sid = match struct_ty {
                         Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
-                        _ => unreachable!("resolved struct binding"),
+                        other => return Err(self.error_at(expression.range.start, &format!("type {} has no fields or methods", other.name(self.ctx)))),
                     };
                     self.seek_scalar_offset(base.range.start);
                     if self.moved.contains(&slot) {
