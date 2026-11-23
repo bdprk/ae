@@ -1,39 +1,62 @@
 #!/bin/bash
 # Cloud-gate leg (P1.1 verification): run the full Linux gate suite on a
-# clean clone, on a real Linux host (e.g. an InstaBox sandbox), and keep the
-# raw tails in the log so a compile failure cannot look like "no output".
+# clean clone, on a real Linux host (e.g. an InstaBox sandbox), and keep each
+# section's verdict line (plus the failure lines when a section fails) in the
+# log, so a hidden failure cannot look like a green run.
 #
 # Usage: scripts/cloud_gate.sh [log-path]
-#   ROUTE_MAX  the route-report ratchet ceiling (default 297)
+#   ROUTE_MAX  the route-report ratchet ceiling (default 224)
 #
-# The caller must build first, and the `ae` binary must exist at
-# target/debug/ae before route_report/deny_route/verify run; building here is
-# intentional (a fresh clone has no binary).
+# The script builds first: a fresh clone has no `ae` binary, and
+# route_report/deny_route/verify need it at the target dir.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 # shellcheck disable=SC1091
 source "$HOME/.cargo/env" 2>/dev/null || true
 LOG=${1:-/tmp/ae-cloud-gate.log}
-: > "$LOG"
+STEP=/tmp/ae-cloud-step.log
+VERDICT=0
+step() {
+  local name=$1
+  shift
+  if "$@" > "$STEP" 2>&1; then
+    echo "ok: $name"
+  else
+    echo "FAILED: $name"
+    VERDICT=1
+  fi
+}
 {
   date -u
   git log --oneline -1
   echo "== cargo build"
-  cargo build --workspace --locked 2>&1 | tail -2
+  step "cargo build" cargo build --workspace --locked
   echo "== cargo test"
-  cargo test --workspace --locked 2>&1 | tail -20
+  step "cargo test" cargo test --workspace --locked
+  grep -E "^test result:" "$STEP" | tail -6
+  grep -E "^(error|thread '.*' panicked)" "$STEP" | head -10
   echo "== script unit tests"
-  python3 -m unittest discover -s scripts -p "test_*.py" 2>&1 | tail -2
+  step "script tests" python3 -m unittest discover -s scripts -p "test_*.py"
+  grep -E "^(FAILED|OK)" "$STEP" | tail -2
   echo "== std layering"
-  python3 scripts/std_layering.py
+  step "std layering" python3 scripts/std_layering.py
+  tail -2 "$STEP"
   echo "== route report"
-  python3 scripts/route_report.py --max "${ROUTE_MAX:-297}" 2>&1 | tail -3
+  step "route report" python3 scripts/route_report.py --max "${ROUTE_MAX:-224}"
+  grep -E "fallbacks=|check skipped \(fails standalone\)" "$STEP" | tail -5
   echo "== deny manifest"
-  python3 scripts/deny_route.py 2>&1 | tail -2
+  step "deny manifest" python3 scripts/deny_route.py
+  grep -E "deny-legacy:" "$STEP" | tail -1
   echo "== generated C (sanitizers)"
-  python3 scripts/verify_generated_c.py --sanitize 2>&1 | tail -3
+  step "generated C" python3 scripts/verify_generated_c.py --sanitize
+  grep -E "^(PASS|FAIL)" "$STEP" | tail -4
   echo "== 50k mutation gate"
-  cargo test -p ae-compiler --lib mutated_sources_never_panic_50k -- --ignored 2>&1 | tail -2
+  step "50k mutation gate" cargo test -p ae-compiler --lib mutated_sources_never_panic_50k -- --ignored
+  grep -E "^test result:" "$STEP" | tail -1
   date -u
-  echo CLOUD_GATE_DONE
+  if [ "$VERDICT" -ne 0 ]; then
+    echo "CLOUD_GATE_FAILED"
+  else
+    echo "CLOUD_GATE_DONE"
+  fi
 } > "$LOG" 2>&1
