@@ -46,8 +46,7 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(operand.range.start);
                     let (value, call_ty) = match self.lower_shared_value(Some(Kind::Question), true) {
                         Some(pair) => pair,
-                        None if self.resolved_expressions().direct_calls.contains(&operand.range.start)
-                            || self.resolved_expressions().enum_constructors.contains(&operand.range.start) => {
+                        None if self.shared_propagation_operand(operand) => {
                                 self.seek_scalar_offset(operand.range.start);
                                 let lowered = self.lower_scalar_body_expression(operand, slots)?;
                                 self.seek_scalar_offset(operand.range.end);

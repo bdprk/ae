@@ -29,6 +29,22 @@ impl<'a> Parser<'a> {
     /// parser instead of lowering the shared syntax node. With
     /// `AE_ROUTE_REPORT` set it names its token, so the dual-parser gap is
     /// measurable and a ratchet can drive it to zero.
+    /// Whether a propagation operand is a shape the shared route can lower:
+    /// a direct call (marked by the scan), a pure builtin call, or a variant
+    /// construction. Anything else keeps the typed token parse.
+    pub(super) fn shared_propagation_operand(&self, operand: &ae_syntax::expression::Expression) -> bool {
+        use ae_syntax::expression::ExpressionKind;
+        let ExpressionKind::Call { callee, .. } = &operand.kind else { return false };
+        match &callee.kind {
+            ExpressionKind::Atom(Kind::Ident(name)) => {
+                self.resolved_expressions().direct_calls.contains(&operand.range.start)
+                    || (resolved_builtin(name) && !typed_intrinsic(name))
+            }
+            ExpressionKind::Qualified { .. } => self.resolved_expressions().enum_constructors.contains(&operand.range.start),
+            _ => false,
+        }
+    }
+
     /// The slot a resolved definition names, or the typed route's unknown-
     /// variable diagnostic when a permissive scan handed the lowering an id
     /// the current scope does not bind. A mutant gets a diagnostic, never a
