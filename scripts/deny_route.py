@@ -16,6 +16,10 @@ import sys
 
 # Sorted so the manifest reads like a checklist; add new entries in place.
 FILES = [
+    "tests/run/batch_core_incremental.ae",
+    "tests/run/batch_core_ranges.ae",
+    "tests/run/batch_core_semver.ae",
+    "tests/run/batch_core_structures.ae",
     "examples/borrow.ae",
     "examples/concat.ae",
     "examples/field_view.ae",

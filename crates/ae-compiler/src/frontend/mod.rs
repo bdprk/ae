@@ -727,6 +727,10 @@ struct ResolvedExpressions {
     closure_capture_reads: HashSet<usize>,
     array_definitions: HashSet<ae_resolve::DefId>,
     struct_definitions: HashSet<ae_resolve::DefId>,
+    /// The struct name each struct-typed local or parameter spells, resolved
+    /// through the registry: a `Named` spelling reaches this module's def
+    /// table, while an imported type (`Unknown`) names the struct directly.
+    struct_definition_names: HashMap<ae_resolve::DefId, String>,
     /// Struct-typed bindings that hold the struct by value (spelled `Named`,
     /// not borrowed). `return binding;` moves one out of the body.
     owned_struct_bindings: HashSet<ae_resolve::DefId>,

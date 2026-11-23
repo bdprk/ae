@@ -1367,3 +1367,23 @@ Next: borrow parameters on methods (`&string`/`&vec` method params — the
 gate currently requires value parameters), `Signature`-driven associated
 calls, generic-instance methods via `instantiate_impl_method`, effectful
 builtins, generic-instance structs, concurrency builtins.
+
+## P1.1 slice 17 landed: imported struct parameters
+
+The resolver spells a type the module does not own as `Unknown("Name")`, so
+every std module function taking an imported struct (`SemVerOrder`,
+`DepNode`, `CrateInterface`, …) missed the struct-receiver map and fell back
+at its first field read. The map is now precomputed by name:
+`struct_definition_names` (def → name) fills from `Named` through this
+module's def table and from `Unknown` straight through the registry, and
+`field_owner_struct` answers from it. `ir_version_req`, `ir_semver_order`,
+`ir_dep_graph` and friends route.
+
+Coverage: 351 → **342**, files with fallbacks 102 → 101. Four heavy
+`batch_core_*` files are now legacy-free and joined the deny manifest
+(`batch_core_incremental`, `ranges`, `semver`, `structures` — 19 files
+total, CI-gated).
+
+Next: function-value calls (`f(x)` — `FnValue`/`FnCall`), effectful
+`try_*`/`read_file`, generic-instance structs, concurrency builtins
+(`cell_load`/`task_yield`), trait dispatch.

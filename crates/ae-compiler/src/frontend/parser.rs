@@ -77,7 +77,6 @@ fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
 fn field_owner_struct(
     base: &ae_syntax::expression::Expression,
     resolved: &ResolvedExpressions,
-    resolution: &ae_resolve::resolve::Resolution,
     struct_names: &HashMap<String, usize>,
     structs: &[StructDef],
 ) -> Option<usize> {
@@ -85,19 +84,15 @@ fn field_owner_struct(
         ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
             // Reads and writes are keyed by occurrence offset, so one merged
             // lookup answers both: a read base names its binding, a store base
-            // names the `&mut` view it writes through.
+            // names the `&mut` view it writes through. The pre-resolved name
+            // map answers for this module's structs and imported ones alike.
             let def = resolved.scalar_reads.get(&base.range.start)
                 .or_else(|| resolved.scalar_writes.get(&base.range.start))?;
-            if !resolved.struct_definitions.contains(def) {
-                return None;
-            }
-            let entry = resolution.defs.get(def.0 as usize)?;
-            let item = definition_struct_item(entry)?;
-            let item_entry = resolution.defs.get(item.0 as usize)?;
-            struct_names.get(&item_entry.name).copied()
+            let name = resolved.struct_definition_names.get(def)?;
+            struct_names.get(name.as_str()).copied()
         }
         ae_syntax::expression::ExpressionKind::Field { base: inner_base, name } => {
-            let sid = field_owner_struct(inner_base, resolved, resolution, struct_names, structs)?;
+            let sid = field_owner_struct(inner_base, resolved, struct_names, structs)?;
             let fty = field_ty_in(sid, name, structs)?;
             match fty {
                 Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => Some(sid),
@@ -171,20 +166,6 @@ fn receiver_field_type(
     }
 }
 
-/// The struct item a marked slot's spelling names: a borrowed parameter
-/// (`&Point` or `&mut Point` — a borrow moves and drops nothing) or an
-/// owned local binding constructed in-route. By-value struct parameters
-/// stay typed (their ownership effects are the typed path's job).
-fn definition_struct_item(entry: &ae_resolve::DefEntry) -> Option<ae_resolve::DefId> {
-    match &entry.inferred {
-        Some(ae_resolve::TypeSpelling::Borrow { inner, .. }) => match inner.as_ref() {
-            ae_resolve::TypeSpelling::Named { def } => Some(*def),
-            _ => None,
-        },
-        Some(ae_resolve::TypeSpelling::Named { def }) => Some(*def),
-        _ => None,
-    }
-}
 
 /// Every expression in the tree rooted at `expression`. `statement.expressions()`
 /// and `visit_expressions` stop at the statement's top-level values; the body
@@ -1202,29 +1183,27 @@ impl<'a> Parser<'a> {
             for definition in resolution.defs.iter().filter(|entry| {
                 entry.kind == ae_resolve::DefKind::Parameter || entry.kind == ae_resolve::DefKind::Binding
             }) {
-                let item = match (&definition.inferred, definition.kind) {
-                    (Some(ae_resolve::TypeSpelling::Borrow { inner, .. }), _) => match inner.as_ref() {
-                        ae_resolve::TypeSpelling::Named { def } => Some(*def),
-                        _ => None,
-                    },
-                    // A by-value struct parameter is spelled `Named` like a
-                    // binding: the guard admits it only for the plain shape,
-                    // and its field reads answer exactly like `&P`'s.
-                    (Some(ae_resolve::TypeSpelling::Named { def }), ae_resolve::DefKind::Binding | ae_resolve::DefKind::Parameter) => Some(*def),
+                use ae_resolve::TypeSpelling;
+                // The spelling names the struct: a `Named` def of this module
+                // resolves through its def table, while an imported type is
+                // `Unknown("Name")` and names the registry entry directly.
+                let spelling = match &definition.inferred {
+                    Some(TypeSpelling::Borrow { inner, .. }) => Some(inner.as_ref()),
+                    other => other.as_ref(),
+                };
+                let name = match spelling {
+                    Some(TypeSpelling::Named { def }) => resolution.defs.get(def.0 as usize).map(|item| item.name.clone()),
+                    Some(TypeSpelling::Unknown(name)) => Some(name.clone()),
                     _ => None,
                 };
-                let names_struct = item
-                    .and_then(|item| resolution.defs.get(item.0 as usize))
-                    .is_some_and(|item| {
-                        item.kind == ae_resolve::DefKind::Struct && self.struct_names.contains_key(&item.name)
-                    });
-                if names_struct {
-                    expressions.struct_definitions.insert(definition.id);
-                    // A value binding (spelled `Named`) owns its struct; a
-                    // borrowed parameter (`&P`, `&mut P`) only views one.
-                    if matches!(definition.inferred, Some(ae_resolve::TypeSpelling::Named { .. })) {
-                        expressions.owned_struct_bindings.insert(definition.id);
-                    }
+                let Some(name) = name else { continue };
+                if !self.struct_names.contains_key(&name) { continue }
+                expressions.struct_definitions.insert(definition.id);
+                expressions.struct_definition_names.insert(definition.id, name);
+                // A value binding (spelled `Named`) owns its struct; a
+                // borrowed parameter (`&P`, `&mut P`) only views one.
+                if matches!(definition.inferred, Some(TypeSpelling::Named { .. })) {
+                    expressions.owned_struct_bindings.insert(definition.id);
                 }
             }
             let function_statements = module.functions.iter()
@@ -1405,7 +1384,7 @@ impl<'a> Parser<'a> {
                             // fields are chain-only receivers (binding one as
                             // a value would move out of the borrowed struct).
                             if let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind {
-                                if let Some(sid) = field_owner_struct(base, &expressions, &resolution, self.struct_names, self.structs) {
+                                if let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs) {
                                     if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                         if scalar_type(field_ty) {
                                             expressions.struct_field_reads.insert(expression.range.start);
@@ -1459,7 +1438,7 @@ impl<'a> Parser<'a> {
                                         .is_some_and(|entry| matches!(entry.inferred,
                                             Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })));
                                 if mutable_base {
-                                    if let Some(sid) = field_owner_struct(base, &expressions, &resolution, self.struct_names, self.structs) {
+                                    if let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs) {
                                         if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                             if scalar_type(field_ty) {
                                                 expressions.struct_field_writes.insert(target.range.start);
