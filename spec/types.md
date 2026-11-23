@@ -19,6 +19,31 @@ ae's type system provides zero-cost abstractions, static memory safety, and expl
 - Unit type: `()` (zero-sized, single-value)
 - Never type: `!` (indicates non-returning expressions, divergent control flow)
 
+#### 2.1.1 Numeric semantics (ADR-0232)
+
+- An unsuffixed integer literal has type `i64`; an unsuffixed floating literal
+  has type `f64`. There are no numeric literal suffixes; a value of another
+  width is written with an explicit `as` conversion.
+- Arithmetic requires both operands to have the same type. There is no
+  implicit widening, including between signed and unsigned widths.
+- `+`, `-`, `*`, unary `-`, `/`, `%` and shifts trap on overflow, division by
+  zero, `MIN / -1`, and a shift count at or past the bit width. Traps behave
+  identically in debug and release builds (Hard Rule 7) and name the
+  operation's source location.
+- `as` between integer widths truncates (two's complement); a constant operand
+  outside the destination range is a compile-time diagnostic. `as` between
+  integers and floats rounds toward the nearest representable value for
+  int→float and traps for out-of-range or non-finite float→int. Integer and
+  pointer casts are available only inside `unsafe`, with `usize` as the
+  pointer-sized integer.
+- `wrapping_*`, `checked_*` (returning `Option[T]`) and `saturating_*` methods
+  are the explicit opt-outs from trapping arithmetic.
+- `char` is a Unicode scalar value, not an integer: `char as u32` and
+  `u32 as char` (validating the scalar value) are the conversions, and
+  arithmetic is not defined on `char`.
+- `()` is the zero-sized unit type; a function without a return type returns
+  it, and unit values have no storage.
+
 ### 2.2 Composite Types
 - Tuples: `(T1, T2, ...)`
 - Fixed-size arrays: `[T; N]` (inline contiguous memory of constant size `N`)
