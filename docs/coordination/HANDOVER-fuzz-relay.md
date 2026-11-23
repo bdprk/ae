@@ -1517,3 +1517,40 @@ unchanged (328) because the affected bodies also call generic-impl methods
 (`p.count()`), which the inherent-only method gate still rejects; this slice
 is the prerequisite for widening that gate with `generic_impls` +
 `struct_origin`.
+
+### Slice 22 note and the remaining generic-method receiver half
+
+Slice 22 landed the *associated-function* half (`Pair[string, i64]::new(..)`)
+by delegating it from Return/Binding to the typed expression parser.
+The remaining half — a **method call on a generic-instance receiver**
+(`p.count()`, `p.left()` in `generic_impl.ae`; also generic-impl receivers
+inside their own bodies) — still falls back because `resolve_inherent_method`
+only answers from `generics.inherent`.
+
+Design for the next attempt (the precompute in
+`lower_resolved_body_with_captures` has `&mut self`, the recheck does not):
+
+1. In the `method_calls` precompute, for a Field-callee call on a bare ident
+   whose slot type is `Type::Struct(sid)`: try `inherent` first; on miss,
+   `generics.struct_origin.get(&sid)` → `(gid, origin_args)`; template =
+   `generics.struct_defs[gid].name`; find the method in
+   `generic_impls[template].methods`; require `has_receiver`;
+   `instantiate_impl_method(template, method, sid, gid, &origin_args,
+   callee.offset)` → `(id, params, ret)` (params[0] is the receiver, as the
+   inherent case).
+2. Store the resolved instance in a second map
+   `generic_method_calls: HashMap<usize, (usize, Vec<Type>, Type)>` keyed by
+   the *callee* offset — the lowering reuses it instead of calling the
+   `&mut` instantiator again, and the recheck closure answers
+   `Role::Call == true` for both maps.
+3. In the lowering's Field-callee branch, on an inherent miss look the
+   callee up in `generic_method_calls` and run the same receiver
+   bookkeeping/argument loop as `lower_method_call`, but with the stored
+   `params`/`ret` (receiver first, so `params[1..]`).
+4. Enum receivers (`Self::assoc` on a generic enum) mirror the recipe via
+   `generics.enum_origin` + `generics.defs[gid].name`; by-value receivers
+   stay typed for now.
+
+Verification: `examples/generic_impl.ae` (`Pair[K, V]` methods,
+`Pair[string, i64]::new`), `tests/run/enum_generic_impls.ae`, then both files
+can join `scripts/deny_route.py` (currently 19 entries).
