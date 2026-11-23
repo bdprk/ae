@@ -545,6 +545,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Expr { .. } => exit_status_operand(statement)
             .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field))
             || propagation_call(statement).is_some()
+            || is_task_yield(statement)
             || vector_statement_builtin(statement, resolved)
                 .is_some_and(|(_, value)| scalar_body_expression(value, resolved, supports_call, supports_field)
                     || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
@@ -577,6 +578,17 @@ fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::Statement, 
         ("pop" | "sort" | "reverse", 1) => Some((builtin, &arguments[0])),
         _ => None,
     }
+}
+
+/// `task_yield();` — a suspension point with no operands. Its statement exists
+/// in the lowered form already (`Statement::TaskYield`).
+fn is_task_yield(statement: &ae_syntax::statement::Statement) -> bool {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: false } = &statement.kind else { return false };
+    matches!(&value.kind, ExpressionKind::Call { callee, arguments }
+        if arguments.is_empty()
+            && matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "task_yield"))
 }
 
 impl<'a> Parser<'a> {
@@ -2219,6 +2231,12 @@ impl<'a> Parser<'a> {
                     eprintln!("ae: {}:{}: warning: unnecessary unsafe block (W0702): the body contains no unchecked operation", block_line, block_column);
                 }
                 Statement::Unsafe(inner)
+            }
+            StatementKind::Expr { .. } if is_task_yield(statement) => {
+                let StatementKind::Expr { value, .. } = &statement.kind else { unreachable!("task_yield statement") };
+                self.seek_scalar_offset(value.range.end);
+                self.take(Kind::Semi)?;
+                return Ok(Statement::TaskYield);
             }
             StatementKind::Expr { propagates: false, .. }
                 if vector_statement_builtin(statement, self.resolved_expressions()).is_some() =>

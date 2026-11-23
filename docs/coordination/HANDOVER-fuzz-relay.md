@@ -1420,3 +1420,13 @@ Coverage: 338 → **335**. `std/std/task/timer.ae` is legacy-free.
 Still typed in this family: `task_spawn`/`task_yield` (effectful statement
 builtins and closure-literal arguments), `shared_*`/`mutex_*`/`chan_*`
 expression builtins, `spawn`/`wait`.
+
+## P1.1 slice 20 landed: `task_yield()`
+
+`task_yield();` lowers as `Statement::TaskYield` (no operands), so a closure
+body whose only effect is a yield joins the route. Coverage: 335 → **333**.
+
+Still typed in the concurrency family: `task_spawn`/`scope_spawn`/
+`pool_spawn` (they move a callable plus its captures into the executor —
+`concurrency_stmt`'s machinery), `spawn`/`wait`, and the `shared_*`/
+`mutex_*`/`chan_*` expression builtins.
