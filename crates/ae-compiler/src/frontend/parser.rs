@@ -86,7 +86,8 @@ fn resolved_builtin(name: &str) -> bool {
 /// vectors) stay on the typed route until construction moves are tracked.
 fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
-    structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none() && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)))
+    structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || owned_plain_struct(*ty, structs)))
 }
 
 /// A struct whose fields are scalar or `string`: it carries one owned value
@@ -95,7 +96,10 @@ fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
 fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
-        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)))
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
+            || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)
+            // A nested plain struct carries no release surface of its own.
+            || owned_plain_struct(*ty, structs)))
 }
 
 /// The registry struct a field expression reads from: a parameter's
@@ -135,6 +139,52 @@ fn field_owner_struct(
 fn field_ty_in(sid: usize, field: &str, structs: &[StructDef]) -> Option<Type> {
     let defn = structs.get(sid)?;
     defn.fields.iter().find(|(name, _)| name == field).map(|(_, ty)| *ty)
+}
+
+/// The declared type of one field read in a resolved body, including a
+/// generic instance spelled in source (`let p = Pair[string, i64] { .. };`
+/// → `p.left` is `string`). The generic arm resolves the template's payload
+/// with the literal's type arguments; no layout is instantiated, so the
+/// answer is stateless.
+fn resolved_field_type(
+    base: &ae_syntax::expression::Expression,
+    field: &str,
+    resolved: &ResolvedExpressions,
+    struct_names: &HashMap<String, usize>,
+    structs: &[StructDef],
+    generics: &Generics,
+) -> Option<Type> {
+    use ae_syntax::expression::ExpressionKind;
+    match &base.kind {
+        ExpressionKind::Atom(Kind::Ident(_)) => {
+            let def = resolved.scalar_reads.get(&base.range.start)
+                .or_else(|| resolved.scalar_writes.get(&base.range.start))?;
+            if let Some((gid, args)) = resolved.generic_struct_bindings.get(def) {
+                let defn = generics.struct_defs.get(*gid)?;
+                let (_, payload) = defn.fields.iter().find(|(name, _)| name == field)?;
+                return payload_type(payload, args);
+            }
+            let name = resolved.struct_definition_names.get(def)?;
+            let sid = struct_names.get(name.as_str())?;
+            field_ty_in(*sid, field, structs)
+        }
+        ExpressionKind::Field { base: inner, name } => {
+            let inner_ty = resolved_field_type(inner, name, resolved, struct_names, structs, generics)?;
+            match inner_ty {
+                Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => field_ty_in(sid, field, structs),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn payload_type(payload: &Payload, args: &[Type]) -> Option<Type> {
+    match payload {
+        Payload::Concrete(ty) => Some(*ty),
+        Payload::Param(index) => args.get(*index).copied(),
+        Payload::Nested(_) => None,
+    }
 }
 
 fn receiver_field_root(expression: &ae_syntax::expression::Expression) -> Option<usize> {
@@ -339,6 +389,8 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                             || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
                             || resolved.struct_field_views.contains(&argument.range.start)
                             || resolved.struct_field_handles.contains(&argument.range.start)
+                            || (matches!(argument.kind, ExpressionKind::Field { .. })
+                                && supports_field(argument, ae_resolve::Role::Read))
                             || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                                 if name != "self" && resolved.scalar_reads.get(&argument.range.start)
                                     .is_some_and(|id| resolved.owned_text_bindings.contains(id)
@@ -399,6 +451,13 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     // borrow it).
                     || resolved.struct_field_views.contains(&argument.range.start)
                     || resolved.struct_field_handles.contains(&argument.range.start)
+                    // A scalar field read as an argument (`describe(id.left)`):
+                    // scalars copy, nothing moves. The scan is permissive for
+                    // an ident-rooted chain; the lowering validates the field
+                    // type (view, scalar, or rejected struct chain).
+                    || resolved.struct_field_reads.contains(&argument.range.start)
+                    || (matches!(argument.kind, ExpressionKind::Field { .. })
+                        && supports_field(argument, ae_resolve::Role::Read))
                     // An owned string in argument position: a `&string`
                     // parameter views it, a `string` parameter moves it (the
                     // lowering records which).
@@ -1438,6 +1497,27 @@ impl<'a> Parser<'a> {
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
                         use ae_syntax::expression::ExpressionKind;
                         if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {
+                            // A generic struct instance's binding keeps its
+                            // template and source type arguments for the field
+                            // walk (no layout is instantiated here, so the
+                            // index is order-independent).
+                            let specialization = match &initializer.kind {
+                                ExpressionKind::Struct { target, .. } => Some(target.as_ref()),
+                                ExpressionKind::Call { callee, .. } => match &callee.kind {
+                                    ExpressionKind::Qualified { base, .. } => Some(base.as_ref()),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            if let Some(ExpressionKind::Specialization { base: inner, arguments }) = specialization.map(|target| &target.kind) {
+                                if let ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
+                                    if let Some(&gid) = self.generics.struct_names.get(struct_name) {
+                                        if let Some(args) = self.loose_specialization_types(arguments) {
+                                            expressions.generic_struct_bindings.insert(id, (gid, args));
+                                        }
+                                    }
+                                }
+                            }
                             match &initializer.kind {
                                 ExpressionKind::Vector(_) => {
                                     expressions.vector_definitions.insert(id);
@@ -1483,10 +1563,25 @@ impl<'a> Parser<'a> {
                                                 // an enum even when the
                                                 // resolver leaves the spelling
                                                 // open.
-                                                if self.functions.get(builtin.as_str())
-                                                    .is_some_and(|signature| matches!(signature.ret, Type::Enum(..)))
-                                                {
-                                                    expressions.enum_bindings.insert(id);
+                                                if let Some(signature) = self.functions.get(builtin.as_str()) {
+                                                    if matches!(signature.ret, Type::Enum(..)) {
+                                                        expressions.enum_bindings.insert(id);
+                                                    }
+                                                    // A call returning a struct (often an
+                                                    // imported one, e.g. a std constructor)
+                                                    // types the binding from the signature:
+                                                    // field reads, by-value moves and returns
+                                                    // answer from this entry.
+                                                    if let Type::Struct(sid) = signature.ret {
+                                                        if let Some(defn) = self.structs.get(sid) {
+                                                            expressions.struct_definition_names.entry(id).or_insert_with(|| defn.name.clone());
+                                                            if owned_plain_struct(signature.ret, self.structs)
+                                                                || owned_field_struct(signature.ret, self.structs)
+                                                            {
+                                                                expressions.owned_struct_bindings.insert(id);
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1618,19 +1713,20 @@ impl<'a> Parser<'a> {
                             // fields are chain-only receivers (binding one as
                             // a value would move out of the borrowed struct).
                             if let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind {
-                                if let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs) {
-                                    if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
-                                        if scalar_type(field_ty) {
-                                            expressions.struct_field_reads.insert(expression.range.start);
-                                        } else if matches!(field_ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)) {
-                                            expressions.struct_field_chains.insert(expression.range.start);
-                                        } else if matches!(field_ty, Type::String | Type::StrView) {
-                                            expressions.struct_field_views.insert(expression.range.start);
-                                        } else if matches!(field_ty, Type::Atomic | Type::Shared(_) | Type::Mutex) {
-                                            // A copy-semantics handle field: only
-                                            // a handle consumer may read it.
-                                            expressions.struct_field_handles.insert(expression.range.start);
-                                        }
+                                let field_ty = field_owner_struct(base, &expressions, self.struct_names, self.structs)
+                                    .and_then(|sid| field_ty_in(sid, name, self.structs))
+                                    .or_else(|| resolved_field_type(base, name, &expressions, self.struct_names, self.structs, &self.generics));
+                                if let Some(field_ty) = field_ty {
+                                    if scalar_type(field_ty) {
+                                        expressions.struct_field_reads.insert(expression.range.start);
+                                    } else if matches!(field_ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)) {
+                                        expressions.struct_field_chains.insert(expression.range.start);
+                                    } else if matches!(field_ty, Type::String | Type::StrView) {
+                                        expressions.struct_field_views.insert(expression.range.start);
+                                    } else if matches!(field_ty, Type::Atomic | Type::Shared(_) | Type::Mutex) {
+                                        // A copy-semantics handle field: only
+                                        // a handle consumer may read it.
+                                        expressions.struct_field_handles.insert(expression.range.start);
                                     }
                                 }
                             }
@@ -1646,9 +1742,10 @@ impl<'a> Parser<'a> {
                                         if let Some(&sid) = self.struct_names.get(name) {
                                             let defn = &self.structs[sid];
                                             if (defn.file == self.file || defn.public) && defn.drop_fn.is_none() {
-                                                if defn.fields.iter().all(|(_, ty)| scalar_type(*ty)) {
+                                                let constructed = Type::Struct(sid);
+                                                if owned_plain_struct(constructed, self.structs) {
                                                     expressions.drop_free_constructions.insert(expression.range.start);
-                                                } else if defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)) {
+                                                } else if owned_field_struct(constructed, self.structs) {
                                                     expressions.owned_constructions.insert(expression.range.start);
                                                 }
                                             }
@@ -2116,7 +2213,7 @@ impl<'a> Parser<'a> {
             };
             let Some(def) = occurrences.get(&root.range.start) else { return false };
             let Some(&(_, ty)) = slots.get(def) else { return false };
-            if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_)) {
+            if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_) | Type::Struct(_)) {
                 return false;
             }
             if field_chain_is_bare(expression) {
@@ -2331,9 +2428,24 @@ impl<'a> Parser<'a> {
             StatementKind::Assign { target, operator, value } => {
                 if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
                     let def = self.resolved_expressions().scalar_writes[&base.range.start];
-                    let (slot, receiver @ Type::StructMut(sid)) = slots[&def] else {
-                        unreachable!("resolved mutable receiver field");
+                    // The store writes through a `&mut` receiver or into an
+                    // owned local struct; both reach the same FieldStore, and
+                    // codegen picks `.`/`->` from the receiver type.
+                    let (slot, receiver) = slots[&def];
+                    let sid = match receiver {
+                        Type::StructMut(sid) | Type::Struct(sid) => sid,
+                        _ => unreachable!("resolved mutable receiver field"),
                     };
+                    if matches!(receiver, Type::Struct(_)) {
+                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind else {
+                            unreachable!("owned struct store base");
+                        };
+                        if !self.names[base_name].1 {
+                            self.seek_scalar_offset(target.range.start);
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{base_name}'")).with_code("E0103");
+                            return Err(self.immutable_binding_error(diagnostic, slot));
+                        }
+                    }
                     let field = field_ty_in(sid, name, self.structs).expect("eligible receiver field");
                     let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
                     self.seek_scalar_offset(statement.range.end);

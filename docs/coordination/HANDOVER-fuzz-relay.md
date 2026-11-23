@@ -1797,6 +1797,27 @@ parity → 50k → WSL → commit.
 - Pitfall: the marking walk only marked a statement's top-level expression;
   any constructor that appears as an argument needs the nested mark or the
   scan rejects the enclosing call.
+
+### Slice 30 — imported-call structs and nested field typing (landed)
+
+- A binding from a call whose signature returns a struct types itself from
+  the signature (`struct_definition_names` by the registry name, plus
+  `owned_struct_bindings` when the shape is ownable) — this is what makes
+  `let r1 = ring_advance_head(r_init); assert(r1.head == 1);` route; the
+  resolver leaves imported-call locals unspelled.
+- A generic instance's fields resolve from the literal's source-spelled type
+  arguments through a stateless `generic_struct_bindings` index
+  (`let p = Pair[i64, Label] { .. }; p.left` is i64, `p.right.name` walks
+  through Label), backed by the wider `loose_specialization_types` reader
+  that accepts struct names as type arguments.
+- A scalar field read as a call argument, and a store into an owned local
+  struct (`plot.w = 40;` — FieldStore with the `.` path, E0103 for a
+  non-`var` binding), join; `owned_plain_struct`/`owned_field_struct` accept
+  a nested plain-struct field.
+- Coverage 194 → 185, files 68 → 64; deny manifest 112.
+- Pitfall: `shared_specialization_types` rejects struct names as type
+  arguments by design (no hidden layout); the field walk must not use it —
+  `loose_specialization_types` is the order-independent spelling reader.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

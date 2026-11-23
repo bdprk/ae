@@ -478,6 +478,39 @@ impl Parser<'_> {
             }
         }).collect()
     }
+    /// A wider reader than `shared_specialization_types` for the *field walk*:
+    /// a generic instance may spell a struct or enum as a type argument
+    /// (`Pair[i64, Label]`), and the walk only needs the spelling to type one
+    /// field. No layout is instantiated, so this stays stateless.
+    pub(super) fn loose_specialization_types(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<Type>> {
+        ranges.iter().map(|range| {
+            let start = self.tokens.partition_point(|token| token.offset < range.start);
+            let end = self.tokens.partition_point(|token| token.offset < range.end);
+            match self.tokens.get(start..end)? {
+                [Token { kind: Kind::Ident(name), .. }] => {
+                    if let Some(ty) = self.subst.get(name) {
+                        return Some(*ty);
+                    }
+                    match name.as_str() {
+                        "string" => Some(Type::String),
+                        "vec" => Some(Type::Vec),
+                        _ => scalar_type(name)
+                            .or_else(|| self.struct_names.get(name).copied().map(Type::Struct))
+                            .or_else(|| self.enum_names.get(name).copied().map(|id| Type::Enum(self.enums[id].name, id))),
+                    }
+                }
+                [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
+                 Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
+                    if name == "vec" => match element.as_str() {
+                        "string" => Some(Type::StrVec),
+                        "f64" => Some(Type::VecF),
+                        _ => None,
+                    },
+                _ => None,
+            }
+        }).collect()
+    }
+
     // A concrete type argument. Structs and enums are rejected for the same
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {

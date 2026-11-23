@@ -717,6 +717,11 @@ struct ResolvedExpressions {
     scalar_address_casts: HashSet<usize>,
     vector_definitions: HashSet<ae_resolve::DefId>,
     owned_vectors: HashSet<ae_resolve::DefId>,
+    /// A local bound from a generic struct literal or constructor, kept as
+    /// its template and source-spelled type arguments: the field walk types
+    /// one field's payload from them without instantiating a layout
+    /// (stateless, so the index does not depend on parse order).
+    generic_struct_bindings: HashMap<ae_resolve::DefId, (usize, Vec<Type>)>,
     owned_text_bindings: HashSet<ae_resolve::DefId>,
     enum_bindings: HashSet<ae_resolve::DefId>,
     enum_constructors: HashSet<usize>,
