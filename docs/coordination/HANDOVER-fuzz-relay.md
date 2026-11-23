@@ -2042,3 +2042,25 @@ is the pointer-binding initializer: add `PointerCast` to `scalar_body_expression
 and to `lower_scalar_body_expression`, and admit pointer returns from extern
 calls in `supports_call` (the slot guard and pointer-store paths already
 accept `Type::Ptr`/`PtrMut` of scalar pointees).
+
+## Raw-pointer surface (2026-11-23 17:40)
+
+Scalar-pointee pointer returns from direct (extern) calls, pointer parameters,
+`raw as *mut f64` casts, and the pointer methods `deref`/`offset`/`byte_offset`
+all lower on the resolved route now. `offset`/`byte_offset` emit
+`Expr::PtrOffset` with the typed route's unsafe gate and i64-count check;
+pointer bindings produced by other calls (`let second = buf.offset(1)`) are
+typed by the stateless precompute (`chain_call_type`) and their receiver slot
+comes from `names`, not `scalar_reads`.
+
+Coverage is **1 fallback / 1 file** (was 5/5). The manifest lists 173 files and
+the CI ratchet is 1. The last remaining fixture is
+`tests/run/native_layout_abi.ae`: `fn test_early_drop(early: bool) -> i64 { let
+g = Guard { id: 777 }; if early { return 1; } return 2; }` with
+`impl Guard { fn drop(&mut self) -> i64 { .. } }`. Next slice: the drop-carrying
+construction on the resolved route — the body route must emit the user `drop`
+call at scope exit, at early return, and for `let g = ..` in loops, which means
+the resolved statement lowering needs the same `Release`/`Drop` bookkeeping the
+typed route's Frees lists perform. Probe the typed route's `emit-tree` for
+`Guard` first (`ae emit-tree tests/run/native_layout_abi.ae`) and mirror its
+exact release placement.

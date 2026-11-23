@@ -416,6 +416,12 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             resolved.scalar_address_casts.contains(&expression.range.start)
                 && resolved.scalar_reads.contains_key(&binding_range.start)
         }
+        // A pointer reinterpretation (`raw as *mut f64`): the base is a
+        // pointer value and the pointee spelling is the typed parser's
+        // business. Nothing moves — a pointer is a copy-semantics handle.
+        ExpressionKind::PointerCast { base, .. } => {
+            scalar_body_expression(base, resolved, supports_call, supports_field)
+        }
         ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
             scalar_body_expression(inner, resolved, supports_call, supports_field)
         }
@@ -1280,9 +1286,12 @@ impl<'a> Parser<'a> {
     /// The type a method-call chain computes (`start.shifted(1, 2).shifted(0, -6)`).
     /// The precompute walks the chain left to right: the root is a parameter,
     /// `self`, or a binding the scan already typed, and each link asks the
-    /// inherent method's declared return type. Only shapes the resolved route
-    /// admits answer (a concrete method, arity included); anything else — a
-    /// generic instance or a receiver the scan cannot name — stays typed.
+    /// inherent method's declared return type. The pointer surface is answered
+    /// the same way (`let v = raw as *mut f64`, `let p = buf.offset(1)`), and a
+    /// direct call answers by the callee's declared return (`extern "C" fn
+    /// ae_std_alloc(..) -> *mut i64`). Only shapes the resolved route admits
+    /// answer (arity included); anything else — a generic instance or a
+    /// receiver the scan cannot name — stays typed.
     fn chain_call_type(
         &self,
         expression: &ae_syntax::expression::Expression,
@@ -1296,12 +1305,37 @@ impl<'a> Parser<'a> {
                 .map(|&(_, _, ty)| ty)
                 .or_else(|| local_structs.get(name).copied()),
             ExpressionKind::Group(inner) => self.chain_call_type(inner, local_structs),
-            ExpressionKind::Call { callee, arguments } => {
-                let ExpressionKind::Field { base, name } = &callee.kind else { return None };
-                let ty = self.chain_call_type(base, local_structs)?;
-                let (signature, _, _) = self.resolve_inherent_method(name, ty)?;
-                (arguments.len() + 1 == signature.params.len()).then_some(signature.ret)
+            ExpressionKind::PointerCast { base, mutable, pointee } => {
+                // The address stays; the pointee spelling names the new view.
+                if !matches!(self.chain_call_type(base, local_structs)?, Type::Ptr(_) | Type::PtrMut(_)) {
+                    return None;
+                }
+                let name = self.source.get(pointee.clone())?;
+                let pointee = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))?;
+                let id = super::intern_pointee(pointee);
+                Some(if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
             }
+            ExpressionKind::Call { callee, arguments } => match &callee.kind {
+                ExpressionKind::Field { base, name } => {
+                    let ty = self.chain_call_type(base, local_structs)?;
+                    if let Type::Ptr(id) | Type::PtrMut(id) = ty {
+                        // A pointer method: `offset`/`byte_offset` keep the
+                        // pointer type, `deref` answers with the pointee.
+                        return match (name.as_str(), arguments.len()) {
+                            ("offset" | "byte_offset", 1) => Some(ty),
+                            ("deref", 0) => Some(super::ptr_pointee(id)),
+                            _ => None,
+                        };
+                    }
+                    let (signature, _, _) = self.resolve_inherent_method(name, ty)?;
+                    (arguments.len() + 1 == signature.params.len()).then_some(signature.ret)
+                }
+                ExpressionKind::Atom(Kind::Ident(name)) if !RESERVED.contains(&name.as_str()) => {
+                    let signature = self.functions.get(name)?;
+                    (arguments.len() == signature.params.len()).then_some(signature.ret)
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2412,14 +2446,16 @@ impl<'a> Parser<'a> {
                     }
                     // A binding from a method call whose signature returns a
                     // struct or enum (`let fixed = u2.with_min_radius(1);`,
-                    // `let moved = start.shifted(1, 2).shifted(0, -6);`): a
-                    // parameter or an earlier local roots the chain, so each
-                    // link's declared return type answers statelessly.
-                    if let ae_syntax::expression::ExpressionKind::Call { .. } = &initializer.kind {
-                        let ret = self.chain_call_type(initializer, &local_structs);
-                        if let Some(ret @ (Type::Enum(..) | Type::Struct(_))) = ret {
-                            local_structs.insert(name.clone(), ret);
-                        }
+                    // `let moved = start.shifted(1, 2).shifted(0, -6);`), or a
+                    // pointer-valued binding (`let raw = ae_std_alloc(..)`,
+                    // `let view = raw as *mut f64`, `let p = buf.offset(1)`):
+                    // a parameter or an earlier local roots the chain, so each
+                    // link's declared type answers statelessly and the gate can
+                    // ask before the lowering declares the binding.
+                    if let Some(ret @ (Type::Enum(..) | Type::Struct(_) | Type::Ptr(_) | Type::PtrMut(_))) =
+                        self.chain_call_type(initializer, &local_structs)
+                    {
+                        local_structs.insert(name.clone(), ret);
                     }
                 }
                 for root in statement.expressions() {
@@ -2427,6 +2463,18 @@ impl<'a> Parser<'a> {
                         let ae_syntax::expression::ExpressionKind::Call { callee, arguments } = &expression.kind else { return };
                         let ae_syntax::expression::ExpressionKind::Field { base, name } = &callee.kind else { return };
                         let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else { return };
+                        // A pointer receiver: the resolver's spelling mark names
+                        // the binding before the lowering declares it, so the
+                        // verdict does not depend on the slot table.
+                        if resolved.scalar_pointer_receivers.contains(&base.range.start) {
+                            let ok = match name.as_str() {
+                                "deref" => arguments.is_empty(),
+                                "offset" | "byte_offset" => arguments.len() == 1,
+                                _ => false,
+                            };
+                            method_calls.insert(callee.range.start, ok);
+                            return;
+                        }
                         let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
                             .or_else(|| local_structs.get(receiver).copied());
                         let Some(ty) = ty else { return };
@@ -2478,6 +2526,11 @@ impl<'a> Parser<'a> {
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
                         || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF)
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
+                        // A scalar-pointee pointer (`extern "C" fn
+                        // ae_std_alloc(..) -> *mut i64`): the binding holds a
+                        // copy-semantics handle the pointer ops consume, the
+                        // same shape the slot guard admits.
+                        || matches!(signature.ret, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                         || owned_field_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
@@ -2500,6 +2553,11 @@ impl<'a> Parser<'a> {
                             // A function-typed parameter takes a closure
                             // literal or a function name (`Argument::FnPtr`).
                             | Type::Fn(_)
+                            // A raw-pointer parameter (`extern "C" fn
+                            // ae_std_free(block: *mut i64)`): a pointer is a
+                            // copy-semantics handle, so the argument passes by
+                            // value with the typed route's exact type check.
+                            | Type::Ptr(_) | Type::PtrMut(_)
                             | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                     })
             })
@@ -3491,6 +3549,27 @@ impl<'a> Parser<'a> {
                 let (_, pointee) = self.pointer_cast_pointee(Some(*mutable))?;
                 self.lower_address_cast(operand, ty, pointee, *mutable, position)?
             }
+            // `raw as *mut f64` (ADR-0209 step A): the address stays, the
+            // pointee changes. The base must already be a pointer — value
+            // conversions are `to_f64`/`to_i64`'s territory — and the pointee
+            // spelling comes from the shared node's range.
+            ExpressionKind::PointerCast { base, mutable, pointee } => {
+                self.seek_scalar_offset(expression.range.start);
+                let (operand, base_type) = self.lower_scalar_body_expression(base, slots)?;
+                if !matches!(base_type, Type::Ptr(_) | Type::PtrMut(_)) {
+                    self.seek_scalar_offset(expression.range.start);
+                    return Err(self.fail(&format!("'as' retags a raw pointer, and {} is not a pointer", base_type.name())));
+                }
+                let name = self.source.get(pointee.clone())
+                    .ok_or_else(|| self.error_at(pointee.start, "cannot read the pointer's pointee type"))?;
+                let pointee_type = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))
+                    .ok_or_else(|| self.error_at(pointee.start, "a pointer cast retags to a scalar pointee here"))?;
+                let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                let token = self.tokens.get(end).ok_or_else(|| self.fail("expected the end of the pointer cast"))?;
+                let id = super::intern_pointee(pointee_type);
+                let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
+                (Expr::PtrCast(Box::new(operand), *mutable, id, token.line, token.column), ty)
+            }
             ExpressionKind::Struct { target, fields } => {
                 // Validate in source order and emit in layout order.
                 let sid = match &target.kind {
@@ -3720,12 +3799,49 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
-                    let (operand, ty) = self.lower_scalar_body_expression(base, slots)?;
+                    // The receiver's slot comes from `names`: a pointer binding
+                    // the resolver could not spell yet (the result of
+                    // `buf.offset(1)`, say) still has an authoritative slot by
+                    // the time this statement lowers.
+                    let (operand, ty) = if let ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind {
+                        let &(slot, _, ty) = self.names.get(receiver).ok_or_else(|| {
+                            self.fail(&format!("unknown variable '{receiver}'")).with_code("E0101")
+                        })?;
+                        self.seek_scalar_offset(base.range.start);
+                        let (line, column) = self.position();
+                        (Expr::Variable(slot, ty, line, column), ty)
+                    } else {
+                        self.lower_scalar_body_expression(base, slots)?
+                    };
                     let (Type::Ptr(id) | Type::PtrMut(id)) = ty else {
                         return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
                     };
                     let method = self.tokens.partition_point(|token| token.offset < callee.range.end) - 1;
-                    self.check_pointer_deref(self.tokens[method].offset)?;
+                    let method_offset = self.tokens[method].offset;
+                    // `offset(n)` / `byte_offset(n)` (ADR-0209 step A): the
+                    // address moves by n elements or n bytes, the result is
+                    // the same pointer type. The gate's marks admitted only
+                    // these three names, so anything else is `deref`'s
+                    // diagnostic below.
+                    if method_name == "offset" || method_name == "byte_offset" {
+                        if self.unsafe_depth == 0 {
+                            return Err(self.error_at(method_offset, "pointer arithmetic requires 'unsafe'"));
+                        }
+                        let [count] = arguments.as_slice() else {
+                            self.seek_scalar_offset(callee.range.end);
+                            return Err(self.fail(&format!("{method_name} takes an i64 count")));
+                        };
+                        let (count_value, count_ty) = self.lower_scalar_body_expression(count, slots)?;
+                        if count_ty != Type::Int {
+                            self.seek_scalar_offset(count.range.end);
+                            return Err(self.fail(&format!("{method_name} takes an i64 count")));
+                        }
+                        self.seek_scalar_offset(expression.range.end);
+                        let (line, column) = self.position();
+                        let bytewise = method_name == "byte_offset";
+                        return Ok((Expr::PtrOffset(Box::new(operand), Box::new(count_value), bytewise, line, column), ty));
+                    }
+                    self.check_pointer_deref(method_offset)?;
                     self.seek_scalar_offset(expression.range.end);
                     let (line, column) = self.position();
                     return Ok((Expr::DerefPtr(Box::new(operand), line, column), super::ptr_pointee(id)));

@@ -8769,3 +8769,50 @@ fn main() {
     fs::remove_file(path).unwrap();
     assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
 }
+
+// P1.1 pointer rung: the extern allocator bridge, pointer retag, pointer
+// arithmetic (`offset`/`byte_offset`), stores through `*p`, `deref` reads and
+// the free call all lower on the resolved route. The deny switch proves the
+// whole body is resolved-route; the compiled output is the fixture's.
+#[test]
+fn raw_pointer_surface_lowers_on_the_resolved_route() {
+    let source = r#"extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
+/// Preconditions: block came from ae_std_alloc; released exactly once.
+extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;
+
+fn main() {
+    unsafe {
+        let buf = ae_std_alloc(64, 12, 22);
+        *buf = 10;
+        let second = buf.offset(1);
+        *second = 20;
+        let third = buf.byte_offset(16);
+        *third = 30;
+        print(buf.deref());
+        print(second.deref());
+        print(third.deref());
+        let view = buf as *const f64;
+        print("retagged");
+        let freed = ae_std_free(buf);
+    }
+    print("done");
+}"#;
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "10\n20\n30\nretagged\ndone\n"
+    );
+
+    // Every body is on the resolved route: the deny switch compiles it.
+    let path = std::env::temp_dir().join(format!("ae-pointer-route-deny-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let deny = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .env("AE_DENY_LEGACY_ROUTE", "1")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+}
