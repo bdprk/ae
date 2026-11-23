@@ -1691,18 +1691,28 @@ manifest.
 - Host load across the fleet is 7–14 (4 cores) because of other sessions and
   our own fuzz jobs; gate runs use `nice 10`, fuzz `nice 19`.
 
-### The enum `match self` gap (next slice for `enum_generic_impls`)
+### The enum `match self` gap (landed, slice 25)
 
 The instantiated generic-enum method bodies (`is_some(self)`,
-`unwrap_or(self, ..)`) fall back at `match self`: the scan's Match arm needs
+`unwrap_or(self, ..)`) fell back at `match self`: the scan's Match arm needed
 the subject's def in `enum_bindings`, and a by-value `self` dispatch has no
-spelling the builder classifies as an enum. Do NOT bake a receiver-dependent
-mark into `resolved_expressions` — that cell is shared across a file's
-functions (or reused across instantiation parses), so the mark would be
-order-dependent (exactly the hazard class already recorded above). The
-workable shape: pass the body's receiver-kind knowledge into the eligibility
-check as a parameter (e.g. extend the `supports_field` carrier or add a
-parallel `supports_subject` closure to `scalar_body_statement`), so the Match
-arm can answer "subject is `self` and the body's receiver is an enum" without
-touching the shared cache. Gate order for that slice: unit suite → deny on
-`enum_generic_impls` → parity → 50k.
+spelling the builder classifies as an enum. Two rules make it land without
+baking a receiver-dependent mark into `resolved_expressions`:
+
+- The gap between scan and lowering is bridged by the existing per-role
+  carrier: the scan's Match arm accepts `supports_field(subject, Role::Borrow)`
+  and both closures answer for a `self` subject from the body's receiver kind
+  (scan: `function.impl_owner`'s def kind; lowering: `self.receiver` /
+  `self.impl_self`), never from a shared cell value.
+- `Self` constructor paths are classified from the owning declaration on the
+  raw module (`impl_owner` → `declarations[owner].name` → enum/struct
+  registries) instead of the parser-local `impl_self`, so a body whose tokens
+  are shared with an earlier pass (`main` lowered before the instantiated
+  method, same file) marks the same variants. A body local bound from a bare
+  variant path (`let c = Opt[i64]::None;`) is typed in the receiver precompute
+  through the same peel as constructor calls.
+- Guard: an enum receiver joins the receiver clause and the `self` slot rule.
+
+`tests/run/enum_generic_impls.ae` is legacy-free and in the deny manifest
+(21 files); coverage 310 → 297. Gate order used: unit suite → deny →
+parity → 50k → WSL → commit.

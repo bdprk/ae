@@ -44,7 +44,7 @@ jobs:
         # The resolved-body route replaces the legacy parser slice by slice.
         # The fallback total must never rise between slices; bump the ceiling
         # only in a commit that lowers it (the ledger records both numbers).
-        run: python scripts/route_report.py --max 310
+        run: python scripts/route_report.py --max 297
       - name: Legacy-free files stay legacy-free (P1.1)
         # AE_DENY_LEGACY_ROUTE=1 turns any fallback into a diagnostic. The
         # manifest in scripts/deny_route.py lists the files the resolved

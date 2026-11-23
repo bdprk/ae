@@ -20,6 +20,7 @@ FILES = [
     "tests/run/batch_core_ranges.ae",
     "tests/run/batch_core_semver.ae",
     "tests/run/batch_core_structures.ae",
+    "tests/run/enum_generic_impls.ae",
     "examples/borrow.ae",
     "examples/concat.ae",
     "examples/field_view.ae",

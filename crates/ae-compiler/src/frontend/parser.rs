@@ -540,8 +540,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::Match { subject, arms } => {
             matches!(subject.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.scalar_reads.get(&subject.range.start)
-                    .is_some_and(|id| resolved.enum_bindings.contains(id))
+                && (resolved.scalar_reads.get(&subject.range.start)
+                        .is_some_and(|id| resolved.enum_bindings.contains(id))
+                    // `match self` in an impl whose target is an enum: the
+                    // carrier answers by the impl owner, not by a spelling.
+                    || supports_field(subject, ae_resolve::Role::Borrow))
                 && arms.iter().all(|arm| arm.body.iter().all(|statement| {
                     scalar_body_statement(statement, resolved, supports_call, supports_field)
                 }))
@@ -1250,12 +1253,14 @@ impl<'a> Parser<'a> {
                     expressions.owned_struct_bindings.insert(definition.id);
                 }
             }
-            let function_statements = module.functions.iter()
-                .filter_map(|function| function.body.as_ref()).flatten();
             let closure_statements = resolution.functions.iter()
                 .flat_map(|function| function.closure_bodies.iter())
                 .flat_map(|body| body.statements.iter());
-            for statement in function_statements.chain(closure_statements) {
+            let owned_statements = module.functions.iter()
+                .filter_map(|function| function.body.as_ref().map(|body| (body, function.impl_owner)));
+            for (statement, impl_owner) in owned_statements
+                .flat_map(|(body, owner)| body.iter().map(move |statement| (statement, owner)))
+                .chain(closure_statements.map(|statement| (statement, None))) {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
@@ -1368,12 +1373,21 @@ impl<'a> Parser<'a> {
                                     match &node.kind {
                                         ExpressionKind::Atom(Kind::Ident(name)) => {
                                             if name == "Self" {
-                                                // Inside an instantiated impl body `Self`
-                                                // is the concrete target the sub-parser
-                                                // was built for.
-                                                if let Some(impl_ty) = self.impl_self {
-                                                    names_enum = matches!(impl_ty, Type::Enum(..));
-                                                    names_struct_path = matches!(impl_ty, Type::Struct(_));
+                                                // The owning declaration answers `Self`
+                                                // statelessly: it lives on the raw module,
+                                                // so a parser that shares this body's tokens
+                                                // (an earlier pass, or an instantiated impl
+                                                // method's sub-parser) cannot change the
+                                                // answer.
+                                                if let Some(owner) = impl_owner {
+                                                    if let Some(declaration) = module.declarations.get(owner) {
+                                                        if matches!(declaration.kind, ae_syntax::declaration::DeclarationKind::Impl { target: None }) {
+                                                            names_enum = self.enum_names.contains_key(&declaration.name)
+                                                                || self.generics.names.contains_key(&declaration.name);
+                                                            names_struct_path = self.struct_names.contains_key(&declaration.name)
+                                                                || self.generics.struct_names.contains_key(&declaration.name);
+                                                        }
+                                                    }
                                                 }
                                                 break;
                                             }
@@ -1593,6 +1607,18 @@ impl<'a> Parser<'a> {
                     if function.impl_owner.is_some() && receiver_field_root(expression).is_some() {
                         return true;
                     }
+                    // A match subject: `match self` is a valid enum scrutinee
+                    // exactly when the impl's target is an enum. The shared
+                    // resolution identifies the target, so the answer does
+                    // not depend on any per-body state.
+                    if role == ae_resolve::Role::Borrow {
+                        if !matches!(&expression.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name == "self") {
+                            return false;
+                        }
+                        return function.impl_owner.is_some_and(|owner| {
+                            resolution.defs.get(owner).is_some_and(|entry| entry.kind == ae_resolve::DefKind::Enum)
+                        });
+                    }
                     // A method-call callee: permissive at scan time; the
                     // lowering's re-check resolves the method.
                     if role == ae_resolve::Role::Call {
@@ -1663,7 +1689,7 @@ impl<'a> Parser<'a> {
 // scalars and `string` both lower through the same arms (owned
 // fields, concatenation, comparisons).
         if !self.subst.values().copied().all(|ty| scalar_type(ty) || matches!(ty, Type::String))
-            || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
+            || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Enum(..)))
             // A trait-impl body without a receiver can still spell `Self`;
             // inherent methods (receiver set) join the route like functions.
             || (self.impl_self.is_some() && self.subst.is_empty() && self.receiver.is_none())
@@ -1695,7 +1721,7 @@ impl<'a> Parser<'a> {
                     // needs no exit drop: reads (and moving it back out) are
                     // the whole surface.
                     || owned_plain_struct(ty, self.structs)
-                    || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_)))
+                    || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)))
             })
         {
             return None;
@@ -1766,6 +1792,41 @@ impl<'a> Parser<'a> {
                                     }
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+                    // A bare variant path (`let c = Opt[i64]::None;`) names
+                    // the instance's enum type without opening a call.
+                    if let ae_syntax::expression::ExpressionKind::Qualified { base, .. } = &initializer.kind {
+                        let mut node = base.as_ref();
+                        let mut arguments = None;
+                        loop {
+                            match &node.kind {
+                                ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments: args }
+                                | ae_syntax::expression::ExpressionKind::BracketedCallTarget { base: inner, arguments: args } => {
+                                    arguments = self.shared_specialization_types(args);
+                                    node = inner.as_ref();
+                                }
+                                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(type_name)) => {
+                                    if type_name == "Self" {
+                                        if let Some(impl_ty) = self.impl_self {
+                                            local_structs.insert(name.clone(), impl_ty);
+                                        }
+                                    } else if let Some(&sid) = self.struct_names.get(type_name) {
+                                        local_structs.insert(name.clone(), Type::Struct(sid));
+                                    } else if let Some(&gid) = self.generics.names.get(type_name) {
+                                        if let Some(args) = arguments {
+                                            if let Ok(eid) = self.instantiate_enum(gid, args, node.range.start) {
+                                                let display = self.enums[eid].name;
+                                                local_structs.insert(name.clone(), Type::Enum(display, eid));
+                                            }
+                                        }
+                                    } else if let Some(&eid) = self.enum_names.get(type_name) {
+                                        local_structs.insert(name.clone(), Type::Enum(self.enums[eid].name, eid));
+                                    }
+                                    break;
+                                }
+                                _ => break,
                             }
                         }
                     }
@@ -1840,6 +1901,12 @@ impl<'a> Parser<'a> {
         // writes the same way `self` does). Reads and stores lower through
         // the same slot lookups the impl path uses.
         let supports_field = |expression: &ae_syntax::expression::Expression, role| {
+            // A match subject: `match self` is valid when this body's
+            // receiver is an enum (by-value dispatch or a generic instance).
+            if role == ae_resolve::Role::Borrow {
+                return matches!(&expression.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name == "self")
+                    && (matches!(self.receiver, Some(Type::Enum(..))) || matches!(self.impl_self, Some(Type::Enum(..))));
+            }
             // A method-call callee: the precomputed verdict admits the
             // inherent cases; a struct/enum receiver is admitted permissively
             // and the lowering resolves the generic instance lazily (it owns

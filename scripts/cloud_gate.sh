@@ -4,7 +4,7 @@
 # raw tails in the log so a compile failure cannot look like "no output".
 #
 # Usage: scripts/cloud_gate.sh [log-path]
-#   ROUTE_MAX  the route-report ratchet ceiling (default 310)
+#   ROUTE_MAX  the route-report ratchet ceiling (default 297)
 #
 # The caller must build first, and the `ae` binary must exist at
 # target/debug/ae before route_report/deny_route/verify run; building here is
@@ -27,7 +27,7 @@ LOG=${1:-/tmp/ae-cloud-gate.log}
   echo "== std layering"
   python3 scripts/std_layering.py
   echo "== route report"
-  python3 scripts/route_report.py --max "${ROUTE_MAX:-310}" 2>&1 | tail -3
+  python3 scripts/route_report.py --max "${ROUTE_MAX:-297}" 2>&1 | tail -3
   echo "== deny manifest"
   python3 scripts/deny_route.py 2>&1 | tail -2
   echo "== generated C (sanitizers)"
