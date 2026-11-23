@@ -126,6 +126,92 @@ impl Parser<'_> {
         self.take(Kind::RParen)?;
         Ok((Expr::AtomicCas(Box::new(handle), Box::new(expect), Box::new(new)), Type::Bool))
     }
+    /// `spawn(closure)` — cursor after the name. The thread runs the callable
+    /// once with no arguments; the data travels in its owned captures
+    /// (spec/concurrency.md §1–§3). Shared by the typed dispatch and the
+    /// resolved body route.
+    #[inline(never)]
+    pub(super) fn spawn_expr(&mut self, line: usize, col: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let at = self.tokens[self.pos - 1].offset;
+        self.take(Kind::LParen)?;
+        let (callable, callable_ty) = self.spawn_callable()?;
+        self.take(Kind::RParen)?;
+        let mut slots = Vec::new();
+        let tid = match (&callable, callable_ty) {
+            (Expr::ClosureLit(cid), Type::Closure(_)) | (Expr::Variable(_, Type::Closure(cid), ..), _) => {
+                let def = self.generics.closures[*cid].clone();
+                if !def.params.is_empty() {
+                    return Err(self.fail("the spawned closure must take no parameters; move the data it needs through its captures"));
+                }
+                // ADR-0215: borrow captures are accepted when the handle is
+                // provably joined before the borrowed region ends — the escape
+                // proof defers to the function's CFG. Until the proof lands,
+                // the borrowed variables freeze like views (no write, no
+                // move), which is sound on its own.
+                if !def.borrow_captures.is_empty() {
+                    let borrowed: Vec<usize> = def.borrow_captures.iter().map(|(outer_id, _)| *outer_id).collect();
+                    let depth = self.scopes.len();
+                    for outer_id in &borrowed {
+                        self.borrows.push((*outer_id, depth, BorrowKind::View));
+                    }
+                    self.deferred_borrow_spawns.push((*cid, borrowed, at));
+                }
+                for (outer_id, ty) in &def.value_captures {
+                    // Arrays and cursors read the caller's storage no matter
+                    // how the capture is classified, and closure/pointer
+                    // values have no byte layout to package; owned scalars,
+                    // strings, vectors, maps, structs, and enums move.
+                    if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
+                        return Err(self.fail("spawn moves its captures into the thread; this capture's storage cannot cross"));
+                    }
+                    if self.moved.contains(outer_id) {
+                        return Err(moved_value_hint(self.error_at(at, "cannot spawn a closure that captures a moved variable").with_code("E0102")));
+                    }
+                    if self.is_borrowed(*outer_id) {
+                        return Err(self.fail("cannot spawn while one of the closure's captured variables is borrowed"));
+                    }
+                    if ty.owned() { self.moved.insert(*outer_id); }
+                    slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
+                }
+                let tid = self.intern_thread(def.ret);
+                record_spawned(SpawnedThread::Closure {
+                    fn_id: closure_fn_id(*cid),
+                    captures: def.value_captures.iter().map(|(_, ty)| *ty).collect(),
+                    borrows: def.borrow_captures.clone(),
+                    ret: def.ret,
+                });
+                tid
+            }
+            (Expr::Variable(_, Type::Fn(sig), ..), _) => {
+                let (params, ret) = crate::frontend::closures::fn_sig(*sig);
+                if !params.is_empty() {
+                    return Err(self.fail("the spawned function value must take no parameters"));
+                }
+                let tid = self.intern_thread(ret);
+                record_spawned(SpawnedThread::FnValue { sig: *sig, ret });
+                tid
+            }
+            _ => return Err(self.fail("spawn needs a closure value; move the data the thread needs through its captures")),
+        };
+        Ok((Expr::Spawn(slots, Box::new(callable), tid, line, col), Type::Thread(tid)))
+    }
+
+    /// `wait(handle)` — cursor after the name. The handle is consumed: the
+    /// move rules reject a second wait, and the thread's slot transfers its
+    /// return value (spec/concurrency.md §1 rule 3).
+    #[inline(never)]
+    pub(super) fn wait_expr(&mut self, line: usize, col: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        self.take(Kind::LParen)?;
+        let (handle, handle_ty) = self.expression(0, true)?;
+        self.take(Kind::RParen)?;
+        let tid = match handle_ty {
+            Type::Thread(tid) => tid,
+            _ => return Err(self.fail("wait expects a thread handle")),
+        };
+        let ret = self.generics.threads[tid];
+        Ok((Expr::Wait(Box::new(handle), ret, line, col), ret))
+    }
+
     #[inline(never)]
     fn shared_new_expr(&mut self, _line: usize, _col: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
         self.take(Kind::LParen)?;
@@ -945,88 +1031,9 @@ impl Parser<'_> {
                 } else if matches!(name.as_str(), "shared_new" | "shared_get" | "mutex_new" | "mutex_lock" | "chan_new" | "chan_send" | "chan_try_send" | "chan_recv" | "chan_select" | "exec_new" | "exec_run" | "scope_new" | "pool_new" | "pool_join") && *self.current() == Kind::LParen {
                     self.concurrency_builtin_expr(&name, vline, vcol)?
                 } else if name == "spawn" && *self.current() == Kind::LParen {
-                    let (line, col) = (vline, vcol);
-                    let at = self.tokens[self.pos - 1].offset;
-                    self.take(Kind::LParen)?;
-                    let (callable, callable_ty) = self.spawn_callable()?;
-                    self.take(Kind::RParen)?;
-                    // The thread runs the callable once with no arguments: the
-                    // data it needs travels in its owned captures
-                    // (spec/concurrency.md §1–§3).
-                    let mut slots = Vec::new();
-                    let tid = match (&callable, callable_ty) {
-                        (Expr::ClosureLit(cid), Type::Closure(_)) | (Expr::Variable(_, Type::Closure(cid), ..), _) => {
-                            let def = self.generics.closures[*cid].clone();
-                            if !def.params.is_empty() {
-                                return Err(self.fail("the spawned closure must take no parameters; move the data it needs through its captures"));
-                            }
-                            // ADR-0215: borrow captures are accepted when the
-                            // handle is provably joined before the borrowed
-                            // region ends — the escape proof defers to the
-                            // function's CFG. Until the proof lands, the
-                            // borrowed variables freeze like views (no write,
-                            // no move), which is sound on its own.
-                            if !def.borrow_captures.is_empty() {
-                                let borrowed: Vec<usize> = def.borrow_captures.iter().map(|(outer_id, _)| *outer_id).collect();
-                                let depth = self.scopes.len();
-                                for outer_id in &borrowed {
-                                    self.borrows.push((*outer_id, depth, BorrowKind::View));
-                                }
-                                self.deferred_borrow_spawns.push((*cid, borrowed, at));
-                            }
-                            for (outer_id, ty) in &def.value_captures {
-                                // Arrays and cursors read the caller's storage
-                                // no matter how the capture is classified, and
-                                // closure/pointer values have no byte layout to
-                                // package; owned scalars, strings, vectors,
-                                // maps, structs, and enums move.
-                                if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
-                                    return Err(self.fail("spawn moves its captures into the thread; this capture's storage cannot cross"));
-                                }
-                                if self.moved.contains(outer_id) {
-                                    return Err(moved_value_hint(self.error_at(at, "cannot spawn a closure that captures a moved variable").with_code("E0102")));
-                                }
-                                if self.is_borrowed(*outer_id) {
-                                    return Err(self.fail("cannot spawn while one of the closure's captured variables is borrowed"));
-                                }
-                                if ty.owned() { self.moved.insert(*outer_id); }
-                                slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
-                            }
-                            let tid = self.intern_thread(def.ret);
-                            record_spawned(SpawnedThread::Closure {
-                                fn_id: closure_fn_id(*cid),
-                                captures: def.value_captures.iter().map(|(_, ty)| *ty).collect(),
-                                borrows: def.borrow_captures.clone(),
-                                ret: def.ret,
-                            });
-                            tid
-                        }
-                        (Expr::Variable(_, Type::Fn(sig), ..), _) => {
-                            let (params, ret) = crate::frontend::closures::fn_sig(*sig);
-                            if !params.is_empty() {
-                                return Err(self.fail("the spawned function value must take no parameters"));
-                            }
-                            let tid = self.intern_thread(ret);
-                            record_spawned(SpawnedThread::FnValue { sig: *sig, ret });
-                            tid
-                        }
-                        _ => return Err(self.fail("spawn needs a closure value; move the data the thread needs through its captures")),
-                    };
-                    (Expr::Spawn(slots, Box::new(callable), tid, line, col), Type::Thread(tid))
+                    self.spawn_expr(vline, vcol)?
                 } else if name == "wait" && *self.current() == Kind::LParen {
-                    let (line, col) = (vline, vcol);
-                    self.take(Kind::LParen)?;
-                    // The handle is consumed: the move rules reject a second
-                    // wait, and the thread's slot transfers its return value
-                    // (spec/concurrency.md §1 rule 3).
-                    let (handle, handle_ty) = self.expression(0, true)?;
-                    self.take(Kind::RParen)?;
-                    let tid = match handle_ty {
-                        Type::Thread(tid) => tid,
-                        _ => return Err(self.fail("wait expects a thread handle")),
-                    };
-                    let ret = self.generics.threads[tid];
-                    (Expr::Wait(Box::new(handle), ret, line, col), ret)
+                    self.wait_expr(vline, vcol)?
                 } else if name == "args" && *self.current() == Kind::LParen {
                     let (line, col) = (vline, vcol);
                     self.take(Kind::LParen)?;

@@ -1296,7 +1296,7 @@ impl Parser<'_> {
     }
     // The argument list of a call, starting at '(' (ADR-31 shares it between
     // ordinary calls and generic instantiations).
-    fn function_value_argument(&mut self, callee: &str, position: usize, sig: usize) -> Result<Argument, ae_span::Diagnostic> {
+    pub(super) fn function_value_argument(&mut self, callee: &str, position: usize, sig: usize) -> Result<Argument, ae_span::Diagnostic> {
         let expected = Type::Fn(sig);
         let (params, returns) = super::closures::fn_sig(sig);
         if let Kind::Ident(name) = self.current() {

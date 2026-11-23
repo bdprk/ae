@@ -56,6 +56,10 @@ const RESOLVED_BUILTINS: &[&str] = &[
     "try_copy_file", "try_rename_path", "try_remove_file", "try_remove_dir", "try_create_dir",
     "set_cwd", "path_join", "path_name", "path_parent", "path_exists", "path_is_dir",
     "count_lines_with", "run_command", "utf8_len", "utf8_prefix", "lines", "strvec_new", "f64vec_new",
+    // The thread pair: `spawn` moves captures into the thread and returns its
+    // handle; `wait` consumes the handle. The spawn statement forms
+    // (task_spawn/scope_spawn/pool_spawn) stay typed for now.
+    "spawn", "wait",
 ];
 
 /// Builtins whose result is a prelude enum value: a binding initialized by
@@ -418,6 +422,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                             || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                                 if name != "self" && resolved.scalar_reads.get(&argument.range.start)
                                     .is_some_and(|id| resolved.enum_bindings.contains(id)))
+                            // A closure literal passed to a method.
+                            || matches!(&argument.kind, ExpressionKind::Closure { body, .. }
+                                if resolved.scalar_bodies.contains_key(&body.start))
                     });
             }
             // A call through a function-typed value: the binding names the
@@ -502,7 +509,11 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                                 || resolved.map_definitions.contains(id)))
                     || matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
                     // An enum construction passed directly (`f(Shape::Circle(3))`).
-                    || resolved.enum_constructors.contains(&argument.range.start))
+                    || resolved.enum_constructors.contains(&argument.range.start)
+                    // A closure literal argument (`apply(|x: i64| -> i64
+                    // {..}, 21)`) whose body the route collected.
+                    || matches!(&argument.kind, ExpressionKind::Closure { body, .. }
+                        if resolved.scalar_bodies.contains_key(&body.start)))
         }
         _ => false,
     }
@@ -801,6 +812,7 @@ fn handle_statement_builtin(statement: &ae_syntax::statement::Statement) -> Opti
     let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
     let builtin = match name.as_str() {
         "shared_set" => "shared_set", "chan_close" => "chan_close", "cell_store" => "cell_store",
+        "task_spawn" => "task_spawn", "scope_spawn" => "scope_spawn", "pool_spawn" => "pool_spawn",
         _ => return None,
     };
     Some((builtin, value))
@@ -966,73 +978,14 @@ impl<'a> Parser<'a> {
     }
     #[inline(never)]
     fn concurrency_stmt(&mut self, name: &str) -> Result<Statement, ae_span::Diagnostic> {
-        let (line, col) = self.position();
-        let at = self.tokens[self.pos].offset;
+        if matches!(name, "task_spawn" | "scope_spawn" | "pool_spawn") {
+            return self.spawn_statement(name);
+        }
         self.pos += 2;
         if name == "task_yield" {
             self.take(Kind::RParen)?;
             self.take(Kind::Semi)?;
             return Ok(Statement::TaskYield);
-        }
-        if matches!(name, "task_spawn" | "scope_spawn" | "pool_spawn") {
-            let (ex, ex_ty) = match self.lower_shared_value(Some(Kind::Comma), false) {
-                Some(pair) => pair,
-                None => self.expression(0, false)?,
-            };
-            let expected_ty = match name {
-                "task_spawn" => Type::Exec,
-                "scope_spawn" => Type::TaskScope,
-                _ => Type::Pool,
-            };
-            if ex_ty != expected_ty {
-                let art = if name == "task_spawn" { "an" } else { "a" };
-                return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name())));
-            }
-            self.take(Kind::Comma)?;
-            let (callable, callable_ty) = self.spawn_callable()?;
-            self.take(Kind::RParen)?;
-            self.take(Kind::Semi)?;
-            let mut slots = Vec::new();
-            let cid = match (&callable, callable_ty) {
-                (Expr::ClosureLit(cid), Type::Closure(_)) | (Expr::Variable(_, Type::Closure(cid), ..), _) => {
-                    let def = self.generics.closures[*cid].clone();
-                    if !def.params.is_empty() {
-                        return Err(self.fail("the spawned task closure must take no parameters"));
-                    }
-                    if def.ret != Type::Int {
-                        return Err(self.fail("the spawned task closure must return i64"));
-                    }
-                    if !def.borrow_captures.is_empty() {
-                        return Err(self.fail("task_spawn moves its captures into the task; borrow captures are not allowed"));
-                    }
-                    for (outer_id, ty) in &def.value_captures {
-                        if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
-                            return Err(self.fail("task_spawn moves its captures into the task; this capture's storage cannot cross"));
-                        }
-                        if self.moved.contains(outer_id) {
-                            return Err(moved_value_hint(self.error_at(at, "cannot spawn a task that captures a moved variable").with_code("E0102")));
-                        }
-                        if self.is_borrowed(*outer_id) {
-                            return Err(self.fail("cannot spawn a task while one of the closure's captured variables is borrowed"));
-                        }
-                        if ty.owned() { self.moved.insert(*outer_id); }
-                        slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
-                    }
-                    crate::frontend::closures::record_spawned(crate::frontend::closures::SpawnedThread::Closure {
-                        fn_id: crate::frontend::closures::closure_fn_id(*cid),
-                        captures: def.value_captures.iter().map(|(_, ty)| *ty).collect(),
-                        borrows: Vec::new(),
-                        ret: def.ret,
-                    });
-                    *cid
-                }
-                _ => return Err(self.fail("task_spawn expects a zero-parameter closure returning i64")),
-            };
-            return Ok(match name {
-                "task_spawn" => Statement::TaskSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
-                "scope_spawn" => Statement::ScopeSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
-                _ => Statement::PoolSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
-            });
         }
         if name == "chan_close" {
             let (handle, handle_ty) = match self.lower_shared_value(Some(Kind::RParen), false) {
@@ -1066,6 +1019,75 @@ impl<'a> Parser<'a> {
             return Err(self.fail("shared_set requires a live mutex guard in scope; call mutex_lock(...) first"));
         }
         Ok(Statement::SharedSet(Box::new(handle), Box::new(value), sid))
+    }
+
+    /// The spawn statement forms (`task_spawn(exec, || ..)`,
+    /// `scope_spawn(sc, || ..)`, `pool_spawn(pool, || ..)`): the handle first,
+    /// then the callable whose captures move into the task. Shared by the
+    /// typed statement parser and the resolved route; the cursor sits on the
+    /// name.
+    pub(super) fn spawn_statement(&mut self, name: &str) -> Result<Statement, ae_span::Diagnostic> {
+        let (line, col) = self.position();
+        let at = self.tokens[self.pos].offset;
+        self.pos += 2;
+        let (ex, ex_ty) = match self.lower_shared_value(Some(Kind::Comma), false) {
+            Some(pair) => pair,
+            None => self.expression(0, false)?,
+        };
+        let expected_ty = match name {
+            "task_spawn" => Type::Exec,
+            "scope_spawn" => Type::TaskScope,
+            _ => Type::Pool,
+        };
+        if ex_ty != expected_ty {
+            let art = if name == "task_spawn" { "an" } else { "a" };
+            return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name())));
+        }
+        self.take(Kind::Comma)?;
+        let (callable, callable_ty) = self.spawn_callable()?;
+        self.take(Kind::RParen)?;
+        self.take(Kind::Semi)?;
+        let mut slots = Vec::new();
+        let cid = match (&callable, callable_ty) {
+            (Expr::ClosureLit(cid), Type::Closure(_)) | (Expr::Variable(_, Type::Closure(cid), ..), _) => {
+                let def = self.generics.closures[*cid].clone();
+                if !def.params.is_empty() {
+                    return Err(self.fail("the spawned task closure must take no parameters"));
+                }
+                if def.ret != Type::Int {
+                    return Err(self.fail("the spawned task closure must return i64"));
+                }
+                if !def.borrow_captures.is_empty() {
+                    return Err(self.fail("task_spawn moves its captures into the task; borrow captures are not allowed"));
+                }
+                for (outer_id, ty) in &def.value_captures {
+                    if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
+                        return Err(self.fail("task_spawn moves its captures into the task; this capture's storage cannot cross"));
+                    }
+                    if self.moved.contains(outer_id) {
+                        return Err(moved_value_hint(self.error_at(at, "cannot spawn a task that captures a moved variable").with_code("E0102")));
+                    }
+                    if self.is_borrowed(*outer_id) {
+                        return Err(self.fail("cannot spawn a task while one of the closure's captured variables is borrowed"));
+                    }
+                    if ty.owned() { self.moved.insert(*outer_id); }
+                    slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
+                }
+                crate::frontend::closures::record_spawned(crate::frontend::closures::SpawnedThread::Closure {
+                    fn_id: crate::frontend::closures::closure_fn_id(*cid),
+                    captures: def.value_captures.iter().map(|(_, ty)| *ty).collect(),
+                    borrows: Vec::new(),
+                    ret: def.ret,
+                });
+                *cid
+            }
+            _ => return Err(self.fail("task_spawn expects a zero-parameter closure returning i64")),
+        };
+        Ok(match name {
+            "task_spawn" => Statement::TaskSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
+            "scope_spawn" => Statement::ScopeSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
+            _ => Statement::PoolSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
+        })
     }
 
     pub(super) fn block(&mut self) -> Result<Vec<Statement>, ae_span::Diagnostic> {
@@ -2073,6 +2095,9 @@ impl<'a> Parser<'a> {
                 // `atomic`/`shared`/`mutex`/`chan`/`exec`/`pool` values
                 // reads and passes them like scalars.
                 || matches!(ty, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool | Type::Guard)
+                // A thread handle (`spawn`) and a task scope (`scope_new`) are
+                // owned values the body may bind, pass, and join.
+                || matches!(ty, Type::Thread(_) | Type::TaskScope)
                 // A by-value plain struct parameter is owned here, but it
                 // carries nothing a release routine walks, so the callee
                 // needs no exit drop: reads (and moving it back out) are
@@ -2287,6 +2312,9 @@ impl<'a> Parser<'a> {
                             // An enum parameter owns a value argument the
                             // same way (a result enum, an Option payload).
                             | Type::Enum(..)
+                            // A function-typed parameter takes a closure
+                            // literal or a function name (`Argument::FnPtr`).
+                            | Type::Fn(_)
                             | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                     })
             })
@@ -3582,6 +3610,15 @@ impl<'a> Parser<'a> {
                     }
                     let &expected = signature.params.get(index)
                         .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
+                    // A function-typed parameter takes a closure literal (or
+                    // a named function) as `Argument::FnPtr`; the typed reader
+                    // owns the shape check and the generated function.
+                    if let Type::Fn(callable) = expected {
+                        self.seek_scalar_offset(argument.range.start);
+                        let converted = self.function_value_argument(name, index + 1, callable)?;
+                        args.push(converted);
+                        continue;
+                    }
                     // The shared tree records `&x` as a borrow argument.
                     // Only a borrow parameter consumes it; anywhere else the
                     // typed route's expression parser rejects it (a pointer
@@ -4180,6 +4217,20 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(expression.range.end);
                     Ok((Expr::PoolJoin(Box::new(handle)), Type::Int))
                 }
+                "spawn" => {
+                    // Cursor after the name: the typed spawn helper parses the
+                    // callable, moves its captures, and interns the thread.
+                    self.pos += 1;
+                    let (value, ty) = self.spawn_expr(line, column)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
+                }
+                "wait" => {
+                    self.pos += 1;
+                    let (value, ty) = self.wait_expr(line, column)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((value, ty))
+                }
                 "now_ms" | "now_s" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
                     self.seek_scalar_offset(expression.range.end);
@@ -4610,6 +4661,12 @@ impl<'a> Parser<'a> {
     ) -> Result<Statement, ae_span::Diagnostic> {
         use ae_syntax::expression::ExpressionKind;
         let (builtin, call) = handle_statement_builtin(statement).expect("handle builtin eligibility");
+        // The spawn statement forms share the typed parser's helper (cursor on
+        // the name); it consumes the arguments and the semicolon.
+        if matches!(builtin, "task_spawn" | "scope_spawn" | "pool_spawn") {
+            self.seek_scalar_offset(call.range.start);
+            return self.spawn_statement(builtin);
+        }
         let ExpressionKind::Call { callee, arguments } = &call.kind else { unreachable!("handle builtin call") };
         self.seek_scalar_offset(callee.range.start);
         if builtin == "chan_close" {

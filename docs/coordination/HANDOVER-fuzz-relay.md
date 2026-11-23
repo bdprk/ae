@@ -1883,6 +1883,28 @@ parity → 50k → WSL → commit.
 - Still typed: a closure literal as a call argument (`apply(|x| ..)`), the
   spawn family (`spawn(|| ..)` / `task_spawn` / `scope_spawn` /
   `pool_spawn`), and `wait`.
+
+### Slice 34 — callable arguments and the spawn family (landed)
+
+- A `fn(..) -> ..` parameter takes a closure literal (or a named function)
+  through the typed `function_value_argument` (`Argument::FnPtr`); the plain
+  call argument loop dispatches `Type::Fn` before the shared value path.
+- `spawn(closure)` / `wait(handle)` lower natively: the typed logic moved
+  into `spawn_expr`/`wait_expr` (expression.rs), shared by the typed
+  dispatch and the resolved builtin arms — capture moves, borrow-capture
+  freezing (ADR-0215), thread interning, consumed-handle rule.
+- `task_spawn`/`scope_spawn`/`pool_spawn` share the extracted
+  `spawn_statement` (cursor on the name; handle first, then the
+  zero-parameter i64 closure); the resolved `handle_statement_builtin`
+  dispatches them and `task_yield` stays its own statement.
+- Handle slots admit `Thread` and `TaskScope`.
+- `examples/function_types.ae` plus shared_box/channels/chan_select/
+  chan_cancel/mutex_guard/tasks_advanced/fake_clock are legacy-free;
+  coverage 150 → 126, files 56 → 44; deny manifest 132.
+- Pitfall: extracting a typed statement/expression helper must keep the
+  cursor contract identical (cursor on the name, helper advances `pos + 2`
+  or takes the `(` itself); the typed caller and the resolved caller differ
+  only in what they seek to first.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and
