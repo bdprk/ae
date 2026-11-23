@@ -762,7 +762,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                             return resolved.enum_constructors.contains(&value.range.start)
                                 || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(other))
                                     if other != "self" && resolved.scalar_reads.get(&value.range.start)
-                                        .is_some_and(|other_id| resolved.enum_bindings.contains(other_id)));
+                                        .is_some_and(|other_id| resolved.enum_bindings.contains(other_id)))
+                                // A call returning an enum (`e = swap(e)`): the
+                                // callee's signature answers, and the lowering
+                                // reports the same-statement move.
+                                || scalar_body_expression(value, resolved, supports_call, supports_field);
                         }
                         // Re-initializing an owned vector (after a move) takes
                         // a fresh vector: a literal or a call returning one.
@@ -860,7 +864,9 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                             || resolved.owned_text_bindings.contains(id)
                             || resolved.owned_string_bindings.contains(id)
                             // `return counts;` for a map the body owns.
-                            || resolved.map_definitions.contains(id)))
+                            || resolved.map_definitions.contains(id)
+                            // `return owned_enum;` moves the payload out.
+                            || resolved.enum_bindings.contains(id)))
         }
         // A literal print is the typed route's `Printed::Text` (no expression
         // to lower); a string field prints as its view; everything else must
