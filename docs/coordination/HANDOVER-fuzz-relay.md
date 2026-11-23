@@ -1306,3 +1306,33 @@ After this: effectful `try_*`/`read_file`/`env` (needs the typed `effects`
 path), generic-instance structs (`cached_struct_specialization` + field types
 from the instantiated `StructDef`), and concurrency builtins in bodies
 (`cell_load`/`task_yield`).
+
+### Method-call slice: corrected findings (attempt reverted 2026-11-23 05:05)
+
+An implementation was tried and reverted; these corrections to the blueprint
+above matter for the next attempt:
+
+- `MethodDef.signature.params[0]` **is the receiver** (a `&mut self` method's
+  params are `["&mut struct #0", ...]`). Arity is `arguments.len() + 1`;
+  value arguments read `params[index + 1]`.
+- Generic-instance receivers do **not** live in `inherent`: resolve them the
+  way `expression.rs` does — `generics.struct_origin`/`enum_origin` →
+  `generic_impls` template → `instantiate_impl_method(...)`. A lookup that
+  only checks `inherent` must not turn into a diagnostic; the call has to
+  fall back to the typed route.
+- A receiver is a borrow, never a value read: with the shared tree a bare
+  `self.` receiver has no `scalar_reads` occurrence, so lowering it as an
+  expression panics. Resolve the slot from `names` and only fall through to
+  `lower_scalar_body_expression(base)` for pointer receivers (`p.deref()`).
+- The scan predicate must be exactly as strict as the lowering. The clean
+  shape is a precomputed `method_calls: HashSet<usize>` (call offsets that
+  both resolvers accept) filled in `build_resolved_expressions`, consulted by
+  `scalar_body_expression`; anything else keeps the typed body. Without that
+  symmetry, `enum_generic_impls.ae` and the closure pointer tests fail with
+  hard errors instead of falling back (7 failing execution tests in the
+  attempted version).
+- `mut_borrow_of_readonly.ae`'s pinned diagnostic (9:26) is reachable with
+  the `StructMut`-receiver-on-`StructRef` check emitting at
+  `expression.range.end`; the rest of the receiver bookkeeping mirrors the
+  typed postfix branch, including `deferred_write_conflicts` for view
+  borrows.
