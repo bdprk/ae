@@ -903,8 +903,8 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                                         || resolved.owned_string_bindings.contains(id))))
                 }
                 ae_syntax::expression::ExpressionKind::Field { base, .. }
-                    if *operator == Kind::Equal && matches!(&base.kind,
-                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) =>
+                    if (*operator == Kind::Equal || compound_assignment_operator(operator).is_some())
+                        && matches!(&base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) =>
                 {
                     supports_field(target, ae_resolve::Role::Write)
                         && scalar_body_expression(value, resolved, supports_call, supports_field)
@@ -2267,7 +2267,7 @@ impl<'a> Parser<'a> {
                         // the store needs the base itself in `scalar_writes`
                         // (the lowering indexes that map by the base offset),
                         // and the root's spelling must be a mutable borrow.
-                        if *operator == Kind::Equal
+                        if (*operator == Kind::Equal || compound_assignment_operator(operator).is_some())
                             && let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
                                 let base_def = expressions.scalar_writes.get(&base.range.start).copied();
                                 let mutable_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
@@ -3122,10 +3122,27 @@ impl<'a> Parser<'a> {
                     }
                     let field = field_ty_in(sid, name, self.structs)
                         .ok_or_else(|| self.error_at(target.range.start, &format!("struct '{}' has no field '{name}'", self.structs[sid].name)))?;
+                    let compound = compound_assignment_operator(operator);
+                    // The check takes the operator's plain form (`+=` -> `+`),
+                    // exactly like the typed store.
+                    if let Some(op) = &compound {
+                        self.check_compound_assignment(field, op)?;
+                    }
+                    self.seek_scalar_offset(value.range.start);
+                    let (line, column) = self.position();
                     let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
                     self.seek_scalar_offset(statement.range.end);
                     self.check_field_value_type(name, field, actual, None)?;
-                    return Ok(Statement::FieldStore(slot, name.clone(), field, value, receiver));
+                    // `c.n += 5` stores `c.n + 5`: the typed route's FieldStore
+                    // with the field read applied in place.
+                    let stored = match compound {
+                        Some(op) => {
+                            let current = Expr::Field(Box::new(Expr::Variable(slot, receiver, line, column)), name.clone(), field);
+                            Expr::Binary(Box::new(current), op, Box::new(value), line, column, field)
+                        }
+                        None => value,
+                    };
+                    return Ok(Statement::FieldStore(slot, name.clone(), field, stored, receiver));
                 }
                 if let ae_syntax::expression::ExpressionKind::Index { base, index } = &target.kind {
                     // An array element store (`a[i] = v`): eligibility
