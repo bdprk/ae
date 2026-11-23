@@ -513,6 +513,7 @@ impl Parser<'_> {
             ImplTarget::Struct(sid) => Type::Struct(sid),
             ImplTarget::Enum(eid) => Type::Enum(self.enums[eid].name, eid),
         });
+        self.inherent_impl = true;
         self.take(Kind::LBrace)?;
         while *self.current() != Kind::RBrace {
             if *self.current() == Kind::Eof { return Err(self.fail("expected '}' before end of file")); }
@@ -632,6 +633,7 @@ impl Parser<'_> {
         }
         self.take(Kind::RBrace)?;
         self.impl_self = None;
+        self.inherent_impl = false;
         Ok(())
     }
 
@@ -863,6 +865,11 @@ impl Parser<'_> {
         } else {
             return Err(self.fail(&format!("unknown type '{first}'")));
         };
+        // The body route may take a receiver-less inherent associated
+        // function (`fn circle(r: i64) -> Self`), but a trait-impl body
+        // without a receiver stays typed: `Self` there is the trait's
+        // implementer, which the resolved route does not model yet.
+        self.inherent_impl = inherent_type.is_some();
         self.take(Kind::LBrace)?;
         // The resolver and compiler share the method declaration tree. Keep
         // the token route for syntax the shared grammar cannot recover yet.
@@ -895,6 +902,7 @@ impl Parser<'_> {
         }
         self.take(Kind::RBrace)?;
         self.impl_self = None;
+        self.inherent_impl = false;
         Ok(())
     }
 
@@ -1198,7 +1206,7 @@ impl Parser<'_> {
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
-            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, shadow_ok: false, pending: Vec::new(),
+            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new(),
         };
         let parsed = sub.function_rest_with_parameters(false, id, def.bindings.as_deref());
         let mut nested = std::mem::take(&mut sub.pending);
@@ -1272,7 +1280,7 @@ impl Parser<'_> {
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(),
             subst, trait_bounds: HashMap::new(), receiver: receiver_ty,
-            impl_self: Some(impl_self_ty), shadow_ok: false, pending: Vec::new(),
+            impl_self: Some(impl_self_ty), inherent_impl: true, shadow_ok: false, pending: Vec::new(),
         };
         let parsed = sub.function_rest(false, id);
         let mut nested = std::mem::take(&mut sub.pending);

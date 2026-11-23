@@ -553,7 +553,16 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     }
                     _ => iterator_constructor(initializer).is_some()
                         || resolved.enum_constructors.contains(&initializer.range.start)
-                        || scalar_body_expression(initializer, resolved, supports_call, supports_field),
+                        || scalar_body_expression(initializer, resolved, supports_call, supports_field)
+                        // `let copy = owned;` moves an owned value (the
+                        // lowering marks the source moved; the view-after-
+                        // last-use case defers through the move graph).
+                        || matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                            if name != "self" && resolved.scalar_reads.get(&initializer.range.start)
+                                .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                    || resolved.owned_string_bindings.contains(id)
+                                    || resolved.owned_vectors.contains(id)
+                                    || resolved.owned_struct_bindings.contains(id))),
                 }
         }
         StatementKind::Assign { target, operator, value } => {
@@ -2001,49 +2010,63 @@ impl<'a> Parser<'a> {
         // A substitution may be any value type the body route handles:
 // scalars and `string` both lower through the same arms (owned
 // fields, concatenation, comparisons).
-        if !self.subst.values().copied().all(|ty| scalar_type(ty) || matches!(ty, Type::String))
-            || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Enum(..)))
-            // A trait-impl body without a receiver can still spell `Self`;
-            // inherent methods (receiver set) join the route like functions.
-            || (self.impl_self.is_some() && self.subst.is_empty() && self.receiver.is_none())
-            || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
-                || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF)
-                || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
-                || (matches!(self.return_type, Type::Struct(_))
-                    && (self.receiver == Some(self.return_type)
-                        || owned_plain_struct(self.return_type, self.structs)
-                        || owned_field_struct(self.return_type, self.structs))))
-            || !self.names.iter().all(|(name, &(slot, _, ty))| {
-                let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
-                // A value capture moves into the closure's slot; the body's
-                // own Frees releases it after the call (the FnOnce shape),
-                // and a string vector's Frees releases its elements in the
-                // same order the typed path emits.
-                // A `&mut` struct parameter is a borrowed receiver: its field
-                // writes are FieldStore on a StructMut slot (the Checked arm
-                // already lowers them), and nothing moves or drops through
-                // the borrow.
-                // A `string` *parameter* is owned by this body; `live_owned`
-                // carries it in every `return`, so the callee releases what it
-                // did not move out. A closure's owned string capture stays
-                // typed: reading it would move the capture.
-                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..) | Type::Fn(_))
-                    || (matches!(ty, Type::String) && !captured)
-                    || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
-                    || ty == Type::StrView
-                    // A handle is a copy-semantics value: passing one never
-                    // moves or releases anything, so a body whose locals are
-                    // `atomic`/`shared`/`mutex`/`chan`/`exec`/`pool` values
-                    // reads and passes them like scalars.
-                    || matches!(ty, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool | Type::Guard)
-                    // A by-value plain struct parameter is owned here, but it
-                    // carries nothing a release routine walks, so the callee
-                    // needs no exit drop: reads (and moving it back out) are
-                    // the whole surface.
-                    || owned_plain_struct(ty, self.structs)
-                    || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)))
-            })
-        {
+        // Every clause is named so `AE_ROUTE_REASONS=1` can say which one kept the
+        // body off the route: the guard is the one rejection path with no
+        // statement to point at.
+        let subst_supported = self.subst.values().copied().all(|ty| scalar_type(ty) || matches!(ty, Type::String));
+        let receiver_supported = !self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Enum(..)));
+        // A receiver-less inherent associated function routes
+        // (`fn circle(r: i64) -> Self`); a receiver-less trait-impl body
+        // stays typed, because `Self` there is the trait's implementer.
+        let impl_body_supported = !(self.impl_self.is_some() && self.subst.is_empty() && self.receiver.is_none() && !self.inherent_impl);
+        let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
+            || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF)
+            || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
+            || (matches!(self.return_type, Type::Struct(_))
+                && (self.receiver == Some(self.return_type)
+                    || owned_plain_struct(self.return_type, self.structs)
+                    || owned_field_struct(self.return_type, self.structs)));
+        let slots_supported = self.names.iter().all(|(name, &(slot, _, ty))| {
+            let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
+            // A value capture moves into the closure's slot; the body's
+            // own Frees releases it after the call (the FnOnce shape),
+            // and a string vector's Frees releases its elements in the
+            // same order the typed path emits.
+            // A `&mut` struct parameter is a borrowed receiver: its field
+            // writes are FieldStore on a StructMut slot (the Checked arm
+            // already lowers them), and nothing moves or drops through
+            // the borrow.
+            // A `string` *parameter* is owned by this body; `live_owned`
+            // carries it in every `return`, so the callee releases what it
+            // did not move out. A closure's owned string capture stays
+            // typed: reading it would move the capture.
+            scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..) | Type::Fn(_))
+                || (matches!(ty, Type::String) && !captured)
+                || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
+                || ty == Type::StrView
+                // A handle is a copy-semantics value: passing one never
+                // moves or releases anything, so a body whose locals are
+                // `atomic`/`shared`/`mutex`/`chan`/`exec`/`pool` values
+                // reads and passes them like scalars.
+                || matches!(ty, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool | Type::Guard)
+                // A by-value plain struct parameter is owned here, but it
+                // carries nothing a release routine walks, so the callee
+                // needs no exit drop: reads (and moving it back out) are
+                // the whole surface.
+                || owned_plain_struct(ty, self.structs)
+                || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)))
+        });
+        if !(subst_supported && receiver_supported && impl_body_supported && return_supported && slots_supported) {
+            if std::env::var_os("AE_ROUTE_REASONS").is_some() {
+                let mut failed = Vec::new();
+                if !subst_supported { failed.push("substitution"); }
+                if !receiver_supported { failed.push("receiver"); }
+                if !impl_body_supported { failed.push("impl body"); }
+                if !return_supported { failed.push("return type"); }
+                if !slots_supported { failed.push("slot"); }
+                eprintln!("route reason blocked function at {}: guard ({})",
+                    self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), failed.join(", "));
+            }
             return None;
         }
         let resolved_cell = Rc::clone(&self.resolved_expressions);
@@ -2930,10 +2953,16 @@ impl<'a> Parser<'a> {
         let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
         slots.insert(def, (slot, Type::Int));
         self.names.insert(binding.clone(), (slot, false, Type::Int));
+        let base = self.scopes.len();
+        let moved_before = self.moved.clone();
         let body = self.lower_scalar_loop_body(body, slots, Some(label));
         slots.remove(&def);
         self.names.remove(binding);
         let body = body?;
+        // The body runs again: a value moved out of an outer variable must be
+        // re-initialized before the body ends (the typed route's ADR-20 rule,
+        // the same close the while loop applies).
+        self.close_loop_moves(base, moved_before, statement.range.start)?;
         statements.push(Statement::Declare(slot, start));
         statements.push(Statement::Declare(end_slot, end));
         statements.push(Statement::For(slot, end_slot, body, label, line, column));
@@ -6624,7 +6653,7 @@ mod tests {
         let source = format!("{source} fn local_pointer() -> i64 {{ var pointee = 1; let local_ptr = &mut pointee as *mut i64; unsafe {{ *local_ptr = 7; return local_ptr.deref(); }} }}");
         let source = format!("{source} fn vector_sum(vector_arg: &vec[f64]) -> f64 {{ var total = 0.0; for item in vector_arg {{ total += item; }} return total; }}");
         let source = format!("{source} fn owned_loop() -> i64 {{ let empty_vec = vec[]; for unused in empty_vec {{ print(unused); }} return 0; }}");
-        let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = vec[]; let moved = take_vec; return 0; }}");
+        let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = || -> i64 {{ return 0; }}; let moved = take_vec; return 0; }}");
         let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
         let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
         let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
@@ -6773,6 +6802,9 @@ mod tests {
             if values.is_empty() && owned.contains(&(*vector, Type::Vec))
                 && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int))) if source == vector)));
         parser.seek_scalar_offset(source.find("{ let take_vec =").unwrap());
+        // The binding holds a closure literal, which the resolved route does
+        // not take yet; the negative check also pins that a fallback leaves
+        // no move state behind.
         assert!(parser.lower_resolved_scalar_body().is_none());
         let start = source.find("words: &vec[string]").unwrap();
         parser.names.insert("words".into(), (88, false, Type::StrVecRef));

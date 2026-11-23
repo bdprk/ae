@@ -212,7 +212,7 @@ impl Parser<'_> {
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(),
-            subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None,
+            subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false,
             // Shadowing stays allowed in both passes: a body-local may reuse
             // an outer name, and the AST walk (not the name map) decides what
             // was captured.

@@ -1842,6 +1842,26 @@ parity → 50k → WSL → commit.
 - Pitfall: the check-time recheck closure's `slots` is the entry-scope table;
   a body local's marks must answer for the roles it does not hold, or every
   post-declaration field store falls back.
+
+### Slice 32 — guard diagnostics, associated functions, loop-move close (landed)
+
+- The guard's clauses are named booleans and `AE_ROUTE_REASONS=1` prints
+  `route reason blocked function at N: guard (substitution|receiver|impl
+  body|return type|slot)` — the one rejection with no statement to blame.
+- A new `Parser.inherent_impl` flag (true in the inherent impl body pass and
+  the generic-instance sub-parser, false for trait impls) lets a
+  receiver-less inherent associated function (`fn circle(r) -> Self`) route;
+  a receiver-less trait-impl body stays typed.
+- The resolved `for i in a..b` arm now calls `close_loop_moves` — the
+  workspace test `moving_an_outer_value_inside_a_loop_is_rejected` caught
+  the missing ADR-20 close (While/ForIn already had it).
+- `let copy = owned;` moves an owned string/vector/struct/string-binding
+  (scan admission; the lowering's move rules, with the view deferral).
+- `examples/enum_methods.ae` and `borrow_move_after_last_use.ae` are
+  legacy-free; coverage 181 → 175, files 61 → 58; deny manifest 118.
+- Pitfall: a shared-parser regression harness's "stays typed" samples must
+  use constructs the route deliberately does not take (closure literals);
+  when one starts routing, its parser-state residue shifts later assertions.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and
