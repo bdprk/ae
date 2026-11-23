@@ -85,7 +85,7 @@ pub fn parse_module_tokens_recovering(
             // Struct bodies are fields, enum bodies are variants: both are
             // on the declaration already. Trait bodies stay opaque; their
             // signatures are generic-dispatch surface for the type checker.
-            DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait => {}
+            DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait { .. } => {}
         }
     }
     Ok((Module {

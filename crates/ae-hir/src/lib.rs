@@ -39,7 +39,7 @@ pub enum HirItem<'a> {
     Function(HirFunction<'a>),
     Struct(HirItemHeader<'a>),
     Enum(HirItemHeader<'a>),
-    Trait(HirItemHeader<'a>),
+    Trait(HirTrait<'a>),
     Impl(HirItemHeader<'a>),
 }
 
@@ -48,6 +48,19 @@ pub struct HirItemHeader<'a> {
     pub name: String,
     pub span: Range<usize>,
     pub declaration: &'a Declaration,
+}
+
+pub struct HirTrait<'a> {
+    pub header: HirItemHeader<'a>,
+    pub methods: Vec<HirTraitMethod>,
+}
+
+pub struct HirTraitMethod {
+    pub id: HirId,
+    pub name: String,
+    pub span: Range<usize>,
+    pub params: Vec<(String, Range<usize>)>,
+    pub returns: Range<usize>,
 }
 
 pub struct HirFunction<'a> {
@@ -124,7 +137,7 @@ pub struct HirPat<'a> {
 /// still has stable ids.
 pub fn build<'a>(module: &'a ae_resolve::Module, resolution: Option<&'a ae_resolve::resolve::Resolution>) -> HirModule<'a> {
     let mut ids = Ids(0);
-    let mut opaque_bodies = Vec::new();
+    let opaque_bodies = Vec::new();
     let mut items = Vec::new();
     for (index, declaration) in module.declarations.iter().enumerate() {
         match &declaration.kind {
@@ -136,11 +149,16 @@ pub fn build<'a>(module: &'a ae_resolve::Module, resolution: Option<&'a ae_resol
             }
             DeclarationKind::Struct { .. } => items.push(HirItem::Struct(header(declaration, &mut ids))),
             DeclarationKind::Enum { .. } => items.push(HirItem::Enum(header(declaration, &mut ids))),
-            DeclarationKind::Trait => {
-                if let Some(span) = declaration.body.clone() {
-                    opaque_bodies.push(OpaqueBody { owner: declaration.name.clone(), span });
-                }
-                items.push(HirItem::Trait(header(declaration, &mut ids)));
+            DeclarationKind::Trait { methods } => {
+                let header = header(declaration, &mut ids);
+                let methods = methods.iter().map(|method| HirTraitMethod {
+                    id: ids.next(),
+                    name: method.name.clone(),
+                    span: method.range.clone(),
+                    params: method.parameters.iter().map(|parameter| (parameter.name.clone(), parameter.name_range.clone())).collect(),
+                    returns: method.returns.clone(),
+                }).collect();
+                items.push(HirItem::Trait(HirTrait { header, methods }));
             }
             DeclarationKind::Impl { .. } => {
                 items.push(HirItem::Impl(header(declaration, &mut ids)));

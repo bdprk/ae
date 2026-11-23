@@ -220,7 +220,7 @@ impl<'m> Pass<'m> {
                     }
                     self.variants.insert(id, table);
                 }
-                DeclarationKind::Trait => {
+                DeclarationKind::Trait { .. } => {
                     let id = self.register(&declaration.name, DefKind::Trait, self.name_range(&declaration.name, declaration.range.clone()), None);
                     self.claim_item(&declaration.name, id);
                 }
@@ -281,7 +281,7 @@ impl<'m> Pass<'m> {
                         self.claim_free(&declaration.name, id);
                         continue;
                     }
-                    DeclarationKind::Trait => DefKind::Trait,
+                    DeclarationKind::Trait { .. } => DefKind::Trait,
                     DeclarationKind::Impl { .. } => continue,
                 };
                 let id = self.register_imported(&declaration.name, visible, self.import_name_range(&tokens, declaration), None, true);

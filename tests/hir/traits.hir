@@ -1,42 +1,44 @@
 hir traits.ae
-item #0 trait Shape 0..41
-item #1 struct Square 43..75
-item #2 impl Shape 77..173
-item #3 function area 105..171
+item #0 trait Area 0..44
+  method #1 area 17..42
+    param shape: 25..30
+    return: 38..41
+item #2 struct Square 46..78
+item #3 impl Area 80..186
+item #4 function area 107..184
   params:
-    self: 113..117
-  return: 122..125
-  body: 126..171
-    stmt #4 return 136..165
-      expr #5 binary 143..164
-        expr #6 field 143..152
-          expr #7 atom 143..147
-        expr #8 field 155..164
-          expr #9 atom 155..159
+    shape: 115..120
+  return: 133..136
+  body: 137..184
+    stmt #5 return 147..178
+      expr #6 binary 154..177
+        expr #7 field 154..164
+          expr #8 atom 154..159
+        expr #9 field 167..177
+          expr #10 atom 167..172
       statements: none
-item #10 function make 175..241
+item #11 function report 188..251
   params:
-    side: 183..187
-  return: 197..203
-  body: 204..241
-    stmt #11 return 210..239
-      expr #12 struct 217..238
-        expr #13 atom 217..223
-        expr #14 atom 232..236
+    shape: 207..212
+  return: 220..223
+  body: 224..251
+    stmt #12 return 230..249
+      expr #13 call 237..248
+        expr #14 atom 237..241
+        expr #15 atom 242..247
       statements: none
-item #15 function main 243..308
+item #16 function main 253..330
   params: none
   return: (none)
-  body: 253..308
-    stmt #16 binding 259..280
-      expr #17 call 272..279
-        expr #18 atom 272..276
-        expr #19 atom 277..278
+  body: 263..330
+    stmt #17 binding 269..301
+      expr #18 struct 282..300
+        expr #19 atom 282..288
+        expr #20 atom 297..298
       statements: none
-    stmt #20 print 285..306
-      expr #21 call 291..304
-        expr #22 field 291..302
-          expr #23 atom 291..297
+    stmt #21 print 306..328
+      expr #22 call 312..326
+        expr #23 atom 312..318
+        expr #24 atom 319..325
       statements: none
-opaque bodies:
-  Shape 12..41
+opaque bodies: none

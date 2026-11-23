@@ -1,22 +1,22 @@
-trait Shape {
-    fn area(self) -> i64;
+trait Area {
+    fn area(shape: T) -> i64;
 }
 
 struct Square {
     side: i64,
 }
 
-impl Shape for Square {
-    fn area(self) -> i64 {
-        return self.side * self.side;
+impl Area for Square {
+    fn area(shape: Square) -> i64 {
+        return shape.side * shape.side;
     }
 }
 
-fn make(side: i64) -> Square {
-    return Square { side: side };
+fn report[T: Area](shape: T) -> i64 {
+    return area(shape);
 }
 
 fn main() {
-    let square = make(3);
-    print(square.area());
+    let square = Square { side: 3 };
+    print(report(square));
 }

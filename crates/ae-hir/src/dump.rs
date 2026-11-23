@@ -47,8 +47,22 @@ pub fn dump(module: &HirModule<'_>) -> String {
                 header.id.0, header.name, header.span.start, header.span.end)),
             HirItem::Enum(header) => out.push_str(&format!("item #{} enum {} {}..{}\n",
                 header.id.0, header.name, header.span.start, header.span.end)),
-            HirItem::Trait(header) => out.push_str(&format!("item #{} trait {} {}..{}\n",
-                header.id.0, header.name, header.span.start, header.span.end)),
+            HirItem::Trait(trait_item) => {
+                out.push_str(&format!("item #{} trait {} {}..{}
+",
+                    trait_item.header.id.0, trait_item.header.name,
+                    trait_item.header.span.start, trait_item.header.span.end));
+                for method in &trait_item.methods {
+                    out.push_str(&format!("  method #{} {} {}..{}
+", method.id.0, method.name, method.span.start, method.span.end));
+                    for (name, span) in &method.params {
+                        out.push_str(&format!("    param {name}: {}..{}
+", span.start, span.end));
+                    }
+                    out.push_str(&format!("    return: {}..{}
+", method.returns.start, method.returns.end));
+                }
+            }
             HirItem::Impl(header) => out.push_str(&format!("item #{} impl {} {}..{}\n",
                 header.id.0, header.name, header.span.start, header.span.end)),
         }

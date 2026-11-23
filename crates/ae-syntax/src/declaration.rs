@@ -144,6 +144,17 @@ pub struct EnumVariant {
     pub range: Range<usize>,
 }
 
+/// One `fn name(param: Type, ...) -> Type;` signature inside a trait body.
+/// The types stay byte ranges: the compiler owns their semantics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub name_range: Range<usize>,
+    pub parameters: Vec<TypedName>,
+    pub returns: Range<usize>,
+    pub range: Range<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeclarationKind {
     Function {
@@ -154,7 +165,7 @@ pub enum DeclarationKind {
     },
     Struct { fields: Vec<TypedName> },
     Enum { variants: Vec<EnumVariant> },
-    Trait,
+    Trait { methods: Vec<TraitMethod> },
     Impl { target: Option<Range<usize>> },
 }
 
@@ -610,6 +621,42 @@ impl<'a> DeclarationParser<'a> {
         }
     }
 
+    fn trait_body(&mut self) -> Result<Vec<TraitMethod>, Diagnostic> {
+        self.take(Kind::LBrace)?;
+        let mut methods = Vec::new();
+        while self.current().kind != Kind::RBrace {
+            if self.current().kind == Kind::Eof { return Err(self.error("expected '}' before end of file")); }
+            let method_start = self.current().offset;
+            self.take(Kind::Fn)?;
+            let name_pos = self.pos;
+            let name = self.identifier()?.to_owned();
+            let name_range = self.tokens[name_pos].offset..self.tokens[name_pos].end;
+            self.take(Kind::LParen)?;
+            let mut parameters = Vec::new();
+            if self.current().kind != Kind::RParen {
+                loop {
+                    if parameters.len() >= 8 { return Err(self.error("trait method parameter limit exceeded (8)")); }
+                    let parameter_pos = self.pos;
+                    let parameter = self.identifier()?.to_owned();
+                    let parameter_range = self.tokens[parameter_pos].offset..self.tokens[parameter_pos].end;
+                    self.take(Kind::Colon)?;
+                    let ty = self.ty(&[Kind::Comma, Kind::RParen], false)?;
+                    parameters.push(TypedName { name: parameter, name_range: parameter_range, mutable: false, ty });
+                    if self.current().kind != Kind::Comma { break; }
+                    self.pos += 1;
+                }
+            }
+            self.take(Kind::RParen)?;
+            self.take(Kind::Arrow)?;
+            let returns = self.ty(&[Kind::Semi], false)?;
+            self.take(Kind::Semi)?;
+            let end = self.tokens[self.pos - 1].end;
+            methods.push(TraitMethod { name, name_range, parameters, returns, range: method_start..end });
+        }
+        self.take(Kind::RBrace)?;
+        Ok(methods)
+    }
+
     fn declaration(&mut self) -> Result<Declaration, Diagnostic> {
         let start = self.current().offset;
         let public = if matches!(&self.current().kind, Kind::Ident(name) if name == "pub") {
@@ -721,7 +768,9 @@ impl<'a> DeclarationParser<'a> {
             let body_start = self.opaque_body()?;
             (function, body_start)
         } else if keyword == Kind::Trait {
-            (DeclarationKind::Trait, self.opaque_body()?)
+            let body_start = self.current().offset;
+            let methods = self.trait_body()?;
+            (DeclarationKind::Trait { methods }, body_start)
         } else if keyword == Kind::Impl {
             // Without a 'for' clause the declaration name is the inherent
             // implementation target. With one, it names the trait.
@@ -759,7 +808,7 @@ mod tests {
     fn trait_and_impl_ranges_follow_the_repository_examples() {
         let source = include_str!("../../../examples/traits.ae");
         let declarations = parse_declarations("traits.ae", source).unwrap();
-        assert!(matches!(declarations[0].kind, DeclarationKind::Trait));
+        assert!(matches!(declarations[0].kind, DeclarationKind::Trait { .. }));
         assert_eq!(declarations[0].name, "Area");
         let DeclarationKind::Impl { target: Some(target) } = &declarations[1].kind else {
             panic!("expected trait implementation");

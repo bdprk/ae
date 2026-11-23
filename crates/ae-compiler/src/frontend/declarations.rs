@@ -132,7 +132,7 @@ impl Parser<'_> {
             Ok(declarations) => {
                 let mut cursor = body_start;
                 for declaration in declarations {
-                    if declaration.kind != DeclarationKind::Trait {
+                    if !matches!(declaration.kind, DeclarationKind::Trait { .. }) {
                         continue;
                     }
                     // A declaration range includes modifiers such as 'pub'.
@@ -944,7 +944,7 @@ impl Parser<'_> {
                 // Signatures are already registered. Only executable bodies
                 // and impl methods need this pass.
                 let already_collected = match item.kind {
-                    DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait => true,
+                    DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait { .. } => true,
                     DeclarationKind::Function { .. } => !item.type_parameters.is_empty() || item.body.is_none(),
                     DeclarationKind::Impl { .. } => false,
                 };
