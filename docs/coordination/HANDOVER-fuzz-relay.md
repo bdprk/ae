@@ -1387,3 +1387,19 @@ total, CI-gated).
 Next: function-value calls (`f(x)` — `FnValue`/`FnCall`), effectful
 `try_*`/`read_file`, generic-instance structs, concurrency builtins
 (`cell_load`/`task_yield`), trait dispatch.
+
+## P1.1 slice 18 landed: function-value calls
+
+- A local whose spelling is `FnValue { .. }` is marked in
+  `fn_value_bindings`; `call_definitions` maps a call's callee offset to the
+  binding def (the resolver records a fn-value callee under `Role::Call`,
+  not as a read). The guard admits `Type::Fn(_)` parameters.
+- `f(x)` / `f(f(x))` lower as `Expr::FnCall(slot, args, ret, sig)` with the
+  typed `call_arguments` rules: a `&string` parameter takes a view
+  (`Argument::View`), everything else a value, and an owned value moves.
+
+Coverage: 342 → **338**. `apply`/`twice` route; `main` (which *passes*
+closure literals) stays typed until closure-literal arguments are tracked —
+that is the next slice for this family: typed builds `Argument::FnPtr(id)`
+for a matching, capture-free closure literal (`expression.rs`
+`call_arguments`), which needs the closure instantiation path.

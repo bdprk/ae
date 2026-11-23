@@ -310,6 +310,18 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                                         || resolved.map_definitions.contains(id)))
                     });
             }
+            // A call through a function-typed value: the binding names the
+            // pointer the caller passed (`Expr::FnCall` on its slot).
+            if matches!(callee.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && resolved.call_definitions.get(&callee.range.start)
+                    .is_some_and(|id| resolved.fn_value_bindings.contains(id))
+            {
+                return arguments.iter().all(|argument| {
+                    scalar_body_expression(argument, resolved, supports_call, supports_field)
+                        || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
+                        || resolved.struct_field_views.contains(&argument.range.start)
+                });
+            }
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
                     || resolved.unresolved_calls.contains(&callee.range.start))
@@ -1121,6 +1133,9 @@ impl<'a> Parser<'a> {
                         expressions.direct_calls.insert(occurrence.range.start);
                     }
                     ae_resolve::Role::Call if definition.kind.is_local() => {
+                        // The callee offset names the binding being called:
+                        // `Expr::FnCall` needs it (a function value).
+                        expressions.call_definitions.insert(occurrence.range.start, definition.id);
                         if matches!(definition.inferred.as_ref(),
                             Some(ae_resolve::TypeSpelling::Pointer { pointee, .. })
                                 if matches!(pointee.as_ref(), ae_resolve::TypeSpelling::Primitive("i64" | "f64" | "bool")))
@@ -1162,6 +1177,11 @@ impl<'a> Parser<'a> {
             expressions.owned_string_bindings.extend(resolution.defs.iter()
                 .filter(|entry| entry.kind.is_local()
                     && matches!(entry.inferred, Some(ae_resolve::TypeSpelling::Primitive("string"))))
+                .map(|entry| entry.id));
+            // A function-typed local: a call through it lowers as `FnCall`.
+            expressions.fn_value_bindings.extend(resolution.defs.iter()
+                .filter(|entry| entry.kind.is_local()
+                    && matches!(entry.inferred, Some(ae_resolve::TypeSpelling::FnValue { .. })))
                 .map(|entry| entry.id));
             // A map binding or `&map` parameter: the map builtins and
             // `m[key] = v` stores borrow it for the statement's duration.
@@ -1611,7 +1631,7 @@ impl<'a> Parser<'a> {
                 // carries it in every `return`, so the callee releases what it
                 // did not move out. A closure's owned string capture stays
                 // typed: reading it would move the capture.
-                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..))
+                scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..) | Type::Fn(_))
                     || (matches!(ty, Type::String) && !captured)
                     || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                     || ty == Type::StrView
@@ -2642,6 +2662,42 @@ impl<'a> Parser<'a> {
                 if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
                     if resolved_builtin(name) {
                         return self.lower_resolved_builtin(name, expression, callee, arguments, slots);
+                    }
+                    // A call through a function-typed value: the binding's
+                    // slot names the pointer the caller passed (ADR-0189).
+                    if let Some(&(slot, _, Type::Fn(sig))) = self.names.get(name) {
+                        let (params, ret) = super::closures::fn_sig(sig);
+                        let mut args = Vec::with_capacity(arguments.len());
+                        for (index, argument) in arguments.iter().enumerate() {
+                            self.seek_scalar_offset(argument.range.start);
+                            let Some(expected) = params.get(index).copied() else {
+                                return Err(self.fail(&format!("too many arguments to '{name}'")));
+                            };
+                            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                            // A `&string` parameter takes a view (the typed
+                            // `typed_call_argument` rule); everything else is
+                            // a value, and an owned one moves.
+                            if matches!(expected, Type::StrView) {
+                                if !matches!(actual, Type::String | Type::StrView) {
+                                    self.seek_scalar_offset(argument.range.end);
+                                    return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name())));
+                                }
+                                args.push(Argument::View(value));
+                                continue;
+                            }
+                            self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
+                            if actual.owned() {
+                                if let Expr::Variable(source, ..) = &value {
+                                    self.moved.insert(*source);
+                                }
+                            }
+                            args.push(Argument::Value(value));
+                        }
+                        if args.len() != params.len() {
+                            return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", params.len(), args.len())));
+                        }
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::FnCall(slot, args, ret, sig), ret));
                     }
                 }
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {

@@ -756,6 +756,12 @@ struct ResolvedExpressions {
     /// Local bindings and parameters whose spelling is a map (`Composite`
     /// family "map"): map builtins and `m[key] = v` stores borrow them.
     map_definitions: HashSet<ae_resolve::DefId>,
+    /// Locals whose spelling is `fn(T, …) -> R`: a call through the value
+    /// lowers as `Expr::FnCall` on the binding's slot.
+    fn_value_bindings: HashSet<ae_resolve::DefId>,
+    /// Call sites whose callee is a local binding (a function value): the
+    /// callee offset names the def.
+    call_definitions: HashMap<usize, ae_resolve::DefId>,
     /// Stores of an owned value into a `string` field through a `&mut`
     /// receiver (`p.buf = ...`): the codegen releases the old value first
     /// and consumes the right-hand side.
