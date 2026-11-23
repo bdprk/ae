@@ -115,7 +115,11 @@ fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
 fn plain_drop_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_some()
-        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || owned_plain_struct(*ty, structs)))
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
+            // A raw pointer carries no release surface (it is an address, not
+            // an owned value): a guard that points at a slot releases cleanly.
+            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
+            || owned_plain_struct(*ty, structs)))
 }
 
 fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
@@ -2314,7 +2318,9 @@ impl<'a> Parser<'a> {
                                                 // typed route would. Owned fields
                                                 // alongside `drop` stay typed (the
                                                 // release order is the typed route's).
-                                                scalar_type(*ty) || owned_plain_struct(*ty, self.structs)
+                                                scalar_type(*ty)
+                                                    || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
+                                                    || owned_plain_struct(*ty, self.structs)
                                             }) {
                                                 expressions.drop_constructions.insert(expression.range.start);
                                             }
