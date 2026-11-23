@@ -1554,3 +1554,13 @@ Design for the next attempt (the precompute in
 Verification: `examples/generic_impl.ae` (`Pair[K, V]` methods,
 `Pair[string, i64]::new`), `tests/run/enum_generic_impls.ae`, then both files
 can join `scripts/deny_route.py` (currently 19 entries).
+
+Storage detail for step 2: the resolved instances must be visible to the
+*expression* lowerer, which runs after the precompute and cannot call the
+`&mut` instantiator again through the recheck closure. Put the map on the
+`Parser` itself (`generic_method_calls: HashMap<usize, (usize, Vec<Type>,
+Type)>`, default empty in all four constructors), fill it in
+`lower_resolved_body_with_captures` before the eligibility recheck, consult
+it from the lowering's Field-callee branch, and clear it when the body
+returns (the 50k sweep will catch a stale map across bodies — the default
+10k sample may not, so run the ignored gate with this slice).
