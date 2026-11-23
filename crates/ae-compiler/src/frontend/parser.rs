@@ -7917,9 +7917,14 @@ mod tests {
             .expect("resolved string-capture closure body").unwrap();
         assert!(matches!(closure.as_slice(), [Statement::Print(Printed::Expr(Expr::Variable(82, Type::StrView, ..))),
             Statement::Return(Expr::Number(0), _)]));
+        // A captured owned string is the value-capture (FnOnce) shape: the read
+        // lowers, and the capture is released unless the body moved it out.
         parser.names.insert("keep".into(), (82, false, Type::String));
         parser.seek_scalar_offset(source.find("{ print(keep)").unwrap());
-        assert!(parser.lower_resolved_body_with_captures(&[(82, keep_start)]).is_none());
+        let captured = parser.lower_resolved_body_with_captures(&[(82, keep_start)])
+            .expect("resolved owned-string capture").unwrap();
+        assert!(matches!(captured.first(),
+            Some(Statement::Print(Printed::Expr(Expr::Variable(82, Type::String, ..))))));
         parser.names.remove("keep");
         let numbers_start = source.find("let numbers = vec[10, 20]").unwrap() + 4;
         let vector_body = source.find("{ print(numbers[1])").unwrap();
