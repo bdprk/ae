@@ -5,7 +5,11 @@ use super::parser::SharedExpressionEffects;
 impl<'a> Parser<'a> {
     pub(super) fn lower_resolved_local(&mut self, name: &str, offset: usize) -> Option<(Expr, Type)> {
         let (id, _, ty) = *self.names.get(name)?;
-        if self.moved.contains(&id) || self.shadow_ok || !self.subst.is_empty() {
+        // An instantiated template parses in a sub-parser whose `subst` is
+        // non-empty; that is not a reason to refuse the shared rules. The
+        // binding-range identity check below is what proves the offset and
+        // the slot name the same local, so the substitution is irrelevant.
+        if self.moved.contains(&id) || self.shadow_ok {
             return None;
         }
         let definition = self.resolved_expressions().local_bindings.get(&offset)?;
