@@ -809,7 +809,10 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                                 .is_some_and(|id| resolved.owned_text_bindings.contains(id)
                                     || resolved.owned_string_bindings.contains(id)
                                     || resolved.owned_vectors.contains(id)
-                                    || resolved.owned_struct_bindings.contains(id))),
+                                    || resolved.owned_struct_bindings.contains(id)
+                                    // `let y = x;` moves an owned enum, which
+                                    // the lowering records like any owned move.
+                                    || resolved.enum_bindings.contains(id))),
                 }
         }
         StatementKind::Assign { target, operator, value } => {
@@ -986,16 +989,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::Match { subject, arms } => {
+            // A bare local subject is admitted permissively: the lowering's
+            // `lower_match` reports the typed route's "match needs a bare enum
+            // variable as its subject" for a non-enum and reads the enum's own
+            // layout for a genuine one (`match self` included).
             matches!(subject.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                && (resolved.scalar_reads.get(&subject.range.start)
-                        .is_some_and(|id| resolved.enum_bindings.contains(id)
-                            // A subject bound from a generic or method call:
-                            // its concrete enum type exists only at lowering,
-                            // which validates the match.
-                            || resolved.generic_call_bindings.contains(id))
-                    // `match self` in an impl whose target is an enum: the
-                    // carrier answers by the impl owner, not by a spelling.
-                    || supports_field(subject, ae_resolve::Role::Borrow))
                 && arms.iter().all(|arm| arm.body.iter().all(|statement| {
                     scalar_body_statement(statement, resolved, supports_call, supports_field)
                 }))
