@@ -421,11 +421,12 @@ impl Parser<'_> {
     }
 
     fn postfix(&mut self, mut base: Expression, no_struct: bool) -> Result<Expression, Diagnostic> {
-        // `[` continues the postfix chain only after a name (the typed
-        // parser's index rule); any other base leaves the bracket for the
-        // caller's own diagnostic (`expected RParen, found LBracket`).
+        // `[` continues the postfix chain only after a name or a field of one
+        // (the typed parser's index rule); any other base leaves the bracket
+        // for the caller's own diagnostic (`expected RParen, found LBracket`).
         while matches!(self.current().kind, Kind::LParen | Kind::Dot | Kind::ColonColon | Kind::As)
-            || (self.current().kind == Kind::LBracket && matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_))))
+            || (self.current().kind == Kind::LBracket
+                && matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Field { .. }))
             || (!no_struct && self.current().kind == Kind::LBrace
                 && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Specialization { .. }))
         {
