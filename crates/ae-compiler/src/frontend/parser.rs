@@ -2277,7 +2277,7 @@ impl<'a> Parser<'a> {
                                     };
                                     if let Some(&sid) = resolved_name.as_ref().and_then(|struct_name| self.struct_names.get(struct_name)) {
                                         let defn = &self.structs[sid];
-                                        if defn.file == self.file || defn.public {
+                                        {
                                             let constructed = Type::Struct(sid);
                                             if defn.drop_fn.is_none() {
                                                 if owned_plain_struct(constructed, self.structs) {
@@ -2768,7 +2768,9 @@ impl<'a> Parser<'a> {
                 let visible = if signature.file == self.file {
                     resolved.direct_calls.contains(&offset)
                 } else {
-                    signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
+                    // A private import is admitted too: the lowering reports
+                    // the typed route's "private to <file>" diagnostic.
+                    signature.file != PRELUDE && resolved.unresolved_calls.contains(&offset)
                 };
                 visible
                     // Calling C, or an `unsafe fn`, is the unchecked
@@ -3974,6 +3976,10 @@ impl<'a> Parser<'a> {
                     }
                     _ => return Err(self.error_at(target.range.start, "this construction form is not supported by the body route")),
                 };
+                if self.structs[sid].file != self.file && !self.structs[sid].public {
+                    let (name, file) = (self.structs[sid].name.clone(), self.structs[sid].file.clone());
+                    return Err(self.error_at(target.range.start, &format!("struct '{name}' is private to {file} (mark it 'pub' to export it)")));
+                }
                 let mut values: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
                 for field in fields {
                     let next = self.tokens.partition_point(|token| token.offset < field.name_range.end);
@@ -4403,6 +4409,10 @@ impl<'a> Parser<'a> {
                     // the concrete impl, so the call stays monomorphized.
                     None => self.resolve_trait_call(name, callee.range.start)?,
                 };
+                if signature.file != self.file && !signature.public {
+                    // The typed route's import visibility rule.
+                    return Err(self.error_at(callee.range.start, &format!("function '{name}' is private to {} (mark it 'pub' to export it)", signature.file)));
+                }
                 if (signature.extern_c || self.ctx.is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
                     return Err(self.error_at(callee.range.start, &format!("call to unsafe function '{name}' requires 'unsafe'")).with_code("E0701"));
                 }
