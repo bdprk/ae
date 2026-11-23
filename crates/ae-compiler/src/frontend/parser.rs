@@ -455,6 +455,12 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         // (`values: &vec`); the vector itself never moves.
                         || resolved.vector_definitions.contains(id)
                 })
+                // A closure parameter's `[i64; N]` (or any local whose array
+                // shape the marks miss) indexes permissively: the lowering
+                // answers by the slot's type.
+                .then_some(())
+                .or_else(|| resolved.scalar_reads.get(&base.range.start).map(|_| ()))
+                .is_some()
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_)) => true,
@@ -2366,7 +2372,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 let failing = body.statements.iter().position(|statement| {
-                    !scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| false)
+                    // The closure lowering re-checks fields against the
+                    // parameter slots, so the collection pass is permissive for
+                    // an ident-rooted chain (a `&Pair` closure parameter's
+                    // field read, an `&[i64; N]` parameter's index).
+                    !scalar_body_statement(statement, &expressions, &|_, _| true, &|_, _| true)
                 });
                 if !body.has_binding_conflict && failing.is_none() {
                     expressions.scalar_bodies.insert(body.start, body.statements.clone());
@@ -4535,7 +4545,7 @@ impl<'a> Parser<'a> {
                         let by_ref = matches!(ty, Type::StrVecRef);
                         (Expr::StrVecIndex(slot, Box::new(value), line, column, by_ref), Type::StrView)
                     }
-                    _ => unreachable!("resolved array, borrowed or owned numeric/string vector binding"),
+                    other => return Err(self.error_at(base.range.start, &format!("cannot index a value of type {}", other.name(self.ctx)))),
                 }
             }
             ExpressionKind::Vector(elements) => {
