@@ -72,6 +72,9 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn fallback_expression(&mut self, min: u8, moving: bool) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if std::env::var_os("AE_STRICT_ROUTE").is_some() {
+            return Err(self.fail("this expression is not supported by the body route"));
+        }
         if std::env::var_os("AE_ROUTE_REPORT").is_some() {
             let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
             eprintln!("route typed-expression at {offset}");

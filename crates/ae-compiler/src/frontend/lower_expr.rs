@@ -257,6 +257,14 @@ impl<'a> Parser<'a> {
                 // A typed-only intrinsic (`ptr_write`, `ptr_drop_in_place`,
                 // `bytes`): the typed expression parser owns the operational
                 // checks and the shape. Bounded by the following operator.
+                // The pointer-store intrinsics and `bytes` lower from the
+                // shared nodes when their shapes are the supported ones; a
+                // shape that needs a typed diagnostic keeps the delegation.
+                if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind
+                    && matches!(name.as_str(), "ptr_write" | "ptr_drop_in_place" | "bytes")
+                    && let Some(lowered) = self.lower_shared_intrinsic(name, expression, arguments, slots)? {
+                        return Ok(lowered);
+                    }
                 // `tokenize(text, sep)` builds a cursor over a string
                 // variable (or a struct's string field): the base's borrow and
                 // the separator check are the typed rule, applied to the
@@ -292,7 +300,7 @@ impl<'a> Parser<'a> {
                 // builds the call. A receiver-taking entry, a private entry or
                 // an unknown method returns None so the typed postfix layer
                 // still owns those diagnostics.
-                if let Some((value, ty)) = self.lower_shared_associated_call(callee, arguments, expression) {
+                if let Some((value, ty)) = self.lower_shared_associated_call(callee, arguments, expression)? {
                     return Ok((value, ty));
                 }
                 // An associated call (`Point::new(1)`): the typed postfix layer
@@ -914,6 +922,21 @@ impl<'a> Parser<'a> {
         let Some((signature, receiver, _method_receiver_ty)) = self.resolve_inherent_method(method, receiver_ty) else {
             return Ok(None);
         };
+        // A borrowed receiver needs a bare named variable as storage. The
+        // typed route consumes the argument list first and then reports the
+        // rule at the call's closing `)`, so do the same.
+        if matches!(receiver, Some(Type::StructRef(_) | Type::StructMut(_)))
+            || matches!(receiver_ty, Type::StructRef(_) | Type::StructMut(_))
+        {
+            let params = signature.params[1..].to_vec();
+            let mut nodes_left = 128;
+            let mut effects = SharedExpressionEffects::default();
+            if self.lower_shared_call_arguments(arguments, &params, 64, &mut nodes_left, &mut effects).is_none() {
+                return Ok(None);
+            }
+            self.seek_scalar_offset(expression.range.end);
+            return Err(self.fail(&format!("'{method}' borrows its receiver, so the receiver must be a bare struct variable; bind the value to a variable first")));
+        }
         if !matches!(receiver, Some(ty) if ty == receiver_ty) {
             return Ok(None);
         }
@@ -979,9 +1002,78 @@ impl<'a> Parser<'a> {
                     }
                     Some(signature.ret)
                 }
+                // A direct call root (`make().area()`): the function's
+                // declared return types the chain.
+                ExpressionKind::Atom(Kind::Ident(name)) => {
+                    let signature = self.functions.get(name)?;
+                    (arguments.len() == signature.params.len()).then_some(signature.ret)
+                }
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// `ptr_write`, `ptr_drop_in_place` and `bytes` from the shared nodes.
+    /// Only successful shapes lower here; an unsafe-context violation, a
+    /// wrong pointer or a wrong argument type returns `Ok(None)` so the typed
+    /// parser still owns those pinned diagnostics.
+    pub(super) fn lower_shared_intrinsic(
+        &mut self,
+        name: &str,
+        expression: &ae_syntax::expression::Expression,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
+        match name {
+            "ptr_write" => {
+                if arguments.len() != 2 || self.unsafe_depth == 0 {
+                    return Ok(None);
+                }
+                let (pointer, pointer_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                let Type::PtrMut(pointee_id) = pointer_ty else {
+                    return Ok(None);
+                };
+                let pointee = self.ctx.ptr_pointee(pointee_id);
+                let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                if value_ty != pointee {
+                    return Ok(None);
+                }
+                if value_ty.owned()
+                    && let Expr::Variable(slot, ..) = &value {
+                        self.check_variable_move(*slot)?;
+                        self.moved.insert(*slot);
+                    }
+                self.seek_scalar_offset(expression.range.end);
+                let (line, column) = self.position();
+                Ok(Some((Expr::PtrWrite(Box::new(pointer), Box::new(value), pointee, line, column), Type::Int)))
+            }
+            "ptr_drop_in_place" => {
+                if arguments.len() != 1 || self.unsafe_depth == 0 {
+                    return Ok(None);
+                }
+                let (pointer, pointer_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                let Type::PtrMut(pointee_id) = pointer_ty else {
+                    return Ok(None);
+                };
+                let pointee = self.ctx.ptr_pointee(pointee_id);
+                self.seek_scalar_offset(expression.range.end);
+                let (line, column) = self.position();
+                Ok(Some((Expr::PtrDropInPlace(Box::new(pointer), pointee, line, column), Type::Int)))
+            }
+            "bytes" => {
+                if arguments.len() != 1 {
+                    return Ok(None);
+                }
+                let (value, ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                if !matches!(ty, Type::String | Type::StrView) {
+                    return Ok(None);
+                }
+                self.seek_scalar_offset(expression.range.end);
+                let (line, column) = self.position();
+                Ok(Some((Expr::Bytes(Box::new(value), line, column), Type::Vec)))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1031,25 +1123,25 @@ impl<'a> Parser<'a> {
 
     /// An associated function (`Type::method(...)`) on a plain struct or
     /// enum: the inherent impl template supplies the signature, and the
-    /// shared argument lowering supplies the arguments. `None` leaves the
-    /// typed postfix layer to produce its own diagnostics (a receiver-taking
-    /// entry, a private item, an unknown method, or a shape the shared
-    /// argument lowering does not cover).
+    /// shared argument lowering supplies the arguments. Receiver-taking and
+    /// missing entries answer with the typed route's own diagnostics; a
+    /// private entry, or an argument shape the shared lowering does not
+    /// cover, returns `Ok(None)` and keeps the typed delegation.
     pub(super) fn lower_shared_associated_call(
         &mut self,
         callee: &ae_syntax::expression::Expression,
         arguments: &[ae_syntax::expression::Expression],
         expression: &ae_syntax::expression::Expression,
-    ) -> Option<(Expr, Type)> {
+    ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
         use ae_syntax::expression::ExpressionKind;
-        let ExpressionKind::Qualified { base, name: method } = &callee.kind else { return None };
+        let ExpressionKind::Qualified { base, name: method } = &callee.kind else { return Ok(None) };
         let type_name = match &base.kind {
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 if name == "Self" {
                     match self.impl_self {
                         Some(Type::Struct(sid)) => self.structs[sid].name.clone(),
                         Some(Type::Enum(name, _)) => name.to_owned(),
-                        _ => return None,
+                        _ => return Ok(None),
                     }
                 } else {
                     name.clone()
@@ -1058,7 +1150,7 @@ impl<'a> Parser<'a> {
             // A generic instance (`Wrapper[i64]::new(..)`): the cached or
             // freshly instantiated layout names the impl template, and the
             // instance method supplies the signature.
-            _ => return self.lower_shared_generic_associated_call(base, method, arguments, expression),
+            _ => return Ok(self.lower_shared_generic_associated_call(base, method, arguments, expression)),
         };
         let public = if let Some(&sid) = self.struct_names.get(&type_name) {
             let def = &self.structs[sid];
@@ -1067,23 +1159,44 @@ impl<'a> Parser<'a> {
             let def = &self.enums[eid];
             def.public || def.file == self.file || def.file == PRELUDE
         } else {
-            return None;
+            return Ok(None);
         };
         if !public {
-            return None;
+            return Ok(None);
         }
         let key = format!("{type_name}#{method}");
-        let def = self.generics.inherent.get(&key)?.clone();
-        if def.receiver.is_some() || !def.signature.public {
-            return None;
+        match self.generics.inherent.get(&key).cloned() {
+            Some(def) if def.receiver.is_some() => Err(self.error_at(callee.range.start, &format!(
+                "'{type_name}::{method}' takes a receiver; call it as 'value.{method}(...)' instead"))),
+            Some(def) if !def.signature.public => Ok(None),
+            Some(def) => {
+                let params = def.signature.params.clone();
+                let mut nodes_left = 128;
+                let mut effects = SharedExpressionEffects::default();
+                let Some(args) = self.lower_shared_call_arguments(arguments, &params, 64, &mut nodes_left, &mut effects) else {
+                    return Ok(None);
+                };
+                self.commit_shared_effects(effects);
+                self.seek_scalar_offset(expression.range.end);
+                Ok(Some((Expr::Call(def.signature.id, args, def.signature.ret), def.signature.ret)))
+            }
+            None => {
+                // The typed route's missing-associated-function diagnostic
+                // lists the type's impl entries, receiver-bearing ones too.
+                let prefix = format!("{type_name}#");
+                let mut names: Vec<String> = self.generics.inherent.keys()
+                    .filter_map(|entry| entry.strip_prefix(&prefix).map(str::to_owned))
+                    .collect();
+                names.sort();
+                if names.is_empty() {
+                    return Err(self.error_at(callee.range.end, &format!(
+                        "type '{type_name}' has no methods; declare one in 'impl {type_name} {{ ... }}'")));
+                }
+                Err(self.error_at(callee.range.end, &format!(
+                    "type '{type_name}' has no associated function '{method}'; it has {}",
+                    names.join(", "))))
+            }
         }
-        let params = def.signature.params.clone();
-        let mut nodes_left = 128;
-        let mut effects = SharedExpressionEffects::default();
-        let args = self.lower_shared_call_arguments(arguments, &params, 64, &mut nodes_left, &mut effects)?;
-        self.commit_shared_effects(effects);
-        self.seek_scalar_offset(expression.range.end);
-        Some((Expr::Call(def.signature.id, args, def.signature.ret), def.signature.ret))
     }
 
     /// `Type[Args]::method(...)` on a generic struct or enum: instantiate the
@@ -1211,10 +1324,7 @@ impl<'a> Parser<'a> {
                     if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
                         return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, string, vec, or vec[string]"));
                     }
-                    match self.instantiate_enum(gid, args, base.range.start) {
-                        Ok(eid) => eid,
-                        Err(_) => return Ok(None),
-                    }
+                    self.instantiate_enum(gid, args, base.range.start)?
                 }
             }
             _ => return Ok(None),
