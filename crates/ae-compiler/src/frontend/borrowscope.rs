@@ -51,9 +51,9 @@ use super::movewalk::{expr_reads, statement_move_effects, statement_reads, walk_
 /// path that exits without joining would run the thread past the frame.
 /// Blocks containing the join end every path through them, so the walk
 /// explores only unjoined paths and rejects on the first exit it reaches.
-pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Vec<usize>, usize)]) -> Result<(), String> {
+pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Vec<usize>, usize)], ctx: &CompileContext) -> Result<(), String> {
     if spawns.is_empty() { return Ok(()); }
-    let graph = build_cfg(function);
+    let graph = build_cfg(function, ctx);
     for (cid, _borrowed, _offset) in spawns {
         // The joins: blocks containing a `wait` of this spawn's handle; the
         // spawn site: the `Declare` binding a handle from THIS closure's
@@ -63,8 +63,8 @@ pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Ve
         let mut spawn_site: Option<(usize, usize, usize)> = None;
         for block in &graph.blocks {
             for (index, statement) in block.statements.iter().enumerate() {
-                if let Statement::Declare(id, expr) = statement {
-                    if let Expr::Spawn(_, callable, ..) = expr {
+                if let Statement::Declare(id, expr) = statement
+                    && let Expr::Spawn(_, callable, ..) = expr {
                         let spawned_here = match &**callable {
                             Expr::ClosureLit(lit) => lit == cid,
                             Expr::Variable(_, Type::Closure(lit), ..) => lit == cid,
@@ -74,7 +74,6 @@ pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Ve
                             spawn_site = Some((block.id, index + 1, *id));
                         }
                     }
-                }
             }
         }
         let Some((spawn_block, spawn_index, handle)) = spawn_site else {
@@ -164,11 +163,10 @@ fn collect_waits_stmt(statement: &Statement, out: &mut Vec<usize>) {
 }
 
 fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
-    if let Expr::Wait(handle, ..) = expr {
-        if let Expr::Variable(id, Type::Thread(_), ..) = &**handle {
+    if let Expr::Wait(handle, ..) = expr
+        && let Expr::Variable(id, Type::Thread(_), ..) = &**handle {
             out.push(*id);
         }
-    }
     match expr {
         Expr::Spawn(slots, callable, ..) => {
             for slot in slots { collect_waits_expr(slot, out); }
@@ -188,9 +186,9 @@ fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
     }
 }
 
-pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usize, String, &'static str, Option<String>)], mut_sigs: &MutSigs) -> Result<(), String> {
+pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usize, String, &'static str, Option<String>)], mut_sigs: &MutSigs, ctx: &CompileContext) -> Result<(), String> {
     if conflicts.is_empty() { return Ok(()); }
-    let graph = build_cfg(function);
+    let graph = build_cfg(function, ctx);
     let view_borrows: Vec<(usize, usize, Option<String>)> = graph.blocks.iter()
         .flat_map(|block| block.statements.iter())
         .filter_map(view_borrow_introduced)
@@ -204,6 +202,7 @@ pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usiz
     let nll = NllRegions::compute(&graph, &view_borrows);
     let dom = dominators(&graph);
     let views_by_base = views_by_base(&view_borrows);
+    let release_inputs = ReleaseInputs { mut_sigs, views_by_base: &views_by_base, ctx };
     for block in &graph.blocks {
         let mut suffix: Vec<std::collections::HashSet<usize>> = vec![std::collections::HashSet::new(); block.statements.len() + 1];
         for index in (0..block.statements.len()).rev() {
@@ -229,9 +228,9 @@ pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usiz
             // dominates it and read on no later path. The places decide the
             // overlap: a field write only touches that field's bytes (L2).
             let mut targets = statement_targets(statement);
-            let ordered_conflict = statement_releases(statement, mut_sigs, &views_by_base);
+            let ordered_conflict = statement_releases(statement, &release_inputs);
             if std::env::var_os("AE_RELEASE_DEBUG").is_some() { eprintln!("DEBUG adjudicate b{} i{} stmt-targets={:?} ordered-rel={:?} viol={:?} view_borrows={:?} mut_sigs={:?}", block.id, index, statement_targets(statement), ordered_conflict.released, ordered_conflict.violated, view_borrows, mut_sigs); }
-            if let Some(_) = ordered_conflict.violated {
+            if ordered_conflict.violated.is_some() {
                 let (_, _, name, verb, _) = &conflicts[0];
                 return Err(format!("cannot {verb} '{name}' while a view binding of it may still be read"));
             }
@@ -249,7 +248,7 @@ pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usiz
                 return Err(format!("cannot {verb} '{name}' while a view binding of it may still be read"));
             }
         }
-        if terminator_releases_conflict(block, mut_sigs, &views_by_base, &view_borrows, &introductions, &dom, &live_out) {
+        if terminator_releases_conflict(block, &release_inputs, &view_borrows, &introductions, &dom, &live_out) {
             let (_, _, name, verb, _) = &conflicts[0];
             return Err(format!("cannot {verb} '{name}' while a view binding of it may still be read"));
         }
@@ -260,8 +259,8 @@ pub(super) fn adjudicate_deferred(function: &Function, conflicts: &[(usize, usiz
 pub(super) fn verify_program_borrows(program: &Program, mut_sigs: &MutSigs) -> Result<(), String> {
     for file in &program.files {
         for function in file {
-            let graph = build_cfg(function);
-            BorrowRegions::run(&graph, mut_sigs)?;
+            let graph = build_cfg(function, &program.ctx);
+            BorrowRegions::run(&graph, mut_sigs, &program.ctx)?;
         }
     }
     Ok(())
@@ -317,9 +316,18 @@ fn views_by_base(view_borrows: &[(usize, usize, Option<String>)]) -> HashMap<usi
 // the released bytes — the ordered conflict this tracker reports. The
 // released bases also join the statement's write targets, because the
 // callee may write any field of the borrowed struct.
-struct ReleaseTracker<'a> {
+/// The inputs every release walk shares: the signature table (a direct call
+/// names a function id, a function-value call a signature id), the declared
+/// views by base slot, and the compilation whose signature intern table a
+/// function-value call's id indexes.
+struct ReleaseInputs<'a> {
     mut_sigs: &'a MutSigs,
     views_by_base: &'a HashMap<usize, Vec<usize>>,
+    ctx: &'a CompileContext,
+}
+
+struct ReleaseTracker<'a> {
+    inputs: &'a ReleaseInputs<'a>,
     // The view slots a release killed (a later read of one is a violation)
     // and the base slots released (they join the statement's write targets).
     released_views: std::collections::HashSet<usize>,
@@ -332,16 +340,17 @@ impl MoveTracker for ReleaseTracker<'_> {
         if self.released_views.contains(&id) { self.violated = Some(id); }
         self.violated
     }
+    fn fn_sig(&self, sig: usize) -> Option<(Vec<Type>, Type)> { self.inputs.ctx.fn_sig_checked(sig) }
     fn consume(&mut self, _id: usize) -> Option<usize> { self.violated }
     fn mark(&mut self, _id: usize) {}
     fn revive(&mut self, _id: usize) {}
     fn mut_release(&mut self, sig: usize, position: usize, slot: usize) {
-        if self.mut_sigs.get(&sig).is_some_and(|positions| positions.contains(&position)) {
+        if self.inputs.mut_sigs.get(&sig).is_some_and(|positions| positions.contains(&position)) {
             self.release_borrowed_base(slot);
         }
     }
     fn release_borrowed_base(&mut self, slot: usize) {
-        if let Some(views) = self.views_by_base.get(&slot) {
+        if let Some(views) = self.inputs.views_by_base.get(&slot) {
             self.released_views.extend(views.iter().copied());
             self.released_bases.insert(slot);
         }
@@ -355,8 +364,8 @@ struct OrderedReleases {
     violated: Option<usize>,
 }
 
-fn statement_releases(statement: &Statement, mut_sigs: &MutSigs, views_by_base: &HashMap<usize, Vec<usize>>) -> OrderedReleases {
-    let mut tracker = ReleaseTracker { mut_sigs, views_by_base, released_views: std::collections::HashSet::new(), released_bases: std::collections::HashSet::new(), violated: None };
+fn statement_releases(statement: &Statement, inputs: &ReleaseInputs<'_>) -> OrderedReleases {
+    let mut tracker = ReleaseTracker { inputs, released_views: std::collections::HashSet::new(), released_bases: std::collections::HashSet::new(), violated: None };
     let violated = walk_statement(statement, &mut tracker);
     OrderedReleases { released: tracker.released_bases, violated }
 }
@@ -369,8 +378,7 @@ fn statement_releases(statement: &Statement, mut_sigs: &MutSigs, views_by_base: 
 // after the release.
 fn terminator_releases_conflict(
     block: &CfgBlock,
-    mut_sigs: &MutSigs,
-    views_by_base: &HashMap<usize, Vec<usize>>,
+    inputs: &ReleaseInputs<'_>,
     view_borrows: &[(usize, usize, Option<String>)],
     introductions: &HashMap<usize, (usize, usize)>,
     dom: &[std::collections::HashSet<usize>],
@@ -381,7 +389,7 @@ fn terminator_releases_conflict(
         CfgTerminator::Return(expr) | CfgTerminator::Exit(expr) => expr,
         _ => return false,
     };
-    let mut tracker = ReleaseTracker { mut_sigs, views_by_base, released_views: std::collections::HashSet::new(), released_bases: std::collections::HashSet::new(), violated: None };
+    let mut tracker = ReleaseTracker { inputs, released_views: std::collections::HashSet::new(), released_bases: std::collections::HashSet::new(), violated: None };
     if walk_expr(expr, &mut tracker).is_some() { return true; }
     let released = tracker.released_bases;
     if released.is_empty() { return false; }
@@ -456,7 +464,7 @@ fn view_covers_write(
 struct BorrowRegions;
 
 impl BorrowRegions {
-    fn run(function: &CfgFunction, mut_sigs: &MutSigs) -> Result<(), String> {
+    fn run(function: &CfgFunction, mut_sigs: &MutSigs, ctx: &CompileContext) -> Result<(), String> {
         // The whole-statement borrows keep their union-meet regions: a
         // borrow is live on entry to a block if ANY incoming path keeps it
         // live, because a scope encloses both branch paths.
@@ -477,6 +485,7 @@ impl BorrowRegions {
             .collect();
         let dom = dominators(function);
         let views_by_base = views_by_base(&view_borrows);
+    let release_inputs = ReleaseInputs { mut_sigs, views_by_base: &views_by_base, ctx };
 
         // Write-through-borrow verification: a statement that writes a slot
         // must not run inside a region covering that slot. The parser
@@ -509,7 +518,7 @@ impl BorrowRegions {
                 .collect();
             for (index, statement) in block.statements.iter().enumerate() {
                 let mut targets = statement_targets(statement);
-                let ordered_conflict = statement_releases(statement, mut_sigs, &views_by_base);
+                let ordered_conflict = statement_releases(statement, &release_inputs);
                 if ordered_conflict.violated.is_some() {
                     return Err(format!(
                         "internal: fn #{} block {} reads a view after a mut call released it; the parser's borrow registers and the ordered release walk disagree",
@@ -550,7 +559,7 @@ impl BorrowRegions {
                     ));
                 }
             }
-            if terminator_releases_conflict(block, mut_sigs, &views_by_base, &view_borrows, &introductions, &dom, &live_out) {
+            if terminator_releases_conflict(block, &release_inputs, &view_borrows, &introductions, &dom, &live_out) {
                 return Err(format!(
                     "internal: fn #{} block {} releases a view through a terminator mut call that a successor may still read; the parser's borrow registers and the ordered release walk disagree",
                     function.id, block.id
@@ -752,7 +761,7 @@ mod tests {
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
         let regions = NllRegions::compute(&function, &[(10, 5, None)]);
         assert!(regions.live_in[&0].contains(&10), "the view is live on entry: {:?}", regions.live_in);
-        let error = BorrowRegions::run(&function, &MutSigs::new()).unwrap_err();
+        let error = BorrowRegions::run(&function, &MutSigs::new(), &CompileContext::new()).unwrap_err();
         assert!(error.contains("may still be read"), "the NLL check fires: {error}");
     }
 
@@ -774,7 +783,7 @@ mod tests {
         // entry liveness still includes it — but nothing reads the view
         // after the write, which is what the check asks.
         assert!(regions.live_in[&0].contains(&10), "the view is live on entry: {:?}", regions.live_in);
-        assert!(BorrowRegions::run(&function, &MutSigs::new()).is_ok(), "no conflict after the last use");
+        assert!(BorrowRegions::run(&function, &MutSigs::new(), &CompileContext::new()).is_ok(), "no conflict after the last use");
     }
 
     // Scope regions keep their union meet: a for's container is borrowed for
@@ -818,7 +827,7 @@ mod tests {
             Statement::Print(Printed::Expr(Expr::Variable(10, Type::StrView, 3, 6))),
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
-        let error = BorrowRegions::run(&function, &mut_sigs()).unwrap_err();
+        let error = BorrowRegions::run(&function, &mut_sigs(), &CompileContext::new()).unwrap_err();
         assert!(error.contains("may still be read"), "the release fires: {error}");
     }
 
@@ -835,7 +844,7 @@ mod tests {
             Statement::Assign(9, mut_call(), false),
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
-        assert!(BorrowRegions::run(&function, &mut_sigs()).is_ok(), "no conflict after the last use");
+        assert!(BorrowRegions::run(&function, &mut_sigs(), &CompileContext::new()).is_ok(), "no conflict after the last use");
     }
 
     // The ordered face: the language pins left-to-right evaluation, so a
@@ -855,7 +864,7 @@ mod tests {
             ), false),
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
-        let error = BorrowRegions::run(&function, &mut_sigs()).unwrap_err();
+        let error = BorrowRegions::run(&function, &mut_sigs(), &CompileContext::new()).unwrap_err();
         assert!(error.contains("after a mut call"), "the ordered walk fires: {error}");
     }
 
@@ -874,7 +883,7 @@ mod tests {
             ), false),
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
-        assert!(BorrowRegions::run(&function, &mut_sigs()).is_ok(), "the read saw the bytes intact");
+        assert!(BorrowRegions::run(&function, &mut_sigs(), &CompileContext::new()).is_ok(), "the read saw the bytes intact");
     }
 
     // A mut call in a branch condition releases at the block's end: the arm
@@ -891,7 +900,7 @@ mod tests {
         let else_block = block(2, Vec::new(), CfgTerminator::Return(Expr::Number(0)));
         let entry = block(0, statements, CfgTerminator::Branch(mut_call(), 1, 2));
         let function = function_of(vec![entry, then_block, else_block]);
-        let error = BorrowRegions::run(&function, &mut_sigs()).unwrap_err();
+        let error = BorrowRegions::run(&function, &mut_sigs(), &CompileContext::new()).unwrap_err();
         assert!(error.contains("terminator mut call"), "the terminator scan fires: {error}");
     }
 
@@ -909,6 +918,6 @@ mod tests {
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
         let sigs: MutSigs = HashMap::from([(7usize, vec![1usize])]);
-        assert!(BorrowRegions::run(&function, &sigs).is_ok(), "position 0 is not the mutable one");
+        assert!(BorrowRegions::run(&function, &sigs, &CompileContext::new()).is_ok(), "position 0 is not the mutable one");
     }
 }

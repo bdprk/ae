@@ -1,6 +1,7 @@
 //! C type mapping, runtime pruning and whole-program C assembly.
+use std::fmt::Write as _;
 use super::*;
-pub(super) fn c_type_field(ty: Type) -> String {
+pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
     match ty {
         Type::Int => "int64_t".to_owned(),
         Type::Bool => "bool".to_owned(),
@@ -46,11 +47,11 @@ pub(super) fn c_type_field(ty: Type) -> String {
         // Unreachable: no syntax for a pointer-typed field (M2.12 pointers
         // bind as locals only); the value keeps the pointer shape so a future
         // slip prints valid C.
-        Type::Ptr(id) => format!("const {} *", c_type_field(ptr_pointee(id))),
-        Type::PtrMut(id) => format!("{} *", c_type_field(ptr_pointee(id))),
+        Type::Ptr(id) => format!("const {} *", c_type_field(ctx.ptr_pointee(id), ctx)),
+        Type::PtrMut(id) => format!("{} *", c_type_field(ctx.ptr_pointee(id), ctx)),
     }
 }
-pub(super) fn c_type(ty: Type, id: usize, declaration: bool) -> String {
+pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContext) -> String {
     match ty {
         Type::Int => format!("int64_t v{id}"),
         Type::Bool => format!("bool v{id}"),
@@ -100,30 +101,30 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool) -> String {
         // A function pointer parameter declares its name inside the pointer
         // parens, the way C requires.
         Type::Fn(sig) => {
-            let (params, ret) = crate::frontend::closures::fn_sig(sig);
+            let (params, ret) = ctx.fn_sig(sig);
             let c_params = if params.is_empty() { "void".to_owned() } else { params.iter().map(|t| match t {
-                Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_) => c_type(*t, 0, false),
-                _ => t.c_temp().trim_end().to_owned(),
+                Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_) => c_type(*t, 0, false, ctx),
+                _ => t.c_temp(ctx).trim_end().to_owned(),
             }).collect::<Vec<_>>().join(", ") };
             if declaration {
-                format!("{} (*v{id})({})", ret.c_temp().trim_end(), c_params)
+                format!("{} (*v{id})({})", ret.c_temp(ctx).trim_end(), c_params)
             } else {
-                format!("{} (*)({})", ret.c_temp().trim_end(), c_params)
+                format!("{} (*)({})", ret.c_temp(ctx).trim_end(), c_params)
             }
         }
         Type::Array(_) if declaration => format!("const int64_t *v{id}"),
         Type::Array(_) => "const int64_t *".to_owned(),
         // M2.12 slice 2: a pointer binds as a plain local (no release, no
         // move tracking), so the declaration is the plain C pointer form.
-        Type::Ptr(pid) if declaration => format!("const {} *v{id}", c_type_field(ptr_pointee(pid))),
-        Type::Ptr(pid) => format!("const {} *", c_type_field(ptr_pointee(pid))),
-        Type::PtrMut(pid) if declaration => format!("{} *v{id}", c_type_field(ptr_pointee(pid))),
-        Type::PtrMut(pid) => format!("{} *", c_type_field(ptr_pointee(pid))),
+        Type::Ptr(pid) if declaration => format!("const {} *v{id}", c_type_field(ctx.ptr_pointee(pid), ctx)),
+        Type::Ptr(pid) => format!("const {} *", c_type_field(ctx.ptr_pointee(pid), ctx)),
+        Type::PtrMut(pid) if declaration => format!("{} *v{id}", c_type_field(ctx.ptr_pointee(pid), ctx)),
+        Type::PtrMut(pid) => format!("{} *", c_type_field(ctx.ptr_pointee(pid), ctx)),
     }
 }
 // Return type of a generated C function: the same spelling the expression
 // temporaries use, without the variable name.
-pub(super) fn c_return(ty: Type) -> String {
+pub(super) fn c_return(ty: Type, ctx: &CompileContext) -> String {
     match ty {
         // Never returned: a function value cannot be a return type yet.
         Type::Fn(_) => "void".to_owned(),
@@ -131,7 +132,7 @@ pub(super) fn c_return(ty: Type) -> String {
         Type::F64 => "double".to_owned(),
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
-        Type::Vec | Type::StrVec | Type::VecF => c_type_field(ty),
+        Type::Vec | Type::StrVec | Type::VecF => c_type_field(ty, ctx),
         Type::Map => "ae_map".to_owned(),
         Type::MapF => "ae_mapf".to_owned(),
         Type::Struct(k) => format!("ae_t{k}"),
@@ -143,8 +144,8 @@ pub(super) fn c_return(ty: Type) -> String {
         // A raw pointer return keeps its star: the extern-prototype contract
         // must match the runtime definition exactly (ADR-0208's allocator
         // bridge returns int64_t* from a void* wrapper).
-        Type::Ptr(id) => format!("const {} *", c_type_field(super::ptr_pointee(id))),
-        Type::PtrMut(id) => format!("{} *", c_type_field(super::ptr_pointee(id))),
+        Type::Ptr(id) => format!("const {} *", c_type_field(ctx.ptr_pointee(id), ctx)),
+        Type::PtrMut(id) => format!("{} *", c_type_field(ctx.ptr_pointee(id), ctx)),
         _ => "int64_t".to_owned(),
     }
 }
@@ -349,23 +350,16 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
     // The layout release/forfeit functions are ordinary named units: they join
     // the reachability walk and are emitted (right after their typedef) only
     // when something calls them.
-    let mut units: Vec<(Option<String>, String)> = Vec::new();
-    units.extend(core_units.iter().cloned());
-    for (eid, (_, release, forfeit)) in prelude.iter().enumerate() {
-        let _ = eid;
-        units.push((Some("LAYOUT_RELEASE".to_owned()), release.clone()));
-        units.push((Some("LAYOUT_FORFEIT".to_owned()), forfeit.clone()));
+    let mut units: Vec<(Option<String>, &str)> = Vec::with_capacity(core_units.len() + prelude.len() * 2 + ex_units.len());
+    for (name, body) in &core_units {
+        units.push((name.clone(), body.as_str()));
     }
-    units.extend(ex_units.iter().cloned());
-    // Give the layout functions their real names for the definitions map.
-    let mut layout_index = 0usize;
-    for index in 0..units.len() {
-        if units[index].0.as_deref() == Some("LAYOUT_RELEASE") || units[index].0.as_deref() == Some("LAYOUT_FORFEIT") {
-            let eid = layout_index / 2;
-            let kind = if layout_index % 2 == 0 { "release" } else { "forfeit" };
-            units[index].0 = Some(format!("ae_e{eid}_{kind}"));
-            layout_index += 1;
-        }
+    for (eid, (_, release, forfeit)) in prelude.iter().enumerate() {
+        units.push((Some(format!("ae_e{eid}_release")), release.as_str()));
+        units.push((Some(format!("ae_e{eid}_forfeit")), forfeit.as_str()));
+    }
+    for (name, body) in &ex_units {
+        units.push((name.clone(), body.as_str()));
     }
 
     let mut definitions: HashMap<String, Vec<usize>> = HashMap::new();
@@ -393,7 +387,7 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
                 for &index in indices {
                     // A kept function that uses a prelude result macro needs that
                     // enum's typedef, even though the body only names the macro.
-                    let body = &units[index].1;
+                    let body = units[index].1;
                     for (macro_prefix, eid) in PRELUDE_MACRO_PREFIXES {
                         if body.contains(macro_prefix) {
                             let typedef = format!("ae_e{eid}");
@@ -446,98 +440,105 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
 
 /// One prelude enum's C layout, in three independently-emittable pieces
 /// (ADR-66): the typedef/tags, the release function, the forfeit function.
-pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize) -> (String, String, String) {
+pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, ctx: &CompileContext) -> (String, String, String) {
     let def = &enums[eid];
     let mut typedef = String::new();
-    let tags = (0..def.variants.len()).map(|v| format!("    AE_E{eid}_{v} = {v}")).collect::<Vec<_>>().join(",\n");
-    typedef.push_str(&format!("\ntypedef enum {{\n{tags}\n}} ae_e{eid}_tag;\n"));
+    let _ = writeln!(typedef, "\ntypedef enum {{");
+    for v in 0..def.variants.len() {
+        if v > 0 { typedef.push_str(",\n"); }
+        let _ = write!(typedef, "    AE_E{eid}_{v} = {v}");
+    }
+    let _ = writeln!(typedef, "\n}} ae_e{eid}_tag;");
     let mut members = String::new();
     for (vidx, (_, fields)) in def.variants.iter().enumerate() {
         if fields.is_empty() { continue; }
-        let mut record = String::new();
+        let _ = writeln!(typedef, "typedef struct {{");
         for (index, ty) in fields.iter().enumerate() {
-            record.push_str(&format!("    {} p{index};\n", c_type_field(*ty)));
+            let _ = writeln!(typedef, "    {} p{index};", c_type_field(*ty, ctx));
         }
-        typedef.push_str(&format!("typedef struct {{\n{record}}} ae_e{eid}_v{vidx};\n"));
-        members.push_str(&format!("        ae_e{eid}_v{vidx} v{vidx};\n"));
+        let _ = writeln!(typedef, "}} ae_e{eid}_v{vidx};");
+        let _ = writeln!(members, "        ae_e{eid}_v{vidx} v{vidx};");
     }
     // A union needs at least one member; enums without payloads get a
     // placeholder so the initializer form stays uniform.
     if members.is_empty() { members.push_str("        char ae_empty;\n"); }
-    typedef.push_str(&format!("typedef struct {{\n    ae_e{eid}_tag tag;\n    union {{\n{members}    }} u;\n}} ae_e{eid};\n"));
+    let _ = writeln!(typedef, "typedef struct {{\n    ae_e{eid}_tag tag;\n    union {{\n{members}    }} u;\n}} ae_e{eid};");
     let mut release = String::new();
     let mut forfeit = String::new();
+    let _ = writeln!(release, "static void ae_e{eid}_release(ae_e{eid} *v) {{");
+    let _ = writeln!(forfeit, "static void ae_e{eid}_forfeit(ae_e{eid} *v) {{");
     for (vidx, (_, fields)) in def.variants.iter().enumerate() {
         if fields.is_empty() { continue; }
-        let mut clears = String::new();
-        let mut forfeits = String::new();
+        let _ = writeln!(release, "    if (v->tag == AE_E{eid}_{vidx}) {{");
+        let _ = writeln!(forfeit, "    if (v->tag == AE_E{eid}_{vidx}) {{");
         for (index, ty) in fields.iter().enumerate() {
-            let member = format!("v->u.v{vidx}.p{index}");
             match ty {
                 Type::String => {
-                    clears.push_str(&format!("        ae_str_release(&{member});\n"));
-                    forfeits.push_str(&format!("        ae_str_forfeit(&{member});\n"));
+                    let _ = writeln!(release, "        ae_str_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_str_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::Vec => {
-                    clears.push_str(&format!("        ae_vec_release(&{member});\n"));
-                    forfeits.push_str(&format!("        ae_vec_forfeit(&{member});\n"));
+                    let _ = writeln!(release, "        ae_vec_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_vec_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::StrVec => {
-                    clears.push_str(&format!("        ae_strvec_release(&{member});\n"));
-                    forfeits.push_str(&format!("        ae_strvec_forfeit(&{member});\n"));
+                    let _ = writeln!(release, "        ae_strvec_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_strvec_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::VecF => {
-                    clears.push_str(&format!("        ae_f64vec_release(&{member});\n"));
-                    forfeits.push_str(&format!("        ae_f64vec_forfeit(&{member});\n"));
+                    let _ = writeln!(release, "        ae_f64vec_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_f64vec_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::Map => {
-                    clears.push_str(&format!("        ae_map_release(&{member});\n"));
-                    forfeits.push_str(&format!("        ae_map_forfeit(&{member});\n"));
+                    let _ = writeln!(release, "        ae_map_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_map_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::MapF => {
-                    clears.push_str(&format!("        ae_mapf_release(&{member});\n"));
-                    forfeits.push_str(&format!("        ae_mapf_forfeit(&{member});\n"));
+                    let _ = writeln!(release, "        ae_mapf_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_mapf_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::Bool => {
-                    clears.push_str(&format!("        {member} = false;\n"));
-                    forfeits.push_str(&format!("        {member} = false;\n"));
+                    let _ = writeln!(release, "        v->u.v{vidx}.p{index} = false;");
+                    let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = false;");
                 }
                 _ => {
-                    clears.push_str(&format!("        {member} = 0;\n"));
-                    forfeits.push_str(&format!("        {member} = 0;\n"));
+                    let _ = writeln!(release, "        v->u.v{vidx}.p{index} = 0;");
+                    let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = 0;");
                 }
             }
         }
-        release.push_str(&format!("    if (v->tag == AE_E{eid}_{vidx}) {{\n{clears}    }}\n"));
-        forfeit.push_str(&format!("    if (v->tag == AE_E{eid}_{vidx}) {{\n{forfeits}    }}\n"));
+        release.push_str("    }\n");
+        forfeit.push_str("    }\n");
     }
-    let release = format!("static void ae_e{eid}_release(ae_e{eid} *v) {{\n{release}}}\n");
-    let forfeit = format!("static void ae_e{eid}_forfeit(ae_e{eid} *v) {{\n{forfeit}}}\n");
+    release.push_str("}\n");
+    forfeit.push_str("}\n");
     (typedef, release, forfeit)
 }
 
-pub(super) fn emit_enum_layouts(enums: &[EnumDef], from: usize, to: usize, out: &mut String) {
+pub(super) fn emit_enum_layouts(enums: &[EnumDef], from: usize, to: usize, out: &mut String, ctx: &CompileContext) {
     // User enums (and any caller that wants a contiguous block) emit all three
     // pieces; the prelude path hands them to the pruner instead (ADR-66).
     for eid in from..to {
-        let (typedef, release, forfeit) = prelude_enum_pieces(enums, eid);
+        let (typedef, release, forfeit) = prelude_enum_pieces(enums, eid, ctx);
         out.push_str(&typedef);
         out.push_str(&release);
         out.push_str(&forfeit);
     }
 }
 
-fn emit_body(function: &Function, out: &mut String) -> Result<(), String> {
+fn emit_body(function: &Function, out: &mut String, ctx: &CompileContext) -> Result<(), String> {
     if codegen_mir::enabled() {
-        codegen_mir::emit_function_body(function, out)?;
+        codegen_mir::emit_function_body(function, out, ctx)?;
     } else {
-        emit_statements(&function.body, out, &mut 0);
+        emit_statements(&function.body, out, &mut 0, ctx);
     }
     Ok(())
 }
 
-pub(super) fn emit_program(program: Program) -> Result<GeneratedC, String> {
-    let Program { files, structs, enums } = program;
+pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> {
+    let files = &program.files;
+    let structs = &program.structs;
+    let enums = &program.enums;
     let prelude_count = prelude_enums().0.len();
     // Fallible built-ins and platform helpers name prelude enum types, so the
     // prelude layouts come before runtime_ex.c. Their order is checked here
@@ -551,75 +552,73 @@ pub(super) fn emit_program(program: Program) -> Result<GeneratedC, String> {
     // platform extensions, and one layout piece-triple per prelude enum. The
     // pruner emits a prelude layout only when the program references it, so a
     // program that uses no fallible built-in carries none of their layouts.
-    let core = String::from(include_str!("../runtime.c"));
-    let ex = String::from(include_str!("../runtime_ex.c"));
+    let core = include_str!("../runtime.c");
+    let ex = include_str!("../runtime_ex.c");
     let prelude: Vec<(String, String, String)> = (0..prelude_count)
-        .map(|eid| prelude_enum_pieces(&enums, eid))
+        .map(|eid| prelude_enum_pieces(enums, eid, &program.ctx))
         .collect();
     let mut out = String::new();
     // User enums are emitted after the runtime prefix. runtime_ex.c only names
     // prelude ids, so this does not change any type it can reference.
-    emit_enum_layouts(&enums, prelude_count, enums.len(), &mut out);
+    emit_enum_layouts(enums, prelude_count, enums.len(), &mut out, &program.ctx);
     // Struct layouts and their ownership helpers. Release zeroes every field
     // and frees owned ones; forfeit only zeroes (the value moved elsewhere).
     for (sid, def) in structs.iter().enumerate() {
         let mut layout = String::new();
         for (n, ty) in &def.fields {
-            layout.push_str(&format!("    {} {};\n", c_type_field(*ty), n));
+            let _ = writeln!(layout, "    {} {n};", c_type_field(*ty, &program.ctx));
         }
         let mut release = String::new();
         let mut forfeit = String::new();
         let mut activate = "((void)0)".to_owned();
         if let Some(drop_id) = def.drop_fn {
             if def.repr_c {
-                release.push_str(&format!("    ae_fn_{drop_id}(v);\n"));
+                let _ = writeln!(release, "    ae_fn_{drop_id}(v);");
             } else {
                 let mut live = "ae_live".to_owned();
                 while def.fields.iter().any(|(name, _)| name == &live) {
                     live.push('_');
                 }
-                layout.push_str(&format!("    bool {live};\n"));
+                let _ = writeln!(layout, "    bool {live};");
                 activate = format!("((value).{live} = true)");
-                release.push_str(&format!(
-                    "    if (!v->{live}) return;\n    v->{live} = false;\n    ae_fn_{drop_id}(v);\n"
-                ));
-                forfeit.push_str(&format!("    v->{live} = false;\n"));
+                let _ = writeln!(release, "    if (!v->{live}) return;\n    v->{live} = false;\n    ae_fn_{drop_id}(v);");
+                let _ = writeln!(forfeit, "    v->{live} = false;");
             }
         }
-        out.push_str(&format!("\n#define AE_T{sid}_ACTIVATE(value) {activate}\n"));
+        let _ = writeln!(out, "\n#define AE_T{sid}_ACTIVATE(value) {activate}");
         for (n, ty) in &def.fields {
             match ty {
                 Type::String => {
-                    release.push_str(&format!("    ae_str_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_str_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_str_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_str_forfeit(&v->{n});");
                 }
                 Type::Vec => {
-                    release.push_str(&format!("    ae_vec_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_vec_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_vec_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_vec_forfeit(&v->{n});");
                 }
                 Type::Struct(k) => {
-                    release.push_str(&format!("    ae_t{k}_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_t{k}_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_t{k}_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_t{k}_forfeit(&v->{n});");
                 }
                 Type::StrVec => {
-                    release.push_str(&format!("    ae_strvec_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_strvec_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_strvec_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_strvec_forfeit(&v->{n});");
                 }
                 Type::VecF => {
-                    release.push_str(&format!("    ae_f64vec_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_f64vec_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_f64vec_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_f64vec_forfeit(&v->{n});");
                 }
                 Type::Map => {
-                    release.push_str(&format!("    ae_map_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_map_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_map_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_map_forfeit(&v->{n});");
                 }
                 Type::MapF => {
-                    release.push_str(&format!("    ae_mapf_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_mapf_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_mapf_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_mapf_forfeit(&v->{n});");
                 }
                 Type::Enum(_, k) => {
-                    release.push_str(&format!("    ae_e{k}_release(&v->{});\n", n));
-                    forfeit.push_str(&format!("    ae_e{k}_forfeit(&v->{});\n", n));
+                    let _ = writeln!(release, "    ae_e{k}_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    ae_e{k}_forfeit(&v->{n});");
                 }
                 other => {
                     // Owned fields got a release/forfeit call above. Scalars
@@ -629,45 +628,45 @@ pub(super) fn emit_program(program: Program) -> Result<GeneratedC, String> {
                     // types are struct values no literal zero can assign.
                     match other {
                         Type::Bool => {
-                            release.push_str(&format!("    v->{} = false;\n", n));
-                            forfeit.push_str(&format!("    v->{} = false;\n", n));
+                            let _ = writeln!(release, "    v->{n} = false;");
+                            let _ = writeln!(forfeit, "    v->{n} = false;");
                         }
                         Type::Int | Type::F64 => {
-                            release.push_str(&format!("    v->{} = 0;\n", n));
-                            forfeit.push_str(&format!("    v->{} = 0;\n", n));
+                            let _ = writeln!(release, "    v->{n} = 0;");
+                            let _ = writeln!(forfeit, "    v->{n} = 0;");
                         }
                         _ => {}
                     }
                 }
             }
         }
-        out.push_str(&format!("\ntypedef struct {{\n{layout}}} ae_t{sid};\n"));
+        let _ = writeln!(out, "\ntypedef struct {{\n{layout}}} ae_t{sid};");
         if let Some(drop_id) = def.drop_fn {
-            out.push_str(&format!("static int64_t ae_fn_{drop_id}(ae_t{sid} *v);\n"));
+            let _ = writeln!(out, "static int64_t ae_fn_{drop_id}(ae_t{sid} *v);");
         }
-        out.push_str(&format!("static void ae_t{sid}_release(ae_t{sid} *v) {{\n{release}}}\n"));
-        out.push_str(&format!("static void ae_t{sid}_forfeit(ae_t{sid} *v) {{\n{forfeit}}}\n"));
+        let _ = writeln!(out, "static void ae_t{sid}_release(ae_t{sid} *v) {{\n{release}}}");
+        let _ = writeln!(out, "static void ae_t{sid}_forfeit(ae_t{sid} *v) {{\n{forfeit}}}");
     }
     // The `extern "C"` declarations' prototypes (M2.12 slice 4): the call
     // site emits the C symbol bare, so without a prototype every foreign
     // call is an implicit declaration — an error at C99 and UB at C89 (the
     // implicit `int` return truncates i64). The prototypes sit after the
     // struct typedefs, so a `#[repr(C)]` parameter names a complete type.
-    for (c_name, params, ret) in crate::frontend::extern_declarations() {
+    for (c_name, params, ret) in program.ctx.extern_declarations() {
         let params_c = if params.is_empty() {
             "void".to_owned()
         } else {
-            params.iter().enumerate().map(|(index, ty)| c_type(*ty, index, true)).collect::<Vec<_>>().join(", ")
+            params.iter().enumerate().map(|(index, ty)| c_type(*ty, index, true, &program.ctx)).collect::<Vec<_>>().join(", ")
         };
         out.push_str(&format!("{} {}({});
-", c_return(ret), c_name, params_c));
+", c_return(ret, &program.ctx), c_name, params_c));
     }
 
     let all: Vec<&Function> = files.iter().flatten().collect();
     for function in &all {
         if function.is_main { continue; }
-        let params = if function.params.is_empty() { "void".to_owned() } else { function.params.iter().map(|&(id, ty)| c_type(ty, id, false)).collect::<Vec<_>>().join(", ") };
-        let ret = c_return(function.returns);
+        let params = if function.params.is_empty() { "void".to_owned() } else { function.params.iter().map(|&(id, ty)| c_type(ty, id, false, &program.ctx)).collect::<Vec<_>>().join(", ") };
+        let ret = c_return(function.returns, &program.ctx);
         out.push_str(&format!("\nstatic {ret} ae_fn_{}({params});\n", function.id));
     }
     // Thread support (ADR-0214): the context layouts and trampolines the
@@ -675,7 +674,7 @@ pub(super) fn emit_program(program: Program) -> Result<GeneratedC, String> {
     // the functions they call and before the bodies that call them. The
     // return value is the context's first member, so wait reads it without
     // knowing the capture layout.
-    let spawned: Vec<crate::frontend::closures::SpawnedThread> = crate::frontend::closures::take_spawned();
+    let spawned: Vec<crate::frontend::closures::SpawnedThread> = program.ctx.take_spawned();
     if !spawned.is_empty() {
         out.push_str("
 typedef struct { void *native; void *ctx; } ae_thread_slot;
@@ -688,13 +687,13 @@ typedef struct { void *native; void *ctx; } ae_thread_slot;
                 all.extend(borrows.iter().map(|(_, ty)| *ty));
                 let fields = all.iter().enumerate()
                     .map(|(index, ty)| format!("    {} f{index};
-", c_type_field(*ty)))
+", c_type_field(*ty, &program.ctx)))
                     .collect::<Vec<_>>().join("");
                 out.push_str(&format!("
 typedef struct {{
     {} ret;
 {fields}}} ae_thread_ctx_{fn_id};
-", c_type_field(*ret)));
+", c_type_field(*ret, &program.ctx)));
                 let arguments = if all.is_empty() {
                     String::new()
                 } else {
@@ -707,7 +706,7 @@ typedef struct {{
 "));
             }
             crate::frontend::closures::SpawnedThread::FnValue { sig, ret } => {
-                let ret_c = c_type_field(*ret);
+                let ret_c = c_type_field(*ret, &program.ctx);
                 out.push_str(&format!("
 typedef struct {{
     {ret_c} ret;
@@ -724,27 +723,27 @@ typedef struct {{
     }
     for function in &all {
         if function.is_main { continue; }
-        let params = if function.params.is_empty() { "void".to_owned() } else { function.params.iter().map(|&(id, ty)| c_type(ty, id, true)).collect::<Vec<_>>().join(", ") };
-        let ret = c_return(function.returns);
-        let signature = match crate::frontend::exposure_name(function.id) {
+        let params = if function.params.is_empty() { "void".to_owned() } else { function.params.iter().map(|&(id, ty)| c_type(ty, id, true, &program.ctx)).collect::<Vec<_>>().join(", ") };
+        let ret = c_return(function.returns, &program.ctx);
+        let signature = match program.ctx.exposure_name(function.id) {
             // A `#[no_mangle]` exposure keeps its own name with external
             // linkage (M2.12 U7); the rest stay internal to the unit.
             Some(name) => format!("{ret} {name}({params})"),
             None => format!("static {ret} ae_fn_{}({params})", function.id),
         };
         out.push_str(&format!("\n{signature} {{\n"));
-        emit_body(function, &mut out)?;
+        emit_body(function, &mut out, &program.ctx)?;
         // Defensive backstop: even a future control-flow analysis bug must not
         // produce a C function that falls through without returning a value.
         out.push_str("    ae_fail(\"function exited without return\", 0, 0);\n}\n");
     }
     let main = all.iter().find(|f| f.is_main).expect("load_program checks exactly one main");
     out.push_str("\nint main(int argc, char **argv) {\n    ae_args_init(argc, argv);\n    ae_argc_g = (int64_t)argc;\n    ae_argv_g = argv;\n");
-    emit_body(main, &mut out)?;
+    emit_body(main, &mut out, &program.ctx)?;
     out.push_str("    if (fflush(stdout) == EOF) return 1;\n    return 0;\n}\n");
     // The fixed prefix is program-independent; emit only its reachable part.
     // `split_off` avoids copying the 100 KB runtime text.
     let user = out;
-    let (full, pruned_len) = prune_runtime(&core, &ex, &prelude, &user);
+    let (full, pruned_len) = prune_runtime(core, ex, &prelude, &user);
     Ok(GeneratedC { full, runtime_len: pruned_len })
 }

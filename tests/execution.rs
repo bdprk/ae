@@ -1962,7 +1962,7 @@ fn many_generic_declarations_in_one_file_keep_their_own_bodies() {
     for i in 0..40 {
         source.push_str(&format!("print(f{i}[i64]({i}, 1)); print(g{i}[i64]({i}, 100)); "));
     }
-    source.push_str("}");
+    source.push('}');
     let output = execute(&source);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let mut expected = Vec::new();
@@ -2392,7 +2392,7 @@ fn count_lines_with_matches_reference_semantics() {
     }
     for (text, pat, expected) in cases {
         let src_text = ae_lit(&text);
-        let src_pat = ae_lit(&pat);
+        let src_pat = ae_lit(pat);
         let source = format!("fn main() {{ print(count_lines_with(\"{src_text}\", \"{src_pat}\")); }}");
         let output = execute(&source);
         assert!(output.status.success(), "{source}: {}", String::from_utf8_lossy(&output.stderr));
@@ -4406,6 +4406,7 @@ fn standalone_declarations_cover_example_and_run_corpus() {
             }
             let source = fs::read_to_string(&path).unwrap();
             let file = path.display().to_string();
+            #[allow(clippy::result_large_err)]
             let parsed = (|| {
                 let tokens = ae_syntax::lex_diagnostic(&source)?;
                 let headers = ae_syntax::module::parse_use_headers(&file, &source, &tokens)?;
@@ -5830,7 +5831,7 @@ fn fmt_formats_a_module_file_without_a_main() {
     let ignore_digits = |line: &str| -> String { line.chars().filter(|c| !c.is_ascii_digit()).collect() };
     let strip = |bytes: &[u8]| -> Vec<String> {
         String::from_utf8_lossy(bytes).replace("\r\n", "\n").split('\n')
-            .map(|l| ignore_digits(l)).collect()
+            .map(ignore_digits).collect()
     };
     assert_eq!(strip(&before.stdout), strip(&after.stdout));
     let _ = fs::remove_dir_all(&dir);
@@ -7756,7 +7757,7 @@ fn path_dependency_versions_must_satisfy_caret_requirements() {
             assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("lib {version}")), "{version}");
         } else {
             assert!(!output.status.success(), "{version}");
-            assert!(stderr.contains(&format!("requires version 0.3 but")) && stderr.contains(version), "{version}: {stderr}");
+            assert!(stderr.contains("requires version 0.3 but") && stderr.contains(version), "{version}: {stderr}");
         }
     }
     write("lib", "0.3.0", "");
@@ -8141,7 +8142,7 @@ fn malformed_dependency_declarations_are_reported_at_the_manifest_location() {
         assert!(!ok, "{dependency}: {stderr}");
         // The location is the declaring manifest, not just a bare message.
         assert!(stderr.contains(manifest_path.file_name().unwrap().to_str().unwrap())
-            && stderr.contains(&manifest_path.parent().unwrap().file_name().unwrap().to_str().unwrap()),
+            && stderr.contains(manifest_path.parent().unwrap().file_name().unwrap().to_str().unwrap()),
             "{dependency}: {stderr}");
         assert!(stderr.contains(needle), "{dependency}: {stderr}");
     }

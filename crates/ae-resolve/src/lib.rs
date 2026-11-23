@@ -31,6 +31,7 @@
 //! The dump (`dump`) is a deterministic text form of the whole table and is
 //! pinned by `tests/resolve` UI snapshots through `ae emit-resolve`.
 
+#![allow(clippy::result_large_err)]
 pub mod dump;
 pub mod imports;
 pub mod module;
@@ -183,7 +184,7 @@ mod tests {
         let receiver = resolution.defs.iter().find(|entry| entry.name == "self").expect("the receiver is a local");
         assert_eq!(receiver.kind, DefKind::Parameter);
         assert_eq!(&source[receiver.range.clone()], "self", "the def names the receiver token");
-        assert_eq!(receiver.mutable, false, "&self borrows read-only");
+        assert!(!receiver.mutable, "&self borrows read-only");
         let occurrences = &resolution.functions[0].occurrences;
         assert!(occurrences.iter().any(|occurrence| occurrence.role == Role::Read && occurrence.name == "self" && occurrence.target == Some(receiver.id)));
     }

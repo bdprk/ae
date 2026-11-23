@@ -104,7 +104,11 @@ struct Env<'a> {
 const MAX_STEPS: usize = 5_000_000;
 
 pub fn interpret_path(path: &Path) -> Result<(String, u8), (String, String)> {
-    let program = loader::load_program(path).map_err(|e| (String::new(), e))?;
+    interpret_path_with_imports(path, &PackageImports::new())
+}
+
+pub fn interpret_path_with_imports(path: &Path, imports: &PackageImports) -> Result<(String, u8), (String, String)> {
+    let program = loader::load_program_with_imports(path, imports).map_err(|e| (String::new(), e))?;
     let mut fns = HashMap::new();
     let mut main_fn = None;
     for file in &program.files {
@@ -215,14 +219,14 @@ fn path_is_absolute(path: &str) -> bool {
 // `path_name`: everything after the final separator; `path_parent`: every-
 // thing before it (the separator itself dropped, matching the runtime).
 fn path_name(path: &str) -> String {
-    match path.rfind(|c| is_separator(c)) {
+    match path.rfind(is_separator) {
         Some(idx) => path[idx + 1..].to_owned(),
         None => path.to_owned(),
     }
 }
 
 fn path_parent(path: &str) -> String {
-    match path.rfind(|c| is_separator(c)) {
+    match path.rfind(is_separator) {
         Some(idx) => path[..idx].to_owned(),
         None => String::new(),
     }
@@ -538,19 +542,16 @@ fn eval_stmts(
                     _ => None,
                 };
                 let mut wrote = false;
-                if let Some(target_id) = ref_target {
-                    if let Some(caller) = caller_locals.as_mut() {
-                        if let Some(Val::Struct(_, fields)) = caller.get_mut(&target_id) {
+                if let Some(target_id) = ref_target
+                    && let Some(caller) = caller_locals.as_mut()
+                        && let Some(Val::Struct(_, fields)) = caller.get_mut(&target_id) {
                             fields.insert(fname.clone(), val.clone());
                             wrote = true;
                         }
-                    }
-                }
-                if !wrote {
-                    if let Some(Val::Struct(_, fields)) = locals.get_mut(id) {
+                if !wrote
+                    && let Some(Val::Struct(_, fields)) = locals.get_mut(id) {
                         fields.insert(fname.clone(), val);
                     }
-                }
             }
             Statement::VecPush(id, val_expr, line, col) => {
                 let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
@@ -864,11 +865,9 @@ fn eval_stmts(
                     Err(f) => return f,
                 };
                 for (id, ty) in frees {
-                    if *ty == Type::TaskScope {
-                        if let Some(Val::TaskScope(eid)) = locals.get(id).cloned() {
-                            if let Err(f) = drain_exec_queue(env, eid) { return f; }
-                        }
-                    }
+                    if *ty == Type::TaskScope
+                        && let Some(Val::TaskScope(eid)) = locals.get(id).cloned()
+                            && let Err(f) = drain_exec_queue(env, eid) { return f; }
                 }
                 return Flow::Return(res);
             }
@@ -906,11 +905,9 @@ fn eval_stmts(
             Statement::Continue(_) => return Flow::Continue(0),
             Statement::Frees(frees) => {
                 for (id, ty) in frees {
-                    if *ty == Type::TaskScope {
-                        if let Some(Val::TaskScope(eid)) = locals.get(id).cloned() {
-                            if let Err(f) = drain_exec_queue(env, eid) { return f; }
-                        }
-                    }
+                    if *ty == Type::TaskScope
+                        && let Some(Val::TaskScope(eid)) = locals.get(id).cloned()
+                            && let Err(f) = drain_exec_queue(env, eid) { return f; }
                 }
             }
             // An `unsafe` block is a scoping container (M2.12 slice 1): the
@@ -970,7 +967,7 @@ fn eval_stmts(
                         Err(flow) => return flow,
                     }
                 }
-                let fn_id = crate::frontend::closures::closure_fn_id(*cid);
+                let fn_id = env.program.ctx.closure_fn_id(*cid);
                 let Some(func) = env.fns.get(&fn_id).copied() else {
                     return Flow::Trap(format!("internal: missing task closure fn #{fn_id}"));
                 };
@@ -1016,11 +1013,10 @@ fn read_var(
     match locals.get(&id) {
         Some(Val::Moved) => Err(trap("use of moved value", line, col)),
         Some(Val::Ref(target_id)) => {
-            if let Some(caller) = caller_locals.as_ref() {
-                if let Some(v) = caller.get(target_id) {
+            if let Some(caller) = caller_locals.as_ref()
+                && let Some(v) = caller.get(target_id) {
                     return Ok(v.clone());
                 }
-            }
             Err(Flow::Trap("internal: dangling reference in interpreter".to_owned()))
         }
         Some(v) => Ok(v.clone()),
@@ -1411,7 +1407,7 @@ fn eval_expr(
             let p = path_operand(eval_expr(env, path, locals, caller_locals, false))?;
             let t = path_operand(eval_expr(env, text, locals, caller_locals, false))?;
             match std::fs::write(&p, &t) {
-                Err(error) => return result_value(env, ty, false, vec![Val::Str(format!("cannot write file: {error}"))]),
+                Err(error) => result_value(env, ty, false, vec![Val::Str(format!("cannot write file: {error}"))]),
                 Ok(()) => result_value(env, ty, true, vec![Val::Int(t.len() as i64)]),
             }
         }
@@ -1899,10 +1895,10 @@ fn eval_expr(
                 "atan2" => x.atan2(y),
                 "min" => {
                     // NaN-aware: the non-NaN side wins; both NaN -> NaN.
-                    if x.is_nan() { y } else if y.is_nan() { x } else if x < y { x } else { y }
+                    if x.is_nan() { y } else if y.is_nan() || x < y { x } else { y }
                 }
                 "max" => {
-                    if x.is_nan() { y } else if y.is_nan() { x } else if x > y { x } else { y }
+                    if x.is_nan() { y } else if y.is_nan() || x > y { x } else { y }
                 }
                 _ => return Err(Flow::Trap("internal: math function".to_owned())),
             };
@@ -2037,7 +2033,7 @@ fn eval_expr(
         Expr::FnCall(var_id, args, ..) => {
             let target_fn = match read_var(locals, caller_locals, *var_id, 0, 0)? {
                 Val::FnPtr(fid) => fid,
-                Val::Closure(cid) => closures::closure_fn_id(cid),
+                Val::Closure(cid) => env.program.ctx.closure_fn_id(cid),
                 _ => return Err(Flow::Trap("internal: FnCall on non-function".to_owned())),
             };
             invoke_call(env, target_fn, args, locals, caller_locals)
@@ -2051,22 +2047,22 @@ fn eval_expr(
                 Expr::ClosureLit(cid) => {
                     // The borrow captures read the caller's frame through the
                     // same read-only forms the compiled context packages.
-                    for (outer_id, hidden) in closures::closure_borrow_captures(*cid) {
+                    for (outer_id, hidden) in env.program.ctx.closure_borrow_captures(*cid) {
                         match hidden {
                             Type::StrView => args.push(Argument::View(Expr::Variable(outer_id, Type::String, 0, 0))),
                             _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VecRef | Type::StrVecRef | Type::VecFRef))),
                         }
                     }
-                    invoke_call(env, closures::closure_fn_id(*cid), &args, locals, caller_locals)
+                    invoke_call(env, env.program.ctx.closure_fn_id(*cid), &args, locals, caller_locals)
                 }
                 Expr::Variable(_, Type::Closure(cid), ..) => {
-                    for (outer_id, hidden) in closures::closure_borrow_captures(*cid) {
+                    for (outer_id, hidden) in env.program.ctx.closure_borrow_captures(*cid) {
                         match hidden {
                             Type::StrView => args.push(Argument::View(Expr::Variable(outer_id, Type::String, 0, 0))),
                             _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VecRef | Type::StrVecRef | Type::VecFRef))),
                         }
                     }
-                    invoke_call(env, closures::closure_fn_id(*cid), &args, locals, caller_locals)
+                    invoke_call(env, env.program.ctx.closure_fn_id(*cid), &args, locals, caller_locals)
                 }
                 Expr::Variable(id, Type::Fn(_), ..) => {
                     let target = match read_var(locals, caller_locals, *id, 0, 0)? {
@@ -2266,7 +2262,7 @@ fn invoke_call(
     caller_locals: &mut Option<&mut HashMap<usize, Val>>,
 ) -> Result<Val, Flow> {
     let callee = *env.fns.get(&fn_id).ok_or_else(|| {
-        match crate::frontend::extern_name(fn_id) {
+        match env.program.ctx.extern_name(fn_id) {
             // A declared extern has no ae body to interpret (M2.12
             // slice 4): the compiled backends link the C symbol; the
             // interpreter cannot.
@@ -2314,11 +2310,10 @@ fn invoke_call(
     let outcome = eval_stmts(env, &callee.body, &mut callee_locals, &mut parent);
     // The copy-ins write back to the frames their references named.
     for (param_id, target) in &copy_backs {
-        if let Some(value) = callee_locals.get(param_id) {
-            if let Some(caller) = caller_locals.as_mut() {
+        if let Some(value) = callee_locals.get(param_id)
+            && let Some(caller) = caller_locals.as_mut() {
                 caller.insert(*target, value.clone());
             }
-        }
     }
     match outcome {
         Flow::Return(v) => Ok(v),

@@ -476,17 +476,18 @@ impl<'a> DeclarationParser<'a> {
             }));
         }
         let token = self.current();
-        if let Kind::Ident(name) = &token.kind {
-            if name == "self" && !matches!(self.tokens.get(self.pos + 1).map(|next| &next.kind), Some(Kind::Colon)) {
-                let (name_range, end) = (token.offset..token.end, token.end);
-                self.pos += 1;
-                return Ok(Some(TypedName {
-                    name: "self".to_owned(),
-                    name_range,
-                    mutable: false,
-                    ty: end..end,
-                }));
-            }
+        if let Kind::Ident(name) = &token.kind
+            && name == "self"
+            && !matches!(self.tokens.get(self.pos + 1).map(|next| &next.kind), Some(Kind::Colon))
+        {
+            let (name_range, end) = (token.offset..token.end, token.end);
+            self.pos += 1;
+            return Ok(Some(TypedName {
+                name: "self".to_owned(),
+                name_range,
+                mutable: false,
+                ty: end..end,
+            }));
         }
         Ok(None)
     }
@@ -497,14 +498,14 @@ impl<'a> DeclarationParser<'a> {
             if !fields && names.len() >= MAX_FUNCTION_PARAMETERS {
                 return Err(self.error(&format!("function parameter limit exceeded ({MAX_FUNCTION_PARAMETERS})")));
             }
-            if !fields && names.is_empty() {
-                if let Some(receiver) = self.receiver()? {
-                    names.push(receiver);
-                    if self.consume(Kind::Comma) {
-                        continue;
-                    }
-                    break;
+            if !fields && names.is_empty()
+                && let Some(receiver) = self.receiver()?
+            {
+                names.push(receiver);
+                if self.consume(Kind::Comma) {
+                    continue;
                 }
+                break;
             }
             let mutable = !fields && self.consume(Kind::Var);
             let token = self.current();

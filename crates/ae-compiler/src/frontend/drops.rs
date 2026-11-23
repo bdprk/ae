@@ -122,8 +122,8 @@ fn elaborate_with_round_limit(function: &mut MirFunction, rounds: usize) -> Drop
 fn sync_releases_binding(bindings: &mut Vec<MirBinding>, original: &[usize], kept: &[(usize, Type)], consumed: &mut usize) {
     let mut index = *consumed;
     while index < bindings.len() {
-        if let MirRvalue::Intrinsic(name, ops, _) = &bindings[index].rvalue {
-            if *name == "releases" {
+        if let MirRvalue::Intrinsic(name, ops, _) = &bindings[index].rvalue
+            && *name == "releases" {
                 let ids: Vec<usize> = ops.iter().filter_map(|op| match op {
                     MirOperand::Place(MirPlace::Local(id, _)) => Some(*id),
                     _ => None,
@@ -139,7 +139,6 @@ fn sync_releases_binding(bindings: &mut Vec<MirBinding>, original: &[usize], kep
                     return;
                 }
             }
-        }
         index += 1;
     }
 }

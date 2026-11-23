@@ -131,7 +131,8 @@ impl PackageLock {
 
         let mut text = String::from("ae-lock-v1\n");
         for (path, digest) in &self.manifests {
-            writeln!(text, "manifest {digest} {:?}", local(path)?).unwrap();
+            writeln!(text, "manifest {digest} {:?}", local(path)?)
+                .map_err(|error| format!("failed to format lockfile: {error}"))?;
         }
         let mut sources = Vec::new();
         for unit in units {
@@ -140,7 +141,8 @@ impl PackageLock {
         }
         sources.sort();
         for (path, digest) in sources {
-            writeln!(text, "source {digest} {path:?}").unwrap();
+            writeln!(text, "source {digest} {path:?}")
+                .map_err(|error| format!("failed to format lockfile: {error}"))?;
         }
         Ok(text)
     }
@@ -175,9 +177,7 @@ pub(super) fn update_lock(manifest: &Path) -> Result<(), String> {
             PackageLock { path: manifest.with_file_name("ae.lock"), manifests: vec![(canonical, package.digest)] }
         }
     };
-    let tracked = ae_compiler::frontend::with_package_imports(imports, || {
-        ae_compiler::frontend::compile_path_tracked(&path)
-    })?;
+    let tracked = ae_compiler::frontend::compile_path_tracked_with_imports(&path, &imports)?;
     let contents = lock.render(&tracked.units)?;
     let parent = lock.path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let temporary = super::TempDir::create(parent)?;
@@ -245,8 +245,13 @@ impl std::fmt::Display for Requirement {
 }
 
 fn read_manifest(manifest: &Path) -> Result<Manifest, String> {
+    let source = fs::read_to_string(manifest)
+        .map_err(|error| format!("{}: {error}", manifest.display()))?;
+    parse_manifest_str(manifest, &source)
+}
+
+fn parse_manifest_str(manifest: &Path, source: &str) -> Result<Manifest, String> {
     let fail = |message: &str| format!("{}: {message}", manifest.display());
-    let source = fs::read_to_string(&manifest).map_err(|error| fail(&error.to_string()))?;
     let mut document = source.parse::<toml::Table>().map_err(|error| fail(&error.to_string()))?;
     let package = document.get("package").and_then(toml::Value::as_table)
         .ok_or_else(|| fail("expected a [package] table"))?;
@@ -265,7 +270,7 @@ fn read_manifest(manifest: &Path) -> Result<Manifest, String> {
         fail("package.ae must be a toolchain version such as 0.1 or 0.1.1")
     })?;
     let current = Version::parse(env!("CARGO_PKG_VERSION"), false)
-        .expect("the compiler has a numeric release version");
+        .ok_or_else(|| fail("invalid compiler release version"))?;
     if minimum > current {
         return Err(fail(&format!("package requires ae {floor} or later, installed version is {current}")));
     }
@@ -381,14 +386,16 @@ impl PathGraph {
             if source.has_root() || matches!(source.components().next(), Some(std::path::Component::Prefix(_))) {
                 return Err(format!("{}: dependency '{alias}' path must be relative to its manifest", path.display()));
             }
-            let dependency = path.parent().expect("a canonical file has a parent").join(source).join(MANIFEST);
+            let dependency = path.parent()
+                .ok_or_else(|| format!("{}: manifest path has no parent directory", path.display()))?
+                .join(source).join(MANIFEST);
             let canonical = dependency.canonicalize().map_err(|error| format!("{}: {error}", dependency.display()))?;
             let version = self.visit(&canonical)?;
-            if let Some(requirement) = requirement {
-                if !requirement.contains(version) {
-                    return Err(format!("{}: dependency '{alias}' requires version {requirement} but {} is {version}",
-                        path.display(), canonical.display()));
-                }
+            if let Some(requirement) = requirement
+                && !requirement.contains(version)
+            {
+                return Err(format!("{}: dependency '{alias}' requires version {requirement} but {} is {version}",
+                    path.display(), canonical.display()));
             }
             imports.insert(alias.clone(), canonical.with_file_name("src").join("lib.ae"));
             edges.push((alias, relative.to_owned()));
@@ -397,9 +404,11 @@ impl PathGraph {
         self.imports.insert(path.with_file_name("src"), imports);
         self.visited.insert(path.clone(), package.version);
         self.manifests.push((path.clone(), package.digest));
-        writeln!(self.output, "{} {} ({})", package.name, package.version, path.display()).unwrap();
+        writeln!(self.output, "{} {} ({})", package.name, package.version, path.display())
+            .map_err(|error| format!("failed to format package graph: {error}"))?;
         for (alias, relative) in edges {
-            writeln!(self.output, "  {alias} -> {relative}").unwrap();
+            writeln!(self.output, "  {alias} -> {relative}")
+                .map_err(|error| format!("failed to format package graph: {error}"))?;
         }
         Ok(package.version)
     }
@@ -532,7 +541,8 @@ pub(super) fn add_dependency(input: &Path, target: &Path) -> Result<String, Stri
     let manifest = manifest_path(input)
         .ok_or_else(|| format!("{} is not a package directory or {MANIFEST}", input.display()))?
         .canonicalize().map_err(|error| format!("{}: {error}", input.display()))?;
-    let root = manifest.parent().expect("a canonical manifest has a parent");
+    let root = manifest.parent()
+        .ok_or_else(|| format!("{}: manifest path has no parent directory", manifest.display()))?;
     let target_manifest = if target.is_dir() { target.join(MANIFEST) } else { target.to_owned() };
     let target_manifest = target_manifest.canonicalize()
         .map_err(|error| format!("{}: {error}", target_manifest.display()))?;
@@ -541,7 +551,8 @@ pub(super) fn add_dependency(input: &Path, target: &Path) -> Result<String, Stri
     }
     let package = read_manifest(&target_manifest)?;
     let alias = package.name.clone();
-    let target_directory = target_manifest.parent().expect("a canonical manifest has a parent");
+    let target_directory = target_manifest.parent()
+        .ok_or_else(|| format!("{}: manifest path has no parent directory", target_manifest.display()))?;
 
     let source = fs::read_to_string(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
     let current = read_manifest(&manifest)?;
@@ -589,6 +600,92 @@ pub(super) fn remove_dependency(input: &Path, alias: &str) -> Result<String, Str
         Err(error) => Ok(format!("removed dependency '{alias}'\n\
             ae.lock is now stale ({error});\n\
             run 'ae update' after removing imports of '{alias}'")),
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::parse_manifest_str;
+    use std::path::Path;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn usize(&mut self, bound: usize) -> usize {
+            if bound == 0 {
+                0
+            } else {
+                (self.next() as usize) % bound
+            }
+        }
+    }
+
+    const SEEDS: &[&str] = &[
+        "",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nae = \"0.1\"\n",
+        "[package]\nname = \"bad name!\"\nversion = \"0.1.0\"\nae = \"0.1\"\n",
+        "[package]\nname = \"app\"\nversion = \"01.0.0\"\nae = \"0.1\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nae = \"999.0\"\n",
+        "package = 123\ndependencies = [1, 2]\ntarget = \"x86_64\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nae = \"0.1\"\n[dependencies]\nfoo = \"^1.0\"\nbar = { path = \"/abs/path\", version = \"bad\" }\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nae = \"0.1\"\n[target.linux]\ndependencies = { bad = 42 }\n",
+    ];
+
+    const FRAGMENTS: &[&str] = &[
+        "[package]", "[dependencies]", "[target]", "name = ", "version = ", "ae = ", "path = ",
+        "\"0.1.0\"", "\"../dep\"", "\"\"", "123", "true", "[]", "{}", "=", "\n", "\"", "#", "中", "😀",
+    ];
+
+    fn mutate_toml(rng: &mut Rng, base: &str) -> String {
+        let mut chars: Vec<char> = base.chars().collect();
+        let ops = 1 + rng.usize(5);
+        for _ in 0..ops {
+            match rng.usize(3) {
+                0 if !chars.is_empty() => {
+                    let len = rng.usize(chars.len() + 1);
+                    chars.truncate(len);
+                }
+                1 if !chars.is_empty() => {
+                    let start = rng.usize(chars.len());
+                    let end = start + rng.usize(chars.len() - start + 1);
+                    chars.drain(start..end);
+                }
+                _ => {
+                    let frag = FRAGMENTS[rng.usize(FRAGMENTS.len())];
+                    let pos = rng.usize(chars.len() + 1);
+                    chars.splice(pos..pos, frag.chars());
+                }
+            }
+        }
+        chars.into_iter().collect()
+    }
+
+    #[test]
+    fn deterministic_fuzz_manifest_parser_zero_panics() {
+        let mut rng = Rng(0x517C_C1B7_2722_0A95);
+        let manifest_path = Path::new("fuzz/ae.toml");
+
+        for &seed in SEEDS {
+            let _ = parse_manifest_str(manifest_path, seed);
+            for (idx, _) in seed.char_indices() {
+                let _ = parse_manifest_str(manifest_path, &seed[..idx]);
+            }
+        }
+
+        for i in 0..2000 {
+            let base = SEEDS[i % SEEDS.len()];
+            let mutated = mutate_toml(&mut rng, base);
+            let _ = parse_manifest_str(manifest_path, &mutated);
+        }
     }
 }
 

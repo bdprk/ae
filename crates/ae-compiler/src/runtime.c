@@ -559,13 +559,18 @@ static void ae_strvec_forfeit(ae_strvec *v) {
 // which is SIMD-optimised in both libc implementations, instead of comparing
 // byte by byte (ADR-49).
 static int64_t ae_find_sep(const char *base, int64_t from, int64_t len, ae_strview sep) {
-    if (from >= len) return -1;
+    if (from >= len || sep.len > len - from) return -1;
     if (sep.len == 1) {
         const char *hit = memchr(base + from, sep.ptr[0], (size_t)(len - from));
         return hit == NULL ? -1 : (int64_t)(hit - base);
     }
-    for (int64_t i = from; i + sep.len <= len; i++) {
-        if (memcmp(base + i, sep.ptr, (size_t)sep.len) == 0) return i;
+    const char first = sep.ptr[0];
+    for (int64_t i = from; i + sep.len <= len; ) {
+        const char *hit = memchr(base + i, first, (size_t)(len - sep.len - i + 1));
+        if (!hit) return -1;
+        i = (int64_t)(hit - base);
+        if (memcmp(hit, sep.ptr, (size_t)sep.len) == 0) return i;
+        i += 1;
     }
     return -1;
 }
@@ -672,9 +677,12 @@ static bool ae_tokens_next(ae_tokens *cursor, ae_strview *out) {
         const char *hit = memchr(cursor->text.ptr + start, cursor->sep[0], (size_t)(cursor->text.len - start));
         if (hit) at = (int64_t)(hit - cursor->text.ptr);
     } else {
-        int64_t i = start;
-        while (i + cursor->sep_len <= cursor->text.len) {
-            if (memcmp(cursor->text.ptr + i, cursor->sep, (size_t)cursor->sep_len) == 0) { at = i; break; }
+        const char first = cursor->sep[0];
+        for (int64_t i = start; i + cursor->sep_len <= cursor->text.len; ) {
+            const char *hit = memchr(cursor->text.ptr + i, first, (size_t)(cursor->text.len - cursor->sep_len - i + 1));
+            if (!hit) break;
+            i = (int64_t)(hit - cursor->text.ptr);
+            if (memcmp(hit, cursor->sep, (size_t)cursor->sep_len) == 0) { at = i; break; }
             i += 1;
         }
     }
@@ -1063,7 +1071,7 @@ static ae_string ae_read_file(const char *path, size_t line, size_t column) {
     char *buffer = ae_alloc(wanted, line, column);
     size_t read = fread(buffer, 1, (size_t)size, f);
     fclose(f);
-    if (read != (size_t)size) ae_fail("cannot read file", line, column);
+    if (read != (size_t)size) { ae_free(buffer); ae_fail("cannot read file", line, column); }
     buffer[size] = 0;
     ae_string out = { buffer, (int64_t)size };
     return out;
@@ -1076,9 +1084,13 @@ static int64_t ae_write_file(ae_string path, ae_strview content, size_t line, si
     return (int64_t)written;
 }
 static ae_vec ae_bytes(ae_strview s, size_t line, size_t column) {
-    ae_vec v = ae_vec_new(line, column);
+    if (s.len > INT64_MAX / (int64_t)sizeof(int64_t)) ae_fail("vector too large", line, column);
+    ae_vec v;
+    v.len = s.len;
+    v.cap = s.len > 4 ? s.len : 4;
+    v.data = ae_alloc((size_t)v.cap * sizeof(int64_t), line, column);
     for (int64_t i = 0; i < s.len; i++) {
-        ae_vec_push(&v, (int64_t)(unsigned char)s.ptr[i], line, column);
+        v.data[i] = (int64_t)(unsigned char)s.ptr[i];
     }
     return v;
 }
