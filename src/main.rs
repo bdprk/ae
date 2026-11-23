@@ -267,12 +267,17 @@ fn build_c(c: &str, dir: &Path, release: bool, use_cache: bool) -> Result<PathBu
                 if timings_enabled() { eprintln!("ae cache: disabled (cannot identify the C compiler {cc_name:?})"); }
             }
             Some(identity) => {
+                // The route mode is part of the key for the same reason it is
+                // part of the frontend cache identity: a legacy-route build must
+                // never answer a resolved-route request.
+                let route = if env::var_os("AE_ALLOW_LEGACY_ROUTE").is_some() { "legacy" } else { "resolved" };
                 let key = sha256::hex_parts(&[
                     c.as_bytes(),
                     optimization.as_bytes(),
                     identity.as_bytes(),
                     cc_name.as_bytes(),
                     env!("CARGO_PKG_VERSION").as_bytes(),
+                    route.as_bytes(),
                     if cfg!(windows) { &b"windows"[..] } else { &b"unix"[..] },
                 ]);
                 let entry = cache_root().join("entries").join(key);
