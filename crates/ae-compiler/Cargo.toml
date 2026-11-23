@@ -7,3 +7,4 @@ edition = "2024"
 ae-resolve = { path = "../ae-resolve" }
 ae-syntax = { path = "../ae-syntax" }
 ae-span = { path = "../ae-span" }
+ae-ty = { path = "../ae-ty" }

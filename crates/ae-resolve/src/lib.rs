@@ -35,11 +35,13 @@
 pub mod dump;
 pub mod imports;
 pub mod module;
-pub mod typecheck;
 pub mod resolve;
 pub mod types;
 
 pub use module::{parse_module, FnUnit, Module};
+/// The shared operator rules now live in `ae-ty`; the old path stays as a
+/// re-export so resolver call sites and snapshots keep one source.
+pub use ae_ty as typecheck;
 pub use resolve::{resolve, FnOccurrences, Resolution};
 pub use dump::dump;
 pub use types::{classify, Spelled, TypeSpelling, SpellingRole, SpellingEntry};

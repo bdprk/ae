@@ -55,7 +55,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    pub(super) fn checked_scalar(&self, range: Option<&std::ops::Range<usize>>) -> Option<ae_resolve::typecheck::Scalar> {
+    pub(super) fn checked_scalar(&self, range: Option<&std::ops::Range<usize>>) -> Option<ae_ty::Scalar> {
         match self.resolved_expressions().scalar_expression_types.get(range?)? {
             ae_resolve::resolve::ExpressionType::Checked(scalar) => Some(*scalar),
             _ => None,
@@ -64,7 +64,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn check_compound_assignment(&self, target: Type, operator: &Kind) -> Result<(), ae_span::Diagnostic> {
         if (target == Type::String && *operator == Kind::Plus)
-            || ae_resolve::typecheck::scalar_compound_assignment(super::expression::operator_scalar(target), operator)
+            || ae_ty::scalar_compound_assignment(super::expression::operator_scalar(target), operator)
         {
             return Ok(());
         }

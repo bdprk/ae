@@ -530,7 +530,7 @@ use super::*;
         let start = source.find(comparison).unwrap();
         assert_eq!(
             parser.resolved_expressions().scalar_expression_types.get(&(start..start + comparison.len())),
-            Some(&ae_resolve::resolve::ExpressionType::Checked(ae_resolve::typecheck::Scalar::Bool)),
+            Some(&ae_resolve::resolve::ExpressionType::Checked(ae_ty::Scalar::Bool)),
         );
         parser.seek_scalar_offset(source.find("{ let local").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved scalar route").unwrap();

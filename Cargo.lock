@@ -19,6 +19,7 @@ dependencies = [
  "ae-resolve",
  "ae-span",
  "ae-syntax",
+ "ae-ty",
 ]
 
 [[package]]
@@ -27,6 +28,7 @@ version = "0.1.1"
 dependencies = [
  "ae-span",
  "ae-syntax",
+ "ae-ty",
 ]
 
 [[package]]
@@ -38,6 +40,13 @@ name = "ae-syntax"
 version = "0.1.1"
 dependencies = [
  "ae-span",
+]
+
+[[package]]
+name = "ae-ty"
+version = "0.1.1"
+dependencies = [
+ "ae-syntax",
 ]
 
 [[package]]

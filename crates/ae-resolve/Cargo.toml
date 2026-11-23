@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 ae-span = { path = "../ae-span" }
+ae-ty = { path = "../ae-ty" }
 ae-syntax = { path = "../ae-syntax" }

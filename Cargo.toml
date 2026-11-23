@@ -10,6 +10,6 @@ ae-resolve = { path = "crates/ae-resolve" }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [workspace]
-members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span"]
-default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span"]
+members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty"]
+default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty"]
 resolver = "3"

@@ -1890,10 +1890,10 @@ impl Parser<'_> {
 
     pub(super) fn check_array_index(
         &mut self,
-        scalar: Option<ae_resolve::typecheck::Scalar>,
+        scalar: Option<ae_ty::Scalar>,
         end: Option<usize>,
     ) -> Result<(), ae_span::Diagnostic> {
-        if !ae_resolve::typecheck::valid_array_index(scalar) {
+        if !ae_ty::valid_array_index(scalar) {
             if let Some(end) = end {
                 self.seek_scalar_offset(end);
             }
@@ -1902,7 +1902,7 @@ impl Parser<'_> {
         Ok(())
     }
 
-    fn operator_error(&self, error: ae_resolve::typecheck::OperatorError) -> ae_span::Diagnostic {
+    fn operator_error(&self, error: ae_ty::OperatorError) -> ae_span::Diagnostic {
         let diagnostic = self.fail(error.message());
         if let Some(code) = error.code() { diagnostic.with_code(code) } else { diagnostic }
     }
@@ -1910,7 +1910,7 @@ impl Parser<'_> {
     fn operator_type(
         &self,
         fact: Option<ae_resolve::resolve::ExpressionType>,
-        check: impl FnOnce() -> Result<ae_resolve::typecheck::Scalar, ae_resolve::typecheck::OperatorError>,
+        check: impl FnOnce() -> Result<ae_ty::Scalar, ae_ty::OperatorError>,
     ) -> Result<Type, ae_span::Diagnostic> {
         use ae_resolve::resolve::ExpressionType;
         let result = match fact {
@@ -1928,7 +1928,7 @@ impl Parser<'_> {
         (line, column): (usize, usize),
         fact: Option<ae_resolve::resolve::ExpressionType>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let ty = self.operator_type(fact, || ae_resolve::typecheck::prefix(&operator, operator_scalar(ty)))?;
+        let ty = self.operator_type(fact, || ae_ty::prefix(&operator, operator_scalar(ty)))?;
         let value = if operator == Kind::Minus {
             Expr::Neg(Box::new(operand), line, column)
         } else {
@@ -1961,15 +1961,15 @@ impl Parser<'_> {
             Type::String
         } else {
             self.operator_type(fact, || {
-                ae_resolve::typecheck::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
+                ae_ty::infix(&op, operator_scalar(lhs_ty), operator_scalar(rhs_ty))
             })?
         };
         Ok((Expr::Binary(Box::new(lhs_expr), op, Box::new(rhs), line, column, ty), ty))
     }
 }
 
-pub(super) fn operator_scalar(ty: Type) -> Option<ae_resolve::typecheck::Scalar> {
-    use ae_resolve::typecheck::Scalar;
+pub(super) fn operator_scalar(ty: Type) -> Option<ae_ty::Scalar> {
+    use ae_ty::Scalar;
     match ty {
         Type::Int => Some(Scalar::Int),
         Type::F64 => Some(Scalar::Float),
@@ -1978,8 +1978,8 @@ pub(super) fn operator_scalar(ty: Type) -> Option<ae_resolve::typecheck::Scalar>
     }
 }
 
-fn concrete_scalar(ty: ae_resolve::typecheck::Scalar) -> Type {
-    use ae_resolve::typecheck::Scalar;
+fn concrete_scalar(ty: ae_ty::Scalar) -> Type {
+    use ae_ty::Scalar;
     match ty {
         Scalar::Int => Type::Int,
         Scalar::Float => Type::F64,
