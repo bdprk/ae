@@ -8,6 +8,7 @@
 pub mod concrete;
 pub mod id;
 pub mod interner;
+pub mod numeric;
 pub mod op;
 pub mod spelling;
 pub mod unify;
@@ -17,4 +18,5 @@ pub use id::DefId;
 pub use spelling::TypeSpelling;
 pub use unify::{unify, Substitution, Term, TypeVar, UnifyError};
 pub use interner::TypeInterner;
+pub use numeric::{FloatTy, IntTy};
 pub use op::{infix, prefix, scalar_compound_assignment, valid_array_index, OperatorError, Scalar};

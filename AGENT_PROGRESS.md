@@ -389,3 +389,5 @@
 
 - 2026-11-24 23:30 (+08:00): **P2.1 slice 1: the primitive width model is decided.** ADR-0232 (Proposed) defines width-carrying integer/float types plus char and unit, literal typing, explicit casts, same-type arithmetic, checked-traps-identical-in-dev-and-release, and the C/interp representations; spec/types.md gains the numeric-semantics section. The staged implementation starts with a byte-identical mechanical Int(I64) migration. Meanwhile the P1.4 deletion passed dual-platform ab_gate (50 examples + 663 CLI invocations, 0 diffs), WSL sanitize+leak 41/41 and the 10k-seed fuzz is running.
 
+- 2026-11-25 00:20 (+08:00): **P2.1 slice 2: numeric vocabulary in ae-ty.** `IntTy` (ten widths, signedness, bits, Rust/C names, inclusive range) and `FloatTy` (f32/f64) are exported with defaults I64/F64; two unit tests pin the tables. The TyKind migration is next. The 10k-seed fuzz continues to run (P1.4 gate).
+
