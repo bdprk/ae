@@ -8138,7 +8138,10 @@ mod tests {
         parser.binding_ranges.insert(80, receiver_binding..receiver_binding + "self".len());
         parser.structs[instance].fields[0].1 = Type::String;
         parser.seek_scalar_offset(receiver_body);
-        assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar receiver field stays typed");
+        // A string receiver field reads as a borrowed view on this route: the
+        // body is taken (the field read lowers, or the shape check answers)
+        // rather than handed back whole to the typed parser.
+        assert!(parser.lower_resolved_scalar_body().is_some(), "a string receiver field no longer forces the typed route");
         parser.structs.pop();
         parser.receiver = None;
         parser.names.remove("self");
