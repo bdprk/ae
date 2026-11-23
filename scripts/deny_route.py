@@ -23,6 +23,7 @@ FILES = [
     "examples/borrow.ae",
     "examples/concat.ae",
     "examples/field_view.ae",
+    "examples/generic_impl.ae",
     "examples/heart.ae",
     "examples/map_count.ae",
     "examples/map_missing.ae",

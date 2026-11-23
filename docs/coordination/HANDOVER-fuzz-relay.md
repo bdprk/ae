@@ -1625,3 +1625,32 @@ Steps:
    `enum_generic_impls.ae` (they must pass and join the manifest) → byte
    parity → **50k mutation gate** → WSL sync. Any env-dependent difference
    in route/dny output is a red flag (the hazard seen on 2026-11-23).
+
+## P1.1 slice 23 landed: generic receiver methods (stateless lazy gate)
+
+The two attempts that were reverted paid off; the third version is green:
+
+- the recheck answers `Role::Call` permissively for a struct/enum receiver
+  (stateless — independent of whether an instance exists), and the lowering
+  resolves lazily with `struct_origin`/`enum_origin` →
+  `generic_impls[template]` → `instantiate_impl_method` (legal there, and the
+  constructor binding has already created the layout);
+- the receiver precompute types body locals from struct literals, generic
+  literals and constructor calls (layout instantiation only — no body parse),
+  and the recheck consults that map for locals not yet declared;
+- missing methods reproduce the typed route's pinned diagnostics at the
+  call's `(`: `type 'Point' has no methods; declare one in 'impl Point { ... }'`,
+  `type 'Point' has no method '…'; it has …`, `the impl for 'Pair' has no
+  method '…'; it has …`;
+- a substitution may be `string` as well as a scalar, so generic bodies
+  instantiated with `K = string` route.
+
+Coverage: 328 → **310**, files with fallbacks 101 → 99;
+`examples/generic_impl.ae` joins the deny manifest (20 files). 511/0,
+byte parity, 50k mutation gate all green.
+
+Remaining in this family: `tests/run/enum_generic_impls.ae` — `return
+Self::None;` inside a generic enum impl (the `Self` path needs the impl's
+enum instance, not a named base) and enum-instance locals from associated
+calls (`let a = Opt[i64]::some(..); a.is_some()`) need the same local-type
+inference for `Type::Enum(sid)` plus `enum_origin` in the lazy branch.

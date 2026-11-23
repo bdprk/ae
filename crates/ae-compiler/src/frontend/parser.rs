@@ -1647,7 +1647,10 @@ impl<'a> Parser<'a> {
         // Generic functions arrive here after the instance machinery has
         // substituted their signature. Keep non-scalar substitutions on
         // the typed route until their ownership and layout are covered.
-        if !self.subst.values().copied().all(scalar_type)
+        // A substitution may be any value type the body route handles:
+// scalars and `string` both lower through the same arms (owned
+// fields, concatenation, comparisons).
+        if !self.subst.values().copied().all(|ty| scalar_type(ty) || matches!(ty, Type::String))
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
             // A trait-impl body without a receiver can still spell `Self`;
             // inherent methods (receiver set) join the route like functions.
@@ -1693,6 +1696,78 @@ impl<'a> Parser<'a> {
             }
             return None
         };
+        let mut method_calls: HashMap<usize, bool> = HashMap::new();
+        let mut local_structs: HashMap<String, Type> = HashMap::new();
+        for statement in body.iter() {
+            ae_syntax::statement::visit_statements(statement, &mut |statement| {
+                if let ae_syntax::statement::StatementKind::Binding { name, initializer, .. } = &statement.kind {
+                    if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &initializer.kind {
+                        if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind {
+                            if let Some(&sid) = self.struct_names.get(struct_name) {
+                                local_structs.insert(name.clone(), Type::Struct(sid));
+                            }
+                        }
+                        // A generic struct literal names its instance's type.
+                        if let ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } = &target.kind {
+                            if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
+                                if let Some(&gid) = self.generics.struct_names.get(struct_name) {
+                                    if let Some(args) = self.shared_specialization_types(arguments) {
+                                        if let Ok(sid) = self.instantiate_struct(gid, args, target.range.start) {
+                                            local_structs.insert(name.clone(), Type::Struct(sid));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // A binding from a struct constructor call (`Point::new(..)`,
+                    // `Pair[string, i64]::new(..)`): a layout instantiation only
+                    // (no body parse), so it is safe in this precompute.
+                    if let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &initializer.kind {
+                        if let ae_syntax::expression::ExpressionKind::Qualified { base, .. } = &callee.kind {
+                            match &base.kind {
+                                ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } => {
+                                    if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
+                                        if let Some(&gid) = self.generics.struct_names.get(struct_name) {
+                                            if let Some(args) = self.shared_specialization_types(arguments) {
+                                                if let Ok(sid) = self.instantiate_struct(gid, args, base.range.start) {
+                                                    local_structs.insert(name.clone(), Type::Struct(sid));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) => {
+                                    if let Some(&sid) = self.struct_names.get(struct_name) {
+                                        local_structs.insert(name.clone(), Type::Struct(sid));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                for root in statement.expressions() {
+                    visit_expression_tree(root, &mut |expression| {
+                        let ae_syntax::expression::ExpressionKind::Call { callee, arguments } = &expression.kind else { return };
+                        let ae_syntax::expression::ExpressionKind::Field { base, name } = &callee.kind else { return };
+                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else { return };
+                        let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
+                            .or_else(|| local_structs.get(receiver).copied());
+                        let Some(ty) = ty else { return };
+                        let ok = if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
+                            name == "deref" && arguments.is_empty()
+                        } else {
+                            // Arity is part of the gate: a mismatched call
+                            // falls back instead of reaching the lowering.
+                            self.resolve_inherent_method(name, ty)
+                                .is_some_and(|(signature, _, _)| arguments.len() + 1 == signature.params.len())
+                        };
+                        method_calls.insert(callee.range.start, ok);
+                    });
+                }
+            });
+        }
         let supports_call = |name: &str, offset: usize| {
             // The pure value builtins lower natively (lower_resolved_builtin);
             // every other reserved name keeps the typed body.
@@ -1736,51 +1811,33 @@ impl<'a> Parser<'a> {
 // `names` already) or a local bound to a struct construction; anything
 // else — generic-instance receivers included — is rejected here and the
 // body falls back whole.
-        let mut method_calls: HashMap<usize, bool> = HashMap::new();
-        let mut local_structs: HashMap<String, Type> = HashMap::new();
-        for statement in body.iter() {
-            ae_syntax::statement::visit_statements(statement, &mut |statement| {
-                if let ae_syntax::statement::StatementKind::Binding { name, initializer, .. } = &statement.kind {
-                    if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &initializer.kind {
-                        if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind {
-                            if let Some(&sid) = self.struct_names.get(struct_name) {
-                                local_structs.insert(name.clone(), Type::Struct(sid));
-                            }
-                        }
-                    }
-                }
-                for root in statement.expressions() {
-                    visit_expression_tree(root, &mut |expression| {
-                        let ae_syntax::expression::ExpressionKind::Call { callee, arguments } = &expression.kind else { return };
-                        let ae_syntax::expression::ExpressionKind::Field { base, name } = &callee.kind else { return };
-                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else { return };
-                        let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
-                            .or_else(|| local_structs.get(receiver).copied());
-                        let Some(ty) = ty else { return };
-                        let ok = if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
-                            name == "deref" && arguments.is_empty()
-                        } else {
-                            // Arity is part of the gate: a mismatched call
-                            // falls back instead of reaching the lowering.
-                            self.resolve_inherent_method(name, ty)
-                                .is_some_and(|(signature, _, _)| arguments.len() + 1 == signature.params.len())
-                        };
-                        method_calls.insert(callee.range.start, ok);
-                    });
-                }
-            });
-        }
         // Any routed struct slot can root a field chain: the root ident's
         // occurrence names the def, the def names the slot, and the slot's
         // type drives the field walk (a `&mut` struct parameter roots its
         // writes the same way `self` does). Reads and stores lower through
         // the same slot lookups the impl path uses.
         let supports_field = |expression: &ae_syntax::expression::Expression, role| {
-            // A method-call callee: the precomputed verdict above decides;
-            // anything the route cannot lower rejects the body, which falls
-            // back whole.
+            // A method-call callee: the precomputed verdict admits the
+            // inherent cases; a struct/enum receiver is admitted permissively
+            // and the lowering resolves the generic instance lazily (it owns
+            // `&mut self` and emits the typed diagnostics when the method is
+            // missing), so the gate never depends on instantiation order.
             if role == ae_resolve::Role::Call {
-                return method_calls.get(&expression.range.start).copied().unwrap_or(false);
+                if method_calls.get(&expression.range.start).copied().unwrap_or(false) {
+                    return true;
+                }
+                let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind else { return false };
+                let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else { return false };
+                // A body local that the precompute typed (a struct literal or
+                // constructor call) answers here even though the lowering has
+                // not declared it yet.
+                let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
+                    .or_else(|| local_structs.get(receiver).copied());
+                let Some(ty) = ty else { return false };
+                if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
+                    return name == "deref";
+                }
+                return matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::StructRef(_) | Type::Enum(..));
             }
             let Some(root) = field_chain_root(expression) else { return false };
             let occurrences = match role {
@@ -2714,6 +2771,56 @@ impl<'a> Parser<'a> {
                             if !matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
                                 if let Some((signature, _, _)) = self.resolve_inherent_method(method_name, ty) {
                                     return self.lower_method_call(method_name, slot, ty, signature, expression, arguments, slots);
+                                }
+                                // A generic-instance receiver resolves lazily
+                                // here (the gate is permissive and stateless);
+                                // a missing method reproduces the typed route's
+                                // pinned diagnostics.
+                                let sid = match ty {
+                                    Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => Some((sid, false)),
+                                    Type::Enum(_, sid) => Some((sid, true)),
+                                    _ => None,
+                                };
+                                if let Some((sid, is_enum)) = sid {
+                                    let origin = if is_enum {
+                                        self.generics.enum_origin.get(&sid).cloned()
+                                    } else {
+                                        self.generics.struct_origin.get(&sid).cloned()
+                                    };
+                                    if let Some((gid, origin_args)) = origin {
+                                        let template = if is_enum {
+                                            self.generics.defs[gid].name.clone()
+                                        } else {
+                                            self.generics.struct_defs[gid].name.clone()
+                                        };
+                                        let Some(gimpl) = self.generics.generic_impls.get(&template).cloned() else {
+                                            return Err(self.error_at(callee.range.end, &format!("the impl for '{template}' has no method '{method_name}'")));
+                                        };
+                                        let mut names: Vec<String> = gimpl.methods.iter().map(|m| m.name.clone()).collect();
+                                        names.sort();
+                                        let Some(mdef) = gimpl.methods.iter().find(|m| m.name == *method_name) else {
+                                            return Err(self.error_at(callee.range.end, &format!("the impl for '{template}' has no method '{method_name}'; it has {}", names.join(", "))));
+                                        };
+                                        if mdef.receiver.is_some() {
+                                            let (id, params, ret) = self.instantiate_impl_method(&template, method_name, sid, gid, &origin_args, expression.range.start)?;
+                                            let signature = Signature { id, params, ret, file: self.file.clone(), public: true, extern_c: false };
+                                            return self.lower_method_call(method_name, slot, ty, signature, expression, arguments, slots);
+                                        }
+                                        return Err(self.error_at(callee.range.end, &format!("'{template}::{method_name}' is an associated function, so it takes no receiver")));
+                                    }
+                                    let type_name = match ty {
+                                        Type::Enum(name, _) => name.to_owned(),
+                                        _ => self.structs[sid].name.clone(),
+                                    };
+                                    let mut names: Vec<String> = self.generics.inherent.keys()
+                                        .filter(|key| key.starts_with(&format!("{type_name}#")))
+                                        .filter_map(|key| key.split('#').nth(1).map(|name| name.to_owned()))
+                                        .collect();
+                                    names.sort();
+                                    if names.is_empty() {
+                                        return Err(self.error_at(callee.range.end, &format!("type '{type_name}' has no methods; declare one in 'impl {type_name} {{ ... }}'")));
+                                    }
+                                    return Err(self.error_at(callee.range.end, &format!("type '{type_name}' has no method '{method_name}'; it has {}", names.join(", "))));
                                 }
                                 return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
                             }
