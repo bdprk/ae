@@ -3524,6 +3524,14 @@ impl<'a> Parser<'a> {
                 // Frees and later reads are rejected (E0102). This covers
                 // `return self;` and `return binding;` for structs, strings
                 // and vectors alike.
+                // An owned field cannot be moved out of its struct (the
+                // struct owns its fields as a whole), so `return p.text;` is
+                // the typed route's rejection, not a value.
+                if ty.owned()
+                    && matches!(&value.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
+                        self.seek_scalar_offset(value.range.end);
+                        return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
+                    }
                 if let Expr::Variable(slot, ty, ..) = &lowered
                     && ty.owned() {
                         self.seek_scalar_offset(value.range.end);
@@ -8329,7 +8337,10 @@ mod tests {
         parser.names.insert("h".into(), (0, false, Type::StructRef(3)));
         parser.binding_ranges.insert(0, h_offset..h_offset + 1);
         parser.seek_scalar_offset(source.find("{ return h.text").unwrap());
-        assert!(parser.lower_resolved_scalar_body().is_none(), "non-scalar field reads stay typed");
+        // A string field read is a view, but returning it would move it out of
+        // the borrowed struct: the route takes the body and rejects the move.
+        let error = parser.lower_resolved_scalar_body().expect("string field return").err().unwrap();
+        assert!(error.message.contains("cannot move a field out of a struct"), "{}", error.message);
         parser.names.remove("h");
 
         let o_offset = source.find("(o: &Outer)").unwrap() + 1;
