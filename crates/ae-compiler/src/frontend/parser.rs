@@ -25,10 +25,14 @@ pub(super) fn moved_self_assignment_hint(diagnostic: ae_span::Diagnostic) -> ae_
 
 impl<'a> Parser<'a> {
     pub(super) fn current(&self) -> &Kind { &self.tokens[self.pos].kind }
-    /// A lowering site that still hands an expression to the typed Pratt
-    /// parser instead of lowering the shared syntax node. With
-    /// `AE_ROUTE_REPORT` set it names its token, so the dual-parser gap is
-    /// measurable and a ratchet can drive it to zero.
+    /// A lowering site reached a shape the resolved route does not cover.
+    /// The token-level expression parser is no longer a fallback: the shape
+    /// is a diagnostic with its own span, so a program cannot silently take
+    /// a different parser after the cutover.
+    pub(super) fn unsupported_expression(&mut self) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        Err(self.fail("this expression is not supported by the resolved route yet"))
+    }
+
     /// Whether a propagation operand is a shape the shared route can lower:
     /// a direct call (marked by the scan), a pure builtin call, or a variant
     /// construction. Anything else keeps the typed token parse.
@@ -69,17 +73,6 @@ impl<'a> Parser<'a> {
     ) -> Result<ae_resolve::DefId, ae_span::Diagnostic> {
         def.copied()
             .ok_or_else(|| self.error_at(offset, &format!("unknown variable '{name}'")).with_code("E0101"))
-    }
-
-    pub(super) fn fallback_expression(&mut self, min: u8, moving: bool) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        if std::env::var_os("AE_STRICT_ROUTE").is_some() {
-            return Err(self.fail("this expression is not supported by the body route"));
-        }
-        if std::env::var_os("AE_ROUTE_REPORT").is_some() {
-            let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
-            eprintln!("route typed-expression at {offset}");
-        }
-        self.expression(min, moving)
     }
 
     pub(super) fn fail(&self, message: &str) -> ae_span::Diagnostic {

@@ -287,7 +287,7 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(operand.range.end);
                 lowered
             }
-            None => self.fallback_expression(0, true)?,
+            None => self.unsupported_expression()?,
         };
         if *self.current() != Kind::Question {
             return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
@@ -298,15 +298,11 @@ impl<'a> Parser<'a> {
         Ok(statement)
     }
 
-    pub(super) fn spawn_callable(&mut self) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        self.spawn_callable_with(None, &HashMap::new())
-    }
-
     /// The spawn callable, with the shared callable node when the resolved
     /// route has it. A parenthesized or bare closure variable lowers from the
     /// tree; a closure literal keeps the typed closure machinery (capture
     /// inference); anything else keeps the typed token parse.
-    fn spawn_callable_with(
+    pub(super) fn spawn_callable_with(
         &mut self,
         callable: Option<&ae_syntax::expression::Expression>,
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
@@ -317,9 +313,17 @@ impl<'a> Parser<'a> {
                 ExpressionKind::Group(inner) => inner.as_ref(),
                 _ => argument,
             };
-            if let ExpressionKind::Atom(Kind::Ident(name)) = &inner.kind
-                && matches!(self.names.get(name), Some(&(_, _, Type::Closure(_))))
-            {
+            // A closure or function value bound to a name, or any atom-shaped
+            // callable (a literal, `true`, `0`): the shared expression lowering
+            // answers it, and the caller's callable rules (closure capture,
+            // function value, or the typed route's "needs a closure value")
+            // take it from there.
+            let atom = matches!(&inner.kind, ExpressionKind::Atom(_));
+            let named_callable = match &inner.kind {
+                ExpressionKind::Atom(Kind::Ident(name)) => matches!(self.names.get(name), Some(&(_, _, Type::Closure(_) | Type::Fn(_)))),
+                _ => false,
+            };
+            if atom || named_callable {
                 self.seek_scalar_offset(argument.range.start);
                 let lowered = self.lower_scalar_body_expression(argument, slots)?;
                 self.seek_scalar_offset(argument.range.end);
@@ -345,7 +349,7 @@ impl<'a> Parser<'a> {
                 return result;
             }
         }
-        self.fallback_expression(0, false)
+        self.unsupported_expression()
     }
 
 }

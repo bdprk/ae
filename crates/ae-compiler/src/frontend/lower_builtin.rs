@@ -424,7 +424,7 @@ impl<'a> Parser<'a> {
                     // Cursor after the name: the typed spawn helper parses the
                     // callable, moves its captures, and interns the thread.
                     self.pos += 1;
-                    let (value, ty) = self.spawn_expr(line, column)?;
+                    let (value, ty) = self.spawn_expr_with(line, column, arguments.first(), slots)?;
                     self.seek_scalar_offset(expression.range.end);
                     Ok((value, ty))
                 }

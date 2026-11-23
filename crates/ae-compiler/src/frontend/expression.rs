@@ -212,9 +212,19 @@ impl Parser<'_> {
     /// resolved body route.
     #[inline(never)]
     pub(super) fn spawn_expr(&mut self, line: usize, col: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        self.spawn_expr_with(line, col, None, &HashMap::new())
+    }
+
+    pub(super) fn spawn_expr_with(
+        &mut self,
+        line: usize,
+        col: usize,
+        callable: Option<&ae_syntax::expression::Expression>,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         let at = self.tokens[self.pos - 1].offset;
         self.take(Kind::LParen)?;
-        let (callable, callable_ty) = self.spawn_callable()?;
+        let (callable, callable_ty) = self.spawn_callable_with(callable, slots)?;
         self.take(Kind::RParen)?;
         let mut slots = Vec::new();
         let tid = match (&callable, callable_ty) {

@@ -837,7 +837,7 @@ use super::*;
         }
         let inline = source.find("task_spawn(ex, ||").unwrap() + "task_spawn(ex, ".len();
         parser.seek_scalar_offset(inline);
-        assert!(matches!(parser.spawn_callable(), Ok((Expr::ClosureLit(id), Type::Closure(ty))) if id == ty));
+        assert!(matches!(parser.spawn_callable_with(None, &std::collections::HashMap::new()), Ok((Expr::ClosureLit(id), Type::Closure(ty))) if id == ty));
         assert_eq!(*parser.current(), Kind::RParen);
 
         parser.names.insert("flag".into(), (7, false, Type::Bool));

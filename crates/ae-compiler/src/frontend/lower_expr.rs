@@ -276,12 +276,8 @@ impl<'a> Parser<'a> {
                     }
                 if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind
                     && typed_intrinsic(name) {
-                    let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
-                    let min = self.tokens.get(end)
-                        .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
-                        .map_or(0, |(left, _)| left + 1);
                     self.seek_scalar_offset(expression.range.start);
-                    let parsed = self.fallback_expression(min, true)?;
+                    let parsed = self.unsupported_expression()?;
                     self.seek_scalar_offset(expression.range.end);
                     return Ok(parsed);
                 }
@@ -307,27 +303,36 @@ impl<'a> Parser<'a> {
                 // builds the instance and owns the pinned diagnostics. Bounded
                 // by the following operator, like a chained method receiver.
                 if let ExpressionKind::Qualified { .. } = &callee.kind {
-                    let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
-                    let min = self.tokens.get(end)
-                        .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
-                        .map_or(0, |(left, _)| left + 1);
                     self.seek_scalar_offset(expression.range.start);
-                    let parsed = self.fallback_expression(min, true)?;
+                    let parsed = self.unsupported_expression()?;
                     self.seek_scalar_offset(expression.range.end);
                     return Ok(parsed);
                 }
                 if let ExpressionKind::Field { base, name: method_name } = &callee.kind {
-                    // A borrow argument (`pair.combine(&mut pair)`): the typed
-                    // postfix layer classifies the argument and rejects an
-                    // alias of the receiver slot in one statement. Delegate the
-                    // whole call, bounded by the following operator.
+                    // A borrow argument (`pair.combine(&mut pair)`): an alias
+                    // of the receiver slot with a mutable borrow in the same
+                    // statement is the typed route's rejection.
+                    if let ExpressionKind::Atom(Kind::Ident(receiver_name)) = &base.kind
+                        && let Some(&(receiver_slot, _, receiver_ty)) = self.names.get(receiver_name) {
+                        for argument in arguments {
+                            if let ExpressionKind::BorrowArgument { name, name_range, mutable, .. } = &argument.kind
+                                && self.names.get(name).is_some_and(|&(argument_slot, ..)| argument_slot == receiver_slot)
+                                && (*mutable || matches!(receiver_ty, Type::StructMut(_))) {
+                                    let message = if *mutable {
+                                        format!("cannot borrow '{name}' mutably while it is borrowed in this statement")
+                                    } else {
+                                        format!("cannot borrow '{name}' while it is mutably borrowed in this statement")
+                                    };
+                                    return Err(self.error_at(name_range.start, &message));
+                                }
+                        }
+                    }
+                    // A borrow argument the shared rules cannot classify keeps
+                    // the typed postfix layer's diagnostics; delegate the whole
+                    // call, bounded by the following operator.
                     if arguments.iter().any(|argument| matches!(argument.kind, ExpressionKind::BorrowArgument { .. })) {
-                        let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
-                        let min = self.tokens.get(end)
-                            .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
-                            .map_or(0, |(left, _)| left + 1);
                         self.seek_scalar_offset(expression.range.start);
-                        let parsed = self.fallback_expression(min, true)?;
+                        let parsed = self.unsupported_expression()?;
                         self.seek_scalar_offset(expression.range.end);
                         return Ok(parsed);
                     }
@@ -351,12 +356,8 @@ impl<'a> Parser<'a> {
                     // enclosing operator (`... .value() == 11`) stays with the
                     // shared lowering.
                     if !matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))) {
-                        let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
-                        let min = self.tokens.get(end)
-                            .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
-                            .map_or(0, |(left, _)| left + 1);
                         self.seek_scalar_offset(expression.range.start);
-                        let parsed = self.fallback_expression(min, true)?;
+                        let parsed = self.unsupported_expression()?;
                         // The typed parse consumed exactly this operand; the
                         // surrounding shared nodes own what follows.
                         self.seek_scalar_offset(expression.range.end);
@@ -559,17 +560,52 @@ impl<'a> Parser<'a> {
                     // slot names the pointer the caller passed (ADR-0189).
                     if let Some(&(slot, _, Type::Fn(sig))) = self.names.get(name) {
                         let (params, ret) = self.ctx.fn_sig(sig);
-                        // A borrow argument needs the typed parser's classify
-                        // rules (an alias of the same slot in one statement is
-                        // rejected); delegate the whole call, bounded by the
-                        // following operator.
+                        // Borrow arguments forwarded through a function value:
+                        // the shared argument lowering already applies the
+                        // classify rules and the statement-scoped borrow
+                        // registers, so a full-arity call lowers here. A shape
+                        // it does not cover keeps the typed delegation below.
+                        if arguments.len() == params.len()
+                            && arguments.iter().any(|argument| matches!(argument.kind, ExpressionKind::BorrowArgument { .. }))
+                        {
+                            let mut nodes_left = 128;
+                            let mut effects = SharedExpressionEffects::default();
+                            if let Some(args) = self.lower_shared_call_arguments(arguments, &params, 64, &mut nodes_left, &mut effects) {
+                                self.commit_shared_effects(effects);
+                                self.seek_scalar_offset(expression.range.end);
+                                return Ok((Expr::FnCall(slot, args, ret, sig), ret));
+                            }
+                            // The helper refused a shape it cannot answer; a
+                            // same-slot borrow in one statement is the typed
+                            // route's rejection, so report it here.
+                            let mut borrows: Vec<(usize, String, usize, bool)> = Vec::new();
+                            for argument in arguments {
+                                if let ExpressionKind::BorrowArgument { name, name_range, mutable, .. } = &argument.kind
+                                    && let Some(&(argument_slot, ..)) = self.names.get(name) {
+                                        if let Some((_, earlier_name, earlier_at, earlier_mutable)) = borrows.iter().find(|(slot, ..)| *slot == argument_slot) {
+                                            let (subject, at) = if *earlier_name == *name {
+                                                (name.clone(), name_range.start)
+                                            } else {
+                                                (earlier_name.clone(), *earlier_at)
+                                            };
+                                            let message = if *mutable || *earlier_mutable {
+                                                format!("cannot borrow '{subject}' mutably while it is borrowed in this statement")
+                                            } else {
+                                                format!("cannot borrow '{subject}' while it is mutably borrowed in this statement")
+                                            };
+                                            return Err(self.error_at(at, &message));
+                                        }
+                                        borrows.push((argument_slot, name.clone(), name_range.start, *mutable));
+                                    }
+                            }
+                        }
+                        // A borrow argument the shared lowering refused can
+                        // still be a typed diagnostic (an alias of the same
+                        // slot in one statement); delegate the whole call,
+                        // bounded by the following operator.
                         if arguments.iter().any(|argument| matches!(argument.kind, ExpressionKind::BorrowArgument { .. })) {
-                            let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
-                            let min = self.tokens.get(end)
-                                .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
-                                .map_or(0, |(left, _)| left + 1);
                             self.seek_scalar_offset(expression.range.start);
-                            let parsed = self.fallback_expression(min, true)?;
+                            let parsed = self.unsupported_expression()?;
                             self.seek_scalar_offset(expression.range.end);
                             return Ok(parsed);
                         }
@@ -774,7 +810,7 @@ impl<'a> Parser<'a> {
                     return Ok((value, ty));
                 }
                 self.seek_scalar_offset(expression.range.start);
-                let parsed = self.fallback_expression(0, false)?;
+                let parsed = self.unsupported_expression()?;
                 self.seek_scalar_offset(expression.range.end);
                 return Ok(parsed);
             }
@@ -832,7 +868,7 @@ impl<'a> Parser<'a> {
                     Some((value, ty)) => (value, ty),
                     None => {
                         self.seek_scalar_offset(expression.range.start);
-                        self.fallback_expression(0, false)?
+                        self.unsupported_expression()?
                     }
                 }
             }
@@ -1101,12 +1137,21 @@ impl<'a> Parser<'a> {
             Expr::Variable(id, Type::String, _, _) => (*id, None),
             Expr::Field(inner, fname, Type::String) => match inner.as_ref() {
                 Expr::Variable(id, Type::Struct(_), _, _) => (*id, Some(fname.clone())),
-                _ => return Ok(None),
+                _ => {
+                    self.seek_scalar_offset(arguments[0].range.end);
+                    return Err(self.fail("tokenize can follow a string field only on a struct variable"));
+                }
             },
-            _ => return Ok(None),
+            _ => {
+                self.seek_scalar_offset(arguments[0].range.end);
+                return Err(self.fail("tokenize expects a string variable or a string field of a struct variable (the cursor borrows its base)"));
+            }
         };
         if self.moved.contains(&vid) {
-            return Ok(None);
+            self.seek_scalar_offset(arguments[0].range.start);
+            return Err(moved_value_hint(self.binding_label(
+                self.fail("cannot tokenize a moved string").with_code("E0102"), vid,
+            )));
         }
         self.seek_scalar_offset(arguments[1].range.start);
         let (sep, sep_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;

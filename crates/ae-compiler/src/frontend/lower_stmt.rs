@@ -52,7 +52,7 @@ impl<'a> Parser<'a> {
                                 self.seek_scalar_offset(operand.range.end);
                                 lowered
                             }
-                        None => self.fallback_expression(0, true)?,
+                        None => self.unsupported_expression()?,
                     };
                     if *self.current() != Kind::Question {
                         return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
