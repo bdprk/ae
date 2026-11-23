@@ -710,16 +710,6 @@ type SharedFunctions = HashMap<String, Signature>;
 #[derive(Clone, Copy, PartialEq)]
 enum BorrowKind { View, Container }
 
-#[derive(Clone, Copy)]
-enum IndexedStatement {
-    Binding { name_start: usize, name_end: usize, mutable: bool },
-    For { binding_start: usize, binding_end: usize, is_range: bool },
-    Print(usize),
-    Assert(usize),
-    Break,
-    Continue,
-}
-
 /// A source-spelled type argument of a generic instance, kept for the
 /// stateless field walk: a value type, or a nested generic struct instance
 /// (`Pair[string, Pair[string, string]]`). No layout is instantiated here.
@@ -744,7 +734,6 @@ struct ResolvedExpressions {
     pointer_cast_targets: HashMap<usize, bool>,
     closure_headers: HashMap<usize, std::sync::Arc<ae_syntax::expression::Expression>>,
     values: HashMap<usize, Rc<ae_syntax::expression::Expression>>,
-    statements: HashMap<usize, (IndexedStatement, usize)>,
     pointer_store_names: HashMap<usize, String>,
     match_patterns: HashMap<usize, ae_syntax::pattern::Pattern>,
     scalar_bodies: HashMap<usize, std::sync::Arc<[ae_syntax::statement::Statement]>>,

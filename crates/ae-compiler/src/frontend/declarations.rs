@@ -1120,23 +1120,17 @@ impl Parser<'_> {
                     let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
                     eprintln!("route legacy function id={id} at {offset}");
                 }
-                // The endgame switch (P1.4): the resolved route IS the body
-                // parser. A body it does not take is a diagnostic, not a
-                // silent fallback; the legacy typed block parser stays
-                // reachable during its deletion behind the escape hatch
-                // AE_ALLOW_LEGACY_ROUTE=1. (AE_DENY_LEGACY_ROUTE is kept as a
-                // no-op alias for the gates that still set it.)
-                if std::env::var_os("AE_ALLOW_LEGACY_ROUTE").is_none() {
-                    let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
-                    // The shared module parse recovered from a statement-level
-                    // error in THIS body: its diagnostic is the answer, so it
-                    // is reported instead of a route denial.
-                    if let Some(diagnostic) = self.resolved_expressions().shared_body_errors.get(&offset).cloned() {
-                        return Err(diagnostic);
-                    }
-                    return Err(self.error_at(offset, "the legacy body parser is disabled (AE_ALLOW_LEGACY_ROUTE=1 re-enables it); this function's body is not on the resolved route yet"));
+                // The resolved route IS the body parser (P1.4): a body it
+                // does not take is a diagnostic, never a silent fallback to
+                // the typed block parser.
+                let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                // The shared module parse recovered from a statement-level
+                // error in THIS body: its diagnostic is the answer, so it is
+                // reported instead of a route denial.
+                if let Some(diagnostic) = self.resolved_expressions().shared_body_errors.get(&offset).cloned() {
+                    return Err(diagnostic);
                 }
-                self.block()
+                return Err(self.error_at(offset, "this function's body is not on the resolved route yet; the legacy body parser has been removed"));
             }
         };
         let params_scope = self.scopes.pop().unwrap();

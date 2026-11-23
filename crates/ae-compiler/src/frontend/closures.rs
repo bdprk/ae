@@ -264,16 +264,16 @@ impl Parser<'_> {
         let body = match self.lower_resolved_body_with_captures(&resolved_captures) {
             Some(body) => body,
             None => {
+                // The resolved route is the body parser (P1.4): a closure body
+                // it does not take is a diagnostic, never a typed fallback —
+                // the capture classification can only answer for a body that
+                // lowers.
                 if std::env::var_os("AE_ROUTE_REPORT").is_some() {
                     let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
                     eprintln!("route legacy closure id={id} at {offset}");
                 }
-                // The endgame switch (P1.1), same rule as function bodies.
-                if std::env::var_os("AE_DENY_LEGACY_ROUTE").is_some() {
-                    let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
-                    return Err(self.error_at(offset, "the legacy body parser is disabled (AE_DENY_LEGACY_ROUTE=1); this closure's body is not on the resolved route yet"));
-                }
-                self.block()
+                let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                return Err(self.error_at(offset, "this closure's body is not on the resolved route yet; the legacy body parser has been removed"));
             }
         };
         let scope = self.scopes.pop().unwrap();

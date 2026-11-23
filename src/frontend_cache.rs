@@ -36,11 +36,7 @@ fn tool_identity(imports: &str) -> String {
         ),
         None => (0, 0),
     };
-    // A legacy-route compile (the temporary escape hatch) must never serve a
-    // resolved-route request: the route mode is part of the identity, so the
-    // deny measurements cannot be masked by an earlier legacy compile.
-    let route = if std::env::var_os("AE_ALLOW_LEGACY_ROUTE").is_some() { "legacy" } else { "resolved" };
-    format!("{} {len} {stamp} codegen:{} route:{route} imports:{imports}", env!("CARGO_PKG_VERSION"), frontend::codegen_mode())
+    format!("{} {len} {stamp} codegen:{} imports:{imports}", env!("CARGO_PKG_VERSION"), frontend::codegen_mode())
 }
 
 /// Canonical form of the entry file, used both to name the entry directory and

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""The P1.1 endgame switch: files that must compile with the legacy parser
-disabled (`AE_DENY_LEGACY_ROUTE=1`).
+"""The P1.1 deny manifest, kept as the P1.4 deletion gate: files that must
+compile now that the typed body parser is gone.
 
 Every file listed here has no legacy body left — the resolved route covers
-its functions and closures completely. Add a file once
-`python scripts/route_report.py --details` shows no `route legacy` line for
-it; from then on this gate keeps it legacy-free. When the list covers the
-whole corpus, the legacy parser can be deleted (P1.2-P1.4).
+its functions and closures completely. A failure means a body the route
+does not take, which is a diagnostic in every mode since P1.4 removed the
+typed fallback and its escape hatch.
 """
 
 import argparse
@@ -218,11 +217,10 @@ def main():
     ae = options.ae or default_binary(options.repo)
     if os.name == "nt" and not ae.endswith(".exe"):
         ae += ".exe"
-    env = dict(os.environ, AE_DENY_LEGACY_ROUTE="1")
     failures = []
     for relative in FILES:
         source = os.path.join(options.repo, relative)
-        result = subprocess.run([ae, "check", source], capture_output=True, text=True, errors="replace", env=env)
+        result = subprocess.run([ae, "check", source], capture_output=True, text=True, errors="replace")
         if result.returncode != 0:
             failures.append((relative, result.stderr.strip().splitlines()[0] if result.stderr.strip() else "no output"))
     print(f"deny-legacy: {len(FILES) - len(failures)}/{len(FILES)} files are legacy-free")

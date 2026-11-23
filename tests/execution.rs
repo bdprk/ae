@@ -8677,15 +8677,14 @@ fn resolver_agrees_with_the_compiler_on_accepted_programs() {
     assert!(checked > 100, "expected a large resolution corpus, checked {checked}");
 }
 
-// P1.1 endgame switch: AE_DENY_LEGACY_ROUTE=1 turns every body the resolved
-// route does not take into a diagnostic. A fully routed program compiles;
-// a generic-instance construction (still typed) fails with the message.
+// P1.4: a body the resolved route does not take is a diagnostic in every
+// mode (the typed parser and its escape hatch are gone). A fully routed
+// program compiles; an unrouted statement shape fails with the message.
 #[test]
-fn deny_legacy_route_turns_fallbacks_into_diagnostics() {
+fn unrouted_bodies_are_diagnostics() {
     let routed = "struct S { a: i64, b: i64 }\nfn make(a: i64, b: i64) -> S { return S { a: a, b: b }; }\nfn main() { let s = make(1, 2); print(s.a + s.b); }\n";
     // A bare method call statement (`p.m();`) is still off the resolved
-    // route: its statement rule belongs to the typed block parser, so it
-    // keeps denying.
+    // route, so it is rejected instead of falling back.
     let legacy = "struct P { n: i64 } impl P { fn m(self) -> i64 { return self.n; } } fn main() { let p = P { n: 1 }; p.m(); }\n";
     for (source, expect_ok) in [(routed, true), (legacy, false)] {
         let path = std::env::temp_dir().join(format!(
@@ -8697,14 +8696,13 @@ fn deny_legacy_route_turns_fallbacks_into_diagnostics() {
         let output = Command::new(env!("CARGO_BIN_EXE_ae"))
             .arg("check")
             .arg(&path)
-            .env("AE_DENY_LEGACY_ROUTE", "1")
             .output()
             .unwrap();
         fs::remove_file(path).unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.success(), expect_ok, "{stderr}");
         if !expect_ok {
-            assert!(stderr.contains("the legacy body parser is disabled"), "{stderr}");
+            assert!(stderr.contains("the legacy body parser"), "{stderr}");
         }
     }
 }
@@ -8714,7 +8712,7 @@ fn deny_legacy_route_turns_fallbacks_into_diagnostics() {
 // binding's type comes from the chain's declared returns, so the following
 // `moved.describe()` resolves too, and the comparison around it keeps its
 // operand bound (`...value() == 11`). The compiled and interpreted runs
-// agree byte for byte, and the deny switch proves no body fell back.
+// agree byte for byte, and P1.4 leaves no fallback path to take.
 #[test]
 fn chained_method_calls_lower_and_run_on_the_resolved_route() {
     let source = r#"struct Point {
@@ -8766,22 +8764,21 @@ fn main() {
     assert!(interp.status.success(), "{}", String::from_utf8_lossy(&interp.stderr));
     assert_eq!(String::from_utf8_lossy(&interp.stdout).replace("\r\n", "\n"), "(4, 0)\n1\n");
 
-    // Every body is on the resolved route: the deny switch compiles it.
-    let path = std::env::temp_dir().join(format!("ae-chained-methods-deny-{}.ae", std::process::id()));
+    // Every body is on the resolved route; check accepts it.
+    let path = std::env::temp_dir().join(format!("ae-chained-methods-check-{}.ae", std::process::id()));
     fs::write(&path, source).unwrap();
-    let deny = Command::new(env!("CARGO_BIN_EXE_ae"))
+    let check = Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("check")
         .arg(&path)
-        .env("AE_DENY_LEGACY_ROUTE", "1")
         .output()
         .unwrap();
     fs::remove_file(path).unwrap();
-    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
 }
 
 // P1.1 pointer rung: the extern allocator bridge, pointer retag, pointer
 // arithmetic (`offset`/`byte_offset`), stores through `*p`, `deref` reads and
-// the free call all lower on the resolved route. The deny switch proves the
+// the free call all lower on the resolved route. The check run proves the
 // whole body is resolved-route; the compiled output is the fixture's.
 #[test]
 fn raw_pointer_surface_lowers_on_the_resolved_route() {
@@ -8813,17 +8810,16 @@ fn main() {
         "10\n20\n30\nretagged\ndone\n"
     );
 
-    // Every body is on the resolved route: the deny switch compiles it.
-    let path = std::env::temp_dir().join(format!("ae-pointer-route-deny-{}.ae", std::process::id()));
+    // Every body is on the resolved route; check accepts it.
+    let path = std::env::temp_dir().join(format!("ae-pointer-route-check-{}.ae", std::process::id()));
     fs::write(&path, source).unwrap();
-    let deny = Command::new(env!("CARGO_BIN_EXE_ae"))
+    let check = Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("check")
         .arg(&path)
-        .env("AE_DENY_LEGACY_ROUTE", "1")
         .output()
         .unwrap();
     fs::remove_file(path).unwrap();
-    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
 }
 
 // P1.1 drop rung: a construction of a struct that declares `drop` lowers on
@@ -8855,15 +8851,14 @@ fn main() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "7\n1\n7\n2\n");
 
-    // Every body is on the resolved route: the deny switch compiles it.
-    let path = std::env::temp_dir().join(format!("ae-drop-route-deny-{}.ae", std::process::id()));
+    // Every body is on the resolved route; check accepts it.
+    let path = std::env::temp_dir().join(format!("ae-drop-route-check-{}.ae", std::process::id()));
     fs::write(&path, source).unwrap();
-    let deny = Command::new(env!("CARGO_BIN_EXE_ae"))
+    let check = Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("check")
         .arg(&path)
-        .env("AE_DENY_LEGACY_ROUTE", "1")
         .output()
         .unwrap();
     fs::remove_file(path).unwrap();
-    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
 }
