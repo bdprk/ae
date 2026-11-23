@@ -1781,6 +1781,22 @@ parity → 50k → WSL → commit.
 - Pitfall: an Assign statement's range ends past the `;` (no `take(Semi)`
   needed), while a vector-store value's range ends before it — seek the
   value's end before taking the semicolon.
+
+### Slice 29 — enum payloads and owned-string returns (landed)
+
+- An enum parameter joins `supports_call`; enum constructions nested inside
+  expressions (`f(Shape::Circle(3))`) are marked by the recursive expression
+  walk, not only at the statement top level, and the call/method argument
+  lists, Assign and Return delegate them to the typed expression parser.
+- An enum value argument moves (`describe(a)`); an enum reassignment
+  (`current = Message::Number(9);`) releases the old payload; `return
+  owned_string;` moves the string out; `name = "a" + label(r);` releases the
+  old value for a concat.
+- `examples/enums.ae` and `maybe.ae` are legacy-free; coverage 214 → 194,
+  files 80 → 68; deny manifest 108.
+- Pitfall: the marking walk only marked a statement's top-level expression;
+  any constructor that appears as an argument needs the nested mark or the
+  scan rejects the enclosing call.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

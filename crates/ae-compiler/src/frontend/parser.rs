@@ -345,6 +345,12 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                                         || resolved.owned_string_bindings.contains(id)
                                         || resolved.owned_vectors.contains(id)
                                         || resolved.map_definitions.contains(id)))
+                            // An enum construction as a method argument.
+                            || resolved.enum_constructors.contains(&argument.range.start)
+                            // An enum value passed by value to a method.
+                            || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                                if name != "self" && resolved.scalar_reads.get(&argument.range.start)
+                                    .is_some_and(|id| resolved.enum_bindings.contains(id)))
                     });
             }
             // A call through a function-typed value: the binding names the
@@ -384,7 +390,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     // slots, so the argument position re-admits them.
                     || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                         if name != "self" && resolved.scalar_reads.get(&argument.range.start)
-                            .is_some_and(|id| resolved.struct_definitions.contains(id)))
+                            .is_some_and(|id| resolved.struct_definitions.contains(id)
+                                // An enum value passed by value (`describe(a)`):
+                                // the call moves it.
+                                || resolved.enum_bindings.contains(id)))
                     // A string-typed field in argument position reads as its
                     // view (builtins and `&string` parameters only ever
                     // borrow it).
@@ -402,7 +411,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                                 // borrows it. A map is borrowed the same way.
                                 || resolved.owned_vectors.contains(id)
                                 || resolved.map_definitions.contains(id)))
-                    || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }))
+                    || matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
+                    // An enum construction passed directly (`f(Shape::Circle(3))`).
+                    || resolved.enum_constructors.contains(&argument.range.start))
         }
         _ => false,
     }
@@ -476,9 +487,17 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start).is_some_and(|&id| {
                         if resolved.array_definitions.contains(&id)
-                            || resolved.token_cursor_definitions.contains(&id) || resolved.enum_bindings.contains(&id)
+                            || resolved.token_cursor_definitions.contains(&id)
                         {
                             return false;
+                        }
+                        // Reassigning an enum releases the old payload first;
+                        // the value is a constructor or another owned enum.
+                        if resolved.enum_bindings.contains(&id) {
+                            return resolved.enum_constructors.contains(&value.range.start)
+                                || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(other))
+                                    if other != "self" && resolved.scalar_reads.get(&value.range.start)
+                                        .is_some_and(|other_id| resolved.enum_bindings.contains(other_id)));
                         }
                         // Re-initializing an owned vector (after a move) takes
                         // a fresh vector: a literal or a call returning one.
@@ -507,6 +526,10 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                             || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
                                 if matches!(&callee.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                                     if string_result_builtin(name)))
+                            // A concat always builds a fresh string, so
+                            // `s = a + b` releases the old value and takes
+                            // the new one.
+                            || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Binary { operator: Kind::Plus, .. })
                     })
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
@@ -557,7 +580,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                     if name != "self" && resolved.scalar_reads.get(&value.range.start)
                         .is_some_and(|id| resolved.owned_struct_bindings.contains(id)
-                            || resolved.owned_vectors.contains(id)))
+                            || resolved.owned_vectors.contains(id)
+                            // `return owned_string;` moves the string out the
+                            // same way.
+                            || resolved.owned_text_bindings.contains(id)
+                            || resolved.owned_string_bindings.contains(id)))
         }
         // A literal print is the typed route's `Printed::Text` (no expression
         // to lower); a string field prints as its view; everything else must
@@ -1536,6 +1563,20 @@ impl<'a> Parser<'a> {
                         expressions.values.insert(top_level.range.start, Rc::new(top_level.clone()));
                         visit_expression_tree(top_level, &mut |expression| {
                             use ae_syntax::expression::ExpressionKind;
+                            // A constructor nested in an expression
+                            // (`f(Shape::Circle(3))`, `g(Option[i64]::None)`):
+                            // the typed expression parser owns the resolution,
+                            // so the mark lets the scan and the lowering
+                            // delegate it (the same delegation the top-level
+                            // statements use for Return/Binding).
+                            if let ExpressionKind::Qualified { .. } = &expression.kind {
+                                expressions.enum_constructors.insert(expression.range.start);
+                            }
+                            if let ExpressionKind::Call { callee, .. } = &expression.kind {
+                                if matches!(callee.kind, ExpressionKind::Qualified { .. }) {
+                                    expressions.enum_constructors.insert(expression.range.start);
+                                }
+                            }
                             if let ExpressionKind::AddressCast { pointee, .. } = &expression.kind {
                                 if self.source.get(pointee.clone()).and_then(super::types::scalar_type).is_some() {
                                     expressions.scalar_address_casts.insert(expression.range.start);
@@ -2013,6 +2054,9 @@ impl<'a> Parser<'a> {
                             // A by-value vector parameter owns the argument:
                             // the call moves it (tracked in `moved`).
                             | Type::Vec | Type::StrVec | Type::VecF
+                            // An enum parameter owns a value argument the
+                            // same way (a result enum, an Option payload).
+                            | Type::Enum(..)
                             | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                     })
             })
@@ -2449,7 +2493,15 @@ impl<'a> Parser<'a> {
                 // Assigning to an already-moved variable is a legal
                 // re-initialization, so the flag clears either way.
                 let moved_before = self.moved.contains(&slot);
-                let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
+                let (rhs, rhs_ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
+                    // An enum construction on the right-hand side
+                    // (`current = Message::Number(9);`): the typed expression
+                    // parser owns the variant layout and payload lowering.
+                    self.seek_scalar_offset(value.range.start);
+                    self.expression(0, true)?
+                } else {
+                    self.lower_scalar_body_expression(value, slots)?
+                };
                 // An owned right-hand side moves into the target: the source
                 // slot's Frees is trimmed, and assigning the target to itself
                 // fails as a same-statement move (the typed rule).
@@ -3308,7 +3360,14 @@ impl<'a> Parser<'a> {
                         }
                         continue;
                     }
-                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+                    let (value, actual) = if self.resolved_expressions().enum_constructors.contains(&argument.range.start) {
+                        // An enum construction as an argument (`area(Shape::Circle(3))`):
+                        // the typed expression parser owns the variant layout.
+                        self.seek_scalar_offset(argument.range.start);
+                        self.expression(0, true)?
+                    } else {
+                        self.lower_scalar_body_expression(argument, slots)?
+                    };
                     // A `&string` parameter is a read-only view: the argument
                     // lowers as `Argument::View` and nothing moves (the typed
                     // route's `typed_call_argument` for a `StrView`).
