@@ -2539,7 +2539,10 @@ impl<'a> Parser<'a> {
                 (Expr::StrLit(value.clone(), line, column), Type::String)
             }
             ExpressionKind::Atom(Kind::Ident(name)) => {
-                let def = self.resolved_expressions().scalar_reads[&expression.range.start];
+                // A name the resolver did not record is a diagnostic, never a
+                // panic: a permissive scan can hand us a malformed tree.
+                let def = self.resolved_expressions().scalar_reads.get(&expression.range.start).copied()
+                    .ok_or_else(|| self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
                 let &(slot, ty) = slots.get(&def).ok_or_else(|| {
                     self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101")
                 })?;
@@ -2759,7 +2762,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
-                    unreachable!("scalar call eligibility");
+                    // Only a bare name or a field receiver reaches this arm;
+                    // anything else is a call form the route does not take.
+                    return Err(self.fail("this call form is not supported by the body route"));
                 };
                 let Some(signature) = self.functions.get(name).cloned() else {
                     return Err(self.fail(&format!("unknown function '{name}'")).with_code("E0101"));

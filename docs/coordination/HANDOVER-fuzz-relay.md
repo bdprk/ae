@@ -1485,3 +1485,23 @@ Verification: `examples/generic_impl.ae` (`Pair[string, i64]::new`),
 `tests/run/enum_generic_impls.ae`, then the deny manifest grows by those
 files; parity must stay byte-identical because the emitted `Expr::Call` is
 the same shape the typed route builds.
+
+## P0.4 re-audit on the accumulated tree: two lowering panics fixed
+
+The 10,000-case default sweep stayed green through every P1.1 slice, but the
+50,000-case CI gate (run here against the final tree) found two panics that
+only a rarer mutation reaches:
+
+1. `lower_scalar_body_expression`'s call arm had an `unreachable!` for a
+   callee that is neither a field receiver nor a bare name (the permissive
+   method-call scan clause can hand one over from a malformed tree) → now a
+   structured diagnostic ("this call form is not supported by the body
+   route").
+2. The identifier arm indexed `scalar_reads` directly; a malformed tree can
+   name an identifier the resolver never recorded → now a fallible lookup
+   with the standard "unknown variable ..." E0101 diagnostic.
+
+`cargo test -p ae-compiler --lib mutated_sources_never_panic_50k -- --ignored`
+is green again (≈36 s); 511/0, byte parity and the 328-fallback count are
+unchanged. Lesson: run the ignored 50k gate whenever a slice widens a scan
+predicate — the 10k default sample is not a substitute.
