@@ -2939,7 +2939,12 @@ impl<'a> Parser<'a> {
                 // same shape for reads — its type exists only at lowering.
                 return match role {
                     ae_resolve::Role::Write => resolved.struct_field_writes.contains(&expression.range.start)
-                        || resolved.owned_field_writes.contains(&expression.range.start),
+                        || resolved.owned_field_writes.contains(&expression.range.start)
+                        // A body local declared after the entry scope (a
+                        // generic-instance binding, `var p = Pair[..] { .. }`):
+                        // the lowering's FieldStore arm validates the receiver
+                        // type, the field, and the binding's mutability.
+                        || resolved.scalar_writes.contains_key(&root.range.start),
                     ae_resolve::Role::Read => resolved.generic_call_bindings.contains(def),
                     _ => false,
                 };
@@ -2957,6 +2962,10 @@ impl<'a> Parser<'a> {
                 // view and read marks.
                 receiver_field_type(expression, ty, self.structs)
                     .is_some_and(|field| scalar_type(field)
+                        // A string field reads as a borrowed view (print, a
+                        // borrow argument, a comparison); binding it as a value
+                        // is the binding arm's own move rejection.
+                        || (role == ae_resolve::Role::Read && matches!(field, Type::String))
                         || (role == ae_resolve::Role::Write
                             && matches!(field, Type::String | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF)))
             }
@@ -3200,8 +3209,8 @@ impl<'a> Parser<'a> {
                         return Err(self.fail(&format!("cannot write through '{base_name}': struct borrows are read-only in this version")));
                     }
                     let sid = match receiver {
-                        Type::StructMut(sid) | Type::Struct(sid) => sid,
-                        _ => unreachable!("resolved mutable receiver field"),
+                        Type::StructMut(sid) | Type::Struct(sid) | Type::StructRef(sid) => sid,
+                        other => return Err(self.error_at(target.range.start, &format!("type {} has no fields or methods", other.name(self.ctx)))),
                     };
                     if matches!(receiver, Type::Struct(_)) {
                         let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind else {
