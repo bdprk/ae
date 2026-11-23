@@ -790,6 +790,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                             // `s = a + b` releases the old value and takes
                             // the new one.
                             || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Binary { operator: Kind::Plus, .. })
+                            // Any other bare name: the lowering's assignment
+                            // type check answers (a string view, a scalar, an
+                            // aggregate), positioned at the target name like
+                            // the typed route.
+                            || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                     })
                 }
                 // `a[i] = v` stores through a resolved array binding. Only
@@ -831,7 +836,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             }
         }
         StatementKind::Return(value) => {
-            scalar_body_expression(value, resolved, supports_call, supports_field)
+            // A returned closure literal has the typed route's own diagnostic
+            // (a closure has no storage); every other value keeps the shaped
+            // gates.
+            matches!(&value.kind, ae_syntax::expression::ExpressionKind::Closure { .. })
+                || scalar_body_expression(value, resolved, supports_call, supports_field)
                 || resolved.enum_constructors.contains(&value.range.start)
                 || receiver_value(value).is_some_and(|atom| supports_field(atom, ae_resolve::Role::Read))
                 // `return binding;` moves an owned struct out of the body;
@@ -3257,6 +3266,10 @@ impl<'a> Parser<'a> {
                 if self.in_main {
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
+                }
+                if matches!(&value.kind, ae_syntax::expression::ExpressionKind::Closure { .. }) {
+                    self.seek_scalar_offset(statement.range.end);
+                    return Err(self.fail("a closure cannot be returned: it has no storage, and its captures live in this frame"));
                 }
                 let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
                     self.seek_scalar_offset(value.range.start);
