@@ -346,13 +346,34 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             if receiver_field_root(expression).is_some() {
                 return supports_field(expression, ae_resolve::Role::Read);
             }
+            // A field read on a *plain* call result (`f().x`,
+            // `compute_mag[Delta](d).offset`): the call must be admissible and
+            // the lowering checks the return type is a struct. A method-call
+            // result (`p.new(2).x`) stays out: the method resolution's pinned
+            // diagnostics belong to the typed route.
+            let plain_call_base = match &base.kind {
+                ExpressionKind::Call { callee, .. } => {
+                    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                        || matches!(&callee.kind, ExpressionKind::BracketedCallTarget { base: inner, .. }
+                            if matches!(inner.kind, ExpressionKind::Atom(Kind::Ident(_))))
+                }
+                _ => false,
+            };
             let rooted = match &base.kind {
                 ExpressionKind::Atom(Kind::Ident(_)) => true,
                 ExpressionKind::Field { .. } => resolved.struct_field_reads.contains(&base.range.start)
                     || resolved.struct_field_chains.contains(&base.range.start),
+                ExpressionKind::Call { .. } => plain_call_base
+                    && scalar_body_expression(base, resolved, supports_call, supports_field),
                 _ => false,
             };
-            rooted && resolved.struct_field_reads.contains(&expression.range.start)
+            rooted && (resolved.struct_field_reads.contains(&expression.range.start)
+                || plain_call_base
+                // A local from an explicit generic call: the instantiated
+                // return type exists only at lowering time.
+                || matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                    && resolved.scalar_reads.get(&base.range.start)
+                        .is_some_and(|id| resolved.generic_call_bindings.contains(id)))
         }
         ExpressionKind::Index { base, index } => {
             matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
@@ -1617,6 +1638,15 @@ impl<'a> Parser<'a> {
                                     }
                                 }
                             }
+                            // A binding from an explicit generic call
+                            // (`let x = f[T](..)`): the instantiated return
+                            // type exists only at lowering time, so its fields
+                            // and methods are admitted permissively there.
+                            if let ExpressionKind::Call { callee, .. } = &initializer.kind {
+                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }) {
+                                    expressions.generic_call_bindings.insert(id);
+                                }
+                            }
                             match &initializer.kind {
                                 ExpressionKind::Vector(_) => {
                                     expressions.vector_definitions.insert(id);
@@ -2405,6 +2435,14 @@ impl<'a> Parser<'a> {
                 // not declared it yet.
                 let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
                     .or_else(|| local_structs.get(receiver).copied());
+                if ty.is_none()
+                    && resolved.scalar_reads.get(&base.range.start)
+                        .is_some_and(|id| resolved.generic_call_bindings.contains(id))
+                {
+                    // A local from an explicit generic call: the lowering has
+                    // its concrete type once the call is instantiated.
+                    return true;
+                }
                 let Some(ty) = ty else { return false };
                 if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
                     return name == "deref";
@@ -2421,10 +2459,14 @@ impl<'a> Parser<'a> {
             let Some(&(_, ty)) = slots.get(def) else {
                 // A body local declared after the entry scope (`var plot = ..;
                 // plot.w = 40;`): the lowering owns its slot and validates the
-                // write there.
-                return role == ae_resolve::Role::Write
-                    && (resolved.struct_field_writes.contains(&expression.range.start)
-                        || resolved.owned_field_writes.contains(&expression.range.start));
+                // write there. A local from an explicit generic call is the
+                // same shape for reads — its type exists only at lowering.
+                return match role {
+                    ae_resolve::Role::Write => resolved.struct_field_writes.contains(&expression.range.start)
+                        || resolved.owned_field_writes.contains(&expression.range.start),
+                    ae_resolve::Role::Read => resolved.generic_call_bindings.contains(def),
+                    _ => false,
+                };
             };
             if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_) | Type::Struct(_)) {
                 return false;

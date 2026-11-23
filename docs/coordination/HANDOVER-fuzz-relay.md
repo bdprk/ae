@@ -1926,6 +1926,21 @@ parity → 50k → WSL → commit.
   (`compute_mag[Delta](d1).offset`), locals bound from an explicit generic
   call (`let cfg2 = duplicate[Config](cfg1);` → `cfg2.port`), map returns
   from user calls, and trait-object-ish uses.
+
+### Slice 36 — call-result field reads and generic-call locals (landed)
+
+- A field read on a *plain* call result (`f().x`,
+  `compute_mag[Delta](d1).offset`) routes when the call is admissible; the
+  lowering checks the base's return type is a struct.
+- A method-call result (`p.new(2).x`) stays on the typed route on purpose:
+  the associated-function diagnostic is pinned there, and admitting the
+  bare `Call` shape drifted it once (UI snapshot + CLI parity caught it).
+- A local bound from an explicit generic call is marked in
+  `generic_call_bindings`; its field reads and method calls are admitted
+  permissively because the instantiated return type exists only at
+  lowering (`let cfg2 = duplicate[Config](cfg1); cfg2.port`).
+- All eight trait fixtures are legacy-free; coverage 47 → 40, files
+  36 → 29; deny manifest 147.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and
