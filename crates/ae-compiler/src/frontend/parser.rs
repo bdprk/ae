@@ -322,7 +322,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 && !resolved.enum_bindings.contains(id)
                 && !resolved.token_cursor_definitions.contains(id)
                 || (resolved.owned_text_bindings.contains(id)
-                    && resolved.closure_capture_reads.contains(&expression.range.start)),
+                    && resolved.closure_capture_reads.contains(&expression.range.start))
+                // A struct borrow read as a value: the binding arm's own
+                // "cannot store a borrowed struct" diagnostic answers.
+                || resolved.struct_borrow_reads.contains(id),
             None => true,
         },
         // A construction of a file-local struct: the drop-free scalar
@@ -654,13 +657,16 @@ fn exit_status_operand(statement: &ae_syntax::statement::Statement) -> Option<&a
 /// (`missing_first();`): the typed route reports `unknown function 'name'`
 /// (E0207) while parsing the callee, before the statement-level "must end with
 /// '?'" check. The scan admits the shape so the lowering can reproduce it.
-fn unknown_call_statement<'a>(statement: &'a ae_syntax::statement::Statement, resolved: &ResolvedExpressions) -> Option<&'a ae_syntax::expression::Expression> {
+fn bare_call_statement(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
     use ae_syntax::expression::ExpressionKind;
     use ae_syntax::statement::StatementKind;
     let StatementKind::Expr { value, propagates: false } = &statement.kind else { return None };
     let ExpressionKind::Call { callee, .. } = &value.kind else { return None };
-    let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind else { return None };
-    resolved.unknown_calls.contains(&callee.range.start).then_some(value)
+    // `exit` and the statement builtins are handled by their own arms; any
+    // other bare call is evaluated (borrow and move diagnostics included) and
+    // then rejected with the typed route's "must end with '?'" rule.
+    let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
+    (!RESERVED.contains(&name.as_str())).then_some(value)
 }
 
 fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
@@ -909,7 +915,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Expr { .. } => exit_status_operand(statement)
             .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field))
             || propagation_call(statement).is_some()
-            || unknown_call_statement(statement, resolved).is_some()
+            || bare_call_statement(statement).is_some()
             || is_task_yield(statement)
             || handle_statement_builtin(statement).is_some()
             || vector_statement_builtin(statement, resolved)
@@ -1630,6 +1636,16 @@ impl<'a> Parser<'a> {
                                     expressions.owned_vectors.insert(definition.id);
                                 }
                             }
+                        // A parameter bound to a struct borrow (`r: &Rect`): a
+                        // value-position read is the typed route's "cannot
+                        // store a borrowed struct in a variable" error, so the
+                        // scan admits it and the binding arm answers.
+                        if matches!(definition.inferred, Some(TypeSpelling::Borrow { .. }))
+                            && let Some(TypeSpelling::Named { def } | TypeSpelling::GenericInstance { def, .. }) = spelling
+                            && resolution.defs.get(def.0 as usize).is_some_and(|item| item.kind == ae_resolve::DefKind::Struct)
+                        {
+                            expressions.struct_borrow_reads.insert(definition.id);
+                        }
                     }
                     ae_resolve::Role::Write | ae_resolve::Role::DerefWrite if definition.kind.is_local() => {
                         expressions.scalar_writes.insert(occurrence.range.start, definition.id);
@@ -2737,7 +2753,7 @@ impl<'a> Parser<'a> {
                     _ => false,
                 };
             };
-            if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_) | Type::Struct(_)) {
+            if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_) | Type::Struct(_) | Type::StructRef(_)) {
                 return false;
             }
             if field_chain_is_bare(expression) {
@@ -2965,6 +2981,22 @@ impl<'a> Parser<'a> {
                     // owned local struct; both reach the same FieldStore, and
                     // codegen picks `.`/`->` from the receiver type.
                     let (slot, receiver) = slots[&def];
+                    if let Type::StructRef(_) = receiver {
+                        // A read-only struct borrow: neither the pointer nor
+                        // anything behind it may be written. The typed route
+                        // distinguishes an immutable binding from a mutable one
+                        // (`var r: &Rect`), and so does this arm.
+                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind else {
+                            unreachable!("borrowed struct store base");
+                        };
+                        if !self.names.get(base_name).is_some_and(|&(_, mutable, _)| mutable) {
+                            self.seek_scalar_offset(target.range.start);
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{base_name}'")).with_code("E0103");
+                            return Err(self.immutable_binding_error(diagnostic, slot));
+                        }
+                        self.seek_scalar_offset(base.range.end);
+                        return Err(self.fail(&format!("cannot write through '{base_name}': struct borrows are read-only in this version")));
+                    }
                     let sid = match receiver {
                         Type::StructMut(sid) | Type::Struct(sid) => sid,
                         _ => unreachable!("resolved mutable receiver field"),
@@ -3301,7 +3333,7 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(operand.range.start);
                 self.lower_propagating_call()?
             }
-            StatementKind::Expr { .. } if unknown_call_statement(statement, self.resolved_expressions()).is_some() => {
+            StatementKind::Expr { .. } if bare_call_statement(statement).is_some() => {
                 let StatementKind::Expr { value, .. } = &statement.kind else { unreachable!("unknown call statement") };
                 self.seek_scalar_offset(value.range.start);
                 // The name answers nowhere, so the callee resolution fails

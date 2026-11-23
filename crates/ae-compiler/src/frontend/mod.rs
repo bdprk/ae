@@ -776,6 +776,10 @@ struct ResolvedExpressions {
     /// Struct-typed bindings that hold the struct by value (spelled `Named`,
     /// not borrowed). `return binding;` moves one out of the body.
     owned_struct_bindings: HashSet<ae_resolve::DefId>,
+    /// Locals bound to a struct *borrow* (`r: &Rect`): a value-position read
+    /// is the typed route's "cannot store a borrowed struct in a variable"
+    /// error, so the scan admits the read for the binding arm to answer.
+    struct_borrow_reads: HashSet<ae_resolve::DefId>,
     struct_field_reads: HashSet<usize>,
     struct_field_chains: HashSet<usize>,
     /// String-typed field reads: a view, never a move. Lowered in concat
