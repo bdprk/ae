@@ -327,6 +327,45 @@ impl Parser<'_> {
         args.extend(visible);
         Ok((Expr::Call(def.fn_id, args, def.ret), def.ret))
     }
+
+    /// A closure call whose visible arguments come from the shared call node:
+    /// the captured slots are prepended exactly as the typed path does, then
+    /// the same value/borrow/move rules a direct call uses lower the visible
+    /// list. A shape the rules cannot cover is a diagnostic.
+    pub(super) fn closure_call_with(
+        &mut self,
+        name: &str,
+        call_offset: usize,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let Some(&(_, _, Type::Closure(cid))) = self.names.get(name) else {
+            return Err(self.fail(&format!("internal: '{name}' is not a closure")));
+        };
+        let def = self.generics.closures[cid].clone();
+        let mut args: Vec<Argument> = Vec::new();
+        for (outer_id, ty) in &def.value_captures {
+            if self.moved.contains(outer_id) {
+                return Err(moved_value_hint(self.binding_label(self.error_at(call_offset, &format!("cannot call '{name}' again because a value capture was already moved by the first call")).with_code("E0102"), *outer_id)));
+            }
+            if self.is_borrowed(*outer_id) {
+                return Err(self.fail(&format!("cannot call '{name}' while one of its captured variables is borrowed")));
+            }
+            if ty.owned() {
+                self.moved.insert(*outer_id);
+            }
+            args.push(Argument::Value(Expr::Variable(*outer_id, *ty, 0, 0)));
+        }
+        for (outer_id, hidden) in &def.borrow_captures {
+            match hidden {
+                Type::StrView => args.push(Argument::View(Expr::Variable(*outer_id, Type::String, 0, 0))),
+                _ => args.push(Argument::Borrow(*outer_id, true)),
+            }
+        }
+        let visible = self.lower_value_arguments(&format!("closure {name}"), arguments, &def.params, slots)?;
+        args.extend(visible);
+        Ok((Expr::Call(def.fn_id, args, def.ret), def.ret))
+    }
 }
 
 // The read-only form of a capture: the borrow types a body can read through.

@@ -515,31 +515,9 @@ impl<'a> Parser<'a> {
                     let type_args = self.generic_call_type_arguments(base.range.start)?;
                     let (id, params, ret) = self.instantiate_fn(gid, type_args, base.range.start)?;
                     // The argument list follows the type arguments; lower it
-                    // against the substituted signature with the shared
-                    // argument rules (borrows, views, moves).
-                    let budget = 128usize.checked_sub(self.expression_nodes)
-                        .ok_or_else(|| self.fail("expression node limit exceeded"))?;
-                    let remaining = 128usize.checked_sub(self.expression_depth).map(|depth| depth.min(64))
-                        .ok_or_else(|| self.fail("expression depth limit exceeded"))?;
-                    let mut nodes_left = budget;
-                    let mut effects = SharedExpressionEffects::default();
-                    let shared = self.lower_shared_call_arguments(arguments, &params, remaining, &mut nodes_left, &mut effects);
-                    let args = match shared {
-                        Some(args) => {
-                            self.commit_shared_effects(effects);
-                            self.expression_nodes += budget - nodes_left;
-                            args
-                        }
-                        // An instantiated template's argument list lives in the
-                        // substituted sub-parser, where the shared expression
-                        // marks are absent; the typed argument reader still
-                        // owns that list (its error is a diagnostic).
-                        None => {
-                            let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
-                            self.pos = open;
-                            self.call_arguments(name, &params)?
-                        }
-                    };
+                    // against the substituted signature with the same value,
+                    // borrow and move rules a direct call uses.
+                    let args = self.lower_value_arguments(name, arguments, &params, slots)?;
                     self.seek_scalar_offset(expression.range.end);
                     return Ok((Expr::Call(id, args, ret), ret));
                 }
@@ -552,7 +530,7 @@ impl<'a> Parser<'a> {
                     // and parses the visible argument list.
                     if matches!(self.names.get(name), Some(&(_, _, Type::Closure(_)))) {
                         self.seek_scalar_offset(callee.range.end);
-                        let (value, ty) = self.closure_call(name, callee.range.start)?;
+                        let (value, ty) = self.closure_call_with(name, callee.range.start, arguments, slots)?;
                         self.seek_scalar_offset(expression.range.end);
                         return Ok((value, ty));
                     }
@@ -666,140 +644,8 @@ impl<'a> Parser<'a> {
                 if (signature.extern_c || self.ctx.is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
                     return Err(self.error_at(callee.range.start, &format!("call to unsafe function '{name}' requires 'unsafe'")).with_code("E0701"));
                 }
-                let mut args = Vec::with_capacity(arguments.len());
-                for (index, argument) in arguments.iter().enumerate() {
-                    self.seek_scalar_offset(argument.range.start);
-                    if index >= 64 {
-                        return Err(self.fail("function argument limit exceeded (64)"));
-                    }
-                    let &expected = signature.params.get(index)
-                        .ok_or_else(|| self.fail(&format!("too many arguments to '{name}'")))?;
-                    // A function-typed parameter takes a closure literal (or
-                    // a named function) as `Argument::FnPtr`; the typed reader
-                    // owns the shape check and the generated function.
-                    if let Type::Fn(callable) = expected {
-                        self.seek_scalar_offset(argument.range.start);
-                        let converted = self.function_value_argument(name, index + 1, callable)?;
-                        args.push(converted);
-                        continue;
-                    }
-                    // The shared tree records `&x` as a borrow argument.
-                    // Only a borrow parameter consumes it; anywhere else the
-                    // typed route's expression parser rejects it (a pointer
-                    // cast is the only legal use of `&expr`).
-                    if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                        && !matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_))
-                    {
-                        self.seek_scalar_offset(argument.range.start);
-                        return Err(self.fail("a borrow expression must be cast to a pointer"));
-                    }
-                    // A container or struct borrow takes the binding's
-                    // address (`Argument::Borrow`); the same classify rules,
-                    // messages and statement-scoped borrow registers the typed
-                    // route uses.
-                    if matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
-                        let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
-                            self.seek_scalar_offset(argument.range.end);
-                            return Err(self.fail("expected Amp, found the argument"));
-                        };
-                        if matches!(expected, Type::StructMut(_)) && !*argument_mutability {
-                            self.seek_scalar_offset(name_range.start);
-                            return Err(self.fail("this parameter borrows mutably; write the argument as '&mut name'"));
-                        }
-                        self.seek_scalar_offset(argument.range.end);
-                        let &(slot, binding_mutable, actual) = self.names.get(borrowed).ok_or_else(|| {
-                            self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
-                        })?;
-                        let Some(borrow) = super::declarations::CallBorrow::classify(expected, actual) else {
-                            let shape = match expected {
-                                Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
-                            };
-                            return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
-                        };
-                        if self.moved.contains(&slot) {
-                            return Err(moved_value_hint(self.binding_label(
-                                self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
-                        }
-                        match (expected, borrow) {
-                            (Type::StructRef(_), super::declarations::CallBorrow::Struct { address }) => {
-                                if self.mut_borrows.iter().any(|&(bid, _)| bid == slot) {
-                                    return Err(self.fail(&format!("cannot borrow '{borrowed}' while it is mutably borrowed in this statement")));
-                                }
-                                // The borrow lives only as long as this call.
-                                if !self.is_borrowed(slot) {
-                                    self.call_borrows.push((slot, self.scopes.len()));
-                                }
-                                args.push(Argument::Borrow(slot, address));
-                            }
-                            (Type::StructRef(_), super::declarations::CallBorrow::Forward) => {
-                                args.push(Argument::Borrow(slot, false));
-                            }
-                            (Type::StructMut(_), super::declarations::CallBorrow::Struct { address }) => {
-                                if !binding_mutable {
-                                    return Err(self.immutable_binding_error(self.fail(&format!("cannot borrow '{borrowed}' mutably: it was declared without 'var'")).with_code("E0103"), slot));
-                                }
-                                if self.is_borrowed(slot) {
-                                    // The callee may write any field, so the
-                                    // call releases the viewed bytes at the
-                                    // call point; with only view borrows
-                                    // active the conflict defers to the
-                                    // graph's ordered adjudication.
-                                    if !self.only_view_borrows_active(slot) {
-                                        return Err(self.fail(&format!("cannot borrow '{borrowed}' mutably while it is borrowed in this statement")));
-                                    }
-                                    // The conflict points at the borrowed name, the token the
-                                    // typed parser's cursor ends on (col of `d`
-                                    // in `&mut d`, not the `&`).
-                                    self.deferred_write_conflicts.push((slot, name_range.start, borrowed.clone(), "mutate", None));
-                                }
-                                self.mut_borrows.push((slot, self.scopes.len()));
-                                args.push(Argument::Borrow(slot, address));
-                            }
-                            (Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_), borrow) => {
-                                // An owned vector takes the address; a
-                                // parameter already spelled `&vec` forwards
-                                // its pointer unchanged.
-                                args.push(Argument::Borrow(slot, borrow.address()));
-                            }
-                            _ => {
-                                let shape = match expected {
-                                    Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
-                                };
-                                return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
-                            }
-                        }
-                        continue;
-                    }
-                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
-                    // A `&string` parameter is a read-only view: the argument
-                    // lowers as `Argument::View` and nothing moves (the typed
-                    // route's `typed_call_argument` for a `StrView`).
-                    if matches!(expected, Type::StrView) {
-                        if !matches!(actual, Type::String | Type::StrView) {
-                            self.seek_scalar_offset(argument.range.end);
-                            return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name(self.ctx))));
-                        }
-                        args.push(Argument::View(value));
-                        continue;
-                    }
-                    if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
-                        self.seek_scalar_offset(atom.range.end);
-                        self.check_variable_move(*slot)?;
-                    }
-                    self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
-                    // An owned aggregate passed by value moves: later uses
-                    // are rejected (E0102), and the drops pass trims the
-                    // Frees lists for this slot.
-                    if actual.owned()
-                        && let Expr::Variable(slot, ..) = &value {
-                            self.moved.insert(*slot);
-                        }
-                    args.push(Argument::Value(value));
-                }
+                                let args = self.lower_value_arguments(name, arguments, &signature.params, slots)?;
                 self.seek_scalar_offset(expression.range.end);
-                if args.len() != signature.params.len() {
-                    return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", signature.params.len(), args.len())));
-                }
                 (Expr::Call(signature.id, args, signature.ret), signature.ret)
             }
             ExpressionKind::Qualified { .. } => {
@@ -1111,6 +957,155 @@ impl<'a> Parser<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// The value/borrow/view argument rules for a direct or generic call:
+    /// function-typed parameters take a function value, borrow parameters take
+    /// a borrow argument with the statement's alias checks, `&string` takes a
+    /// view, and an owned value moves. The typed reader used to own this for
+    /// generic calls; both call forms share it now.
+    pub(super) fn lower_value_arguments(
+        &mut self,
+        callee_name: &str,
+        arguments: &[ae_syntax::expression::Expression],
+        params: &[Type],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Vec<Argument>, ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+let mut args = Vec::with_capacity(arguments.len());
+        for (index, argument) in arguments.iter().enumerate() {
+            self.seek_scalar_offset(argument.range.start);
+            if index >= 64 {
+                return Err(self.fail("function argument limit exceeded (64)"));
+            }
+            let &expected = params.get(index)
+                .ok_or_else(|| self.fail(&format!("too many arguments to '{callee_name}'")))?;
+            // A function-typed parameter takes a closure literal (or
+            // a named function) as `Argument::FnPtr`; the typed reader
+            // owns the shape check and the generated function.
+            if let Type::Fn(callable) = expected {
+                self.seek_scalar_offset(argument.range.start);
+                let converted = self.function_value_argument(callee_name, index + 1, callable)?;
+                args.push(converted);
+                continue;
+            }
+            // The shared tree records `&x` as a borrow argument.
+            // Only a borrow parameter consumes it; anywhere else the
+            // typed route's expression parser rejects it (a pointer
+            // cast is the only legal use of `&expr`).
+            if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
+                && !matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_))
+            {
+                self.seek_scalar_offset(argument.range.start);
+                return Err(self.fail("a borrow expression must be cast to a pointer"));
+            }
+            // A container or struct borrow takes the binding's
+            // address (`Argument::Borrow`); the same classify rules,
+            // messages and statement-scoped borrow registers the typed
+            // route uses.
+            if matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+                let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail("expected Amp, found the argument"));
+                };
+                if matches!(expected, Type::StructMut(_)) && !*argument_mutability {
+                    self.seek_scalar_offset(name_range.start);
+                    return Err(self.fail("this parameter borrows mutably; write the argument as '&mut name'"));
+                }
+                self.seek_scalar_offset(argument.range.end);
+                let &(slot, binding_mutable, actual) = self.names.get(borrowed).ok_or_else(|| {
+                    self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
+                })?;
+                let Some(borrow) = super::declarations::CallBorrow::classify(expected, actual) else {
+                    let shape = match expected {
+                        Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
+                    };
+                    return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
+                };
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
+                }
+                match (expected, borrow) {
+                    (Type::StructRef(_), super::declarations::CallBorrow::Struct { address }) => {
+                        if self.mut_borrows.iter().any(|&(bid, _)| bid == slot) {
+                            return Err(self.fail(&format!("cannot borrow '{borrowed}' while it is mutably borrowed in this statement")));
+                        }
+                        // The borrow lives only as long as this call.
+                        if !self.is_borrowed(slot) {
+                            self.call_borrows.push((slot, self.scopes.len()));
+                        }
+                        args.push(Argument::Borrow(slot, address));
+                    }
+                    (Type::StructRef(_), super::declarations::CallBorrow::Forward) => {
+                        args.push(Argument::Borrow(slot, false));
+                    }
+                    (Type::StructMut(_), super::declarations::CallBorrow::Struct { address }) => {
+                        if !binding_mutable {
+                            return Err(self.immutable_binding_error(self.fail(&format!("cannot borrow '{borrowed}' mutably: it was declared without 'var'")).with_code("E0103"), slot));
+                        }
+                        if self.is_borrowed(slot) {
+                            // The callee may write any field, so the
+                            // call releases the viewed bytes at the
+                            // call point; with only view borrows
+                            // active the conflict defers to the
+                            // graph's ordered adjudication.
+                            if !self.only_view_borrows_active(slot) {
+                                return Err(self.fail(&format!("cannot borrow '{borrowed}' mutably while it is borrowed in this statement")));
+                            }
+                            // The conflict points at the borrowed name, the token the
+                            // typed parser's cursor ends on (col of `d`
+                            // in `&mut d`, not the `&`).
+                            self.deferred_write_conflicts.push((slot, name_range.start, borrowed.clone(), "mutate", None));
+                        }
+                        self.mut_borrows.push((slot, self.scopes.len()));
+                        args.push(Argument::Borrow(slot, address));
+                    }
+                    (Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_), borrow) => {
+                        // An owned vector takes the address; a
+                        // parameter already spelled `&vec` forwards
+                        // its pointer unchanged.
+                        args.push(Argument::Borrow(slot, borrow.address()));
+                    }
+                    _ => {
+                        let shape = match expected {
+                            Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
+                        };
+                        return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
+                    }
+                }
+                continue;
+            }
+            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+            // A `&string` parameter is a read-only view: the argument
+            // lowers as `Argument::View` and nothing moves (the typed
+            // route's `typed_call_argument` for a `StrView`).
+            if matches!(expected, Type::StrView) {
+                if !matches!(actual, Type::String | Type::StrView) {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name(self.ctx))));
+                }
+                args.push(Argument::View(value));
+                continue;
+            }
+            if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
+                self.seek_scalar_offset(atom.range.end);
+                self.check_variable_move(*slot)?;
+            }
+            self.check_value_argument_type(callee_name, index, expected, actual, Some(&argument.range))?;
+            // An owned aggregate passed by value moves: later uses
+            // are rejected (E0102), and the drops pass trims the
+            // Frees lists for this slot.
+            if actual.owned()
+                && let Expr::Variable(slot, ..) = &value {
+                    self.moved.insert(*slot);
+                }
+            args.push(Argument::Value(value));
+        }
+        if args.len() != params.len() {
+            return Err(self.fail(&format!("function '{callee_name}' expects {} arguments, got {}", params.len(), args.len())));
+        }
+        Ok(args)
     }
 
     /// `tokenize(text, sep)` from the shared nodes. Only the shapes the
