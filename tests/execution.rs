@@ -8699,3 +8699,73 @@ fn deny_legacy_route_turns_fallbacks_into_diagnostics() {
         }
     }
 }
+
+// P1.1 chained-call rung: a method call on the result of another call
+// (`start.shifted(1, 2).shifted(0, -6)`) lowers on the resolved route. The
+// binding's type comes from the chain's declared returns, so the following
+// `moved.describe()` resolves too, and the comparison around it keeps its
+// operand bound (`...value() == 11`). The compiled and interpreted runs
+// agree byte for byte, and the deny switch proves no body fell back.
+#[test]
+fn chained_method_calls_lower_and_run_on_the_resolved_route() {
+    let source = r#"struct Point {
+    x: i64,
+    y: i64,
+}
+impl Point {
+    fn new(x: i64, y: i64) -> Point {
+        return Point { x: x, y: y };
+    }
+    fn shifted(self, dx: i64, dy: i64) -> Point {
+        return Point { x: self.x + dx, y: self.y + dy };
+    }
+    fn distance(self) -> i64 {
+        return abs_i64(self.x) + abs_i64(self.y);
+    }
+    fn describe(self) -> string {
+        return "(" + to_string(self.x) + ", " + to_string(self.y) + ")";
+    }
+}
+fn abs_i64(value: i64) -> i64 {
+    if value < 0 {
+        return -value;
+    }
+    return value;
+}
+fn main() {
+    let start = Point::new(3, 4);
+    let moved = start.shifted(1, 2).shifted(0, -6);
+    print(moved.describe());
+    let from_origin = Point::new(1, 2);
+    assert(from_origin.distance() == 3);
+    print(1);
+}"#;
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "(4, 0)\n1\n");
+
+    // The same source runs identically under the interpreter.
+    let path = std::env::temp_dir().join(format!("ae-chained-methods-interp-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let interp = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("run")
+        .arg(&path)
+        .arg("--interp")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(interp.status.success(), "{}", String::from_utf8_lossy(&interp.stderr));
+    assert_eq!(String::from_utf8_lossy(&interp.stdout).replace("\r\n", "\n"), "(4, 0)\n1\n");
+
+    // Every body is on the resolved route: the deny switch compiles it.
+    let path = std::env::temp_dir().join(format!("ae-chained-methods-deny-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let deny = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .env("AE_DENY_LEGACY_ROUTE", "1")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+}

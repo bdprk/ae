@@ -2021,3 +2021,24 @@ parity → 50k → WSL → commit.
   `gen_checklist.py` and the script unit tests after every ledger edit, and
   `scripts/cloud_gate.sh` now records per-section verdicts
   (`ok:`/`FAILED:` plus `CLOUD_GATE_DONE`/`CLOUD_GATE_FAILED`).
+
+## Chained method-call receivers (2026-11-23 17:15)
+
+A method call whose receiver is another call's result now lowers on the
+resolved route (`start.shifted(1, 2).shifted(0, -6)`, `c4.advanced(2).value()`
+inside a comparison). The delegation takes the binding power of the operator
+following the shared node (`infix_binding_power(next) + 1`) and re-seats the
+cursor at the node's end; the binding precompute types the chain through each
+method's declared return (`chain_call_type`), so a later `moved.describe()`
+resolves too. Coverage is **5 fallbacks / 5 files** (was 9/9); the deny
+manifest now lists 169 files and the CI ratchet is 5.
+
+Next target: the five remaining fixtures are the raw-pointer/extern surface —
+`tests/run/{extern_alloc_ok,extern_alloc_oom,ptr_offset,ptr_retag}.ae` fail on
+a pointer-returning extern binding initializer (`let p = ae_std_alloc(..)`,
+`let v = raw as *mut f64`), and `tests/run/native_layout_abi.ae` fails on the
+drop-carrying `Guard { .. }` construction (`test_early_drop`). The next slice
+is the pointer-binding initializer: add `PointerCast` to `scalar_body_expression`
+and to `lower_scalar_body_expression`, and admit pointer returns from extern
+calls in `supports_call` (the slot guard and pointer-store paths already
+accept `Type::Ptr`/`PtrMut` of scalar pointees).

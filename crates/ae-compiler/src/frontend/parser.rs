@@ -831,7 +831,11 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Match { subject, arms } => {
             matches!(subject.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                 && (resolved.scalar_reads.get(&subject.range.start)
-                        .is_some_and(|id| resolved.enum_bindings.contains(id))
+                        .is_some_and(|id| resolved.enum_bindings.contains(id)
+                            // A subject bound from a generic or method call:
+                            // its concrete enum type exists only at lowering,
+                            // which validates the match.
+                            || resolved.generic_call_bindings.contains(id))
                     // `match self` in an impl whose target is an enum: the
                     // carrier answers by the impl owner, not by a spelling.
                     || supports_field(subject, ae_resolve::Role::Borrow))
@@ -1271,6 +1275,35 @@ impl<'a> Parser<'a> {
             return None;
         }
         Some((signature, receiver, base_ty))
+    }
+
+    /// The type a method-call chain computes (`start.shifted(1, 2).shifted(0, -6)`).
+    /// The precompute walks the chain left to right: the root is a parameter,
+    /// `self`, or a binding the scan already typed, and each link asks the
+    /// inherent method's declared return type. Only shapes the resolved route
+    /// admits answer (a concrete method, arity included); anything else — a
+    /// generic instance or a receiver the scan cannot name — stays typed.
+    fn chain_call_type(
+        &self,
+        expression: &ae_syntax::expression::Expression,
+        local_structs: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        use ae_syntax::expression::ExpressionKind;
+        match &expression.kind {
+            ExpressionKind::Atom(Kind::Ident(name)) => self
+                .names
+                .get(name)
+                .map(|&(_, _, ty)| ty)
+                .or_else(|| local_structs.get(name).copied()),
+            ExpressionKind::Group(inner) => self.chain_call_type(inner, local_structs),
+            ExpressionKind::Call { callee, arguments } => {
+                let ExpressionKind::Field { base, name } = &callee.kind else { return None };
+                let ty = self.chain_call_type(base, local_structs)?;
+                let (signature, _, _) = self.resolve_inherent_method(name, ty)?;
+                (arguments.len() + 1 == signature.params.len()).then_some(signature.ret)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn adjudicate_deferred_conflicts(&mut self, function: &Function) -> Result<(), ae_span::Diagnostic> {
@@ -2117,7 +2150,12 @@ impl<'a> Parser<'a> {
                     // lowering's re-check resolves the method.
                     if role == ae_resolve::Role::Call {
                         return matches!(&expression.kind, ae_syntax::expression::ExpressionKind::Field { base, .. }
-                            if matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))));
+                            if matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))
+                                // A method on a temporary/chained result: the
+                                // lowering delegates the whole call to the
+                                // typed postfix layer.
+                                | ae_syntax::expression::ExpressionKind::Call { .. }
+                                | ae_syntax::expression::ExpressionKind::Group(_)));
                     }
                     let field_on_ident = role != ae_resolve::Role::Borrow
                         && matches!(expression.kind, ae_syntax::expression::ExpressionKind::Field { .. })
@@ -2373,22 +2411,14 @@ impl<'a> Parser<'a> {
                         }
                     }
                     // A binding from a method call whose signature returns a
-                    // struct or enum (`let fixed = u2.with_min_radius(1);`):
-                    // the receiver is a parameter or an earlier local in this
-                    // same precompute, so the signature answers statelessly.
-                    if let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &initializer.kind {
-                        if let ae_syntax::expression::ExpressionKind::Field { base, name: method } = &callee.kind {
-                            if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind {
-                                let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
-                                    .or_else(|| local_structs.get(receiver).copied());
-                                if let Some(ty) = ty {
-                                    if let Some((_, _, ret)) = self.resolve_inherent_method(method, ty) {
-                                        if matches!(ret, Type::Enum(..) | Type::Struct(_)) {
-                                            local_structs.insert(name.clone(), ret);
-                                        }
-                                    }
-                                }
-                            }
+                    // struct or enum (`let fixed = u2.with_min_radius(1);`,
+                    // `let moved = start.shifted(1, 2).shifted(0, -6);`): a
+                    // parameter or an earlier local roots the chain, so each
+                    // link's declared return type answers statelessly.
+                    if let ae_syntax::expression::ExpressionKind::Call { .. } = &initializer.kind {
+                        let ret = self.chain_call_type(initializer, &local_structs);
+                        if let Some(ret @ (Type::Enum(..) | Type::Struct(_))) = ret {
+                            local_structs.insert(name.clone(), ret);
                         }
                     }
                 }
@@ -2526,7 +2556,12 @@ impl<'a> Parser<'a> {
                     return true;
                 }
                 let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind else { return false };
-                let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else { return false };
+                let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else {
+                    // A temporary or chained receiver: the lowering delegates
+                    // the whole call to the typed postfix layer.
+                    return matches!(base.kind, ae_syntax::expression::ExpressionKind::Call { .. }
+                        | ae_syntax::expression::ExpressionKind::Group(_));
+                };
                 // A body local that the precompute typed (a struct literal or
                 // constructor call) answers here even though the lowering has
                 // not declared it yet.
@@ -3601,6 +3636,26 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Call { callee, arguments } => {
                 if let ExpressionKind::Field { base, name: method_name } = &callee.kind {
+                    // A method on a temporary or chained result
+                    // (`start.shifted(1, 2).shifted(0, -6)`): the typed postfix
+                    // layer owns the receiver semantics and the diagnostics;
+                    // delegate the whole call. The binding power comes from the
+                    // operator that follows this operand in the shared tree, so
+                    // the typed parse stops at the operand's end and the
+                    // enclosing operator (`... .value() == 11`) stays with the
+                    // shared lowering.
+                    if !matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))) {
+                        let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                        let min = self.tokens.get(end)
+                            .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
+                            .map_or(0, |(left, _)| left + 1);
+                        self.seek_scalar_offset(expression.range.start);
+                        let parsed = self.expression(min, true)?;
+                        // The typed parse consumed exactly this operand; the
+                        // surrounding shared nodes own what follows.
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok(parsed);
+                    }
                     // A method receiver is a borrow, not a value read: its
                     // slot comes from `names`. The re-check admitted only
                     // calls `resolve_inherent_method` answers, so this path
