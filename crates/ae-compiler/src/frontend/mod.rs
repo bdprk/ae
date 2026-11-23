@@ -694,6 +694,12 @@ enum IndexedStatement {
     Continue,
 }
 
+/// A source-spelled type argument of a generic instance, kept for the
+/// stateless field walk: a value type, or a nested generic struct instance
+/// (`Pair[string, Pair[string, string]]`). No layout is instantiated here.
+#[derive(Clone, Debug)]
+enum ShapeArg { Value(Type), StructInstance { gid: usize, args: Vec<ShapeArg> } }
+
 #[derive(Default)]
 struct ResolvedExpressions {
     local_bindings: HashMap<usize, std::ops::Range<usize>>,
@@ -721,7 +727,7 @@ struct ResolvedExpressions {
     /// its template and source-spelled type arguments: the field walk types
     /// one field's payload from them without instantiating a layout
     /// (stateless, so the index does not depend on parse order).
-    generic_struct_bindings: HashMap<ae_resolve::DefId, (usize, Vec<Type>)>,
+    generic_struct_bindings: HashMap<ae_resolve::DefId, (usize, Vec<ShapeArg>)>,
     owned_text_bindings: HashSet<ae_resolve::DefId>,
     enum_bindings: HashSet<ae_resolve::DefId>,
     enum_constructors: HashSet<usize>,

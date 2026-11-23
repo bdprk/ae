@@ -1818,6 +1818,30 @@ parity → 50k → WSL → commit.
 - Pitfall: `shared_specialization_types` rejects struct names as type
   arguments by design (no hidden layout); the field walk must not use it —
   `loose_specialization_types` is the order-independent spelling reader.
+
+### Slice 31 — shapes and writable owned structs (landed)
+
+- `loose_specialization_types` became `loose_shape_arguments`: source-spelled
+  type arguments are a recursive shape (`ShapeArg::{Value, StructInstance}`,
+  `Payload::Nested` dereferenced through `nested_shapes`), so
+  `Pair[string, Pair[string, string]].right.left` and `box_new[Node].val.val`
+  walks resolve without instantiating.
+- A struct literal's specialization instantiates nested instances bottom-up
+  (`shape_type`), so `Pair[i64, Label] { .. }` is legal for a literal (the
+  strict call-site reader still rejects struct type arguments).
+- A plain struct literal types its binding in `struct_definition_names`
+  (+ `owned_struct_bindings`); an owned local's field store marks
+  (`struct_field_writes`/`owned_field_writes`, the `owned_base` clause) and
+  lowers as `FieldStore` on the `.` path with E0103; the recheck's Write role
+  defers a body local's slot to the lowering when the entry-scope slots map
+  lacks it.
+- A method call returning a struct/enum types its binding in the receiver
+  precompute (`let fixed = u2.with_min_radius(1);`).
+- `examples/pairs.ae` and `struct_borrow.ae` are legacy-free; coverage
+  185 → 181, files 64 → 61; deny manifest 115.
+- Pitfall: the check-time recheck closure's `slots` is the entry-scope table;
+  a body local's marks must answer for the roles it does not hold, or every
+  post-declaration field store falls back.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

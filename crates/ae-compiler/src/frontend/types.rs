@@ -479,36 +479,73 @@ impl Parser<'_> {
         }).collect()
     }
     /// A wider reader than `shared_specialization_types` for the *field walk*:
-    /// a generic instance may spell a struct or enum as a type argument
-    /// (`Pair[i64, Label]`), and the walk only needs the spelling to type one
-    /// field. No layout is instantiated, so this stays stateless.
-    pub(super) fn loose_specialization_types(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<Type>> {
+    /// a generic instance may spell a struct or a nested generic instance as a
+    /// type argument (`Pair[string, Pair[string, string]]`), and the walk only
+    /// needs the spelling to type one field. No layout is instantiated, so
+    /// this stays stateless.
+    pub(super) fn loose_shape_arguments(&self, ranges: &[std::ops::Range<usize>]) -> Option<Vec<ShapeArg>> {
         ranges.iter().map(|range| {
             let start = self.tokens.partition_point(|token| token.offset < range.start);
             let end = self.tokens.partition_point(|token| token.offset < range.end);
-            match self.tokens.get(start..end)? {
-                [Token { kind: Kind::Ident(name), .. }] => {
-                    if let Some(ty) = self.subst.get(name) {
-                        return Some(*ty);
-                    }
-                    match name.as_str() {
-                        "string" => Some(Type::String),
-                        "vec" => Some(Type::Vec),
-                        _ => scalar_type(name)
-                            .or_else(|| self.struct_names.get(name).copied().map(Type::Struct))
-                            .or_else(|| self.enum_names.get(name).copied().map(|id| Type::Enum(self.enums[id].name, id))),
-                    }
-                }
-                [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
-                 Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
-                    if name == "vec" => match element.as_str() {
-                        "string" => Some(Type::StrVec),
-                        "f64" => Some(Type::VecF),
-                        _ => None,
-                    },
-                _ => None,
-            }
+            self.shape_argument(start, end)
         }).collect()
+    }
+
+    fn shape_argument(&self, start: usize, end: usize) -> Option<ShapeArg> {
+        if start >= end { return None }
+        match &self.tokens.get(start)?.kind {
+            Kind::Ident(name) if end == start + 1 => self.shape_value(name),
+            Kind::Ident(name) => {
+                if self.tokens.get(start + 1)?.kind != Kind::LBracket
+                    || self.tokens.get(end - 1)?.kind != Kind::RBracket
+                {
+                    return None;
+                }
+                let inner = &self.tokens[start + 2..end - 1];
+                let mut arguments = Vec::new();
+                let mut piece_start = start + 2;
+                let mut depth = 0usize;
+                let mut index = start + 2;
+                for token in inner {
+                    match token.kind {
+                        Kind::LBracket => depth += 1,
+                        Kind::RBracket => depth = depth.saturating_sub(1),
+                        Kind::Comma if depth == 0 => {
+                            arguments.push(self.shape_argument(piece_start, index)?);
+                            piece_start = index + 1;
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                arguments.push(self.shape_argument(piece_start, end - 1)?);
+                if name == "vec" && arguments.len() == 1 {
+                    return match arguments.as_slice() {
+                        [ShapeArg::Value(Type::String)] => Some(ShapeArg::Value(Type::StrVec)),
+                        [ShapeArg::Value(Type::F64)] => Some(ShapeArg::Value(Type::VecF)),
+                        [ShapeArg::Value(Type::Int)] => Some(ShapeArg::Value(Type::Vec)),
+                        _ => None,
+                    };
+                }
+                let gid = self.generics.struct_names.get(name).copied()?;
+                Some(ShapeArg::StructInstance { gid, args: arguments })
+            }
+            _ => None,
+        }
+    }
+
+    fn shape_value(&self, name: &str) -> Option<ShapeArg> {
+        if let Some(ty) = self.subst.get(name) {
+            return Some(ShapeArg::Value(*ty));
+        }
+        match name {
+            "string" => Some(ShapeArg::Value(Type::String)),
+            "vec" => Some(ShapeArg::Value(Type::Vec)),
+            _ => scalar_type(name)
+                .map(ShapeArg::Value)
+                .or_else(|| self.struct_names.get(name).copied().map(|sid| ShapeArg::Value(Type::Struct(sid))))
+                .or_else(|| self.enum_names.get(name).copied().map(|id| ShapeArg::Value(Type::Enum(self.enums[id].name, id)))),
+        }
     }
 
     // A concrete type argument. Structs and enums are rejected for the same

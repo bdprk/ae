@@ -141,49 +141,64 @@ fn field_ty_in(sid: usize, field: &str, structs: &[StructDef]) -> Option<Type> {
     defn.fields.iter().find(|(name, _)| name == field).map(|(_, ty)| *ty)
 }
 
-/// The declared type of one field read in a resolved body, including a
-/// generic instance spelled in source (`let p = Pair[string, i64] { .. };`
-/// → `p.left` is `string`). The generic arm resolves the template's payload
-/// with the literal's type arguments; no layout is instantiated, so the
-/// answer is stateless.
-fn resolved_field_type(
+/// The declared shape of one field read in a resolved body, including a
+/// generic instance spelled in source (`let p = Pair[i64, Label] { .. };`
+/// → `p.left` is `i64`, `p.right.name` walks through `Label`). Nested
+/// generic instances (`Pair[string, Pair[string, string]].right.left`) stay
+/// shapes until the final field resolves to a value. No layout is
+/// instantiated, so the answer is stateless.
+fn resolved_field_shape(
     base: &ae_syntax::expression::Expression,
     field: &str,
     resolved: &ResolvedExpressions,
     struct_names: &HashMap<String, usize>,
     structs: &[StructDef],
     generics: &Generics,
-) -> Option<Type> {
+) -> Option<ShapeArg> {
     use ae_syntax::expression::ExpressionKind;
     match &base.kind {
         ExpressionKind::Atom(Kind::Ident(_)) => {
             let def = resolved.scalar_reads.get(&base.range.start)
                 .or_else(|| resolved.scalar_writes.get(&base.range.start))?;
             if let Some((gid, args)) = resolved.generic_struct_bindings.get(def) {
-                let defn = generics.struct_defs.get(*gid)?;
-                let (_, payload) = defn.fields.iter().find(|(name, _)| name == field)?;
-                return payload_type(payload, args);
+                let instance = ShapeArg::StructInstance { gid: *gid, args: args.clone() };
+                return shape_field(&instance, field, structs, generics);
             }
             let name = resolved.struct_definition_names.get(def)?;
             let sid = struct_names.get(name.as_str())?;
-            field_ty_in(*sid, field, structs)
+            field_ty_in(*sid, field, structs).map(ShapeArg::Value)
         }
         ExpressionKind::Field { base: inner, name } => {
-            let inner_ty = resolved_field_type(inner, name, resolved, struct_names, structs, generics)?;
-            match inner_ty {
-                Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => field_ty_in(sid, field, structs),
-                _ => None,
-            }
+            let inner_shape = resolved_field_shape(inner, name, resolved, struct_names, structs, generics)?;
+            shape_field(&inner_shape, field, structs, generics)
         }
         _ => None,
     }
 }
 
-fn payload_type(payload: &Payload, args: &[Type]) -> Option<Type> {
+fn shape_field(shape: &ShapeArg, field: &str, structs: &[StructDef], generics: &Generics) -> Option<ShapeArg> {
+    match shape {
+        ShapeArg::Value(Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid)) => {
+            field_ty_in(*sid, field, structs).map(ShapeArg::Value)
+        }
+        ShapeArg::StructInstance { gid, args } => {
+            let defn = generics.struct_defs.get(*gid)?;
+            let (_, payload) = defn.fields.iter().find(|(name, _)| name == field)?;
+            payload_shape(payload, args, generics)
+        }
+        _ => None,
+    }
+}
+
+fn payload_shape(payload: &Payload, args: &[ShapeArg], generics: &Generics) -> Option<ShapeArg> {
     match payload {
-        Payload::Concrete(ty) => Some(*ty),
-        Payload::Param(index) => args.get(*index).copied(),
-        Payload::Nested(_) => None,
+        Payload::Concrete(ty) => Some(ShapeArg::Value(*ty)),
+        Payload::Param(index) => args.get(*index).cloned(),
+        Payload::Nested(index) => {
+            let shape = generics.nested_shapes.get(*index)?;
+            let resolved: Option<Vec<ShapeArg>> = shape.args.iter().map(|payload| payload_shape(payload, args, generics)).collect();
+            resolved.map(|args| ShapeArg::StructInstance { gid: shape.gid, args })
+        }
     }
 }
 
@@ -1512,8 +1527,24 @@ impl<'a> Parser<'a> {
                             if let Some(ExpressionKind::Specialization { base: inner, arguments }) = specialization.map(|target| &target.kind) {
                                 if let ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
                                     if let Some(&gid) = self.generics.struct_names.get(struct_name) {
-                                        if let Some(args) = self.loose_specialization_types(arguments) {
+                                        if let Some(args) = self.loose_shape_arguments(arguments) {
                                             expressions.generic_struct_bindings.insert(id, (gid, args));
+                                        }
+                                    }
+                                }
+                            }
+                            // A plain struct literal types its binding from the
+                            // target name: the resolver may leave the spelling
+                            // open, and field reads/writes answer by this entry.
+                            if let ExpressionKind::Struct { target, .. } = &initializer.kind {
+                                if let ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind {
+                                    if let Some(&sid) = self.struct_names.get(struct_name) {
+                                        expressions.struct_definition_names.entry(id).or_insert_with(|| struct_name.clone());
+                                        let constructed = Type::Struct(sid);
+                                        if owned_plain_struct(constructed, self.structs)
+                                            || owned_field_struct(constructed, self.structs)
+                                        {
+                                            expressions.owned_struct_bindings.insert(id);
                                         }
                                     }
                                 }
@@ -1713,20 +1744,30 @@ impl<'a> Parser<'a> {
                             // fields are chain-only receivers (binding one as
                             // a value would move out of the borrowed struct).
                             if let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind {
-                                let field_ty = field_owner_struct(base, &expressions, self.struct_names, self.structs)
+                                let field_shape = field_owner_struct(base, &expressions, self.struct_names, self.structs)
                                     .and_then(|sid| field_ty_in(sid, name, self.structs))
-                                    .or_else(|| resolved_field_type(base, name, &expressions, self.struct_names, self.structs, &self.generics));
-                                if let Some(field_ty) = field_ty {
-                                    if scalar_type(field_ty) {
-                                        expressions.struct_field_reads.insert(expression.range.start);
-                                    } else if matches!(field_ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)) {
-                                        expressions.struct_field_chains.insert(expression.range.start);
-                                    } else if matches!(field_ty, Type::String | Type::StrView) {
-                                        expressions.struct_field_views.insert(expression.range.start);
-                                    } else if matches!(field_ty, Type::Atomic | Type::Shared(_) | Type::Mutex) {
-                                        // A copy-semantics handle field: only
-                                        // a handle consumer may read it.
-                                        expressions.struct_field_handles.insert(expression.range.start);
+                                    .map(ShapeArg::Value)
+                                    .or_else(|| resolved_field_shape(base, name, &expressions, self.struct_names, self.structs, &self.generics));
+                                if let Some(field_shape) = field_shape {
+                                    match field_shape {
+                                        ShapeArg::Value(field_ty) if scalar_type(field_ty) => {
+                                            expressions.struct_field_reads.insert(expression.range.start);
+                                        }
+                                        // A struct-typed field (or a nested generic
+                                        // instance) is a chain-only receiver.
+                                        ShapeArg::Value(Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_))
+                                        | ShapeArg::StructInstance { .. } => {
+                                            expressions.struct_field_chains.insert(expression.range.start);
+                                        }
+                                        ShapeArg::Value(Type::String | Type::StrView) => {
+                                            expressions.struct_field_views.insert(expression.range.start);
+                                        }
+                                        ShapeArg::Value(Type::Atomic | Type::Shared(_) | Type::Mutex) => {
+                                            // A copy-semantics handle field: only
+                                            // a handle consumer may read it.
+                                            expressions.struct_field_handles.insert(expression.range.start);
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -1767,12 +1808,18 @@ impl<'a> Parser<'a> {
                         // and the root's spelling must be a mutable borrow.
                         if *operator == Kind::Equal {
                             if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
+                                let base_def = expressions.scalar_writes.get(&base.range.start).copied();
                                 let mutable_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                                    && expressions.scalar_writes.get(&base.range.start)
-                                        .and_then(|def| resolution.defs.get(def.0 as usize))
-                                        .is_some_and(|entry| matches!(entry.inferred,
-                                            Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })));
-                                if mutable_base {
+                                    && base_def.is_some_and(|def| {
+                                        resolution.defs.get(def.0 as usize).is_some_and(|entry| matches!(entry.inferred,
+                                            Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })))
+                                    });
+                                // An owned struct local is a writable receiver too
+                                // (`plot.w = 40;`): its binding names a struct
+                                // (from a spelling, a literal or a call return).
+                                let owned_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
+                                    && base_def.is_some_and(|def| expressions.struct_definition_names.contains_key(&def));
+                                if mutable_base || owned_base {
                                     if let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs) {
                                         if let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                             if scalar_type(field_ty) {
@@ -1905,6 +1952,18 @@ impl<'a> Parser<'a> {
 
     pub(super) fn shared_specialization_arguments(&self, offset: usize) -> Option<std::sync::Arc<[std::ops::Range<usize>]>> {
         self.resolved_expressions().specialization_arguments.get(&offset).cloned()
+    }
+
+    /// Resolve a source-spelled type argument to a concrete type, instantiating
+    /// nested generic struct instances as it descends (`Pair[i64, Pair[..]]`).
+    pub(super) fn shape_type(&mut self, shape: &ShapeArg, offset: usize) -> Option<Type> {
+        match shape {
+            ShapeArg::Value(ty) => Some(*ty),
+            ShapeArg::StructInstance { gid, args } => {
+                let concrete = args.iter().map(|arg| self.shape_type(arg, offset)).collect::<Option<Vec<_>>>()?;
+                self.instantiate_struct(*gid, concrete, offset).ok().map(Type::Struct)
+            }
+        }
     }
 
     pub(super) fn shared_pointer_cast_qualifier(&self) -> Option<bool> {
@@ -2091,6 +2150,25 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                    // A binding from a method call whose signature returns a
+                    // struct or enum (`let fixed = u2.with_min_radius(1);`):
+                    // the receiver is a parameter or an earlier local in this
+                    // same precompute, so the signature answers statelessly.
+                    if let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &initializer.kind {
+                        if let ae_syntax::expression::ExpressionKind::Field { base, name: method } = &callee.kind {
+                            if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind {
+                                let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
+                                    .or_else(|| local_structs.get(receiver).copied());
+                                if let Some(ty) = ty {
+                                    if let Some((_, _, ret)) = self.resolve_inherent_method(method, ty) {
+                                        if matches!(ret, Type::Enum(..) | Type::Struct(_)) {
+                                            local_structs.insert(name.clone(), ret);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 for root in statement.expressions() {
                     visit_expression_tree(root, &mut |expression| {
@@ -2212,7 +2290,14 @@ impl<'a> Parser<'a> {
                 _ => return false,
             };
             let Some(def) = occurrences.get(&root.range.start) else { return false };
-            let Some(&(_, ty)) = slots.get(def) else { return false };
+            let Some(&(_, ty)) = slots.get(def) else {
+                // A body local declared after the entry scope (`var plot = ..;
+                // plot.w = 40;`): the lowering owns its slot and validates the
+                // write there.
+                return role == ae_resolve::Role::Write
+                    && (resolved.struct_field_writes.contains(&expression.range.start)
+                        || resolved.owned_field_writes.contains(&expression.range.start));
+            };
             if role == ae_resolve::Role::Write && !matches!(ty, Type::StructMut(_) | Type::Struct(_)) {
                 return false;
             }
@@ -3108,7 +3193,13 @@ impl<'a> Parser<'a> {
                             // literal on first sight; do the same here.
                             let &gid = self.generics.struct_names.get(name)
                                 .ok_or_else(|| self.fail(&format!("'{name}' is not a generic struct")))?;
-                            let args = self.shared_specialization_types(arguments)
+                            // A struct literal may name structs (even nested
+                            // generic instances) as type arguments, which the
+                            // strict call-site reader rejects by design.
+                            let shapes = self.loose_shape_arguments(arguments)
+                                .ok_or_else(|| self.error_at(target.range.start, &format!("cannot read the type arguments of '{name}'")))?;
+                            let args = shapes.iter().map(|shape| self.shape_type(shape, target.range.start))
+                                .collect::<Option<Vec<_>>>()
                                 .ok_or_else(|| self.error_at(target.range.start, &format!("cannot read the type arguments of '{name}'")))?;
                             self.instantiate_struct(gid, args, target.range.start)?
                         }
@@ -3162,7 +3253,17 @@ impl<'a> Parser<'a> {
                     let (base_expr, base_ty) = self.lower_scalar_body_expression(base, slots)?;
                     let sid = match base_ty {
                         Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
-                        _ => unreachable!("resolved struct field base"),
+                        // A permissive scan can hand the lowering a chain whose
+                        // base is not a struct; the typed route's diagnostics
+                        // stay authoritative.
+                        Type::Enum(enum_name, _) => {
+                            self.seek_scalar_offset(expression.range.start);
+                            return Err(self.fail(&format!("enum '{enum_name}' has no fields; bind its variant payloads with 'match'")));
+                        }
+                        other => {
+                            self.seek_scalar_offset(expression.range.start);
+                            return Err(self.fail(&format!("type {} has no fields or methods", other.name())));
+                        }
                     };
                     let fty = self.field_ty_checked(sid, name)?;
                     (Expr::Field(Box::new(base_expr), name.clone(), fty), fty)
