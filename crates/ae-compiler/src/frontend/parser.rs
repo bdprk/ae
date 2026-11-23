@@ -463,8 +463,13 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             // field is not a value. An owned string variable is consumed by
             // the same `+`, so it is admissible here too.
             let view = |expression: &ae_syntax::expression::Expression| {
+                if resolved.struct_field_views.contains(&expression.range.start) {
+                    // A borrowed string field reads by `+` and by the
+                    // equality/comparison operators; it never moves.
+                    return *operator == Kind::Plus
+                        || matches!(operator, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq);
+                }
                 if *operator != Kind::Plus { return false };
-                if resolved.struct_field_views.contains(&expression.range.start) { return true }
                 matches!(&expression.kind, ExpressionKind::Atom(Kind::Ident(name))
                     if name != "self" && resolved.scalar_reads.get(&expression.range.start)
                         .is_some_and(|id| resolved.owned_text_bindings.contains(id)
@@ -2674,6 +2679,10 @@ impl<'a> Parser<'a> {
                             // copy-semantics handle, so the argument passes by
                             // value with the typed route's exact type check.
                             | Type::Ptr(_) | Type::PtrMut(_)
+                            // A guard is an owned handle a callee may take by
+                            // value (`consume(g)`), the same move rule as the
+                            // other handles.
+                            | Type::Guard
                             | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                     })
             })
