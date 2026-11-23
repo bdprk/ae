@@ -740,6 +740,9 @@ struct ResolvedExpressions {
     /// operands, print arguments, and call arguments (a builtin or a
     /// `&string` parameter only borrows it).
     struct_field_views: HashSet<usize>,
+    /// Field reads of a copy-semantics handle (`atomic`/`shared`/`mutex`):
+    /// admissible where a handle is consumed (`cell_load(t.cancelled)`).
+    struct_field_handles: HashSet<usize>,
     /// Field store targets on a mutable struct receiver (`r.n = v`): the
     /// base is a `&mut` view, so the write joins the body route exactly as
     /// an impl method's `self.n = v` does.

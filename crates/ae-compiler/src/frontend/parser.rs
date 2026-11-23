@@ -34,6 +34,7 @@ const RESOLVED_BUILTINS: &[&str] = &[
     "len", "to_string", "to_f64", "to_i64", "trim", "slice", "slice_view", "split",
     "contains", "starts_with", "ends_with", "join", "parse_int", "find",
     "map_new", "f64map_new", "map_get", "map_has", "map_remove", "map_inc", "keys",
+    "cell_new", "cell_load", "cell_add", "cell_cas",
     "json_get", "json_int", "json_bool", "json_len", "json_has",
 ];
 
@@ -66,7 +67,7 @@ fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
 fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
-        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String)))
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)))
 }
 
 /// The registry struct a field expression reads from: a parameter's
@@ -302,6 +303,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         scalar_body_expression(argument, resolved, supports_call, supports_field)
                             || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
                             || resolved.struct_field_views.contains(&argument.range.start)
+                            || resolved.struct_field_handles.contains(&argument.range.start)
                             || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
                                 if name != "self" && resolved.scalar_reads.get(&argument.range.start)
                                     .is_some_and(|id| resolved.owned_text_bindings.contains(id)
@@ -320,6 +322,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     scalar_body_expression(argument, resolved, supports_call, supports_field)
                         || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
                         || resolved.struct_field_views.contains(&argument.range.start)
+                        || resolved.struct_field_handles.contains(&argument.range.start)
                 });
             }
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
@@ -338,6 +341,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     // view (builtins and `&string` parameters only ever
                     // borrow it).
                     || resolved.struct_field_views.contains(&argument.range.start)
+                    || resolved.struct_field_handles.contains(&argument.range.start)
                     // An owned string in argument position: a `&string`
                     // parameter views it, a `string` parameter moves it (the
                     // lowering records which).
@@ -1412,6 +1416,10 @@ impl<'a> Parser<'a> {
                                             expressions.struct_field_chains.insert(expression.range.start);
                                         } else if matches!(field_ty, Type::String | Type::StrView) {
                                             expressions.struct_field_views.insert(expression.range.start);
+                                        } else if matches!(field_ty, Type::Atomic | Type::Shared(_) | Type::Mutex) {
+                                            // A copy-semantics handle field: only
+                                            // a handle consumer may read it.
+                                            expressions.struct_field_handles.insert(expression.range.start);
                                         }
                                     }
                                 }
@@ -1430,7 +1438,7 @@ impl<'a> Parser<'a> {
                                             if (defn.file == self.file || defn.public) && defn.drop_fn.is_none() {
                                                 if defn.fields.iter().all(|(_, ty)| scalar_type(*ty)) {
                                                     expressions.drop_free_constructions.insert(expression.range.start);
-                                                } else if defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String)) {
+                                                } else if defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)) {
                                                     expressions.owned_constructions.insert(expression.range.start);
                                                 }
                                             }
@@ -3092,6 +3100,61 @@ impl<'a> Parser<'a> {
                     };
                     self.seek_scalar_offset(expression.range.end);
                     Ok((value, ty))
+                }
+                "cell_new" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (seed, seed_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if seed_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_new expects an i64 seed"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicNew(Box::new(seed)), Type::Atomic))
+                }
+                "cell_load" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 1)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Atomic {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_load expects an atomic handle"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicLoad(Box::new(handle)), Type::Int))
+                }
+                "cell_add" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 2)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Atomic {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_add expects an atomic handle"));
+                    }
+                    let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if value_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("cell_add expects an i64 delta"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicAdd(Box::new(handle), Box::new(value)), Type::Int))
+                }
+                "cell_cas" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let (handle, handle_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if handle_ty != Type::Atomic {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail("cell_cas expects an atomic handle"));
+                    }
+                    let (expect, expect_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if expect_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail("cell_cas expects an i64 expected value"));
+                    }
+                    let (new, new_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                    if new_ty != Type::Int {
+                        self.seek_scalar_offset(arguments[2].range.end);
+                        return Err(self.fail("cell_cas expects an i64 new value"));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::AtomicCas(Box::new(handle), Box::new(expect), Box::new(new)), Type::Bool))
                 }
                 "join" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;

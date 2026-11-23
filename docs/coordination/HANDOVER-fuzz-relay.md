@@ -1403,3 +1403,20 @@ closure literals) stays typed until closure-literal arguments are tracked —
 that is the next slice for this family: typed builds `Argument::FnPtr(id)`
 for a matching, capture-free closure literal (`expression.rs`
 `call_arguments`), which needs the closure instantiation path.
+
+## P1.1 slice 19 landed: copy-semantics handles (atomic cells)
+
+- `cell_new`/`cell_load`/`cell_add`/`cell_cas` lower natively to
+  `Expr::AtomicNew/Load/Add/Cas` with the typed messages and seed/delta
+  types.
+- A field whose type is a handle (`atomic`/`shared`/`mutex`) is marked in
+  `struct_field_handles` and admissible only where a handle consumer reads
+  it (`cell_load(t.cancelled)`), including in call-argument position.
+- A struct whose fields are scalar, `string`, or a handle counts as ownable
+  (`owned_field_struct` + the construction marking), so
+  `return Timer { deadline, cancelled: cell_new(0) };` routes.
+
+Coverage: 338 → **335**. `std/std/task/timer.ae` is legacy-free.
+Still typed in this family: `task_spawn`/`task_yield` (effectful statement
+builtins and closure-literal arguments), `shared_*`/`mutex_*`/`chan_*`
+expression builtins, `spawn`/`wait`.
