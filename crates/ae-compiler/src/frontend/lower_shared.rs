@@ -413,27 +413,6 @@ impl<'a> Parser<'a> {
         Some((Expr::StructLit(sid, values.into_iter().collect::<Option<_>>()?), Type::Struct(sid)))
     }
 
-    pub(super) fn lower_committed_specialized_struct(&mut self, sid: usize) -> Option<(Expr, Type)> {
-        if *self.current() != Kind::LBrace || std::env::var_os("AE_DEBUG_MIR").is_some() {
-            return None;
-        }
-        let offset = self.tokens[self.pos].offset;
-        let (end, fields) = self.resolved_expressions().specialized_struct_fields.get(&offset)?.clone();
-        let cursor = self.tokens.partition_point(|token| token.offset < end);
-        let close = self.tokens.get(cursor.checked_sub(1)?)?;
-        if close.kind != Kind::RBrace || close.end != end {
-            return None;
-        }
-        let depth = 128usize.checked_sub(self.expression_depth)?.min(64);
-        let budget = 128usize.checked_sub(self.expression_nodes)?;
-        let mut nodes_left = budget;
-        let mut effects = SharedExpressionEffects::default();
-        let value = self.lower_shared_struct_fields(sid, &fields, depth, &mut nodes_left, &mut effects)?;
-        self.commit_shared_effects(effects);
-        self.expression_nodes += budget - nodes_left;
-        self.pos = cursor;
-        Some(value)
-    }
 
     pub(super) fn lower_shared_call_arguments(
         &mut self,
@@ -499,53 +478,8 @@ impl<'a> Parser<'a> {
         Some(args)
     }
 
-    pub(super) fn lower_committed_specialized_arguments(&mut self, params: &[Type]) -> Option<Vec<Argument>> {
-        self.lower_indexed_argument_list(params, Self::lower_shared_call_arguments)
-    }
 
-    pub(super) fn lower_committed_enum_payload(&mut self, payload: &[Type]) -> Option<Vec<Expr>> {
-        self.lower_indexed_argument_list(payload, Self::lower_shared_enum_payload)
-    }
 
-    pub(super) fn lower_indexed_argument_list<T>(
-        &mut self,
-        params: &[Type],
-        lower: impl FnOnce(&mut Self, &[ae_syntax::expression::Expression], &[Type], usize, &mut usize, &mut SharedExpressionEffects) -> Option<T>,
-    ) -> Option<T> {
-        if *self.current() != Kind::LParen {
-            return None;
-        }
-        let offset = self.tokens[self.pos].offset;
-        let arguments = self.resolved_expressions().specialized_call_arguments.get(&offset)?.clone();
-        if arguments.len() != params.len() || arguments.len() > 64 {
-            return None;
-        }
-        let mut cursor = self.pos + 1;
-        for (index, argument) in arguments.iter().enumerate() {
-            if self.tokens.get(cursor)?.offset != argument.range.start {
-                return None;
-            }
-            cursor = self.tokens.partition_point(|token| token.offset < argument.range.end);
-            if index + 1 < arguments.len() {
-                if self.tokens.get(cursor)?.kind != Kind::Comma {
-                    return None;
-                }
-                cursor += 1;
-            }
-        }
-        if self.tokens.get(cursor)?.kind != Kind::RParen {
-            return None;
-        }
-        let depth = 128usize.checked_sub(self.expression_depth)?.min(64);
-        let budget = 128usize.checked_sub(self.expression_nodes)?;
-        let mut nodes_left = budget;
-        let mut effects = SharedExpressionEffects::default();
-        let args = lower(self, &arguments, params, depth, &mut nodes_left, &mut effects)?;
-        self.commit_shared_effects(effects);
-        self.expression_nodes += budget - nodes_left;
-        self.pos = cursor + 1;
-        Some(args)
-    }
 
     pub(super) fn commit_shared_effects(&mut self, effects: SharedExpressionEffects) {
         self.call_borrows.extend(effects.call_borrows.into_iter().map(|slot| (slot, self.scopes.len())));

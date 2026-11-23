@@ -1,7 +1,6 @@
 //! Function and trait declaration collection and instantiation.
 use super::*;
 use ae_syntax::declaration::{parse_declaration_attribute, parse_extern_function_prefix, Declaration, DeclarationAttribute, DeclarationKind, TypedName, MAX_FUNCTION_PARAMETERS};
-use super::parser::moved_value_hint;
 
 /// How a borrowed argument is passed and whether it needs a call-scoped
 /// struct borrow. Classification uses concrete compiler type identities.
@@ -1204,7 +1203,7 @@ impl Parser<'_> {
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
-            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new(),
+            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new(),
         };
         let parsed = sub.function_rest_with_parameters(false, id, def.bindings.as_deref());
         let mut nested = std::mem::take(&mut sub.pending);
@@ -1276,7 +1275,7 @@ impl Parser<'_> {
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
-            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(),
+            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(),
             subst, trait_bounds: HashMap::new(), receiver: receiver_ty,
             impl_self: Some(impl_self_ty), inherent_impl: true, shadow_ok: false, pending: Vec::new(),
         };
@@ -1324,27 +1323,23 @@ impl Parser<'_> {
                 }
         }
 
-        let (value, ty) = match argument {
-            Some(argument) => {
-                let expression = match &argument.kind {
-                    ae_syntax::expression::ExpressionKind::Group(inner) => inner.as_ref(),
-                    _ => argument,
-                };
-                if matches!(expression.kind, ae_syntax::expression::ExpressionKind::Closure { .. }) {
-                    self.seek_scalar_offset(expression.range.start);
-                    let lowered = self.closure_literal()?;
-                    self.seek_scalar_offset(argument.range.end);
-                    lowered
-                } else {
-                    self.seek_scalar_offset(argument.range.start);
-                    let lowered = self.lower_scalar_body_expression(argument, slots)?;
-                    self.seek_scalar_offset(argument.range.end);
-                    lowered
-                }
-            }
-            // A caller without the shared node (the typed argument reader)
-            // still parses the tokens.
-            None => self.expression(0, false)?,
+        let Some(argument) = argument else {
+            return Err(self.fail("a function value argument needs the shared call node"));
+        };
+        let expression = match &argument.kind {
+            ae_syntax::expression::ExpressionKind::Group(inner) => inner.as_ref(),
+            _ => argument,
+        };
+        let (value, ty) = if matches!(expression.kind, ae_syntax::expression::ExpressionKind::Closure { .. }) {
+            self.seek_scalar_offset(expression.range.start);
+            let lowered = self.closure_literal()?;
+            self.seek_scalar_offset(argument.range.end);
+            lowered
+        } else {
+            self.seek_scalar_offset(argument.range.start);
+            let lowered = self.lower_scalar_body_expression(argument, slots)?;
+            self.seek_scalar_offset(argument.range.end);
+            lowered
         };
         if ty == expected {
             return Ok(Argument::Value(value));
@@ -1362,156 +1357,5 @@ impl Parser<'_> {
             return Err(self.fail(&format!("argument {position} to '{callee}' must be a closure of type {}, found {}", expected.name(self.ctx), got)));
         }
         Ok(Argument::FnPtr(def.fn_id))
-    }
-
-    fn borrowed_argument_name(&mut self, mutable: bool) -> Result<String, ae_span::Diagnostic> {
-        use ae_syntax::expression::{parse_borrow_argument, ExpressionKind};
-        let (argument, end) = parse_borrow_argument(
-            &self.file, self.source, &self.tokens, self.pos, Some(mutable),
-        )?;
-        self.pos = end;
-        let ExpressionKind::BorrowArgument { name, .. } = argument.kind else {
-            unreachable!("borrow argument parser returns a borrowed binding");
-        };
-        Ok(name)
-    }
-
-    pub(super) fn call_arguments(&mut self, name: &str, types: &[Type]) -> Result<Vec<Argument>, ae_span::Diagnostic> {
-        self.pos += 1;
-        let args = if *self.current() == Kind::RParen {
-            Vec::new()
-        } else {
-            ae_syntax::parse_comma_list(
-                self,
-                |parser, index| {
-                    if index >= 64 {
-                        return Err(parser.fail("function argument limit exceeded (64)"));
-                    }
-                    let expected = *types.get(index)
-                        .ok_or_else(|| parser.fail(&format!("too many arguments to '{name}'")))?;
-                    parser.typed_call_argument(name, index, expected)
-                },
-                |parser| {
-                    if *parser.current() != Kind::Comma {
-                        return false;
-                    }
-                    parser.pos += 1;
-                    true
-                },
-            )?
-        };
-        self.take(Kind::RParen)?;
-        if args.len() != types.len() { return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", types.len(), args.len()))); }
-        Ok(args)
-    }
-
-    fn typed_call_argument(
-        &mut self,
-        name: &str,
-        index: usize,
-        expected: Type,
-    ) -> Result<Argument, ae_span::Diagnostic> {
-        if expected == Type::StrView {
-            let (value, ty) = self.expression(0, false)?;
-            if !matches!(ty, Type::String | Type::StrView) {
-                return Err(self.fail(&format!("argument must be a string or string view, found {}", ty.name(self.ctx))));
-            }
-            Ok(Argument::View(value))
-        } else if expected == Type::VecRef || expected == Type::StrVecRef || expected == Type::VecFRef {
-            let arg = self.borrowed_argument_name(false)?;
-            let (var, _, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown variable '{arg}'")).with_code("E0101"))?;
-            let owned_shape = match expected {
-                Type::VecRef => Type::Vec,
-                Type::StrVecRef => Type::StrVec,
-                _ => Type::VecF,
-            };
-            let Some(borrow) = CallBorrow::classify(expected, actual) else {
-                return Err(self.fail(&format!("argument must be {}, found {}", owned_shape.name(self.ctx), actual.name(self.ctx))));
-            };
-            if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
-            // An owned vector needs its address taken; a parameter that
-            // is already `const ae_vec *` is forwarded unchanged.
-            // The flag means "take the address", not "is a vector".
-            Ok(Argument::Borrow(var, borrow.address()))
-        } else if let Type::Array(len) = expected {
-            let arg = self.borrowed_argument_name(false)?;
-            let (var, _, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown array '{arg}'")))?;
-            let Some(borrow) = CallBorrow::classify(expected, actual) else {
-                return Err(self.fail(&format!("argument requires array of length {len}")));
-            };
-            Ok(Argument::Borrow(var, borrow.address()))
-        } else if let Type::Fn(sig) = expected {
-            self.function_value_argument(name, index + 1, sig, None, &HashMap::new())
-        } else if matches!(expected, Type::StructRef(_)) {
-            // `&Struct` (ADR-0184) borrows a bare struct variable for
-            // the duration of the call, exactly like the container
-            // borrows: no move, no copy, and the caller may not write
-            // or move the struct while the borrow can be read.
-            let arg = self.borrowed_argument_name(false)?;
-            let (var, _, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown variable '{arg}'")).with_code("E0101"))?;
-            match CallBorrow::classify(expected, actual) {
-                Some(CallBorrow::Struct { address }) => {
-                    if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
-                    if self.mut_borrows.iter().any(|&(bid, _)| bid == var) {
-                        return Err(self.fail(&format!("cannot borrow '{arg}' while it is mutably borrowed in this statement")));
-                    }
-                    // The borrow lives only as long as this call, so it
-                    // goes on the statement-scoped register: the next
-                    // statement may write the struct again.
-                    if !self.is_borrowed(var) {
-                        self.call_borrows.push((var, self.scopes.len()));
-                    }
-                    Ok(Argument::Borrow(var, address))
-                }
-                // A borrow parameter forwards its pointer unchanged:
-                // the callee's reads are already covered by the borrow
-                // the caller received. A mutable borrow may shrink to
-                // a read-only one; the reverse is not allowed.
-                Some(CallBorrow::Forward) => {
-                    Ok(Argument::Borrow(var, false))
-                }
-                _ => Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx)))),
-            }
-        } else if matches!(expected, Type::StructMut(_)) {
-            // `&mut Struct` (ADR-0185) lends the struct for writing:
-            // spelled `&mut value` at the call site, exclusive for the
-            // duration of the call, and the lender must own a mutable
-            // variable — the callee writes what the caller owns.
-            let arg = self.borrowed_argument_name(true)?;
-            let (var, mutable, actual) = *self.names.get(&arg).ok_or_else(|| self.fail(&format!("unknown variable '{arg}'")).with_code("E0101"))?;
-            match CallBorrow::classify(expected, actual) {
-                Some(CallBorrow::Struct { address }) => {
-                    if self.moved.contains(&var) { return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow '{arg}' because it was moved")).with_code("E0102"), var))); }
-                    if !mutable {
-                        return Err(self.immutable_binding_error(self.fail(&format!("cannot borrow '{arg}' mutably: it was declared without 'var'")).with_code("E0103"), var));
-                    }
-                    if self.is_borrowed(var) {
-                        // The callee may write any field of the lent
-                        // struct, so the call releases the viewed bytes
-                        // at the call point (M2.5): with only view
-                        // borrows active the conflict defers to the
-                        // graph's ordered adjudication, like the write
-                        // it is. Same-statement call or mut borrows keep
-                        // the on-sight rejection.
-                        if !self.only_view_borrows_active(var) {
-                            return Err(self.fail(&format!("cannot borrow '{arg}' mutably while it is borrowed in this statement")));
-                        }
-                        let offset = self.tokens.get(self.pos.saturating_sub(1)).map(|t| t.offset).unwrap_or(0);
-                        self.deferred_write_conflicts.push((var, offset, arg.clone(), "mutate", None));
-                    }
-                    self.mut_borrows.push((var, self.scopes.len()));
-                    Ok(Argument::Borrow(var, address))
-                }
-                _ => Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx)))),
-            }
-        } else {
-            // By-value arguments always consume their value:
-            // the callee releases the parameter, so the caller
-            // must not use the slot afterwards even when the
-            // surrounding statement is not a move context.
-            let (value, ty) = self.expression(0, true)?;
-            self.check_value_argument_type(name, index, expected, ty, None)?;
-            Ok(Argument::Value(value))
-        }
     }
 }

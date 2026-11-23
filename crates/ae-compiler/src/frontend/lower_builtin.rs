@@ -1,6 +1,12 @@
 //! Lowering module: builtin (P1.4 parser split).
 use super::*;
 use super::parser::moved_value_hint;
+use super::route_marks::resolved_builtin;
+
+/// The runtime-object intrinsic surface frozen by ADR-0224. Keep this list
+/// in sync with `docs/architecture/intrinsic-allowlist.txt`;
+/// `tests/intrinsic_freeze.rs` reads this line.
+pub(super) const RUNTIME_OBJECT_INTRINSICS: &[&str] = &["shared_new", "shared_get", "mutex_new", "mutex_lock", "chan_new", "chan_send", "chan_try_send", "chan_recv", "chan_select", "exec_new", "exec_run", "scope_new", "pool_new", "pool_join"];
 
 impl<'a> Parser<'a> {
     /// The pure value builtins, lowered with the same `Expr` variants and the
@@ -16,6 +22,7 @@ impl<'a> Parser<'a> {
         arguments: &[ae_syntax::expression::Expression],
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        debug_assert!(RUNTIME_OBJECT_INTRINSICS.iter().all(|name| resolved_builtin(name)));
         use ae_syntax::expression::ExpressionKind;
         (|| -> Result<(Expr, Type), ae_span::Diagnostic> {
             self.seek_scalar_offset(callee.range.start);

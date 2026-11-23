@@ -32,8 +32,6 @@ use super::*;
         let tokens = Rc::new(ae_syntax::lex_diagnostic(source).unwrap());
         let print_token = tokens.partition_point(|token| token.offset < source.find("print(flag)").unwrap());
                 let condition_token = tokens.partition_point(|token| token.offset < source.find("if flag").unwrap() + 3);
-        let initializer = source.find("flag;").unwrap();
-        let initializer_token = tokens.iter().position(|token| token.offset == initializer).unwrap();
         let binding = source.find("flag").unwrap();
         let mut functions = SharedFunctions::default();
         functions.insert("compute".into(), Signature {
@@ -215,17 +213,6 @@ use super::*;
         assert_eq!(parser.pos, start);
         assert!(!parser.moved.contains(&82));
         let eid = parser.instantiate_enum(0, vec![Type::String], variant).unwrap();
-        parser.seek_scalar_offset(variant + "CachedBox[string]::Item".len());
-        let open = parser.pos;
-        assert!(parser.lower_committed_enum_payload(&[Type::Int]).is_none());
-        assert_eq!(parser.pos, open);
-        assert!(!parser.moved.contains(&82));
-        assert!(matches!(
-            parser.lower_committed_enum_payload(&[Type::String]).as_deref(),
-            Some([Expr::Variable(82, Type::String, ..)])
-        ));
-        assert_eq!(*parser.current(), Kind::Semi);
-        assert!(parser.moved.remove(&82));
         parser.seek_scalar_offset(variant);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
@@ -251,20 +238,6 @@ use super::*;
         assert_eq!(parser.pos, start);
         assert!(!parser.moved.contains(&83));
         let sid = parser.instantiate_struct(0, vec![Type::String], constructor).unwrap();
-        let mismatched = parser.instantiate_struct(0, vec![Type::Int], constructor).unwrap();
-        parser.seek_scalar_offset(constructor + "CachedRecord[string] ".len());
-        let brace = parser.pos;
-        assert!(parser.lower_committed_specialized_struct(mismatched).is_none());
-        assert_eq!(parser.pos, brace);
-        assert!(!parser.moved.contains(&83));
-        assert!(matches!(
-            parser.lower_committed_specialized_struct(sid),
-            Some((Expr::StructLit(actual, fields), Type::Struct(ty)))
-                if actual == sid && ty == sid
-                    && matches!(fields.as_slice(), [Expr::Variable(83, Type::String, ..), Expr::Number(2)])
-        ));
-        assert_eq!(*parser.current(), Kind::Semi);
-        assert!(parser.moved.remove(&83));
         parser.seek_scalar_offset(constructor);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
@@ -294,17 +267,7 @@ use super::*;
         assert_eq!(parser.pos, start);
         assert!(!parser.moved.contains(&84));
         let (id, params, _) = parser.instantiate_fn(0, vec![Type::String], call).unwrap();
-        parser.seek_scalar_offset(call + "generic_scalar[string]".len());
-        let open = parser.pos;
-        assert!(parser.lower_committed_specialized_arguments(&[Type::Int]).is_none());
-        assert_eq!(parser.pos, open);
-        assert!(!parser.moved.contains(&84));
-        assert!(matches!(
-            parser.lower_committed_specialized_arguments(&params).as_deref(),
-            Some([Argument::Value(Expr::Variable(84, Type::String, ..))])
-        ));
-        assert_eq!(*parser.current(), Kind::Semi);
-        assert!(parser.moved.remove(&84));
+        let _ = &params;
         parser.seek_scalar_offset(call);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
@@ -842,12 +805,6 @@ use super::*;
 
         parser.names.insert("flag".into(), (7, false, Type::Bool));
         parser.binding_ranges.insert(7, binding..binding + 4);
-        parser.pos = initializer_token;
-        assert!(matches!(
-            parser.expression(0, true).unwrap(),
-            (Expr::Variable(7, Type::Bool, _, _), Type::Bool),
-        ));
-        assert_eq!(*parser.current(), Kind::Semi);
 
         parser.pos = print_token + 2;
         assert!(parser.lower_shared_value(Some(Kind::Semi), false).is_none());
@@ -860,20 +817,6 @@ use super::*;
         ));
         assert_eq!(*parser.current(), Kind::LBrace);
 
-        parser.pos = initializer_token;
-        parser.expression_depth = 1;
-        parser.expression_nodes = 127;
-        assert!(matches!(
-            parser.expression(0, false).unwrap(),
-            (Expr::Variable(7, Type::Bool, _, _), Type::Bool),
-        ));
-        assert_eq!(parser.expression_nodes, 128);
-        parser.pos = initializer_token;
-        let error = match parser.expression(0, false) {
-            Err(error) => error,
-            Ok(_) => panic!("nested scalar exceeded the expression budget"),
-        };
-        assert_eq!(error.message, "expression complexity limit exceeded (128)");
 
         let vector_offset = source.find("vec[1.0").unwrap();
         parser.pos = parser.tokens.partition_point(|token| token.offset < vector_offset);

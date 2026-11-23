@@ -151,7 +151,7 @@ impl Parser<'_> {
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
             id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
-            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(),
+            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(),
             subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false,
             // Shadowing stays allowed in both passes: a body-local may reuse
             // an outer name, and the AST walk (not the name map) decides what
@@ -291,42 +291,6 @@ impl Parser<'_> {
         Ok(function)
     }
 
-    // `name(args)` on a variable of closure type: the captures are read at
-    // the call site — value captures move their outer variables (so a second
-    // call is a use-after-move, which is what makes the FnOnce shape safe),
-    // borrow captures forward the enclosing scope's own borrow.
-    pub(super) fn closure_call(&mut self, name: &str, call_offset: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let Some(&(var_id, _, Type::Closure(cid))) = self.names.get(name) else {
-            return Err(self.fail(&format!("internal: '{name}' is not a closure")));
-        };
-        let _ = var_id;
-        let def = self.generics.closures[cid].clone();
-        let mut args: Vec<Argument> = Vec::new();
-        for (outer_id, ty) in &def.value_captures {
-            if self.moved.contains(outer_id) {
-                return Err(moved_value_hint(self.binding_label(self.error_at(call_offset, &format!("cannot call '{name}' again because a value capture was already moved by the first call")).with_code("E0102"), *outer_id)));
-            }
-            if self.is_borrowed(*outer_id) {
-                return Err(self.fail(&format!("cannot call '{name}' while one of its captured variables is borrowed")));
-            }
-            if ty.owned() {
-                self.moved.insert(*outer_id);
-            }
-            args.push(Argument::Value(Expr::Variable(*outer_id, *ty, 0, 0)));
-        }
-        for (outer_id, hidden) in &def.borrow_captures {
-            match hidden {
-                Type::StrView => {
-                    // The outer variable is the string the view reads.
-                    args.push(Argument::View(Expr::Variable(*outer_id, Type::String, 0, 0)));
-                }
-                _ => args.push(Argument::Borrow(*outer_id, true)),
-            }
-        }
-        let visible = self.call_arguments(&format!("closure {name}"), &def.params)?;
-        args.extend(visible);
-        Ok((Expr::Call(def.fn_id, args, def.ret), def.ret))
-    }
 
     /// A closure call whose visible arguments come from the shared call node:
     /// the captured slots are prepended exactly as the typed path does, then

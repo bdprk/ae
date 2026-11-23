@@ -317,3 +317,78 @@ pub(super) fn visit_expression_tree(expression: &ae_syntax::expression::Expressi
         _ => {}
     }
 }
+
+// The unchecked-operation walkers: route admissibility predicates over the
+// compiler's typed statement/expression tree.
+impl<'a> Parser<'a> {
+    // (spec/unsafe.md U4): a block with none is silent decoration.
+    pub(super) fn block_has_unchecked_operation(&self, statements: &[Statement]) -> bool {
+        for statement in statements {
+            if self.statement_has_unchecked_operation(statement) { return true; }
+        }
+        false
+    }
+    pub(super) fn statement_has_unchecked_operation(&self, statement: &Statement) -> bool {
+        match statement {
+            Statement::Unsafe(body) => self.block_has_unchecked_operation(body),
+            Statement::PtrStore(..) => true,
+            Statement::If(cond, yes, no) => {
+                self.expr_has_unchecked_operation(cond)
+                    || self.block_has_unchecked_operation(yes)
+                    || self.block_has_unchecked_operation(no)
+            }
+            Statement::While(cond, body) => {
+                self.expr_has_unchecked_operation(cond) || self.block_has_unchecked_operation(body)
+            }
+            Statement::Return(expr, _) => self.expr_has_unchecked_operation(expr),
+            Statement::Exit(expr, _) => self.expr_has_unchecked_operation(expr),
+            Statement::Print(printed) => match printed {
+                Printed::Expr(e) => self.expr_has_unchecked_operation(e),
+                Printed::Text(_) => false,
+            },
+            Statement::Assert(cond, ..) => self.expr_has_unchecked_operation(cond),
+            Statement::Assign(_, expr, _) => self.expr_has_unchecked_operation(expr),
+            Statement::Declare(_, expr) => self.expr_has_unchecked_operation(expr),
+            Statement::For(_, _, body, ..) | Statement::ForTokens(_, _, body, ..) => {
+                self.block_has_unchecked_operation(body)
+            }
+            Statement::Match(_, _, arms) => arms.iter().any(|arm| self.block_has_unchecked_operation(&arm.body)),
+            _ => false,
+        }
+    }
+    pub(super) fn expr_has_unchecked_operation(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::DerefPtr(..) => true,
+            // Pointer arithmetic is the same class of unchecked operation
+            // (it gates on unsafe_depth exactly like the deref).
+            Expr::PtrOffset(..) | Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => true,
+            Expr::Call(id, args, _) => {
+                // A call to a declared `extern "C" fn` or an `unsafe fn` is
+                // exactly what the block legalizes (the same test E0701
+                // applies at the call site). Both registries fill during the
+                // signature pass, which completes before any body parses, so
+                // the id-keyed lookup is order-safe here — including a call
+                // that textually precedes its declaration. `Expr::FnCall` is
+                // a call through a `fn(T) -> R` pointer whose id comes from
+                // the closure-signature interner, a different id space, and
+                // closures are never unsafe — no registry check there.
+                if self.ctx.is_unsafe_fn(*id) || self.ctx.is_extern_fn(*id) {
+                    return true;
+                }
+                args.iter().any(|arg| match arg {
+                    Argument::Value(e) | Argument::View(e) => self.expr_has_unchecked_operation(e),
+                    _ => false,
+                })
+            }
+            Expr::FnCall(_, args, ..) => {
+                args.iter().any(|arg| match arg {
+                    Argument::Value(e) | Argument::View(e) => self.expr_has_unchecked_operation(e),
+                    _ => false,
+                })
+            }
+            Expr::Binary(a, _, b, ..) => self.expr_has_unchecked_operation(a) || self.expr_has_unchecked_operation(b),
+            Expr::Field(base, ..) => self.expr_has_unchecked_operation(base),
+            Expr::Variable(..) | Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::StrLit(..) => false,
+            _ => false,
+        }
+    }}

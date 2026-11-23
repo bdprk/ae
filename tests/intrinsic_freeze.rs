@@ -3,10 +3,10 @@
 use std::collections::BTreeSet;
 
 fn compiler_intrinsics() -> BTreeSet<String> {
-    let src = include_str!("../crates/ae-compiler/src/frontend/expression.rs");
+    let src = include_str!("../crates/ae-compiler/src/frontend/lower_builtin.rs");
     let line = src
         .lines()
-        .find(|l| l.contains("matches!(name.as_str(), \"shared_new\""))
+        .find(|l| l.contains("const RUNTIME_OBJECT_INTRINSICS"))
         .expect("runtime-object intrinsic dispatch line not found; update tests/intrinsic_freeze.rs");
     line.split('"')
         .skip(1)

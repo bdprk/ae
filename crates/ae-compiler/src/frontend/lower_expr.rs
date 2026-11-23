@@ -497,7 +497,7 @@ impl<'a> Parser<'a> {
                     if matches!(name.as_str(), "c_size_of" | "c_align_of" | "c_offset_of") {
                         self.seek_scalar_offset(base.range.start);
                         self.pos += 1;
-                        let (value, ty) = self.c_layout_expr(name)?;
+                        let (value, ty) = self.c_layout_expr(name, arguments.first())?;
                         self.seek_scalar_offset(expression.range.end);
                         return Ok((value, ty));
                     }

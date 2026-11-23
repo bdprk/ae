@@ -161,41 +161,6 @@ impl Parser<'_> {
             }
         }
     }
-    // `::Variant(payload, ...)` once the enum type is known. Payload values are
-    // moved in, so a variant owns whatever it carries.
-    pub(super) fn enum_literal(&mut self, eid: usize, offset: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let (vname, end) = ae_syntax::pattern::parse_variant_suffix(
-            &self.file, self.source, &self.tokens, self.pos,
-        )?;
-        self.pos = end;
-        let def = self.enums[eid].clone();
-        self.require_public("enum", def.name, &def.file, def.public)?;
-        let (vidx, fields) = def.variant_payload(&vname)
-            .ok_or_else(|| self.error_at(offset, &format!("enum '{}' has no variant '{}'", def.name, vname)))?;
-        if let Some(values) = self.lower_committed_enum_payload(fields) {
-            return Ok((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid)));
-        }
-        let mut values = Vec::new();
-        if *self.current() == Kind::LParen {
-            self.pos += 1;
-            for (index, field) in fields.iter().enumerate() {
-                // String payloads are moved into the variant.
-                let (value, value_ty) = self.expression(0, *field == Type::String)?;
-                if !self.matches_value_type(*field, value_ty, None) {
-                    return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name(self.ctx))));
-                }
-                values.push(value);
-                if index + 1 < fields.len() { self.take(Kind::Comma)?; }
-            }
-            if *self.current() == Kind::Comma {
-                return Err(self.fail(&format!("variant '{}::{}' takes {} payload value(s)", def.name, vname, fields.len())));
-            }
-            self.take(Kind::RParen)?;
-        } else if !fields.is_empty() {
-            return Err(self.fail(&format!("variant '{}::{}' needs {} payload value(s)", def.name, vname, fields.len())));
-        }
-        Ok((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid)))
-    }
     pub(super) fn constructor_field(
         &self,
         sid: usize,
@@ -229,27 +194,6 @@ impl Parser<'_> {
         Ok((Expr::StructLit(sid, values), Type::Struct(sid)))
     }
 
-    // `Name { field: expr, ... }` once the layout is known. Fields may appear
-    // in any order but each exactly once; owned fields are moved in.
-    pub(super) fn struct_literal(&mut self, sid: usize, offset: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let name = self.structs[sid].name.clone();
-        if std::env::var_os("AE_DEBUG_MIR").is_some() {
-            eprintln!("struct literal debug: sid {} name '{}' at token {}", sid, name, self.pos);
-        }
-        self.take(Kind::LBrace)?;
-        let mut slots: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
-        while *self.current() != Kind::RBrace {
-            let fname = self.identifier()?;
-            let (fidx, expected) = self.constructor_field(sid, &fname, &slots, None)?;
-            self.take(Kind::Colon)?;
-            let (value, vty) = self.expression(0, true)?;
-            self.check_field_value_type(&fname, expected, vty, None)?;
-            slots[fidx] = Some(value);
-            if *self.current() == Kind::Comma { self.pos += 1; }
-        }
-        self.take(Kind::RBrace)?;
-        self.finish_struct_literal(sid, offset, slots)
-    }
     // `enum Name { ... }` or `enum Name[T, U] { ... }`. A generic declaration
     // produces no layout at all; only instantiations do (ADR-21).
     pub(super) fn parse_enum_def(

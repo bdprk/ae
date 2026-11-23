@@ -135,79 +135,9 @@ impl<'a> Parser<'a> {
     // exists to legalize: a raw dereference, a pointer store, or a call to
     // a declared extern / `unsafe fn`. Nested `unsafe` blocks check their
     // own bodies — the outer block's warning is about ITS body. W0702
-    // (spec/unsafe.md U4): a block with none is silent decoration.
-    pub(super) fn block_has_unchecked_operation(&self, statements: &[Statement]) -> bool {
-        for statement in statements {
-            if self.statement_has_unchecked_operation(statement) { return true; }
-        }
-        false
-    }
 
-    pub(super) fn statement_has_unchecked_operation(&self, statement: &Statement) -> bool {
-        match statement {
-            Statement::Unsafe(body) => self.block_has_unchecked_operation(body),
-            Statement::PtrStore(..) => true,
-            Statement::If(cond, yes, no) => {
-                self.expr_has_unchecked_operation(cond)
-                    || self.block_has_unchecked_operation(yes)
-                    || self.block_has_unchecked_operation(no)
-            }
-            Statement::While(cond, body) => {
-                self.expr_has_unchecked_operation(cond) || self.block_has_unchecked_operation(body)
-            }
-            Statement::Return(expr, _) => self.expr_has_unchecked_operation(expr),
-            Statement::Exit(expr, _) => self.expr_has_unchecked_operation(expr),
-            Statement::Print(printed) => match printed {
-                Printed::Expr(e) => self.expr_has_unchecked_operation(e),
-                Printed::Text(_) => false,
-            },
-            Statement::Assert(cond, ..) => self.expr_has_unchecked_operation(cond),
-            Statement::Assign(_, expr, _) => self.expr_has_unchecked_operation(expr),
-            Statement::Declare(_, expr) => self.expr_has_unchecked_operation(expr),
-            Statement::For(_, _, body, ..) | Statement::ForTokens(_, _, body, ..) => {
-                self.block_has_unchecked_operation(body)
-            }
-            Statement::Match(_, _, arms) => arms.iter().any(|arm| self.block_has_unchecked_operation(&arm.body)),
-            _ => false,
-        }
-    }
 
-    pub(super) fn expr_has_unchecked_operation(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::DerefPtr(..) => true,
-            // Pointer arithmetic is the same class of unchecked operation
-            // (it gates on unsafe_depth exactly like the deref).
-            Expr::PtrOffset(..) | Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => true,
-            Expr::Call(id, args, _) => {
-                // A call to a declared `extern "C" fn` or an `unsafe fn` is
-                // exactly what the block legalizes (the same test E0701
-                // applies at the call site). Both registries fill during the
-                // signature pass, which completes before any body parses, so
-                // the id-keyed lookup is order-safe here — including a call
-                // that textually precedes its declaration. `Expr::FnCall` is
-                // a call through a `fn(T) -> R` pointer whose id comes from
-                // the closure-signature interner, a different id space, and
-                // closures are never unsafe — no registry check there.
-                if self.ctx.is_unsafe_fn(*id) || self.ctx.is_extern_fn(*id) {
-                    return true;
-                }
-                args.iter().any(|arg| match arg {
-                    Argument::Value(e) | Argument::View(e) => self.expr_has_unchecked_operation(e),
-                    _ => false,
-                })
-            }
-            Expr::FnCall(_, args, ..) => {
-                args.iter().any(|arg| match arg {
-                    Argument::Value(e) | Argument::View(e) => self.expr_has_unchecked_operation(e),
-                    _ => false,
-                })
-            }
-            Expr::Binary(a, _, b, ..) => self.expr_has_unchecked_operation(a) || self.expr_has_unchecked_operation(b),
-            Expr::Field(base, ..) => self.expr_has_unchecked_operation(base),
-            Expr::Variable(..) | Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::StrLit(..) => false,
-            _ => false,
-        }
-    }
+
 
     pub(super) fn position(&self) -> (usize, usize) {
         let token = &self.tokens[self.pos];
@@ -260,14 +190,7 @@ impl<'a> Parser<'a> {
     // Whether the graph's release scan will see a call through this
     // signature id: the scan reads the four tables every `Expr::Call` id
     // can come from. A deferral whose callee is outside them would be an
-    // unsound allowance, so the deferral sites reject on sight instead.
-    pub(super) fn signature_in_release_tables(&self, callee: Option<usize>) -> bool {
-        let Some(id) = callee else { return false; };
-        self.functions.values().any(|s| s.id == id)
-            || self.generics.inherent.values().any(|m| m.signature.id == id)
-            || self.generics.fn_done.values().any(|(iid, _, _)| *iid == id)
-            || self.generics.generic_impl_done.values().any(|(iid, _, _)| *iid == id)
-    }
+
 
     /// The inherent (non-generic) method a receiver type names, if the call
     /// is one the resolved route can lower: a borrowed receiver, a return
