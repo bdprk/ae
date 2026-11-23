@@ -383,3 +383,5 @@
 
 - 2026-11-24 20:00 (+08:00): **P1.4 slice 13: one argument reader for direct, generic and closure calls.** Extracted the direct-call value/borrow/view/move rules into `lower_value_arguments`; generic instantiations and closure calls share it, so the typed `call_arguments`/`closure_call` now have no caller outside the typed expression parser. The only live entry left is `wait`'s operand (`wait_expr`), the next port. Evidence: Windows and WSL suites 532/0, both 50k mutation sweeps green, deny 176/176, route 0/0, clippy clean.
 
+- 2026-11-24 20:45 (+08:00): **P1.4 slice 14: wait and function-value arguments leave the typed parser.** `wait` lowers its operand from the shared node and keeps the move/consume bookkeeping (a second wait is the E0102 moved diagnostic); `function_value_argument` uses the shared argument node for closure literals and every other shape. The typed expression parser now has no reachable caller from the live lowering graph; deleting the island is next. Evidence: Windows and WSL suites 532/0, both 50k mutation sweeps green, deny 176/176, route 0/0, clippy clean.
+

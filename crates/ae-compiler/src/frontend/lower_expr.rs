@@ -985,7 +985,7 @@ let mut args = Vec::with_capacity(arguments.len());
             // owns the shape check and the generated function.
             if let Type::Fn(callable) = expected {
                 self.seek_scalar_offset(argument.range.start);
-                let converted = self.function_value_argument(callee_name, index + 1, callable)?;
+                let converted = self.function_value_argument(callee_name, index + 1, callable, Some(argument), slots)?;
                 args.push(converted);
                 continue;
             }

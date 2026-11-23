@@ -1294,7 +1294,14 @@ impl Parser<'_> {
     }
     // The argument list of a call, starting at '(' (ADR-31 shares it between
     // ordinary calls and generic instantiations).
-    pub(super) fn function_value_argument(&mut self, callee: &str, position: usize, sig: usize) -> Result<Argument, ae_span::Diagnostic> {
+    pub(super) fn function_value_argument(
+        &mut self,
+        callee: &str,
+        position: usize,
+        sig: usize,
+        argument: Option<&ae_syntax::expression::Expression>,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Argument, ae_span::Diagnostic> {
         let expected = Type::Fn(sig);
         let (params, returns) = self.ctx.fn_sig(sig);
         if let Kind::Ident(name) = self.current() {
@@ -1317,7 +1324,28 @@ impl Parser<'_> {
                 }
         }
 
-        let (value, ty) = self.expression(0, false)?;
+        let (value, ty) = match argument {
+            Some(argument) => {
+                let expression = match &argument.kind {
+                    ae_syntax::expression::ExpressionKind::Group(inner) => inner.as_ref(),
+                    _ => argument,
+                };
+                if matches!(expression.kind, ae_syntax::expression::ExpressionKind::Closure { .. }) {
+                    self.seek_scalar_offset(expression.range.start);
+                    let lowered = self.closure_literal()?;
+                    self.seek_scalar_offset(argument.range.end);
+                    lowered
+                } else {
+                    self.seek_scalar_offset(argument.range.start);
+                    let lowered = self.lower_scalar_body_expression(argument, slots)?;
+                    self.seek_scalar_offset(argument.range.end);
+                    lowered
+                }
+            }
+            // A caller without the shared node (the typed argument reader)
+            // still parses the tokens.
+            None => self.expression(0, false)?,
+        };
         if ty == expected {
             return Ok(Argument::Value(value));
         }
@@ -1413,7 +1441,7 @@ impl Parser<'_> {
             };
             Ok(Argument::Borrow(var, borrow.address()))
         } else if let Type::Fn(sig) = expected {
-            self.function_value_argument(name, index + 1, sig)
+            self.function_value_argument(name, index + 1, sig, None, &HashMap::new())
         } else if matches!(expected, Type::StructRef(_)) {
             // `&Struct` (ADR-0184) borrows a bare struct variable for
             // the duration of the call, exactly like the container

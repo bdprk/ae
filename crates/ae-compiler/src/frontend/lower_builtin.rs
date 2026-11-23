@@ -429,10 +429,26 @@ impl<'a> Parser<'a> {
                     Ok((value, ty))
                 }
                 "wait" => {
-                    self.pos += 1;
-                    let (value, ty) = self.wait_expr(line, column)?;
+                    let Some(handle) = arguments.first() else {
+                        self.seek_scalar_offset(expression.range.end);
+                        self.pos = self.pos.saturating_sub(1);
+                        return Err(self.fail("expected expression").with_code("E0011"));
+                    };
+                    let (value, handle_ty) = self.lower_scalar_body_expression(handle, slots)?;
+                    // `wait` consumes the handle: the typed reader parsed it
+                    // with the moving flag, so the same slot bookkeeping
+                    // applies here.
+                    if handle_ty.owned()
+                        && let Expr::Variable(slot, ..) = &value {
+                            self.check_variable_move(*slot)?;
+                            self.moved.insert(*slot);
+                        }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((value, ty))
+                    let Type::Thread(tid) = handle_ty else {
+                        return Err(self.fail("wait expects a thread handle"));
+                    };
+                    let ret = self.generics.threads[tid];
+                    Ok((Expr::Wait(Box::new(value), ret, line, column), ret))
                 }
                 "now_ms" | "now_s" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;

@@ -349,7 +349,8 @@ impl<'a> Parser<'a> {
                 return result;
             }
         }
-        self.unsupported_expression()
+        self.seek_scalar_offset(self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0));
+        Err(self.fail("a spawn callable must be a closure literal or a closure/function-value name").with_code("E0011"))
     }
 
 }
