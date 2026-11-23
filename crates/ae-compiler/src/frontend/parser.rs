@@ -374,7 +374,7 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             // called through a value, a missing method) are the lowering's.
             let plain_call_base = match &base.kind {
                 ExpressionKind::Call { callee, .. } => {
-                    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Qualified { .. })
                         || matches!(&callee.kind, ExpressionKind::BracketedCallTarget { base: inner, .. }
                             if matches!(inner.kind, ExpressionKind::Atom(Kind::Ident(_))))
                 }
@@ -477,6 +477,13 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             // shape.
             if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind
                 && resolved.unknown_calls.contains(&callee.range.start) {
+                return true;
+            }
+            // An associated call (`Point::new(..)`, `Type[..]::new(..)`): the
+            // typed postfix layer owns instance construction, arity, and the
+            // pinned associated-function diagnostics; the lowering delegates
+            // the whole call.
+            if matches!(&callee.kind, ExpressionKind::Qualified { .. }) {
                 return true;
             }
             if let ExpressionKind::Field { base, name } = &callee.kind {
@@ -3804,6 +3811,19 @@ impl<'a> Parser<'a> {
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
             ExpressionKind::Call { callee, arguments } => {
+                // An associated call (`Point::new(1)`): the typed postfix layer
+                // builds the instance and owns the pinned diagnostics. Bounded
+                // by the following operator, like a chained method receiver.
+                if let ExpressionKind::Qualified { .. } = &callee.kind {
+                    let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                    let min = self.tokens.get(end)
+                        .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
+                        .map_or(0, |(left, _)| left + 1);
+                    self.seek_scalar_offset(expression.range.start);
+                    let parsed = self.expression(min, true)?;
+                    self.seek_scalar_offset(expression.range.end);
+                    return Ok(parsed);
+                }
                 if let ExpressionKind::Field { base, name: method_name } = &callee.kind {
                     // A method on a temporary or chained result
                     // (`start.shifted(1, 2).shifted(0, -6)`): the typed postfix
