@@ -1,0 +1,72 @@
+types methods.ae
+item spellings:
+#0 Doc
+  field name -> string
+  field note -> string
+#4 Shape
+  variant-payload Circle -> i64
+  variant-payload Box -> string
+fn #2 rename
+  params:
+    to: string
+  return: i64
+  locals:
+    #9 self = &mut  #0
+    #10 to = string
+  expressions:
+    120..122 deferred
+    139..142 deferred
+    139..153 deferred
+    143..147 deferred
+    143..152 deferred
+fn #3 static_name
+  params: none
+  return: string
+  locals: none
+  expressions:
+    209..214 deferred
+fn #7 area
+  params:
+    shape: #4
+  return: i64
+  locals:
+    #11 shape = #4
+    #12 radius = i64
+    #13 label = string
+  expressions:
+    316..321 deferred
+    366..372 deferred
+    366..381 deferred
+    375..381 deferred
+    423..426 deferred
+    423..433 deferred
+    427..432 deferred
+fn #8 main
+  params: none
+  return: (none)
+  locals:
+    #14 d = #0
+  expressions:
+    470..473 deferred
+    470..505 deferred
+    482..489 deferred
+    497..503 deferred
+    517..518 deferred
+    517..525 deferred
+    517..533 deferred
+    526..532 deferred
+    546..549 deferred
+    546..562 deferred
+    546..564 deferred
+    577..581 deferred
+    577..599 deferred
+    582..587 deferred
+    582..595 deferred
+    582..598 deferred
+    596..597 checked i64
+    612..616 deferred
+    612..636 deferred
+    617..622 deferred
+    617..627 deferred
+    617..635 deferred
+    628..634 deferred

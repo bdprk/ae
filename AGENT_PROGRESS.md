@@ -335,3 +335,5 @@
 
 - 2026-11-24 04:35 (+08:00): **P1.2 slice 1: `crates/ae-ty` exists and owns the operator rules.** `Scalar`, `OperatorError`, `prefix`, `infix`, `valid_array_index` and `scalar_compound_assignment` moved out of `ae-resolve::typecheck` into the new `ae-ty::op`; `ae-resolve` re-exports the crate as `typecheck` so resolver/LSP paths and snapshots keep one source, and `ae-compiler` imports `ae_ty::` directly. The workspace membership and lockfile carry the new crate. Evidence: Windows suite 522/0, clippy `-D warnings`.
 
+- 2026-11-24 05:05 (+08:00): **P1.2 slice 2: `ae emit-types` with pinned snapshots.** `crates/ae-resolve/src/dump_types.rs` dumps item spellings, function parameter/return spellings, local inferred shapes (or `deferred`) and every recorded expression fact (checked/rejected/deferred) in range order; `ae emit-types` exposes it and `tests/types` pins four fixtures (calls, methods, shadowing locals, and a rejected-program fixture with boolean ordering plus mixed i64/f64 arithmetic). Evidence: snapshot suite 5/5, clippy `-D warnings`.
+

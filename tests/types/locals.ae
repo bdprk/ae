@@ -1,0 +1,16 @@
+fn total(items: i64, bonus: i64) -> i64 {
+    var sum = items + bonus;
+    if sum > 10 {
+        let label = "big";
+        print(label);
+    }
+    let label = "small";
+    for i in 0..3 {
+        sum += i;
+    }
+    return sum;
+}
+
+fn main() {
+    print(total(7, 5));
+}

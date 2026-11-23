@@ -33,6 +33,7 @@
 
 #![allow(clippy::result_large_err)]
 pub mod dump;
+pub mod dump_types;
 pub mod imports;
 pub mod module;
 pub mod resolve;

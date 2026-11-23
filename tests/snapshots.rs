@@ -120,6 +120,27 @@ fn run_snapshots() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// `tests/types/*.ae` — `ae emit-types`; expected dump in `*.types`. The dump
+/// is the resolver's type facts (signatures, item spellings, local shapes and
+/// every checked/deferred/rejected expression), so it is the P1.2 baseline a
+/// later unified interner must keep byte-identical.
+#[test]
+fn types_snapshots() {
+    let mut failures = Vec::new();
+    for case in cases("types") {
+        let out = Command::new(env!("CARGO_BIN_EXE_ae")).arg("emit-types").arg(&case).output().unwrap();
+        if !out.status.success() {
+            failures.push(format!("{}: emit-types failed: {}", case.display(), String::from_utf8_lossy(&out.stderr)));
+            continue;
+        }
+        if !out.stderr.is_empty() {
+            failures.push(format!("{}: emit-types wrote stderr: {}", case.display(), String::from_utf8_lossy(&out.stderr)));
+        }
+        compare(&case, "types", &normalise(&out.stdout, case.parent().unwrap()), &mut failures, bless());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// `tests/resolve/*.ae` — `ae emit-resolve`; expected dump in `*.resolve`.
 /// The resolver is its own pipeline stage (ADR-0224 R3b), so unlike the ui
 /// family a case may carry diagnostics inside its dump: the comparison is

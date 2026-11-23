@@ -1,0 +1,37 @@
+types locals.ae
+item spellings: none
+fn #0 total
+  params:
+    items: i64
+    bonus: i64
+  return: i64
+  locals:
+    #2 items = i64
+    #3 bonus = i64
+    #4 sum = i64
+    #5 label = string
+    #6 label = string
+    #7 i = i64
+  expressions:
+    56..61 checked i64
+    56..69 checked i64
+    64..69 checked i64
+    78..81 checked i64
+    78..86 checked bool
+    84..86 checked i64
+    109..114 deferred
+    130..135 deferred
+    160..167 deferred
+    182..183 checked i64
+    185..186 checked i64
+    204..205 deferred
+    224..227 checked i64
+fn #1 main
+  params: none
+  return: (none)
+  locals: none
+  expressions:
+    254..259 deferred
+    254..265 deferred
+    260..261 checked i64
+    263..264 checked i64
