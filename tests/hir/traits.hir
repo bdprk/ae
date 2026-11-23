@@ -1,0 +1,42 @@
+hir traits.ae
+item #0 trait Shape 0..41
+item #1 struct Square 43..75
+item #2 impl Shape 77..173
+item #3 function area 105..171
+  params:
+    self: 113..117
+  return: 122..125
+  body: 126..171
+    stmt #4 return 136..165
+      expr #5 binary 143..164
+        expr #6 field 143..152
+          expr #7 atom 143..147
+        expr #8 field 155..164
+          expr #9 atom 155..159
+      statements: none
+item #10 function make 175..241
+  params:
+    side: 183..187
+  return: 197..203
+  body: 204..241
+    stmt #11 return 210..239
+      expr #12 struct 217..238
+        expr #13 atom 217..223
+        expr #14 atom 232..236
+      statements: none
+item #15 function main 243..308
+  params: none
+  return: (none)
+  body: 253..308
+    stmt #16 binding 259..280
+      expr #17 call 272..279
+        expr #18 atom 272..276
+        expr #19 atom 277..278
+      statements: none
+    stmt #20 print 285..306
+      expr #21 call 291..304
+        expr #22 field 291..302
+          expr #23 atom 291..297
+      statements: none
+opaque bodies:
+  Shape 12..41

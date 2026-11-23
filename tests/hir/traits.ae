@@ -1,0 +1,22 @@
+trait Shape {
+    fn area(self) -> i64;
+}
+
+struct Square {
+    side: i64,
+}
+
+impl Shape for Square {
+    fn area(self) -> i64 {
+        return self.side * self.side;
+    }
+}
+
+fn make(side: i64) -> Square {
+    return Square { side: side };
+}
+
+fn main() {
+    let square = make(3);
+    print(square.area());
+}

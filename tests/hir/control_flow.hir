@@ -1,0 +1,54 @@
+hir control_flow.ae
+item #0 enum Opt 271..300
+item #1 function wrong_condition 302..382
+  params: none
+  return: 326..329
+  body: 330..382
+    stmt #2 if 336..366
+      expr #3 atom 339..340
+      stmt #4 return 351..360
+        expr #5 atom 358..359
+        statements: none
+    stmt #6 return 371..380
+      expr #7 atom 378..379
+      statements: none
+item #8 function wrong_while 384..468
+  params: none
+  return: 404..407
+  body: 408..468
+    stmt #9 while 414..452
+      expr #10 atom 420..426
+      stmt #11 return 437..446
+        expr #12 atom 444..445
+        statements: none
+    stmt #13 return 457..466
+      expr #14 atom 464..465
+      statements: none
+item #15 function wrong_return 470..515
+  params: none
+  return: 491..497
+  body: 498..515
+    stmt #16 return 504..513
+      expr #17 atom 511..512
+      statements: none
+item #18 function missing_arm 517..613
+  params:
+    v: 532..533
+  return: 548..551
+  body: 552..613
+    stmt #19 match 558..611
+      expr #20 atom 564..565
+      pat #21 variant 576..588
+        pat #22 binding 586..587
+      stmt #23 return 594..603
+        expr #24 atom 601..602
+        statements: none
+item #25 function main 615..658
+  params: none
+  return: (none)
+  body: 625..658
+    stmt #26 print 631..656
+      expr #27 call 637..654
+        expr #28 atom 637..652
+      statements: none
+opaque bodies: none

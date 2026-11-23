@@ -1,0 +1,72 @@
+hir calls.ae
+item #0 function apply 0..109
+  params:
+    value: 9..14
+  return: 24..27
+  body: 28..109
+    stmt #1 binding 34..81
+      expr #2 closure 47..80
+      statements: none
+    stmt #3 return 86..107
+      expr #4 call 93..106
+        expr #5 atom 93..99
+        expr #6 atom 100..105
+      statements: none
+  closure #11 63..80 conflict=no
+    stmt #7 return 65..78
+      expr #8 binary 72..77
+        expr #9 atom 72..73
+        expr #10 atom 76..77
+      statements: none
+item #12 function bump 111..207
+  params:
+    pointer: 119..126
+  return: 141..144
+  body: 145..207
+    stmt #13 unsafe 151..205
+      stmt #14 pointer-store 168..181
+        expr #15 atom 179..180
+        statements: none
+      stmt #16 return 190..199
+        expr #17 atom 197..198
+        statements: none
+item #18 function main 209..421
+  params: none
+  return: (none)
+  body: 219..421
+    stmt #19 binding 225..239
+      expr #20 atom 237..238
+      statements: none
+    stmt #21 binding 244..285
+      expr #22 call 256..284
+        expr #23 atom 256..260
+        expr #24 address-cast 261..283
+      statements: none
+    stmt #25 print 290..303
+      expr #26 atom 296..301
+      statements: none
+    stmt #27 print 308..321
+      expr #28 atom 314..319
+      statements: none
+    stmt #29 print 326..343
+      expr #30 call 332..341
+        expr #31 atom 332..337
+        expr #32 atom 338..340
+      statements: none
+    stmt #33 binding 348..372
+      expr #34 vector 362..371
+        expr #35 atom 366..367
+        expr #36 atom 369..370
+      statements: none
+    stmt #37 expr 377..394
+      expr #38 call 377..393
+        expr #39 atom 377..381
+        expr #40 atom 382..389
+        expr #41 atom 391..392
+      statements: none
+    stmt #42 print 399..419
+      expr #43 call 405..417
+        expr #44 atom 405..408
+        expr #45 atom 409..416
+      statements: none
+opaque bodies: none
