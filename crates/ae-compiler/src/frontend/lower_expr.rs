@@ -323,6 +323,17 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(expression.range.end);
                         return Ok(parsed);
                     }
+                    // A method on a temporary whose receiver is taken by
+                    // value (`Counter::starting(1, 2).value()`): the
+                    // associated call's return type resolves without lowering,
+                    // so the chain is built here before any side effect. A
+                    // borrowed receiver on a temporary, or any shape the
+                    // precompute cannot answer, keeps the typed delegation
+                    // below.
+                    if !matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                        && let Some((value, ty)) = self.lower_shared_chain_call(expression, base, method_name, arguments, slots)? {
+                            return Ok((value, ty));
+                        }
                     // A method on a temporary or chained result
                     // (`start.shifted(1, 2).shifted(0, -6)`): the typed postfix
                     // layer owns the receiver semantics and the diagnostics;
@@ -880,6 +891,99 @@ impl<'a> Parser<'a> {
         })
     }
 
+
+    /// A method call on a temporary whose receiver is a by-value `self`
+    /// (`Counter::starting(1, 2).value()`): the receiver's type comes from the
+    /// associated call's declared return, the method resolves from the
+    /// inherent impl table, and the receiver is passed as `Argument::Value`
+    /// exactly like the typed postfix layer moves a temporary into a by-value
+    /// method. `None` means the shape is not one of these (a borrowed
+    /// receiver, an unknown method, another root): the caller keeps the typed
+    /// delegation, and no lowering side effect has happened.
+    pub(super) fn lower_shared_chain_call(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        base: &ae_syntax::expression::Expression,
+        method: &str,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
+        let Some(receiver_ty) = self.chain_return_type(base) else {
+            return Ok(None);
+        };
+        let Some((signature, receiver, _method_receiver_ty)) = self.resolve_inherent_method(method, receiver_ty) else {
+            return Ok(None);
+        };
+        if !matches!(receiver, Some(ty) if ty == receiver_ty) {
+            return Ok(None);
+        }
+        let ret = signature.ret;
+        let params = signature.params[1..].to_vec();
+        let mut nodes_left = 128;
+        let mut effects = SharedExpressionEffects::default();
+        let Some(rest) = self.lower_shared_call_arguments(arguments, &params, 64, &mut nodes_left, &mut effects) else {
+            return Ok(None);
+        };
+        let (receiver_value, actual) = self.lower_scalar_body_expression(base, slots)?;
+        if actual != receiver_ty {
+            return Ok(None);
+        }
+        self.commit_shared_effects(effects);
+        let mut args = Vec::with_capacity(rest.len() + 1);
+        args.push(Argument::Value(receiver_value));
+        args.extend(rest);
+        self.seek_scalar_offset(expression.range.end);
+        Ok(Some((Expr::Call(signature.id, args, ret), ret)))
+    }
+
+    /// The declared result type of a call chain, without lowering it:
+    /// `Type::method(...)` on a plain struct or enum answers from the inherent
+    /// impl entry when the entry is receiver-less and the arity matches; a
+    /// by-value method on such a chain descends recursively. Only shapes whose
+    /// evaluation the chain helper can then repeat are admitted.
+    fn chain_return_type(&self, base: &ae_syntax::expression::Expression) -> Option<Type> {
+        use ae_syntax::expression::ExpressionKind;
+        match &base.kind {
+            ExpressionKind::Atom(Kind::Ident(name)) => self.names.get(name).map(|&(_, _, ty)| ty),
+            ExpressionKind::Call { callee, arguments } => match &callee.kind {
+                ExpressionKind::Qualified { base: target, name: method } => {
+                    let type_name = match &target.kind {
+                        ExpressionKind::Atom(Kind::Ident(name)) => {
+                            if name == "Self" {
+                                match self.impl_self {
+                                    Some(Type::Struct(sid)) => self.structs[sid].name.clone(),
+                                    Some(Type::Enum(name, _)) => name.to_owned(),
+                                    _ => return None,
+                                }
+                            } else {
+                                name.clone()
+                            }
+                        }
+                        _ => return None,
+                    };
+                    let key = format!("{type_name}#{method}");
+                    let def = self.generics.inherent.get(&key)?;
+                    if def.receiver.is_some() || arguments.len() != def.signature.params.len() {
+                        return None;
+                    }
+                    Some(def.signature.ret)
+                }
+                ExpressionKind::Field { base: inner, name: method } => {
+                    let inner_ty = self.chain_return_type(inner)?;
+                    let (signature, receiver, _) = self.resolve_inherent_method(method, inner_ty)?;
+                    if !matches!(receiver, Some(ty) if ty == inner_ty) {
+                        return None;
+                    }
+                    if arguments.len() + 1 != signature.params.len() {
+                        return None;
+                    }
+                    Some(signature.ret)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 
     /// `tokenize(text, sep)` from the shared nodes. Only the shapes the
     /// typed route accepts without further diagnostics (a string variable or
