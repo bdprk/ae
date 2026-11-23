@@ -573,6 +573,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                             // A closure literal passed to a method.
                             || matches!(&argument.kind, ExpressionKind::Closure { body, .. }
                                 if resolved.scalar_bodies.contains_key(&body.start))
+                            // A borrow argument: the typed postfix layer
+                            // classifies it (and rejects an alias), so the
+                            // lowering delegates a method call that carries one.
+                            || matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
                     });
             }
             // A call through a function-typed value: the binding names the
@@ -586,6 +590,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
                         || resolved.struct_field_views.contains(&argument.range.start)
                         || resolved.struct_field_handles.contains(&argument.range.start)
+                        // A borrow argument: the typed parser classifies it
+                        // (and rejects an alias), so the lowering delegates a
+                        // call that carries one whole.
+                        || matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
                 });
             }
             // A call on a closure value: the typed machinery reads the captures
@@ -4048,6 +4056,20 @@ impl<'a> Parser<'a> {
                     return Ok(parsed);
                 }
                 if let ExpressionKind::Field { base, name: method_name } = &callee.kind {
+                    // A borrow argument (`pair.combine(&mut pair)`): the typed
+                    // postfix layer classifies the argument and rejects an
+                    // alias of the receiver slot in one statement. Delegate the
+                    // whole call, bounded by the following operator.
+                    if arguments.iter().any(|argument| matches!(argument.kind, ExpressionKind::BorrowArgument { .. })) {
+                        let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                        let min = self.tokens.get(end)
+                            .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
+                            .map_or(0, |(left, _)| left + 1);
+                        self.seek_scalar_offset(expression.range.start);
+                        let parsed = self.expression(min, true)?;
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok(parsed);
+                    }
                     // A method on a temporary or chained result
                     // (`start.shifted(1, 2).shifted(0, -6)`): the typed postfix
                     // layer owns the receiver semantics and the diagnostics;
@@ -4265,6 +4287,20 @@ impl<'a> Parser<'a> {
                     // slot names the pointer the caller passed (ADR-0189).
                     if let Some(&(slot, _, Type::Fn(sig))) = self.names.get(name) {
                         let (params, ret) = self.ctx.fn_sig(sig);
+                        // A borrow argument needs the typed parser's classify
+                        // rules (an alias of the same slot in one statement is
+                        // rejected); delegate the whole call, bounded by the
+                        // following operator.
+                        if arguments.iter().any(|argument| matches!(argument.kind, ExpressionKind::BorrowArgument { .. })) {
+                            let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                            let min = self.tokens.get(end)
+                                .and_then(|token| ae_syntax::operator::infix_binding_power(&token.kind))
+                                .map_or(0, |(left, _)| left + 1);
+                            self.seek_scalar_offset(expression.range.start);
+                            let parsed = self.expression(min, true)?;
+                            self.seek_scalar_offset(expression.range.end);
+                            return Ok(parsed);
+                        }
                         let mut args = Vec::with_capacity(arguments.len());
                         for (index, argument) in arguments.iter().enumerate() {
                             self.seek_scalar_offset(argument.range.start);
