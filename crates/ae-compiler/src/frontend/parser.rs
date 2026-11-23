@@ -312,13 +312,19 @@ fn visit_expression_tree(expression: &ae_syntax::expression::Expression, visit: 
 fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolved: &ResolvedExpressions, supports_call: &impl Fn(&str, usize) -> bool, supports_field: &impl Fn(&ae_syntax::expression::Expression, ae_resolve::Role) -> bool) -> bool {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
-        ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => resolved.scalar_reads.get(&expression.range.start)
-            .is_some_and(|id| !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
+        // A name no local answers: the lowering reports the typed route's
+        // exact diagnostic (`unknown variable`, E0101, or the struct-name
+        // remedy) at the name itself, so the scan admits it. The marked
+        // shapes keep their exclusion rules.
+        ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => match resolved.scalar_reads.get(&expression.range.start) {
+            Some(id) => !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
                 && !resolved.owned_vectors.contains(id) && !resolved.owned_text_bindings.contains(id)
                 && !resolved.enum_bindings.contains(id)
                 && !resolved.token_cursor_definitions.contains(id)
                 || (resolved.owned_text_bindings.contains(id)
-                    && resolved.closure_capture_reads.contains(&expression.range.start))),
+                    && resolved.closure_capture_reads.contains(&expression.range.start)),
+            None => true,
+        },
         // A construction of a file-local struct: the drop-free scalar
         // shape lowers as a value, and the scalar-or-`string` shape owns its
         // string field values (a literal, a moved owned string, or an
@@ -454,6 +460,15 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 && (scalar_body_expression(right, resolved, supports_call, supports_field) || view(right))
         }
         ExpressionKind::Call { callee, arguments } => {
+            // A call whose name no declaration answers: the typed route errors
+            // at the callee before any argument or return-type question, and
+            // the lowering reproduces that E0207 — so the scan admits the
+            // shape.
+            if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind {
+                if resolved.unknown_calls.contains(&callee.range.start) {
+                    return true;
+                }
+            }
             if let ExpressionKind::Field { base, name } = &callee.kind {
                 if name == "deref" && arguments.is_empty()
                     && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
@@ -617,6 +632,19 @@ fn exit_status_operand(statement: &ae_syntax::statement::Statement) -> Option<&a
     let ExpressionKind::Call { callee, arguments } = &value.kind else { return None };
     let [status] = arguments.as_slice() else { return None };
     matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if name == "exit").then_some(status)
+}
+
+/// A bare statement that only calls a name no declaration answers
+/// (`missing_first();`): the typed route reports `unknown function 'name'`
+/// (E0207) while parsing the callee, before the statement-level "must end with
+/// '?'" check. The scan admits the shape so the lowering can reproduce it.
+fn unknown_call_statement<'a>(statement: &'a ae_syntax::statement::Statement, resolved: &ResolvedExpressions) -> Option<&'a ae_syntax::expression::Expression> {
+    use ae_syntax::expression::ExpressionKind;
+    use ae_syntax::statement::StatementKind;
+    let StatementKind::Expr { value, propagates: false } = &statement.kind else { return None };
+    let ExpressionKind::Call { callee, .. } = &value.kind else { return None };
+    let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind else { return None };
+    resolved.unknown_calls.contains(&callee.range.start).then_some(value)
 }
 
 fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_syntax::expression::Expression> {
@@ -865,6 +893,7 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         StatementKind::Expr { .. } => exit_status_operand(statement)
             .is_some_and(|status| scalar_body_expression(status, resolved, supports_call, supports_field))
             || propagation_call(statement).is_some()
+            || unknown_call_statement(statement, resolved).is_some()
             || is_task_yield(statement)
             || handle_statement_builtin(statement).is_some()
             || vector_statement_builtin(statement, resolved)
@@ -1351,6 +1380,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether any declaration answers `name` as a callable — a function
+    /// (file-local, imported, or an `extern`/`unsafe fn`), a generic function,
+    /// a trait method of a constrained parameter, or a reserved builtin.
+    /// Visibility and signature shape stay the call gate's business; this
+    /// answers identity alone, so an unknown call can reach the lowering's
+    /// `resolve_trait_call` (the typed route's E0207).
+    fn call_has_signature(&self, name: &str) -> bool {
+        if RESERVED.contains(&name) { return true; }
+        if self.functions.contains_key(name) || self.generics.fn_names.contains_key(name) { return true; }
+        self.trait_bounds.values().flatten().any(|&tid| {
+            self.generics.traits.get(tid).is_some_and(|defn| defn.methods.iter().any(|method| method.name == name))
+        })
+    }
+
     pub(super) fn adjudicate_deferred_conflicts(&mut self, function: &Function) -> Result<(), ae_span::Diagnostic> {
         let mut_sigs = borrowscope::mut_borrow_positions(self.functions, self.generics);
         let outcome = borrowscope::adjudicate_deferred(function, &self.deferred_write_conflicts, &mut_sigs);
@@ -1527,6 +1570,14 @@ impl<'a> Parser<'a> {
                 let Some(definition) = occurrence.target.and_then(|id| resolution.defs.get(id.0 as usize)) else {
                     if occurrence.role == ae_resolve::Role::Call {
                         expressions.unresolved_calls.insert(occurrence.range.start);
+                        // No declaration answers this spelling at all: the
+                        // lowering reports E0207 from the callee. A call whose
+                        // name *is* declared (an import, a trait method, a
+                        // builtin) keeps the shaped gates — only identity is
+                        // answered here.
+                        if !self.call_has_signature(&occurrence.name) {
+                            expressions.unknown_calls.insert(occurrence.range.start);
+                        }
                     }
                     continue;
                 };
@@ -3249,6 +3300,16 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(operand.range.start);
                 self.lower_propagating_call()?
             }
+            StatementKind::Expr { .. } if unknown_call_statement(statement, self.resolved_expressions()).is_some() => {
+                let StatementKind::Expr { value, .. } = &statement.kind else { unreachable!("unknown call statement") };
+                self.seek_scalar_offset(value.range.start);
+                // The name answers nowhere, so the callee resolution fails
+                // with the typed route's E0207 (the error precedes the
+                // statement-level "must end with '?'" check). If it somehow
+                // resolves, fall through to that statement rule.
+                let _ = self.lower_scalar_body_expression(value, slots)?;
+                return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+            }
             StatementKind::Expr { .. } => {
                 let status = exit_status_operand(statement).expect("resolved exit eligibility");
                 let (code, ty) = self.lower_scalar_body_expression(status, slots)?;
@@ -3536,9 +3597,18 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 // A name the resolver did not record is a diagnostic, never a
-                // panic: a permissive scan can hand us a malformed tree.
-                let def = self.resolved_expressions().scalar_reads.get(&expression.range.start).copied()
-                    .ok_or_else(|| self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
+                // panic: a permissive scan can hand us a malformed tree. The
+                // classification mirrors the typed ident arm: a struct name
+                // gets its construction remedy (the cursor sits after the
+                // name, where the typed arm's `fail` lands), everything else is
+                // an unknown variable at the name itself.
+                let Some(def) = self.resolved_expressions().scalar_reads.get(&expression.range.start).copied() else {
+                    if self.struct_names.contains_key(name) {
+                        self.seek_scalar_offset(expression.range.end);
+                        return Err(self.fail(&format!("'{name}' is a struct name; construct it with '{name} {{ ... }}'")));
+                    }
+                    return Err(self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101"));
+                };
                 let &(slot, ty) = slots.get(&def).ok_or_else(|| {
                     self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101")
                 })?;

@@ -705,6 +705,11 @@ struct ResolvedExpressions {
     local_bindings: HashMap<usize, std::ops::Range<usize>>,
     direct_calls: HashSet<usize>,
     unresolved_calls: HashSet<usize>,
+    /// Calls whose spelling no declaration answers (not a function, generic
+    /// function, trait method or reserved builtin). The scan admits them so
+    /// the lowering can report the typed route's `unknown function 'name'`
+    /// (E0207) at the callee, before any argument or return-type question.
+    unknown_calls: HashSet<usize>,
     specialization_arguments: HashMap<usize, std::sync::Arc<[std::ops::Range<usize>]>>,
     specialized_call_arguments: HashMap<usize, Rc<[ae_syntax::expression::Expression]>>,
     specialized_struct_fields: HashMap<usize, (usize, Rc<[ae_syntax::expression::FieldInitializer]>)>,
