@@ -29,6 +29,32 @@ impl<'a> Parser<'a> {
     /// parser instead of lowering the shared syntax node. With
     /// `AE_ROUTE_REPORT` set it names its token, so the dual-parser gap is
     /// measurable and a ratchet can drive it to zero.
+    /// The slot a resolved definition names, or the typed route's unknown-
+    /// variable diagnostic when a permissive scan handed the lowering an id
+    /// the current scope does not bind. A mutant gets a diagnostic, never a
+    /// panic.
+    pub(super) fn resolved_slot(
+        &self,
+        def: Option<&ae_resolve::DefId>,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+        offset: usize,
+        name: &str,
+    ) -> Result<(usize, Type), ae_span::Diagnostic> {
+        let def = self.resolved_definition(def, offset, name)?;
+        slots.get(&def).copied()
+            .ok_or_else(|| self.error_at(offset, &format!("unknown variable '{name}'")).with_code("E0101"))
+    }
+
+    pub(super) fn resolved_definition(
+        &self,
+        def: Option<&ae_resolve::DefId>,
+        offset: usize,
+        name: &str,
+    ) -> Result<ae_resolve::DefId, ae_span::Diagnostic> {
+        def.copied()
+            .ok_or_else(|| self.error_at(offset, &format!("unknown variable '{name}'")).with_code("E0101"))
+    }
+
     pub(super) fn fallback_expression(&mut self, min: u8, moving: bool) -> Result<(Expr, Type), ae_span::Diagnostic> {
         if std::env::var_os("AE_ROUTE_REPORT").is_some() {
             let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);

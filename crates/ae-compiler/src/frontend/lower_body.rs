@@ -536,7 +536,7 @@ impl<'a> Parser<'a> {
         for statement in body {
             if let StatementKind::Binding { name, name_range, .. } = &statement.kind {
                 self.names.remove(name);
-                slots.remove(&self.resolved_expressions().scalar_definitions[&name_range.start]);
+                if let Some(&def) = self.resolved_expressions().scalar_definitions.get(&name_range.start) { slots.remove(&def); }
             }
         }
         let depth = self.scopes.len();

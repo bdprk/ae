@@ -28,7 +28,9 @@ impl<'a> Parser<'a> {
                 }
                 let slot = self.next_var;
                 self.next_var += 1;
-                let def = self.resolved_expressions().scalar_definitions[&name_range.start];
+                let def = self.resolved_definition(
+                    self.resolved_expressions().scalar_definitions.get(&name_range.start),
+                    name_range.start, name)?;
                 let (statement, ty) = if let ae_syntax::expression::ExpressionKind::Propagate(operand) = &initializer.kind {
                     // `let x = foo()?;` binds the Ok payload and hands the
                     // failure on, mirroring the typed route's binding
@@ -145,11 +147,16 @@ impl<'a> Parser<'a> {
             }
             StatementKind::Assign { target, operator, value } => {
                 if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
-                    let def = self.resolved_expressions().scalar_writes[&base.range.start];
+                    let store_name = match &base.kind {
+                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) => name.as_str(),
+                        _ => "value",
+                    };
                     // The store writes through a `&mut` receiver or into an
                     // owned local struct; both reach the same FieldStore, and
                     // codegen picks `.`/`->` from the receiver type.
-                    let (slot, receiver) = slots[&def];
+                    let (slot, receiver) = self.resolved_slot(
+                        self.resolved_expressions().scalar_writes.get(&base.range.start),
+                        slots, base.range.start, store_name)?;
                     if let Type::StructRef(_) = receiver {
                         // A read-only struct borrow: neither the pointer nor
                         // anything behind it may be written. The typed route
@@ -224,7 +231,7 @@ impl<'a> Parser<'a> {
                             .or_else(|| self.resolved_expressions().scalar_reads.get(&base.range.start))
                             .copied()
                             .ok_or_else(|| self.error_at(base.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
-                        let (slot, ty) = slots[&def];
+                        let (slot, ty) = self.resolved_slot(Some(&def), slots, base.range.start, name)?;
                         (slot, ty, name.clone(), None)
                     } else if let ae_syntax::expression::ExpressionKind::Field { base: root, name: field } = &base.kind {
                         let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(root_name)) = &root.kind else {
@@ -351,8 +358,9 @@ impl<'a> Parser<'a> {
                 let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
                     unreachable!("scalar assignment eligibility");
                 };
-                let def = self.resolved_expressions().scalar_writes[&target.range.start];
-                let (slot, ty) = slots[&def];
+                let (slot, ty) = self.resolved_slot(
+                    self.resolved_expressions().scalar_writes.get(&target.range.start),
+                    slots, target.range.start, name)?;
                 if !self.names[name].1 {
                     self.seek_scalar_offset(target.range.start);
                     let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
@@ -418,8 +426,9 @@ impl<'a> Parser<'a> {
             StatementKind::PointerStore { pointer, pointer_range, value } => {
                 self.seek_scalar_offset(statement.range.start);
                 let (line, column) = self.position();
-                let def = self.resolved_expressions().scalar_writes[&pointer_range.start];
-                let (slot, ty) = slots[&def];
+                let (slot, ty) = self.resolved_slot(
+                    self.resolved_expressions().scalar_writes.get(&pointer_range.start),
+                    slots, pointer_range.start, pointer)?;
                 self.seek_scalar_offset(pointer_range.end);
                 let pointee = self.pointer_store_pointee(pointer, Some(ty), line)?;
                 let (lowered, actual) = self.lower_scalar_body_expression(value, slots)?;

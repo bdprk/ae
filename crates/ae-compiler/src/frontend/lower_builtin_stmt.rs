@@ -15,7 +15,7 @@ impl<'a> Parser<'a> {
         // the name); it consumes the arguments and the semicolon.
         if matches!(builtin, "task_spawn" | "scope_spawn" | "pool_spawn") {
             self.seek_scalar_offset(call.range.start);
-            return self.spawn_statement(builtin);
+            return self.spawn_statement(builtin, call, slots);
         }
         let ExpressionKind::Call { callee, arguments } = &call.kind else { unreachable!("handle builtin call") };
         self.seek_scalar_offset(callee.range.start);
@@ -91,8 +91,9 @@ impl<'a> Parser<'a> {
         let ExpressionKind::Atom(Kind::Ident(target)) = &arguments[0].kind else { unreachable!("vector builtin target") };
         self.seek_scalar_offset(callee.range.start);
         let (line, column) = self.position();
-        let def = resolved.scalar_reads[&arguments[0].range.start];
-        let (slot, ty) = slots[&def];
+        let (slot, ty) = self.resolved_slot(
+            resolved.scalar_reads.get(&arguments[0].range.start),
+            slots, arguments[0].range.start, target)?;
         if self.moved.contains(&slot) {
             return Err(moved_value_hint(self.binding_label(
                 self.fail(&format!("cannot use '{target}' because it was moved")).with_code("E0102"), slot)));

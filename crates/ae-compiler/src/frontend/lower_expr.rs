@@ -57,8 +57,9 @@ impl<'a> Parser<'a> {
             ExpressionKind::AddressCast { binding, binding_range, mutable, .. } => {
                 self.seek_scalar_offset(expression.range.start);
                 let position = self.position();
-                let def = self.resolved_expressions().scalar_reads[&binding_range.start];
-                let (slot, ty) = slots[&def];
+                let (slot, ty) = self.resolved_slot(
+                    self.resolved_expressions().scalar_reads.get(&binding_range.start),
+                    slots, binding_range.start, binding)?;
                 self.seek_scalar_offset(binding_range.start);
                 if self.moved.contains(&slot) {
                     return Err(moved_value_hint(self.binding_label(
@@ -747,8 +748,13 @@ impl<'a> Parser<'a> {
                 self.fallback_expression(0, false)?
             }
             ExpressionKind::Index { base, index } => {
-                let def = self.resolved_expressions().scalar_reads[&base.range.start];
-                let (slot, ty) = slots[&def];
+                let index_name = match &base.kind {
+                    ExpressionKind::Atom(Kind::Ident(name)) => name.as_str(),
+                    _ => "value",
+                };
+                let (slot, ty) = self.resolved_slot(
+                    self.resolved_expressions().scalar_reads.get(&base.range.start),
+                    slots, base.range.start, index_name)?;
                 self.seek_scalar_offset(base.range.end);
                 let (line, column) = self.position();
                 match ty {

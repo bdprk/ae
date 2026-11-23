@@ -29,7 +29,9 @@ impl<'a> Parser<'a> {
         self.next_var += 2;
         let label = self.next_label;
         self.next_label += 1;
-        let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
+        let def = self.resolved_definition(
+            self.resolved_expressions().scalar_definitions.get(&binding_range.start),
+            binding_range.start, binding)?;
         slots.insert(def, (slot, Type::Int));
         self.names.insert(binding.clone(), (slot, false, Type::Int));
         let base = self.scopes.len();
@@ -66,7 +68,9 @@ impl<'a> Parser<'a> {
         }
         let (iterable_value, ty) = self.lower_scalar_body_expression(iterable, slots)?;
         self.seek_scalar_offset(iterable.range.end);
-        let def = self.resolved_expressions().scalar_definitions[&binding_range.start];
+        let def = self.resolved_definition(
+            self.resolved_expressions().scalar_definitions.get(&binding_range.start),
+            binding_range.start, binding)?;
         let lower_body = |parser: &mut Self, slot, elem_ty| {
             slots.insert(def, (slot, elem_ty));
             let result = parser.lower_scalar_statements(body, slots);

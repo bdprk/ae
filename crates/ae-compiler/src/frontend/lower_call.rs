@@ -9,14 +9,28 @@ impl<'a> Parser<'a> {
     /// then the callable whose captures move into the task. Shared by the
     /// typed statement parser and the resolved route; the cursor sits on the
     /// name.
-    pub(super) fn spawn_statement(&mut self, name: &str) -> Result<Statement, ae_span::Diagnostic> {
+    pub(super) fn spawn_statement(
+        &mut self,
+        name: &str,
+        call: &ae_syntax::expression::Expression,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Statement, ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        let ExpressionKind::Call { arguments, .. } = &call.kind else {
+            unreachable!("the spawn statement form is a call")
+        };
+        self.seek_scalar_offset(call.range.start);
         let (line, col) = self.position();
         let at = self.tokens[self.pos].offset;
-        self.pos += 2;
-        let (ex, ex_ty) = match self.lower_shared_value(Some(Kind::Comma), false) {
-            Some(pair) => pair,
-            None => self.fallback_expression(0, false)?,
+        self.pos += 2; // the name and '('
+        let Some(first) = arguments.first() else {
+            self.seek_scalar_offset(call.range.end);
+            self.pos = self.pos.saturating_sub(1);
+            return Err(self.fail("expected expression").with_code("E0011"));
         };
+        self.seek_scalar_offset(first.range.start);
+        let (ex, ex_ty) = self.lower_scalar_body_expression(first, slots)?;
+        self.seek_scalar_offset(first.range.end);
         let expected_ty = match name {
             "task_spawn" => Type::Exec,
             "scope_spawn" => Type::TaskScope,
@@ -30,7 +44,7 @@ impl<'a> Parser<'a> {
         let (callable, callable_ty) = self.spawn_callable()?;
         self.take(Kind::RParen)?;
         self.take(Kind::Semi)?;
-        let mut slots = Vec::new();
+        let mut capture_slots = Vec::new();
         let cid = match (&callable, callable_ty) {
             (Expr::ClosureLit(cid), Type::Closure(_)) | (Expr::Variable(_, Type::Closure(cid), ..), _) => {
                 let def = self.generics.closures[*cid].clone();
@@ -54,7 +68,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("cannot spawn a task while one of the closure's captured variables is borrowed"));
                     }
                     if ty.owned() { self.moved.insert(*outer_id); }
-                    slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
+                    capture_slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
                 }
                 self.ctx.record_spawned(crate::frontend::closures::SpawnedThread::Closure {
                     fn_id: self.ctx.closure_fn_id(*cid),
@@ -67,9 +81,9 @@ impl<'a> Parser<'a> {
             _ => return Err(self.fail("task_spawn expects a zero-parameter closure returning i64")),
         };
         Ok(match name {
-            "task_spawn" => Statement::TaskSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
-            "scope_spawn" => Statement::ScopeSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
-            _ => Statement::PoolSpawn(Box::new(ex), slots, Box::new(callable), cid, line, col),
+            "task_spawn" => Statement::TaskSpawn(Box::new(ex), capture_slots, Box::new(callable), cid, line, col),
+            "scope_spawn" => Statement::ScopeSpawn(Box::new(ex), capture_slots, Box::new(callable), cid, line, col),
+            _ => Statement::PoolSpawn(Box::new(ex), capture_slots, Box::new(callable), cid, line, col),
         })
     }
 
