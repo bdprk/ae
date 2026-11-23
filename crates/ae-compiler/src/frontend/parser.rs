@@ -464,10 +464,9 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
             // at the callee before any argument or return-type question, and
             // the lowering reproduces that E0207 — so the scan admits the
             // shape.
-            if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind {
-                if resolved.unknown_calls.contains(&callee.range.start) {
-                    return true;
-                }
+            if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind
+                && resolved.unknown_calls.contains(&callee.range.start) {
+                return true;
             }
             if let ExpressionKind::Field { base, name } = &callee.kind {
                 if name == "deref" && arguments.is_empty()
