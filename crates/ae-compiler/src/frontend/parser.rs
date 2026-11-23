@@ -475,9 +475,18 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
             match &target.kind {
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start).is_some_and(|&id| {
-                        if resolved.array_definitions.contains(&id) || resolved.owned_vectors.contains(&id)
+                        if resolved.array_definitions.contains(&id)
                             || resolved.token_cursor_definitions.contains(&id) || resolved.enum_bindings.contains(&id)
                         {
+                            return false;
+                        }
+                        // Re-initializing an owned vector (after a move) takes
+                        // a fresh vector: a literal or a call returning one.
+                        if resolved.owned_vectors.contains(&id) {
+                            return matches!(value.kind, ae_syntax::expression::ExpressionKind::Vector(_))
+                                || scalar_body_expression(value, resolved, supports_call, supports_field);
+                        }
+                        if resolved.vector_definitions.contains(&id) {
                             return false;
                         }
                         if !resolved.owned_text_bindings.contains(&id) {
@@ -510,13 +519,23 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                         && resolved.scalar_writes.get(&base.range.start)
                             .or_else(|| resolved.scalar_reads.get(&base.range.start))
                             .is_some_and(|id| resolved.array_definitions.contains(id)
-                                || resolved.map_definitions.contains(id))
+                                || resolved.map_definitions.contains(id)
+                                // A vector store (`v[i] = x`): the lowering
+                                // checks mutability, the element type, and the
+                                // string move for a view/value store.
+                                || resolved.vector_definitions.contains(id))
                         // A map key is a string value or view; array indices
                         // are scalars.
                         && (scalar_body_expression(index, resolved, supports_call, supports_field)
                             || matches!(index.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
                             || resolved.struct_field_views.contains(&index.range.start))
-                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                        && (scalar_body_expression(value, resolved, supports_call, supports_field)
+                            || matches!(value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)))
+                            || resolved.struct_field_views.contains(&value.range.start)
+                            || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                                if name != "self" && resolved.scalar_reads.get(&value.range.start)
+                                    .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                        || resolved.owned_string_bindings.contains(id))))
                 }
                 ae_syntax::expression::ExpressionKind::Field { base, .. }
                     if *operator == Kind::Equal && matches!(&base.kind,
@@ -537,7 +556,8 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 // its Frees instead of releasing a value the caller owns.
                 || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                     if name != "self" && resolved.scalar_reads.get(&value.range.start)
-                        .is_some_and(|id| resolved.owned_struct_bindings.contains(id)))
+                        .is_some_and(|id| resolved.owned_struct_bindings.contains(id)
+                            || resolved.owned_vectors.contains(id)))
         }
         // A literal print is the typed route's `Printed::Text` (no expression
         // to lower); a string field prints as its view; everything else must
@@ -1790,6 +1810,7 @@ impl<'a> Parser<'a> {
             // inherent methods (receiver set) join the route like functions.
             || (self.impl_self.is_some() && self.subst.is_empty() && self.receiver.is_none())
             || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
+                || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF)
                 || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                 || (matches!(self.return_type, Type::Struct(_))
                     && (self.receiver == Some(self.return_type)
@@ -1975,7 +1996,7 @@ impl<'a> Parser<'a> {
                 };
                 visible && !signature.extern_c && !is_unsafe_fn(signature.id)
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
-                        || matches!(signature.ret, Type::String | Type::Enum(..))
+                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF)
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                         || owned_field_struct(signature.ret, self.structs))
                     && signature.params.iter().copied().all(|ty| {
@@ -2317,6 +2338,56 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
                         return Ok(Statement::MapPut(MapPlace::Var(slot, kind), key, stored, line, column));
+                    }
+                    if matches!(ty, Type::Vec | Type::StrVec | Type::VecF) {
+                        // A vector element store: overwriting a string element
+                        // releases the old one, so a live borrow blocks it
+                        // (the typed store's rule).
+                        if !self.names[name].1 {
+                            self.seek_scalar_offset(base.range.start);
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                            return Err(self.immutable_binding_error(diagnostic, slot));
+                        }
+                        if self.is_borrowed(slot) {
+                            self.seek_scalar_offset(base.range.end);
+                            return Err(self.fail(&format!("cannot modify '{name}' while it is borrowed")));
+                        }
+                        self.seek_scalar_offset(base.range.end);
+                        let (line, column) = self.position();
+                        let (element_index, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if index_ty != Type::Int {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        let (stored, value_ty) = self.lower_scalar_body_expression(value, slots)?;
+                        let expected = match ty {
+                            Type::StrVec => "string",
+                            Type::VecF => "f64",
+                            _ => "i64",
+                        };
+                        let matches_element = match ty {
+                            Type::StrVec => matches!(value_ty, Type::String | Type::StrView),
+                            Type::VecF => value_ty == Type::F64,
+                            _ => value_ty == Type::Int,
+                        };
+                        if !matches_element {
+                            self.seek_scalar_offset(value.range.end);
+                            return Err(self.fail(&format!("vector elements must be {expected}")));
+                        }
+                        // A value store moves an owned string into the slot;
+                        // a view store only borrows it.
+                        if value_ty.owned() {
+                            if let Expr::Variable(source, ..) = &stored {
+                                self.moved.insert(*source);
+                            }
+                        }
+                        self.seek_scalar_offset(value.range.end);
+                        self.take(Kind::Semi)?;
+                        return Ok(match ty {
+                            Type::StrVec => Statement::StrVecStore(slot, element_index, stored, line, column, value_ty == Type::StrView),
+                            Type::VecF => Statement::VecFStore(slot, element_index, stored, line, column),
+                            _ => Statement::VecStore(slot, element_index, stored, line, column),
+                        });
                     }
                     let Type::Array(len) = ty else {
                         unreachable!("resolved array store");
@@ -3303,6 +3374,26 @@ impl<'a> Parser<'a> {
                     }
                     _ => unreachable!("resolved array, borrowed or owned numeric/string vector binding"),
                 }
+            }
+            ExpressionKind::Vector(elements) => {
+                // A vector literal used as a value (`a = vec[9];`): the same
+                // construction the Declare arm builds.
+                self.seek_scalar_offset(expression.range.start);
+                let (line, column) = self.position();
+                let mut values = Vec::with_capacity(elements.len());
+                let mut element_type = None;
+                for (index, element) in elements.iter().enumerate() {
+                    if index >= 65536 {
+                        self.seek_scalar_offset(element.range.start);
+                        return Err(self.fail("vector element limit exceeded (65536)"));
+                    }
+                    let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
+                    self.seek_scalar_offset(element.range.end);
+                    element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
+                    values.push(value);
+                }
+                let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
+                (Expr::VecLit(values, ty, line, column), ty)
             }
             _ => unreachable!("scalar expression eligibility"),
         })

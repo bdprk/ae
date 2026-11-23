@@ -1765,6 +1765,22 @@ parity → 50k → WSL → commit.
   `lower_indexed_argument_list` requires the resolved
   `specialized_call_arguments` map — read the argument AST from the callee
   arm instead when the map is missing.
+
+### Slice 28 — owned vector returns and stores (landed)
+
+- `vec`/`vec[string]`/`vec[f64]` returns join the guard and `supports_call`;
+  `return v;` moves an owned vector out (drops trim its Frees); an Assign to
+  an owned vector target re-initializes it (literal or vector-returning
+  call), releasing the old one; `v[i] = x` lowers to
+  `VecStore`/`StrVecStore`/`VecFStore` with the typed rules.
+- A vector literal lowers as a value expression (`a = vec[9];`) — the
+  workspace test `vectors_move_through_functions_and_release` pinned the
+  `unreachable!` that this gap produced.
+- `examples/vectors.ae` legacy-free; coverage 217 → 214, files 82 → 80;
+  deny manifest 96.
+- Pitfall: an Assign statement's range ends past the `;` (no `take(Semi)`
+  needed), while a vector-store value's range ends before it — seek the
+  value's end before taking the semicolon.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and
