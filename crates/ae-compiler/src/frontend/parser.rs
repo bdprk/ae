@@ -907,7 +907,18 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                         && matches!(&base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) =>
                 {
                     supports_field(target, ae_resolve::Role::Write)
-                        && scalar_body_expression(value, resolved, supports_call, supports_field)
+                        && (scalar_body_expression(value, resolved, supports_call, supports_field)
+                            // An owned aggregate moves into the field
+                            // (`r.value = replacement`), like a struct literal
+                            // field: the lowering records the move.
+                            || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                                if name != "self" && resolved.scalar_reads.get(&value.range.start)
+                                    .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                        || resolved.owned_string_bindings.contains(id)
+                                        || resolved.owned_vectors.contains(id)
+                                        || resolved.owned_struct_bindings.contains(id)
+                                        || resolved.enum_bindings.contains(id)
+                                        || resolved.map_definitions.contains(id))))
                 }
                 _ => false,
             }
@@ -2285,10 +2296,11 @@ impl<'a> Parser<'a> {
                                         && let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                             if scalar_type(field_ty) {
                                                 expressions.struct_field_writes.insert(target.range.start);
-                                            } else if matches!(field_ty, Type::String) {
+                                            } else if matches!(field_ty, Type::String | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF) {
                                                 // An owned field store releases the
-                                                // old string and consumes the new
-                                                // one (the FieldStore codegen).
+                                                // old value and consumes the new one
+                                                // (the FieldStore codegen); containers
+                                                // release in place like strings.
                                                 expressions.owned_field_writes.insert(target.range.start);
                                             }
                                         }
@@ -2872,7 +2884,9 @@ impl<'a> Parser<'a> {
                 // reads stay scalar-only here and reach the scan through the
                 // view and read marks.
                 receiver_field_type(expression, ty, self.structs)
-                    .is_some_and(|field| scalar_type(field) || (role == ae_resolve::Role::Write && matches!(field, Type::String)))
+                    .is_some_and(|field| scalar_type(field)
+                        || (role == ae_resolve::Role::Write
+                            && matches!(field, Type::String | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF)))
             }
         };
         // Parameters owned by this body, minus capture slots (the closure
@@ -3131,6 +3145,13 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(value.range.start);
                     let (line, column) = self.position();
                     let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
+                    // An owned value moves into the field; the source slot is
+                    // forfeited, exactly like a struct literal field.
+                    if actual.owned()
+                        && let Expr::Variable(source, ..) = &value {
+                            self.check_variable_move(*source)?;
+                            self.moved.insert(*source);
+                        }
                     self.seek_scalar_offset(statement.range.end);
                     self.check_field_value_type(name, field, actual, None)?;
                     // `c.n += 5` stores `c.n + 5`: the typed route's FieldStore
