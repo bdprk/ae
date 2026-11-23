@@ -2696,12 +2696,11 @@ impl<'a> Parser<'a> {
             // The pure value builtins lower natively (lower_resolved_builtin);
             // every other reserved name keeps the typed body.
             if resolved_builtin(name) { return true; }
-            // A generic function joins the route only when the call spells
-            // its type arguments (`identity[i64](41)`); a bare call keeps the
-            // typed route's pinned "write its type arguments" diagnostic.
+            // A generic function: the spelled form (`identity[i64](41)`)
+            // instantiates through the bracketed arm, and a bare call reaches
+            // the lowering's own "write its type arguments" diagnostic.
             if self.generics.fn_names.contains_key(name) {
-                let index = self.tokens.partition_point(|token| token.offset < offset);
-                return self.tokens.get(index + 1).is_some_and(|token| token.kind == Kind::LBracket);
+                return true;
             }
             // A trait method of one of this function's constrained type
             // parameters: the instance's substitution picks the impl, so the
@@ -4263,6 +4262,12 @@ impl<'a> Parser<'a> {
                 };
                 let signature = match self.functions.get(name).cloned() {
                     Some(signature) => signature,
+                    // A bare call to a generic function: the type arguments are
+                    // mandatory (there is no inference), the typed route's
+                    // message.
+                    None if self.generics.fn_names.contains_key(name) => {
+                        return Err(self.error_at(callee.range.start, &format!("'{name}' is a generic function; write its type arguments, e.g. {name}[i64](...)")));
+                    }
                     // Not a plain function: a trait method of one of this
                     // instance's constrained parameters. The substitution picks
                     // the concrete impl, so the call stays monomorphized.

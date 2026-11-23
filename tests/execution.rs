@@ -8678,9 +8678,9 @@ fn resolver_agrees_with_the_compiler_on_accepted_programs() {
 #[test]
 fn deny_legacy_route_turns_fallbacks_into_diagnostics() {
     let routed = "struct S { a: i64, b: i64 }\nfn make(a: i64, b: i64) -> S { return S { a: a, b: b }; }\nfn main() { let s = make(1, 2); print(s.a + s.b); }\n";
-    // A bare generic call keeps the typed route's pinned "write its type
-    // arguments" diagnostic, so its body is still off the resolved route.
-    let legacy = "fn load[T](x: T) -> T { return x; }\nfn main() { print(load(1)); }\n";
+    // A closure that captures a local is still off the resolved route (its
+    // capture inference belongs to the typed machinery), so it keeps denying.
+    let legacy = "fn main() { let s = \"x\"; let f = || -> string { return s; }; print(f()); }\n";
     for (source, expect_ok) in [(routed, true), (legacy, false)] {
         let path = std::env::temp_dir().join(format!(
             "ae-deny-legacy-{}-{}.ae",
