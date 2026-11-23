@@ -96,6 +96,14 @@ fn publish_cache(entry: &Path, exe: &Path) {
         let _ = fs::remove_file(&staging);
         return;
     }
+    // The entry is an executable: `fs::write` creates it 0644, and a cache
+    // hit copies those permissions verbatim, so the bit is set before the
+    // rename publishes it. Windows has no executable bit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&staging, fs::Permissions::from_mode(0o755));
+    }
     let manifest = entry.join(format!("manifest.{}.tmp", std::process::id()));
     if fs::write(&manifest, format!("{} {}", bytes.len(), sha256::hex(&bytes))).is_err() {
         let _ = fs::remove_file(&staging);
@@ -273,6 +281,14 @@ fn build_c(c: &str, dir: &Path, release: bool, use_cache: bool) -> Result<PathBu
                     let started = Instant::now();
                     touch_used(&entry);
                     fs::copy(&cached, &exe).map_err(|e| format!("copying cached executable: {e}"))?;
+                    // `fs::copy` carries the entry's permissions; an entry
+                    // published before the executable bit was set would copy
+                    // 0644, so heal the destination before running it.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
+                    }
                     if timings_enabled() {
                         eprintln!("ae cache: hit");
                         eprintln!("ae timing: c_compile_and_link_ms={:.3} (cache hit)", started.elapsed().as_secs_f64() * 1000.0);
