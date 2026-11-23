@@ -202,11 +202,17 @@ impl Parser<'_> {
     // Use the outer declaration offsets to recover their resolved identities.
     fn parse_closure_body(&mut self, id: usize, body_start: usize, captures: &[(String, Type)]) -> Result<(Function, std::collections::HashSet<usize>, usize), ae_span::Diagnostic> {
         let capture_starts: Vec<_> = captures.iter().map(|(name, _)| {
-            self.names.get(name).and_then(|&(slot, _, _)| self.binding_ranges.get(&slot)).map(|range| range.start)
+            self.names.get(name).and_then(|&(slot, _, _)| {
+                self.binding_ranges.get(&slot).map(|range| range.start)
+                    // A nested closure capturing a capture: the middle
+                    // closure's hidden parameter has no name range, so its
+                    // origin is the binding it was captured from.
+                    .or_else(|| self.capture_origins.get(&slot).copied())
+            })
         }).collect();
         let mut sub = Parser {
             file: self.file.clone(), source: self.source, tokens: Rc::clone(&self.tokens), shared_source: Rc::clone(&self.shared_source), pos: body_start,
-            names: HashMap::new(), binding_ranges: HashMap::new(), resolved_expressions: Rc::clone(&self.resolved_expressions), next_var: 1, expression_depth: 0, expression_nodes: 0, block_depth: 0,
+            names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::clone(&self.resolved_expressions), next_var: 1, expression_depth: 0, expression_nodes: 0, block_depth: 0,
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
@@ -250,6 +256,10 @@ impl Parser<'_> {
             self.names.insert(name.clone(), (var_id, true, *ty));
             params.push((var_id, *ty));
             if let Some(start) = start {
+                // Remember where this hidden parameter was captured from, so
+                // a closure nested inside this body can resolve the same
+                // binding (its own capture_starts lookup walks this map).
+                self.capture_origins.insert(var_id, start);
                 resolved_captures.push((var_id, start));
             }
         }

@@ -1862,6 +1862,27 @@ parity → 50k → WSL → commit.
 - Pitfall: a shared-parser regression harness's "stays typed" samples must
   use constructs the route deliberately does not take (closure literals);
   when one starts routing, its parser-state residue shifts later assertions.
+
+### Slice 33 — closure literals and nested captures (landed)
+
+- A Binding whose initializer is a closure literal routes when its body was
+  collected; the lowering delegates the literal to the typed closure
+  machinery (`closure_literal`): both capture probes, the generated
+  function, and the body route through the same resolved pass. A call on a
+  closure binding delegates to the typed call-site rules (`closure_call`:
+  capture arguments first, then the visible ones).
+- Nested closures: `Parser.capture_origins` maps a hidden capture parameter
+  to the binding offset it was captured from, so an inner literal's parse
+  recovers the same def the outer body uses (`nested closure capturing a
+  capture` used to fall back with no reason).
+- Silent fallbacks removed: the slots-assembly `?` paths now print a
+  `AE_ROUTE_REASONS` line naming the slot/binding, and the guard's slot
+  clause names the slot and type.
+- `examples/closures.ae` and `tests/run/closures.ae` are fully
+  legacy-free; coverage 175 → 150, files 58 → 56; deny manifest 120.
+- Still typed: a closure literal as a call argument (`apply(|x| ..)`), the
+  spawn family (`spawn(|| ..)` / `task_spawn` / `scope_spawn` /
+  `pool_spawn`), and `wait`.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

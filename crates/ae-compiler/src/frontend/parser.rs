@@ -433,6 +433,21 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         || resolved.struct_field_handles.contains(&argument.range.start)
                 });
             }
+            // A call on a closure value: the typed machinery reads the captures
+            // at the call site; the scan admits the shape and the lowering
+            // validates the callee and the arguments.
+            if let ExpressionKind::Atom(Kind::Ident(_)) = &callee.kind {
+                if resolved.call_definitions.get(&callee.range.start)
+                    .is_some_and(|id| resolved.closure_bindings.contains(id))
+                {
+                    return arguments.iter().all(|argument| {
+                        scalar_body_expression(argument, resolved, supports_call, supports_field)
+                            || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
+                            || resolved.struct_field_views.contains(&argument.range.start)
+                            || resolved.struct_field_handles.contains(&argument.range.start)
+                    });
+                }
+            }
             // An explicit generic call: `identity[i64](41)`. The scan admits
             // the shape permissively; the lowering instantiates the function
             // and re-checks the substituted argument list.
@@ -554,6 +569,12 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     _ => iterator_constructor(initializer).is_some()
                         || resolved.enum_constructors.contains(&initializer.range.start)
                         || scalar_body_expression(initializer, resolved, supports_call, supports_field)
+                        // A closure literal whose body the resolved route
+                        // already collected: the lowering delegates the literal
+                        // to the closure machinery (capture inference and the
+                        // generated function).
+                        || matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Closure { body, .. }
+                            if resolved.scalar_bodies.contains_key(&body.start))
                         // `let copy = owned;` moves an owned value (the
                         // lowering marks the source moved; the view-after-
                         // last-use case defers through the move graph).
@@ -1566,6 +1587,9 @@ impl<'a> Parser<'a> {
                                 ExpressionKind::Atom(Kind::Text(_)) => {
                                     expressions.owned_text_bindings.insert(id);
                                 }
+                                ExpressionKind::Closure { .. } => {
+                                    expressions.closure_bindings.insert(id);
+                                }
                                 _ => match iterator_constructor(initializer) {
                                     Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
                                     Some(Type::StrVec) => {
@@ -2040,7 +2064,7 @@ impl<'a> Parser<'a> {
             // carries it in every `return`, so the callee releases what it
             // did not move out. A closure's owned string capture stays
             // typed: reading it would move the capture.
-            scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..) | Type::Fn(_))
+            let ok = scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
                 || (matches!(ty, Type::String) && !captured)
                 || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(super::ptr_pointee(id)))
                 || ty == Type::StrView
@@ -2054,7 +2078,15 @@ impl<'a> Parser<'a> {
                 // needs no exit drop: reads (and moving it back out) are
                 // the whole surface.
                 || owned_plain_struct(ty, self.structs)
-                || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)))
+                // A capture of a struct with owned fields is bound by value
+                // in the closure's generated function; the caller's move
+                // rules already made that capture a value.
+                || owned_field_struct(ty, self.structs)
+                || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)));
+            if !ok && std::env::var_os("AE_ROUTE_REASONS").is_some() {
+                eprintln!("route reason blocked function: guard slot '{name}' of type {}", ty.name());
+            }
+            ok
         });
         if !(subst_supported && receiver_supported && impl_body_supported && return_supported && slots_supported) {
             if std::env::var_os("AE_ROUTE_REASONS").is_some() {
@@ -2264,8 +2296,25 @@ impl<'a> Parser<'a> {
         let mut slots = HashMap::new();
         for &(slot, _, ty) in self.names.values() {
             let start = self.binding_ranges.get(&slot).map(|range| range.start)
-                .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
-            slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
+                .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)));
+            // These two lookups used to `?` out silently: a body whose slots
+            // cannot be mapped fell back with no explanation at all. Name the
+            // cause when the reason report is on.
+            let Some(start) = start else {
+                if std::env::var_os("AE_ROUTE_REASONS").is_some() {
+                    eprintln!("route reason blocked function at {}: slot {slot} ({}) has no binding range",
+                        self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), ty.name());
+                }
+                return None;
+            };
+            let Some(&def) = resolved.scalar_definitions.get(&start) else {
+                if std::env::var_os("AE_ROUTE_REASONS").is_some() {
+                    eprintln!("route reason blocked function at {}: slot {slot} ({}) start {start} is not an indexed binding",
+                        self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0), ty.name());
+                }
+                return None;
+            };
+            slots.insert(def, (slot, ty));
         }
         // Method-call verdicts, precomputed with `&self` so the gate closure below
 // captures only this map. A receiver is a parameter/`self` (known through
@@ -2497,7 +2546,16 @@ impl<'a> Parser<'a> {
                     let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
-                    let (value, ty) = if iterator_constructor(initializer).is_some()
+                    let (value, ty) = if let ae_syntax::expression::ExpressionKind::Closure { .. } = &initializer.kind {
+                        // A closure literal: the typed closure machinery owns
+                        // capture inference, the generated function, and the
+                        // body route (it lowers the body through this same
+                        // resolved pass).
+                        self.seek_scalar_offset(initializer.range.start);
+                        let literal = self.closure_literal()?;
+                        self.seek_scalar_offset(initializer.range.end);
+                        literal
+                    } else if iterator_constructor(initializer).is_some()
                         || self.resolved_expressions().enum_constructors.contains(&initializer.range.start)
                     {
                         self.seek_scalar_offset(initializer.range.start);
@@ -3461,6 +3519,15 @@ impl<'a> Parser<'a> {
                 if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
                     if resolved_builtin(name) {
                         return self.lower_resolved_builtin(name, expression, callee, arguments, slots);
+                    }
+                    // A call on a closure value: the typed machinery reads the
+                    // captured slots at the call site (the leading arguments)
+                    // and parses the visible argument list.
+                    if matches!(self.names.get(name), Some(&(_, _, Type::Closure(_)))) {
+                        self.seek_scalar_offset(callee.range.end);
+                        let (value, ty) = self.closure_call(name, callee.range.start)?;
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((value, ty));
                     }
                     // A call through a function-typed value: the binding's
                     // slot names the pointer the caller passed (ADR-0189).
@@ -6653,7 +6720,7 @@ mod tests {
         let source = format!("{source} fn local_pointer() -> i64 {{ var pointee = 1; let local_ptr = &mut pointee as *mut i64; unsafe {{ *local_ptr = 7; return local_ptr.deref(); }} }}");
         let source = format!("{source} fn vector_sum(vector_arg: &vec[f64]) -> f64 {{ var total = 0.0; for item in vector_arg {{ total += item; }} return total; }}");
         let source = format!("{source} fn owned_loop() -> i64 {{ let empty_vec = vec[]; for unused in empty_vec {{ print(unused); }} return 0; }}");
-        let source = format!("{source} fn moved_vec() -> i64 {{ let take_vec = || -> i64 {{ return 0; }}; let moved = take_vec; return 0; }}");
+        let source = format!("{source} fn moved_vec() -> i64 {{ spawn(|| -> i64 {{ return 0; }}); return 0; }}");
         let source = format!("{source} fn print_words(words: &vec[string]) -> i64 {{ for word in words {{ print(word); }} return 0; }}");
         let source = format!("{source} fn scan_words() -> i64 {{ let text_base = \"a b\"; let cursor = tokenize(text_base, \" \"); for token in cursor {{ print(token); }} return 0; }}");
         let source = format!("{source} fn local_words() -> i64 {{ let pieces = split(\"a,b\", \",\"); for piece in pieces {{ print(piece); }} return 0; }}");
@@ -6801,10 +6868,10 @@ mod tests {
         assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::VecLit(values, Type::Vec, ..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
             if values.is_empty() && owned.contains(&(*vector, Type::Vec))
                 && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int))) if source == vector)));
-        parser.seek_scalar_offset(source.find("{ let take_vec =").unwrap());
-        // The binding holds a closure literal, which the resolved route does
-        // not take yet; the negative check also pins that a fallback leaves
-        // no move state behind.
+        parser.seek_scalar_offset(source.find("{ spawn(").unwrap());
+        // A spawn statement still keeps the body on the typed route; the
+        // negative check also pins that a fallback leaves no move state
+        // behind.
         assert!(parser.lower_resolved_scalar_body().is_none());
         let start = source.find("words: &vec[string]").unwrap();
         parser.names.insert("words".into(), (88, false, Type::StrVecRef));
