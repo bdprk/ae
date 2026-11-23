@@ -112,7 +112,11 @@ fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
         && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
-            || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)
+            // Every container the generated release routine knows (it frees a
+            // vec/strvec/f64vec/map field in place, `release_member`): the
+            // construction moves the value in and the exit free releases it.
+            || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex
+                | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF)
             // A nested struct carries its own release routine; the generated
             // release recurses into every struct field (c_output).
             || owned_plain_struct(*ty, structs)
@@ -617,6 +621,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                                     || resolved.owned_struct_bindings.contains(id)))
                         || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }));
             }
+            // The argument list below needs the callee's identity; a `matches!`
+            // guard's bindings do not escape the macro, so the builtin answer is
+            // taken once here.
+            let callee_builtin = matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if resolved_builtin(name));
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
                     || resolved.unresolved_calls.contains(&callee.range.start))
@@ -659,6 +667,10 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                     || matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
                     // An enum construction passed directly (`f(Shape::Circle(3))`).
                     || resolved.enum_constructors.contains(&argument.range.start)
+                    // A builtin over a struct field (`map_inc(b.counts, ..)`,
+                    // `len(b.counts)`): the builtin's own arm type-checks the
+                    // field, so the scan admits the read permissively.
+                    || (callee_builtin && matches!(argument.kind, ExpressionKind::Field { .. }))
                     // A closure literal argument (`apply(|x: i64| -> i64
                     // {..}, 21)`) whose body the route collected.
                     || matches!(&argument.kind, ExpressionKind::Closure { body, .. }
