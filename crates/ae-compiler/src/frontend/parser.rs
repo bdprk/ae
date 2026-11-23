@@ -510,8 +510,15 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         .is_some_and(|id| resolved.owned_text_bindings.contains(id)
                             || resolved.owned_string_bindings.contains(id)))
             };
-            (scalar_body_expression(left, resolved, supports_call, supports_field) || view(left))
-                && (scalar_body_expression(right, resolved, supports_call, supports_field) || view(right))
+            // A known local operand is admitted permissively: the infix
+            // lowering type-checks it (a vector in `v + 1.0` reports the typed
+            // route's mixed i64/f64 arithmetic, a struct its own error).
+            let local_read = |expression: &ae_syntax::expression::Expression| {
+                matches!(&expression.kind, ExpressionKind::Atom(Kind::Ident(name))
+                    if name != "self" && resolved.scalar_reads.contains_key(&expression.range.start))
+            };
+            (scalar_body_expression(left, resolved, supports_call, supports_field) || view(left) || local_read(left))
+                && (scalar_body_expression(right, resolved, supports_call, supports_field) || view(right) || local_read(right))
         }
         ExpressionKind::Call { callee, arguments } => {
             // A call whose name no declaration answers: the typed route errors
@@ -894,15 +901,21 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                 ae_syntax::expression::ExpressionKind::Index { base, index }
                     if *operator == Kind::Equal =>
                 {
-                    matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                        && resolved.scalar_writes.get(&base.range.start)
-                            .or_else(|| resolved.scalar_reads.get(&base.range.start))
-                            .is_some_and(|id| resolved.array_definitions.contains(id)
-                                || resolved.map_definitions.contains(id)
-                                // A vector store (`v[i] = x`): the lowering
-                                // checks mutability, the element type, and the
-                                // string move for a view/value store.
-                                || resolved.vector_definitions.contains(id))
+                    // A named container, or a field of a name (`p.table[k]`):
+                    // the field's declared type comes from the struct table, so
+                    // a field base needs no container mark on the root.
+                    let field_base = matches!(&base.kind, ae_syntax::expression::ExpressionKind::Field { base: inner, .. }
+                        if matches!(inner.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))));
+                    (matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) || field_base)
+                        && (field_base
+                            || resolved.scalar_writes.get(&base.range.start)
+                                .or_else(|| resolved.scalar_reads.get(&base.range.start))
+                                .is_some_and(|id| resolved.array_definitions.contains(id)
+                                    || resolved.map_definitions.contains(id)
+                                    // A vector store (`v[i] = x`): the lowering
+                                    // checks mutability, the element type, and the
+                                    // string move for a view/value store.
+                                    || resolved.vector_definitions.contains(id)))
                         // A map key is a string value or view; array indices
                         // are scalars.
                         && (scalar_body_expression(index, resolved, supports_call, supports_field)
@@ -3194,28 +3207,45 @@ impl<'a> Parser<'a> {
                     // confirmed a resolved array binding and the plain
                     // operator. The checks mirror the typed store: the
                     // binding must be mutable (E0103), the index and the
-                    // element must be i64 (E0201 for the index).
-                    let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
+                    // element must be i64 (E0201 for the index). A container
+                    // held in a struct field (`p.table[k] = v`) resolves the
+                    // field's declared type and keeps the field as the place.
+                    let (slot, ty, root_name, field_place) = if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind {
+                        let def = self.resolved_expressions().scalar_writes.get(&base.range.start)
+                            .or_else(|| self.resolved_expressions().scalar_reads.get(&base.range.start))
+                            .copied()
+                            .ok_or_else(|| self.error_at(base.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
+                        let (slot, ty) = slots[&def];
+                        (slot, ty, name.clone(), None)
+                    } else if let ae_syntax::expression::ExpressionKind::Field { base: root, name: field } = &base.kind {
+                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(root_name)) = &root.kind else {
+                            return Err(self.error_at(base.range.start, "an index store needs a named container"));
+                        };
+                        let &(slot, _, struct_ty) = self.names.get(root_name)
+                            .ok_or_else(|| self.error_at(root.range.start, &format!("unknown variable '{root_name}'")).with_code("E0101"))?;
+                        let sid = match struct_ty {
+                            Type::Struct(sid) | Type::StructMut(sid) => sid,
+                            _ => return Err(self.error_at(root.range.start, "only a named struct field holds a container here")),
+                        };
+                        let field_ty = field_ty_in(sid, field, self.structs)
+                            .ok_or_else(|| self.error_at(base.range.start, &format!("struct '{}' has no field '{field}'", self.structs[sid].name)))?;
+                        (slot, field_ty, root_name.clone(), Some(field.clone()))
+                    } else {
                         return Err(self.error_at(base.range.start, "an index store needs a named container"));
                     };
-                    let def = self.resolved_expressions().scalar_writes.get(&base.range.start)
-                        .or_else(|| self.resolved_expressions().scalar_reads.get(&base.range.start))
-                        .copied()
-                        .ok_or_else(|| self.error_at(base.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
-                    let (slot, ty) = slots[&def];
                     // `m[key] = v` inserts or overwrites in a map: the key is
                     // copied by the runtime, the value must match the map's
                     // element type, and the store is statement-scoped.
                     if matches!(ty, Type::Map | Type::MapF) {
                         let kind = map_kind_of(ty);
-                        if !self.names[name].1 {
+                        if !self.names[&root_name].1 {
                             self.seek_scalar_offset(base.range.start);
-                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
                             return Err(self.immutable_binding_error(diagnostic, slot));
                         }
                         if self.is_borrowed(slot) {
                             self.seek_scalar_offset(base.range.end);
-                            return Err(self.fail(&format!("cannot modify '{name}' while it is borrowed")));
+                            return Err(self.fail(&format!("cannot modify '{root_name}' while it is borrowed")));
                         }
                         self.seek_scalar_offset(base.range.end);
                         let (line, column) = self.position();
@@ -3231,20 +3261,27 @@ impl<'a> Parser<'a> {
                         }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
-                        return Ok(Statement::MapPut(MapPlace::Var(slot, kind), key, stored, line, column));
+                        let place = match field_place {
+                            Some(field) => MapPlace::Field(slot, field, kind),
+                            None => MapPlace::Var(slot, kind),
+                        };
+                        return Ok(Statement::MapPut(place, key, stored, line, column));
                     }
                     if matches!(ty, Type::Vec | Type::StrVec | Type::VecF) {
+                        if field_place.is_some() {
+                            return Err(self.error_at(base.range.start, "an element store into a vector field is not supported by the body route yet"));
+                        }
                         // A vector element store: overwriting a string element
                         // releases the old one, so a live borrow blocks it
                         // (the typed store's rule).
-                        if !self.names[name].1 {
+                        if !self.names[&root_name].1 {
                             self.seek_scalar_offset(base.range.start);
-                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
                             return Err(self.immutable_binding_error(diagnostic, slot));
                         }
                         if self.is_borrowed(slot) {
                             self.seek_scalar_offset(base.range.end);
-                            return Err(self.fail(&format!("cannot modify '{name}' while it is borrowed")));
+                            return Err(self.fail(&format!("cannot modify '{root_name}' while it is borrowed")));
                         }
                         self.seek_scalar_offset(base.range.end);
                         let (line, column) = self.position();
@@ -3285,9 +3322,9 @@ impl<'a> Parser<'a> {
                     let Type::Array(len) = ty else {
                         unreachable!("resolved array store");
                     };
-                    if !self.names[name].1 {
+                    if !self.names[&root_name].1 {
                         self.seek_scalar_offset(base.range.start);
-                        let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                        let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
                         return Err(self.immutable_binding_error(diagnostic, slot));
                     }
                     self.seek_scalar_offset(base.range.end);
