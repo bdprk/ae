@@ -2532,8 +2532,7 @@ impl<'a> Parser<'a> {
                 && (self.receiver == Some(self.return_type)
                     || owned_plain_struct(self.return_type, self.structs)
                     || owned_field_struct(self.return_type, self.structs)));
-        let slots_supported = self.names.iter().all(|(name, &(slot, _, ty))| {
-            let captured = capture_starts.iter().any(|&(capture, _)| capture == slot);
+        let slots_supported = self.names.iter().all(|(name, &(_, _, ty))| {
             // A value capture moves into the closure's slot; the body's
             // own Frees releases it after the call (the FnOnce shape),
             // and a string vector's Frees releases its elements in the
@@ -2544,10 +2543,16 @@ impl<'a> Parser<'a> {
             // the borrow.
             // A `string` *parameter* is owned by this body; `live_owned`
             // carries it in every `return`, so the callee releases what it
-            // did not move out. A closure's owned string capture stays
-            // typed: reading it would move the capture.
+            // did not move out. A closure's string capture is the same owned
+            // value (a value capture, the FnOnce shape): the exit Frees
+            // releases it unless the body moved it out, and the move checks
+            // reject a second read after a move.
             let ok = scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
-                || (matches!(ty, Type::String) && !captured)
+                || matches!(ty, Type::String)
+                // A captured token cursor: the closure borrows the outer
+                // cursor (the capture form is the cursor itself), and the
+                // loop's borrow rules apply inside.
+                || matches!(ty, Type::Tokens)
                 || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(self.ctx.ptr_pointee(id)))
                 || ty == Type::StrView
                 // A handle is a copy-semantics value: passing one never
