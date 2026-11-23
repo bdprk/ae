@@ -7610,6 +7610,9 @@ let (rhs, rhs_ty) = match self.lower_shared_value(None, false) {
                     other => other,
                 };
                 self.names.insert(bname.clone(), (id, false, bty));
+                // The binding's own range: a closure that captures this
+                // payload needs the outer start to resolve its definition.
+                self.binding_ranges.insert(id, name_at..name_at + bname.len());
                 self.scopes.last_mut().unwrap().push((id, bty));
                 bound.push((bname, name_at));
                 bindings.push((id, field, index));
