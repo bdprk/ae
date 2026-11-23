@@ -759,12 +759,63 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(expression.range.end);
                 return Ok(parsed);
             }
-            ExpressionKind::Specialization { .. } => {
+            ExpressionKind::Specialization { base, arguments } => {
                 // A bracket the syntax tree kept as a specialization on a
-                // value name (`arr[j]`): the typed expression parser
-                // disambiguates it against the known names and indexes.
-                self.seek_scalar_offset(expression.range.start);
-                self.fallback_expression(0, false)?
+                // value name (`arr[j]`): the bracket contents are a spelling
+                // range, so the resolved scan has no read facts for the index.
+                // A name binding indexed by a bare name or number is lowered
+                // here by consulting the binding table; every other shape
+                // keeps the typed disambiguation.
+                let mut lowered = None;
+                if arguments.len() == 1
+                    && let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind
+                    && !self.struct_names.contains_key(name)
+                    && !self.enum_names.contains_key(name)
+                    && !self.generics.struct_names.contains_key(name)
+                    && !self.generics.names.contains_key(name)
+                    && let Some(&(slot, _, ty)) = self.names.get(name)
+                    && matches!(ty, Type::Array(_) | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVec | Type::StrVecRef)
+                {
+                    if self.moved.contains(&slot) {
+                        self.seek_scalar_offset(base.range.start);
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"), slot,
+                        )));
+                    }
+                    let start = self.tokens.partition_point(|token| token.offset < arguments[0].start);
+                    if let Ok((index, _)) = ae_syntax::expression::parse_expression_tokens(&self.file, self.source, &self.tokens, start, false) {
+                        self.seek_scalar_offset(index.range.start);
+                        let index_position = self.position();
+                        let index_value = match &index.kind {
+                            ExpressionKind::Atom(Kind::Ident(bound)) => self.names.get(bound).map(|&(id, _, ity)| (Expr::Variable(id, ity, index_position.0, index_position.1), ity)),
+                            ExpressionKind::Atom(Kind::Number(value)) => Some((Expr::Number(*value), Type::Int)),
+                            _ => None,
+                        };
+                        if let Some((index_value, Type::Int)) = index_value {
+                            self.seek_scalar_offset(base.range.end);
+                            let (line, column) = self.position();
+                            lowered = Some(match ty {
+                                Type::Array(len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int),
+                                Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef => {
+                                    let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::F64 } else { Type::Int };
+                                    let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
+                                    (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), element)
+                                }
+                                _ => {
+                                    let by_ref = matches!(ty, Type::StrVecRef);
+                                    (Expr::StrVecIndex(slot, Box::new(index_value), line, column, by_ref), Type::StrView)
+                                }
+                            });
+                        }
+                    }
+                }
+                match lowered {
+                    Some((value, ty)) => (value, ty),
+                    None => {
+                        self.seek_scalar_offset(expression.range.start);
+                        self.fallback_expression(0, false)?
+                    }
+                }
             }
             ExpressionKind::Index { base, index } => {
                 let index_name = match &base.kind {
