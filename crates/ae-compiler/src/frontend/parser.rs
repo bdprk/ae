@@ -1085,7 +1085,10 @@ fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::Statement, 
     };
     let Some(ExpressionKind::Atom(Kind::Ident(_))) = arguments.first().map(|argument| &argument.kind) else { return None };
     let def = resolved.scalar_reads.get(&arguments[0].range.start)?;
-    if !resolved.owned_vectors.contains(def) { return None }
+    // An owned vector takes the statement; a borrowed one (`&vec`) is admitted
+    // too so the lowering reports the typed route's own shape diagnostic
+    // ('push expects a vec'), never a denial.
+    if !resolved.vector_definitions.contains(def) { return None }
     match (builtin, arguments.len()) {
         ("push", 2) => Some((builtin, &arguments[1])),
         ("pop" | "sort" | "reverse", 1) => Some((builtin, &arguments[0])),
