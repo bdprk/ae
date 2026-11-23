@@ -60,6 +60,9 @@ const RESOLVED_BUILTINS: &[&str] = &[
     // handle; `wait` consumes the handle. The spawn statement forms
     // (task_spawn/scope_spawn/pool_spawn) stay typed for now.
     "spawn", "wait",
+    // Compile-time C layout queries (`c_size_of[Struct]()`, ...), spelled
+    // with a type argument like the generic calls.
+    "c_size_of", "c_align_of", "c_offset_of",
 ];
 
 /// Builtins whose result is a prelude enum value: a binding initialized by
@@ -2375,7 +2378,11 @@ impl<'a> Parser<'a> {
                 } else {
                     signature.file != PRELUDE && signature.public && resolved.unresolved_calls.contains(&offset)
                 };
-                visible && !signature.extern_c && !is_unsafe_fn(signature.id)
+                visible
+                    // Calling C, or an `unsafe fn`, is the unchecked
+                    // operation: the scan admits the shape and the lowering
+                    // enforces the `unsafe` block (so the pinned E0701 travels
+                    // the same path).
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
                         || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF)
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
@@ -3609,6 +3616,15 @@ impl<'a> Parser<'a> {
                     let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
                         return Err(self.fail("this call form is not supported by the body route"));
                     };
+                    // The C layout queries are spelled like a generic call but read a
+                    // repr(C) layout: cursor on the `[` for the shared reader.
+                    if matches!(name.as_str(), "c_size_of" | "c_align_of" | "c_offset_of") {
+                        self.seek_scalar_offset(base.range.start);
+                        self.pos += 1;
+                        let (value, ty) = self.c_layout_expr(name)?;
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((value, ty));
+                    }
                     let Some(&gid) = self.generics.fn_names.get(name) else {
                         return Err(self.error_at(base.range.start, &format!("'{name}' is not a generic function")));
                     };
@@ -3713,6 +3729,9 @@ impl<'a> Parser<'a> {
                     // the concrete impl, so the call stays monomorphized.
                     None => self.resolve_trait_call(name, callee.range.start)?,
                 };
+                if (signature.extern_c || crate::frontend::is_unsafe_fn(signature.id)) && self.unsafe_depth == 0 {
+                    return Err(self.error_at(callee.range.start, &format!("call to unsafe function '{name}' requires 'unsafe'")).with_code("E0701"));
+                }
                 let mut args = Vec::with_capacity(arguments.len());
                 for (index, argument) in arguments.iter().enumerate() {
                     self.seek_scalar_offset(argument.range.start);
@@ -4327,6 +4346,11 @@ impl<'a> Parser<'a> {
                     }
                     self.seek_scalar_offset(expression.range.end);
                     Ok((Expr::PoolJoin(Box::new(handle)), Type::Int))
+                }
+                "c_size_of" | "c_align_of" | "c_offset_of" => {
+                    // Only the bracketed form exists; the bracket path is
+                    // intercepted before this arm, so a plain call lands here.
+                    Err(self.fail(&format!("{name} is a layout query; write {name}[Type](..)")))
                 }
                 "spawn" => {
                     // Cursor after the name: the typed spawn helper parses the

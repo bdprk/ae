@@ -5,7 +5,7 @@
 # log, so a hidden failure cannot look like a green run.
 #
 # Usage: scripts/cloud_gate.sh [log-path]
-#   ROUTE_MAX  the route-report ratchet ceiling (default 26)
+#   ROUTE_MAX  the route-report ratchet ceiling (default 21)
 #
 # The script builds first: a fresh clone has no `ae` binary, and
 # route_report/deny_route/verify need it at the target dir.
@@ -42,7 +42,7 @@ step() {
   step "std layering" python3 scripts/std_layering.py
   tail -2 "$STEP"
   echo "== route report"
-  step "route report" python3 scripts/route_report.py --max "${ROUTE_MAX:-26}"
+  step "route report" python3 scripts/route_report.py --max "${ROUTE_MAX:-21}"
   grep -E "fallbacks=|check skipped \(fails standalone\)" "$STEP" | tail -5
   echo "== deny manifest"
   step "deny manifest" python3 scripts/deny_route.py

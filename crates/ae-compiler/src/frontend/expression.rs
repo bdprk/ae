@@ -126,6 +126,86 @@ impl Parser<'_> {
         self.take(Kind::RParen)?;
         Ok((Expr::AtomicCas(Box::new(handle), Box::new(expect), Box::new(new)), Type::Bool))
     }
+    /// `c_size_of[T]()` / `c_align_of[T]()` / `c_offset_of[T]("field")` — cursor
+    /// on the `[`. Compile-time layout constants over a `#[repr(C)]` struct
+    /// (M2.12 U8), so a layout regression fails a test rather than an FFI
+    /// session. Shared by the typed dispatch and the resolved body route.
+    #[inline(never)]
+    pub(super) fn c_layout_expr(&mut self, name: &str) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        self.pos += 1;
+        let type_name = self.identifier()?;
+        // A type parameter inside a generic body resolves through the
+        // substitution table first (ADR-0209 step A): at instantiation the
+        // body is re-parsed with T bound to the concrete struct, so
+        // `c_size_of[T]()` must see through it. An unsubstituted unknown name
+        // keeps today's error.
+        let scalar = match self.subst.get(&type_name) {
+            Some(ty) => ty.scalar_c_layout(),
+            None => match type_name.as_str() {
+                "i64" => Type::Int.scalar_c_layout(),
+                "f64" => Type::F64.scalar_c_layout(),
+                "bool" => Type::Bool.scalar_c_layout(),
+                _ => None,
+            },
+        };
+        Ok(if name != "c_offset_of" && scalar.is_some() {
+            self.take(Kind::RBracket)?;
+            self.take(Kind::LParen)?;
+            if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Type]()"))); }
+            self.pos += 1;
+            let (size, align) = scalar.unwrap();
+            self.value_number(if name == "c_align_of" { align } else { size })
+        } else {
+            let type_name = match self.subst.get(&type_name) {
+                Some(Type::Struct(sid)) => self.structs[*sid].name.clone(),
+                _ => type_name,
+            };
+            if let Some(&eid) = self.enum_names.get(&type_name) {
+                if name == "c_offset_of" {
+                    return Err(self.fail(&format!("'{}' is not a struct; c_offset_of names concrete structs", type_name)));
+                }
+                self.take(Kind::RBracket)?;
+                self.take(Kind::LParen)?;
+                if *self.current() != Kind::RParen {
+                    return Err(self.fail(&format!("{name} takes no arguments; write {name}[Enum]()")));
+                }
+                self.pos += 1;
+                let (size, align) = self.enums[eid].c_layout(&self.structs);
+                self.value_number(if name == "c_align_of" { align } else { size })
+            } else {
+                let Some(&sid) = self.struct_names.get(&type_name) else {
+                    return Err(self.fail(&format!("'{}' is not a struct; the layout queries name concrete structs", type_name)));
+                };
+                if !self.structs[sid].repr_c {
+                    return Err(self.fail(&format!("'{}' has no '#[repr(C)]', so its layout is the compiler's choice; the queries pin promised layouts only", type_name)));
+                }
+                self.take(Kind::RBracket)?;
+                self.take(Kind::LParen)?;
+                if name == "c_size_of" || name == "c_align_of" {
+                    if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Struct]()"))); }
+                    self.pos += 1;
+                    let Some((size, align, _)) = self.structs[sid].c_layout(&self.structs) else {
+                        return Err(self.fail("internal: a repr(C) struct without a layout"));
+                    };
+                    self.value_number(if name == "c_align_of" { align } else { size })
+                } else {
+                    let (field, field_ty) = self.expression(0, false)?;
+                    if !matches!(field_ty, Type::String) { return Err(self.fail("offset_of's field is written as a string literal")); }
+                    let Expr::StrLit(fname, _, _) = &field else {
+                        return Err(self.fail("offset_of's field is written as a string literal"));
+                    };
+                    self.take(Kind::RParen)?;
+                    let Some((_, _, offsets)) = self.structs[sid].c_layout(&self.structs) else {
+                        return Err(self.fail("internal: a repr(C) struct without a layout"));
+                    };
+                    let index = self.structs[sid].fields.iter().position(|(n, _)| n == fname)
+                        .ok_or_else(|| self.fail(&format!("'{}' has no field '{}'", type_name, fname)))?;
+                    self.value_number(offsets[index])
+                }
+            }
+        })
+    }
+
     /// `spawn(closure)` — cursor after the name. The thread runs the callable
     /// once with no arguments; the data travels in its owned captures
     /// (spec/concurrency.md §1–§3). Shared by the typed dispatch and the
@@ -846,83 +926,7 @@ impl Parser<'_> {
                     let (line, column) = self.position();
                     (Expr::PtrDropInPlace(Box::new(ptr_expr), pointee, line, column), Type::Int)
                 } else if (name == "c_size_of" || name == "c_align_of" || name == "c_offset_of") && *self.current() == Kind::LBracket {
-                    // The layout query pair (M2.12 U8): compile-time
-                    // constants over a `#[repr(C)]` struct, so a layout
-                    // regression fails a test rather than an FFI session.
-                    // `size_of[Pair]()`, `offset_of[Pair]("field")`.
-                    self.pos += 1;
-                    let type_name = self.identifier()?;
-                    // A type parameter inside a generic body resolves through
-                    // the substitution table first (ADR-0209 step A): at
-                    // instantiation the body is re-parsed with T bound to the
-                    // concrete struct, so `c_size_of[T]()` must see through
-                    // it. An unsubstituted unknown name keeps today's error.
-                    let scalar = match self.subst.get(&type_name) {
-                        Some(ty) => ty.scalar_c_layout(),
-                        None => match type_name.as_str() {
-                            "i64" => Type::Int.scalar_c_layout(),
-                            "f64" => Type::F64.scalar_c_layout(),
-                            "bool" => Type::Bool.scalar_c_layout(),
-                            _ => None,
-                        },
-                    };
-                    if name != "c_offset_of" && scalar.is_some() {
-                        self.take(Kind::RBracket)?;
-                        self.take(Kind::LParen)?;
-                        if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Type]()"))); }
-                        self.pos += 1;
-                        let (size, align) = scalar.unwrap();
-                        self.value_number(if name == "c_align_of" { align } else { size })
-                    } else {
-                        let type_name = match self.subst.get(&type_name) {
-                            Some(Type::Struct(sid)) => self.structs[*sid].name.clone(),
-                            _ => type_name,
-                        };
-                        if let Some(&eid) = self.enum_names.get(&type_name) {
-                            if name == "c_offset_of" {
-                                return Err(self.fail(&format!("'{}' is not a struct; c_offset_of names concrete structs", type_name)));
-                            }
-                            self.take(Kind::RBracket)?;
-                            self.take(Kind::LParen)?;
-                            if *self.current() != Kind::RParen {
-                                return Err(self.fail(&format!("{name} takes no arguments; write {name}[Enum]()")));
-                            }
-                            self.pos += 1;
-                            let (size, align) = self.enums[eid].c_layout(&self.structs);
-                            self.value_number(if name == "c_align_of" { align } else { size })
-                        } else {
-                            let Some(&sid) = self.struct_names.get(&type_name) else {
-                                return Err(self.fail(&format!("'{}' is not a struct; the layout queries name concrete structs", type_name)));
-                            };
-                            if !self.structs[sid].repr_c {
-                                return Err(self.fail(&format!("'{}' has no '#[repr(C)]', so its layout is the compiler's choice; the queries pin promised layouts only", type_name)));
-                            }
-                            self.take(Kind::RBracket)?;
-                            self.take(Kind::LParen)?;
-                            let value = if name == "c_size_of" || name == "c_align_of" {
-                                if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Struct]()"))); }
-                                self.pos += 1;
-                                let Some((size, align, _)) = self.structs[sid].c_layout(&self.structs) else {
-                                    return Err(self.fail("internal: a repr(C) struct without a layout"));
-                                };
-                                self.value_number(if name == "c_align_of" { align } else { size })
-                            } else {
-                                let (field, field_ty) = self.expression(0, false)?;
-                                if !matches!(field_ty, Type::String) { return Err(self.fail("offset_of's field is written as a string literal")); }
-                                let Expr::StrLit(fname, _, _) = &field else {
-                                    return Err(self.fail("offset_of's field is written as a string literal"));
-                                };
-                                self.take(Kind::RParen)?;
-                                let Some((_, _, offsets)) = self.structs[sid].c_layout(&self.structs) else {
-                                    return Err(self.fail("internal: a repr(C) struct without a layout"));
-                                };
-                                let index = self.structs[sid].fields.iter().position(|(n, _)| n == fname)
-                                    .ok_or_else(|| self.fail(&format!("'{}' has no field '{}'", type_name, fname)))?;
-                                self.value_number(offsets[index])
-                            };
-                            value
-                        }
-                    }
+                    self.c_layout_expr(&name)?
                 } else if name == "slice_view" && *self.current() == Kind::LParen {
                     let (line, col) = (vline, vcol);
                     self.take(Kind::LParen)?;

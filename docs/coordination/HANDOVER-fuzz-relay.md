@@ -1969,6 +1969,23 @@ parity → 50k → WSL → commit.
   an owned map out.
 - `examples/word_count.ae` and `modules/main.ae` are legacy-free; coverage
   31 → 26, files 24 → 22; deny manifest 154.
+
+### Slice 39 — the FFI surface (landed)
+
+- Extern-C and `unsafe fn` calls route: the scan admits the shape and the
+  lowering enforces the `unsafe`-block rule with the pinned E0701 at the
+  name token.
+- The C layout queries (`c_size_of[T]()`, `c_align_of[T]()`,
+  `c_offset_of[T]("field")`) are a shared `c_layout_expr` (extracted from
+  the typed dispatch) invoked from the resolved bracket-call path; the
+  generic body's `c_size_of[T]()` sees through `subst`.
+- `generic_layout_query.ae`, `extern_c_call.ae` and `unsafe_fn_call.ae` are
+  legacy-free; coverage 26 → 21, files 22 → 19; deny manifest 157.
+- Remaining: pointer arithmetic/retag + extern fns returning pointers
+  (`extern_alloc_*`, `ptr_offset`, `ptr_retag`), a struct with a `Drop`
+  impl's construction (`native_layout_abi`'s Guard), nested generic literal
+  field typing, chained temporary method calls, `sync_markers` trait
+  markers, `box_wrapper`'s generic call returning an instance struct.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and
