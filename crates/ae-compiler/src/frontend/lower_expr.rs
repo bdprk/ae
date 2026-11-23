@@ -530,10 +530,10 @@ impl<'a> Parser<'a> {
                             self.expression_nodes += budget - nodes_left;
                             args
                         }
-                        // The generic template's own argument list may not be
-                        // indexed in the shared tree; the typed argument
-                        // reader still owns the exact diagnostics (and its
-                        // error falls the whole body back to the typed route).
+                        // An instantiated template's argument list lives in the
+                        // substituted sub-parser, where the shared expression
+                        // marks are absent; the typed argument reader still
+                        // owns that list (its error is a diagnostic).
                         None => {
                             let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
                             self.pos = open;
