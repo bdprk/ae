@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::frontend::{check_source_diagnostic, reset_compilation_state};
+    use crate::frontend::check_source_diagnostic;
     use crate::lsp::LspServer;
 
     /// The example sources, read at compile time so the test never depends
@@ -84,7 +84,6 @@ mod tests {
         for _ in 0..10_000 {
             let seed = SEEDS[(next(&mut state) as usize) % SEEDS.len()];
             let source = mutate(seed, &mut state);
-            reset_compilation_state();
             let _ = ae_syntax::lex_diagnostic(&source);
             let _ = check_source_diagnostic(&source);
             cases += 1;

@@ -43,8 +43,7 @@ pub fn parse_module_tokens(file: &str, source: &str, tokens: &[Token]) -> Result
     let headers = ae_syntax::module::parse_use_headers(file, source, tokens)?;
     let declarations = parse_declaration_tokens(file, source, tokens, headers.body_start)?;
     let mut functions = Vec::new();
-    for index in 0..declarations.len() {
-        let declaration = &declarations[index];
+    for (index, declaration) in declarations.iter().enumerate() {
         match &declaration.kind {
             DeclarationKind::Function { .. } => {
                 let body = body_statements(file, source, tokens, declaration)?;
@@ -77,10 +76,11 @@ fn body_statements(file: &str, source: &str, tokens: &[Token], declaration: &Dec
     let Some(body) = declaration.body.clone() else {
         return Ok(None);
     };
-    let open = tokens.iter().position(|token| token.offset == body.start)
-        .expect("the body range starts at the opening brace token");
+    let Some(open) = tokens.iter().position(|token| token.offset == body.start) else {
+        return Err(ae_syntax::diagnostic_range(file, source, body, "expected opening brace for function body"));
+    };
     let (statements, close) = parse_statements_until_close(file, source, tokens, open + 1)?;
-    debug_assert!(tokens[close].offset < body.end, "the body parser stops inside its range");
+    debug_assert!(tokens.get(close).is_some_and(|token| token.offset < body.end), "the body parser stops inside its range");
     Ok(Some(statements))
 }
 

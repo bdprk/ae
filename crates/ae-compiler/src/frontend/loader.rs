@@ -6,48 +6,29 @@ use std::path::PathBuf;
 // the shared function table, so imports can be loaded depth-first.
 pub type PackageImports = std::collections::BTreeMap<PathBuf, std::collections::BTreeMap<String, PathBuf>>;
 
-thread_local! {
-    static PACKAGE_IMPORTS: std::cell::RefCell<PackageImports> = Default::default();
-}
-
-pub fn with_package_imports<T>(imports: PackageImports, action: impl FnOnce() -> T) -> T {
-    struct Restore(PackageImports);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            PACKAGE_IMPORTS.with(|active| active.replace(std::mem::take(&mut self.0)));
-        }
-    }
-
-    let _restore = Restore(PACKAGE_IMPORTS.with(|active| active.replace(imports)));
-    action()
-}
-
-fn resolve_import(file: &Path, canonical: &Path, import: &str) -> Result<PathBuf, FrontendError> {
+fn resolve_import(file: &Path, canonical: &Path, import: &str, imports: &PackageImports) -> Result<PathBuf, FrontendError> {
     let Some(alias) = import.strip_prefix('@') else {
         return Ok(file.parent().unwrap_or(Path::new(".")).join(import));
     };
-    PACKAGE_IMPORTS.with(|active| {
-        let imports = active.borrow();
-        if imports.is_empty() {
-            return Ok(file.parent().unwrap_or(Path::new(".")).join(import));
-        }
-        imports.iter()
-            .filter(|(root, _)| canonical.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count())
-            .and_then(|(_, aliases)| aliases.get(alias))
-            .cloned()
-            .ok_or_else(|| FrontendError::Legacy(format!("{}: unknown package dependency '{alias}'", file.display())))
-    })
+    if imports.is_empty() {
+        return Ok(file.parent().unwrap_or(Path::new(".")).join(import));
+    }
+    imports.iter()
+        .filter(|(root, _)| canonical.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .and_then(|(_, aliases)| aliases.get(alias))
+        .cloned()
+        .ok_or_else(|| FrontendError::Legacy(format!("{}: unknown package dependency '{alias}'", file.display())))
 }
 
-#[allow(dead_code)] // exercised by in-memory unit tests
-pub(super) fn parse_source(file: &str, source: &str, shared: &mut SharedFunctions, structs: &mut Vec<StructDef>, struct_names: &mut HashMap<String, usize>, enums: &mut Vec<EnumDef>, enum_names: &mut HashMap<String, usize>, generics: &mut Generics, next_id: &mut usize) -> Result<Vec<Function>, FrontendDiagnostic> {
+#[allow(dead_code, clippy::too_many_arguments)] // exercised by in-memory unit tests
+pub(super) fn parse_source(file: &str, source: &str, shared: &mut SharedFunctions, structs: &mut Vec<StructDef>, struct_names: &mut HashMap<String, usize>, enums: &mut Vec<EnumDef>, enum_names: &mut HashMap<String, usize>, generics: &mut Generics, ctx: &mut CompileContext, next_id: &mut usize) -> Result<Vec<Function>, FrontendDiagnostic> {
     let tokens = Rc::new(ae_syntax::lex_diagnostic(source)?);
     let uses = parse_use_headers(file, source, tokens.as_ref())?;
     if !uses.paths.is_empty() {
         return Err(ae_syntax::diagnostic(file, source, 0, "'use' is only supported when compiling a source file"));
     }
-    let mut p = make_parser(file, source, tokens, shared, structs, struct_names, enums, enum_names, generics);
+    let mut p = make_parser(file, source, tokens, shared, structs, struct_names, enums, enum_names, generics, ctx);
     let declarations = p.collect_functions(next_id, uses.body_start)?;
     let functions = p.program(&declarations)?;
     if functions.iter().filter(|f| f.is_main).count() != 1 {
@@ -100,13 +81,14 @@ struct RecoveryState {
     enums: Vec<EnumDef>,
     enum_names: HashMap<String, usize>,
     generics: Generics,
+    ctx: CompileContext,
     ids: Vec<usize>,
 }
 impl RecoveryState {
     fn capture(parser: &Parser<'_>) -> Self {
         Self { functions: parser.functions.clone(), structs: parser.structs.clone(),
             struct_names: parser.struct_names.clone(), enums: parser.enums.clone(),
-            enum_names: parser.enum_names.clone(), generics: parser.generics.clone(), ids: parser.id_order.clone() }
+            enum_names: parser.enum_names.clone(), generics: parser.generics.clone(), ctx: parser.ctx.clone(), ids: parser.id_order.clone() }
     }
 
     fn check_bodies(&self, file: &str, source: &str, tokens: Rc<Vec<Token>>) -> Vec<ae_span::Diagnostic> {
@@ -132,9 +114,9 @@ impl RecoveryState {
                     id_index += 1;
                     let mut replay_tokens = Rc::clone(&tokens);
                     loop {
-                        let (mut functions, mut structs, mut struct_names, mut enums, mut enum_names, mut generics) =
-                            (self.functions.clone(), self.structs.clone(), self.struct_names.clone(), self.enums.clone(), self.enum_names.clone(), self.generics.clone());
-                        let mut parser = make_parser(file, source, Rc::clone(&replay_tokens), &mut functions, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics);
+                        let (mut functions, mut structs, mut struct_names, mut enums, mut enum_names, mut generics, mut ctx) =
+                            (self.functions.clone(), self.structs.clone(), self.struct_names.clone(), self.enums.clone(), self.enum_names.clone(), self.generics.clone(), self.ctx.clone());
+                        let mut parser = make_parser(file, source, Rc::clone(&replay_tokens), &mut functions, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx);
                         parser.pos = index + 2;
                         let diagnostic = match parser.function_rest(depth == 0 && name == "main", id) {
                             Ok(_) => break,
@@ -243,19 +225,19 @@ fn begin_file(path: &Path, visited: &mut HashMap<std::path::PathBuf, ModuleState
 }
 
 #[allow(clippy::too_many_arguments)]
-fn load_file(path: &Path, root: &Path, visited: &mut HashMap<std::path::PathBuf, ModuleState>, shared: &mut SharedFunctions, structs: &mut Vec<StructDef>, struct_names: &mut HashMap<String, usize>, enums: &mut Vec<EnumDef>, enum_names: &mut HashMap<String, usize>, generics: &mut Generics, next_id: &mut usize, out: &mut Vec<Vec<Function>>, mains: &mut usize, modules: &mut Vec<ModuleInfo>, recover: bool) -> Result<(), FrontendError> {
+fn load_file(path: &Path, root: &Path, visited: &mut HashMap<std::path::PathBuf, ModuleState>, shared: &mut SharedFunctions, structs: &mut Vec<StructDef>, struct_names: &mut HashMap<String, usize>, enums: &mut Vec<EnumDef>, enum_names: &mut HashMap<String, usize>, generics: &mut Generics, ctx: &mut CompileContext, next_id: &mut usize, out: &mut Vec<Vec<Function>>, mains: &mut usize, modules: &mut Vec<ModuleInfo>, recover: bool) -> Result<(), FrontendError> {
     let Some(first) = begin_file(path, visited, true, &[])? else { return Ok(()) };
     let mut stack = vec![first];
     while let Some(frame) = stack.last_mut() {
         if let Some(import) = frame.uses.get(frame.next_import) {
             frame.next_import += 1;
 
-            let child = resolve_import(&frame.path, &frame.canonical, import)?;
+            let child = resolve_import(&frame.path, &frame.canonical, import, ctx.package_imports())?;
             if let Some(next) = begin_file(&child, visited, false, &stack)? { stack.push(next); }
             continue;
         }
         let frame = stack.pop().expect("stack is nonempty");
-        let mut parser = make_parser(&frame.file, &frame.source, Rc::clone(&frame.tokens), shared, structs, struct_names, enums, enum_names, generics);
+        let mut parser = make_parser(&frame.file, &frame.source, Rc::clone(&frame.tokens), shared, structs, struct_names, enums, enum_names, generics, ctx);
         let declarations = match parser.collect_functions(next_id, frame.body_start) {
             Ok(declarations) => declarations,
             Err(first) if recover => {
@@ -322,10 +304,7 @@ struct Loaded {
     modules: Vec<ModuleInfo>,
 }
 
-fn load_program_full(entry: &Path, recover: bool) -> Result<Loaded, FrontendError> {
-    // Every top-level entry starts from empty per-compilation registries;
-    // see `frontend::reset_compilation_state`.
-    super::reset_compilation_state();
+fn load_program_full(entry: &Path, recover: bool, imports: &PackageImports) -> Result<Loaded, FrontendError> {
     let root = entry.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut visited = HashMap::new();
     let mut shared: SharedFunctions = HashMap::new();
@@ -334,13 +313,14 @@ fn load_program_full(entry: &Path, recover: bool) -> Result<Loaded, FrontendErro
     // Prelude result types are registered first, so their ids are stable.
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
+    let mut ctx = CompileContext::with_package_imports(imports.clone());
     let mut next_id = 0usize;
     let mut files = Vec::new();
     let mut mains = 0usize;
     let mut modules = Vec::new();
-    load_file(entry, root, &mut visited, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut next_id, &mut files, &mut mains, &mut modules, recover)?;
+    load_file(entry, root, &mut visited, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id, &mut files, &mut mains, &mut modules, recover)?;
     if mains != 1 { return Err(format!("program must define exactly one main function (found {mains})").into()); }
-    let program = Program { files, structs, enums };
+    let program = Program { files, structs, enums, ctx };
     // The CFG move walk re-derives the parser's move verdicts on the graph.
     // It runs on accepted programs only, so a violation means the parser's
     // single-pass rules and the dataflow disagree — an internal error, never
@@ -358,7 +338,11 @@ fn load_program_full(entry: &Path, recover: bool) -> Result<Loaded, FrontendErro
 }
 
 pub(super) fn load_program(entry: &Path) -> Result<Program, String> {
-    load_program_full(entry, false).map(|loaded| loaded.program).map_err(Into::into)
+    load_program_full(entry, false, &PackageImports::new()).map(|loaded| loaded.program).map_err(Into::into)
+}
+
+pub(super) fn load_program_with_imports(entry: &Path, imports: &PackageImports) -> Result<Program, String> {
+    load_program_full(entry, false, imports).map(|loaded| loaded.program).map_err(Into::into)
 }
 
 /// One file of the import graph, identified well enough for a build cache to
@@ -368,8 +352,8 @@ pub struct SourceUnit { pub label: String, pub path: std::path::PathBuf, pub dig
 
 /// The program plus the source units it was built from. The caller gets both in
 /// one pass so a cache never has to walk the import graph a second time.
-pub(super) fn load_with_units(entry: &Path) -> Result<(Program, Vec<SourceUnit>), FrontendError> {
-    let loaded = load_program_full(entry, false)?;
+pub(super) fn load_with_units_and_imports(entry: &Path, imports: &PackageImports) -> Result<(Program, Vec<SourceUnit>), FrontendError> {
+    let loaded = load_program_full(entry, false, imports)?;
     let units = loaded.modules.iter().map(|module| SourceUnit {
         label: module.label.clone(),
         path: module.path.clone(),
@@ -379,7 +363,11 @@ pub(super) fn load_with_units(entry: &Path) -> Result<(Program, Vec<SourceUnit>)
 }
 
 pub fn check_path(path: &Path) -> Result<(), String> {
-    load_program(path).map(|_| ())
+    check_path_with_imports(path, &PackageImports::new())
+}
+
+pub fn check_path_with_imports(path: &Path, imports: &PackageImports) -> Result<(), String> {
+    load_program_with_imports(path, imports).map(|_| ())
 }
 
 // A lexically invalid file can still expose imports that precede the first
@@ -414,7 +402,7 @@ fn verified_import_prefix(path: &Path, errors: &[ae_span::Diagnostic]) -> Option
 
 // Read-only supplemental traversal after an initial lexical error. A failed
 // file may expose verified imports before its first error; siblings can still be scanned.
-fn collect_import_lex_errors(entry: &Path) -> Vec<ae_span::Diagnostic> {
+fn collect_import_lex_errors(entry: &Path, imports: &PackageImports) -> Vec<ae_span::Diagnostic> {
     const LIMIT: usize = 32;
     let mut visited = HashMap::new();
     let mut diagnostics = Vec::new();
@@ -430,7 +418,7 @@ fn collect_import_lex_errors(entry: &Path) -> Vec<ae_span::Diagnostic> {
     while let Some(frame) = stack.last_mut() {
         if let Some(import) = frame.uses.get(frame.next_import) {
             frame.next_import += 1;
-            let Ok(child) = resolve_import(&frame.path, &frame.canonical, import) else { continue; };
+            let Ok(child) = resolve_import(&frame.path, &frame.canonical, import, imports) else { continue; };
             let canonical = std::fs::canonicalize(&child).ok();
             let was_visited = canonical.as_ref().is_some_and(|path| visited.contains_key(path));
             match begin_file(&child, &mut visited, false, &stack) {
@@ -456,9 +444,8 @@ fn collect_import_lex_errors(entry: &Path) -> Vec<ae_span::Diagnostic> {
                     }
                     // Only mark a newly encountered failed file. A cycle points to
                     // an active frame and must not change that frame's state.
-                    if !was_visited {
-                        if let Some(canonical) = canonical { visited.insert(canonical, ModuleState::Loaded); }
-                    }
+                    if !was_visited
+                        && let Some(canonical) = canonical { visited.insert(canonical, ModuleState::Loaded); }
                 }
             }
         } else {
@@ -470,9 +457,13 @@ fn collect_import_lex_errors(entry: &Path) -> Vec<ae_span::Diagnostic> {
 }
 
 pub fn check_path_diagnostic(path: &Path) -> Result<(), FrontendError> {
-    match load_program_full(path, true) {
+    check_path_diagnostic_with_imports(path, &PackageImports::new())
+}
+
+pub fn check_path_diagnostic_with_imports(path: &Path, imports: &PackageImports) -> Result<(), FrontendError> {
+    match load_program_full(path, true, imports) {
         Err(FrontendError::LexDiagnostics(first)) => {
-            let recovered = collect_import_lex_errors(path);
+            let recovered = collect_import_lex_errors(path, imports);
             if recovered.len() > first.len() && recovered.starts_with(&first) {
                 Err(FrontendError::LexDiagnostics(recovered))
             } else {
@@ -490,27 +481,27 @@ pub fn check_path_diagnostic(path: &Path) -> Result<(), FrontendError> {
 /// does not yet participate in a cache decision, because the backend still
 /// emits one translation unit per program.
 pub fn describe_path(entry: &Path) -> Result<String, String> {
-    let loaded = load_program_full(entry, false)?;
+    let loaded = load_program_full(entry, false, &PackageImports::new())?;
     let Loaded { program, shared, generics, modules } = loaded;
-    let Program { structs, enums, .. } = program;
+    let Program { structs, enums, ctx, .. } = program;
     let mut lines = Vec::new();
     let mut all = Vec::new();
     for module in &modules {
         let mut items: Vec<String> = Vec::new();
         for (name, sig) in &shared {
             if sig.file != module.raw || !sig.public { continue; }
-            let params = sig.params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
-            items.push(format!("fn {name}({params}) -> {}", sig.ret.name()));
+            let params = sig.params.iter().map(|t| t.name(&ctx)).collect::<Vec<_>>().join(", ");
+            items.push(format!("fn {name}({params}) -> {}", sig.ret.name(&ctx)));
         }
         for def in &structs {
             if def.file != module.raw || !def.public { continue; }
-            let fields = def.fields.iter().map(|(n, t)| format!("{n}: {}", t.name())).collect::<Vec<_>>().join(", ");
+            let fields = def.fields.iter().map(|(n, t)| format!("{n}: {}", t.name(&ctx))).collect::<Vec<_>>().join(", ");
             items.push(format!("struct {} {{ {fields} }}", def.name));
         }
         for def in &enums {
             if def.file != module.raw || !def.public { continue; }
             let variants = def.variants.iter().map(|(name, fields)| {
-                let payload = fields.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+                let payload = fields.iter().map(|t| t.name(&ctx)).collect::<Vec<_>>().join(", ");
                 format!("{name}({payload})")
             }).collect::<Vec<_>>().join(", ");
             items.push(format!("enum {} {{ {variants} }}", def.name));

@@ -310,7 +310,7 @@ impl SpellingParser<'_> {
                 None => TypeSpelling::Unknown("Self".to_owned()),
             };
         }
-        if self.type_parameters.iter().any(|parameter| *parameter == name) {
+        if self.type_parameters.contains(&name) {
             return TypeSpelling::TypeParameter(name);
         }
         match (self.items)(&name) {

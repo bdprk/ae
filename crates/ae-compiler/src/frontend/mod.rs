@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -14,10 +16,9 @@ pub mod interp;
 mod expression;
 mod types;
 mod declarations;
-pub use loader::{PackageImports, with_package_imports};
+pub use loader::{PackageImports, check_path, check_path_with_imports, check_path_diagnostic, check_path_diagnostic_with_imports, describe_path, FrontendDiagnostic, FrontendError, SourceUnit};
 mod loader;
-use loader::{load_program, parse_source};
-pub use loader::{check_path, check_path_diagnostic, describe_path, FrontendDiagnostic, FrontendError, SourceUnit};
+use loader::{load_program, load_program_with_imports, parse_source};
 mod capability_audit;
 use capability_audit::audit_generic_fn;
 mod codegen;
@@ -32,71 +33,135 @@ use c_output::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Type { Int, Bool, F64, String, StrView, Vec, StrVec, VecF, VecRef, StrVecRef, VecFRef, Map, MapF, Array(usize), Struct(usize), StructRef(usize), StructMut(usize), Enum(&'static str, usize), Tokens, Closure(usize), Fn(usize), Ptr(usize), PtrMut(usize), Thread(usize), Atomic, Shared(usize), Mutex, Guard, Chan, Exec, TaskScope, Pool }
-// The pointee registry for `Type::Ptr` (M2.12): Type is Copy, so the
-// pointee rides an id exactly like the closure/fn signature registries do.
-thread_local! {
-    static PTR_POINTEES: std::cell::RefCell<Vec<Type>> = const { std::cell::RefCell::new(Vec::new()) };
+#[derive(Debug, Default, Clone)]
+pub struct CompileContext {
+    ptr_pointees: Vec<Type>,
+    extern_names: BTreeMap<usize, (String, Vec<Type>, Type)>,
+    exposure_names: HashMap<usize, String>,
+    unsafe_fns: HashSet<usize>,
+    shared_types: Vec<Type>,
+    fn_sigs: Vec<(Vec<Type>, Type)>,
+    closure_fn_ids: Vec<usize>,
+    spawned_threads: Vec<closures::SpawnedThread>,
+    closure_borrow_captures: Vec<Vec<(usize, Type)>>,
+    package_imports: PackageImports,
 }
-// The extern "C" registry (M2.12 slice 4): the id a call site carries maps
-// to the C symbol the declaration names. The code emitter and the interpreter
-// both read it; the parser fills it.
-thread_local! {
-    static EXTERN_NAMES: std::cell::RefCell<BTreeMap<usize, (String, Vec<Type>, Type)>> = const { std::cell::RefCell::new(BTreeMap::new()) };
-}
-fn register_extern(id: usize, c_name: String, params: Vec<Type>, ret: Type) {
-    EXTERN_NAMES.with(|map| { map.borrow_mut().insert(id, (c_name, params, ret)); });
-}
-fn extern_name(id: usize) -> Option<String> {
-    EXTERN_NAMES.with(|map| map.borrow().get(&id).map(|(name, _, _)| name.clone()))
-}
-// Whether the id is a declared `extern "C" fn` (no body): calling one is the
-// unchecked operation the enclosing `unsafe` block exists to legalize, so
-// the W0702 scan consults this alongside `is_unsafe_fn`. Both registries
-// fill during the signature pass, which completes before any body parses.
-pub(super) fn is_extern_fn(id: usize) -> bool {
-    EXTERN_NAMES.with(|map| map.borrow().contains_key(&id))
-}
-// Every declared extern in function ID order, for stable prototype emission.
-fn extern_declarations() -> Vec<(String, Vec<Type>, Type)> {
-    EXTERN_NAMES.with(|map| map.borrow().values().cloned().collect())
-}
-// The `#[no_mangle]` exposures (M2.12 U7): an `extern "C" fn` WITH a body,
-// emitted under its own name with external linkage so a C symbol can call
-// it. The registry maps the ae function id to the C symbol; the call
-// sites and the emitter both read it.
-thread_local! {
-    static EXPOSURE_NAMES: std::cell::RefCell<HashMap<usize, String>> = std::cell::RefCell::new(HashMap::new());
-}
-pub(super) fn register_exposure(id: usize, c_name: String) {
-    EXPOSURE_NAMES.with(|map| { map.borrow_mut().insert(id, c_name); });
-}
-pub(super) fn exposure_name(id: usize) -> Option<String> {
-    EXPOSURE_NAMES.with(|map| map.borrow().get(&id).cloned())
-}
-// The unsafe-fn registry (M2.12 slice 5): an `unsafe fn` is a normal
-// function in codegen — its call sites are what require `unsafe`.
-thread_local! {
-    static UNSAFE_FNS: std::cell::RefCell<std::collections::HashSet<usize>> = std::cell::RefCell::new(std::collections::HashSet::new());
-}
-pub(super) fn register_unsafe_fn(id: usize) {
-    UNSAFE_FNS.with(|set| { set.borrow_mut().insert(id); });
-}
-pub(super) fn is_unsafe_fn(id: usize) -> bool {
-    UNSAFE_FNS.with(|set| set.borrow().contains(&id))
-}
-// Intern a pointee type; identical pointees share one id.
-fn intern_pointee(pointee: Type) -> usize {
-    PTR_POINTEES.with(|pointees| {
-        let mut pointees = pointees.borrow_mut();
-        if let Some(index) = pointees.iter().position(|t| *t == pointee) { return index; }
-        pointees.push(pointee);
-        pointees.len() - 1
-    })
-}
-// The pointee of an interned pointer type. Runs without a parser handy, like
-// `fn_sig` (ADR-0189).
-fn ptr_pointee(id: usize) -> Type {
-    PTR_POINTEES.with(|pointees| pointees.borrow()[id])
+
+impl CompileContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_package_imports(package_imports: PackageImports) -> Self {
+        Self { package_imports, ..Self::default() }
+    }
+
+    fn register_extern(&mut self, id: usize, c_name: String, params: Vec<Type>, ret: Type) {
+        self.extern_names.insert(id, (c_name, params, ret));
+    }
+
+    fn extern_name(&self, id: usize) -> Option<String> {
+        self.extern_names.get(&id).map(|(name, _, _)| name.clone())
+    }
+
+    fn is_extern_fn(&self, id: usize) -> bool {
+        self.extern_names.contains_key(&id)
+    }
+
+    fn extern_declarations(&self) -> Vec<(String, Vec<Type>, Type)> {
+        self.extern_names.values().cloned().collect()
+    }
+
+    fn register_exposure(&mut self, id: usize, c_name: String) {
+        self.exposure_names.insert(id, c_name);
+    }
+
+    fn exposure_name(&self, id: usize) -> Option<String> {
+        self.exposure_names.get(&id).cloned()
+    }
+
+    fn register_unsafe_fn(&mut self, id: usize) {
+        self.unsafe_fns.insert(id);
+    }
+
+    fn is_unsafe_fn(&self, id: usize) -> bool {
+        self.unsafe_fns.contains(&id)
+    }
+
+    fn intern_pointee(&mut self, pointee: Type) -> usize {
+        if let Some(index) = self.ptr_pointees.iter().position(|t| *t == pointee) {
+            return index;
+        }
+        self.ptr_pointees.push(pointee);
+        self.ptr_pointees.len() - 1
+    }
+
+    fn find_pointee(&self, pointee: Type) -> Option<usize> {
+        self.ptr_pointees.iter().position(|t| *t == pointee)
+    }
+
+    fn ptr_pointee(&self, id: usize) -> Type {
+        self.ptr_pointees[id]
+    }
+
+    fn intern_shared(&mut self, elem: Type) -> usize {
+        if let Some(index) = self.shared_types.iter().position(|existing| *existing == elem) {
+            return index;
+        }
+        self.shared_types.push(elem);
+        self.shared_types.len() - 1
+    }
+
+    fn shared_types_get(&self, id: usize) -> Type {
+        self.shared_types[id]
+    }
+
+    fn fn_sig(&self, id: usize) -> (Vec<Type>, Type) {
+        self.fn_sigs[id].clone()
+    }
+
+    /// The signature an interned id names, or `None` when the id does not
+    /// belong to this compilation (a synthetic test expression, or a walker
+    /// meeting an id it did not create). The walkers use this so a foreign id
+    /// cannot panic.
+    fn fn_sig_checked(&self, id: usize) -> Option<(Vec<Type>, Type)> {
+        self.fn_sigs.get(id).cloned()
+    }
+
+    fn intern_fn_sig(&mut self, params: Vec<Type>, ret: Type) -> usize {
+        if let Some(index) = self.fn_sigs.iter().position(|(p, r)| *p == params && *r == ret) {
+            return index;
+        }
+        self.fn_sigs.push((params, ret));
+        self.fn_sigs.len() - 1
+    }
+
+    fn closure_fn_id(&self, cid: usize) -> usize {
+        self.closure_fn_ids[cid]
+    }
+
+    fn record_spawned(&mut self, entry: closures::SpawnedThread) {
+        if !self.spawned_threads.contains(&entry) {
+            self.spawned_threads.push(entry);
+        }
+    }
+
+    fn take_spawned(&mut self) -> Vec<closures::SpawnedThread> {
+        std::mem::take(&mut self.spawned_threads)
+    }
+
+    fn closure_borrow_captures(&self, cid: usize) -> Vec<(usize, Type)> {
+        self.closure_borrow_captures[cid].clone()
+    }
+
+    fn push_closure(&mut self, fn_id: usize, borrow_captures: Vec<(usize, Type)>) {
+        self.closure_borrow_captures.push(borrow_captures);
+        self.closure_fn_ids.push(fn_id);
+    }
+
+    fn package_imports(&self) -> &PackageImports {
+        &self.package_imports
+    }
 }
 impl Type {
     fn scalar_c_layout(self) -> Option<(i64, i64)> {
@@ -106,7 +171,7 @@ impl Type {
             _ => None,
         }
     }
-    fn name(self) -> String {
+    fn name(self, ctx: &CompileContext) -> String {
         match self {
             Type::Int => "i64".to_owned(),
             Type::Bool => "bool".to_owned(),
@@ -141,12 +206,12 @@ impl Type {
             // signature registry. Only non-capturing closures can be passed
             // as one (ADR-0189).
             Type::Fn(sig) => {
-                let (params, ret) = closures::fn_sig(sig);
-                format!("fn({}) -> {}", params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "), ret.name())
+                let (params, ret) = ctx.fn_sig(sig);
+                format!("fn({}) -> {}", params.iter().map(|t| t.name(ctx)).collect::<Vec<_>>().join(", "), ret.name(ctx))
             }
             // A raw pointer (M2.12): an address typed by pointee layout only.
-            Type::Ptr(id) => format!("*const {}", ptr_pointee(id).name()),
-            Type::PtrMut(id) => format!("*mut {}", ptr_pointee(id).name()),
+            Type::Ptr(id) => format!("*const {}", ctx.ptr_pointee(id).name(ctx)),
+            Type::PtrMut(id) => format!("*mut {}", ctx.ptr_pointee(id).name(ctx)),
             // A thread handle (ADR-0214 / spec/concurrency.md): owns its heap
             // slot; the return type rides the interned slot, not the spelling.
             Type::Thread(id) => format!("Thread#{}", id),
@@ -155,7 +220,7 @@ impl Type {
             Type::Atomic => "atomic".to_owned(),
             // A copy-semantics handle to one process-lifetime box holding an
             // owned value (ADR-0216): copying shares, reads copy out.
-            Type::Shared(id) => format!("shared[{}]", shared_types_get(id).name()),
+            Type::Shared(id) => format!("shared[{}]", ctx.shared_types_get(id).name(ctx)),
             Type::Mutex => "mutex".to_owned(),
             Type::Guard => "guard".to_owned(),
             Type::Chan => "chan".to_owned(),
@@ -164,7 +229,7 @@ impl Type {
             Type::Pool => "pool".to_owned(),
         }
     }
-    fn c_temp(self) -> String {
+    fn c_temp(self, ctx: &CompileContext) -> String {
         match self {
             Type::Bool => "bool ".to_owned(),
             Type::F64 => "double ".to_owned(),
@@ -187,8 +252,8 @@ impl Type {
             // so a stray use fails the build instead of printing a bad type.
             Type::Closure(_) => "void ".to_owned(),
             Type::Fn(_) => "void ".to_owned(),
-            Type::Ptr(id) => format!("const {}* ", ptr_pointee(id).c_temp().trim_end()),
-            Type::PtrMut(id) => format!("{}* ", ptr_pointee(id).c_temp().trim_end()),
+            Type::Ptr(id) => format!("const {}* ", ctx.ptr_pointee(id).c_temp(ctx).trim_end()),
+            Type::PtrMut(id) => format!("{}* ", ctx.ptr_pointee(id).c_temp(ctx).trim_end()),
             Type::Thread(_) => "void *".to_owned(),
             Type::Atomic => "ae_atomic ".to_owned(),
             Type::Shared(_) => "ae_shared ".to_owned(),
@@ -218,47 +283,6 @@ const PRELUDE: &str = "<prelude>";
 // instantiation count is a real code-size hazard (ADR-21).
 const MAX_ENUM_TYPES: usize = 256;
 const MAX_STRUCT_TYPES: usize = 256;
-// The interned element types of `shared[T]` handles, indexed by Type::Shared
-// (ADR-0216). A thread_local like FN_IDS: one compile per process.
-thread_local! {
-    static SHARED_TYPES: std::cell::RefCell<Vec<Type>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn intern_shared(elem: Type) -> usize {
-    SHARED_TYPES.with(|all| {
-        let mut all = all.borrow_mut();
-        if let Some(index) = all.iter().position(|existing| *existing == elem) {
-            return index;
-        }
-        all.push(elem);
-        all.len() - 1
-    })
-}
-
-fn shared_types_get(id: usize) -> Type {
-    SHARED_TYPES.with(|all| all.borrow()[id])
-}
-
-/// Clear every per-compilation registry. The registries are thread-local
-/// mirrors of state a program owns (ids into the pointee, extern, exposure,
-/// unsafe-fn, shared-handle, fn-signature, closure and spawn maps), so a
-/// long-lived process compiling a second program must start from empty maps:
-/// the ids restart at 0 for every program, and a stale entry would answer
-/// for the wrong program. Every top-level entry (`check_source`,
-/// `check_source_diagnostic`, `compile`, `load_program_full`) calls this
-/// first.
-///
-/// A true per-compile context (so two compilations can run in parallel on
-/// different threads without sharing these maps) belongs to the query
-/// engine work in checklist §8 phase P6.
-pub fn reset_compilation_state() {
-    PTR_POINTEES.with(|registry| registry.borrow_mut().clear());
-    SHARED_TYPES.with(|registry| registry.borrow_mut().clear());
-    EXTERN_NAMES.with(|registry| registry.borrow_mut().clear());
-    EXPOSURE_NAMES.with(|registry| registry.borrow_mut().clear());
-    UNSAFE_FNS.with(|registry| registry.borrow_mut().clear());
-    closures::reset_compilation_state();
-}
 
 // Built-in names are reserved so their semantics stay unambiguous.
 // `pub` is reserved too: it is only meaningful before a top-level item.
@@ -282,6 +306,7 @@ const MATH_FNS: &[(&str, &str, usize)] = &[
 // type, so a program can name them without importing anything. They are
 // expected to move into a stdlib module once generics and a module search path
 // exist (ADR-11).
+#[allow(clippy::type_complexity)]
 fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
     let defs: Vec<(&'static str, Vec<(&'static str, Vec<Type>)>)> = vec![
         ("ReadResult", vec![("Ok", vec![Type::String]), ("Err", vec![Type::String])]),
@@ -331,6 +356,7 @@ fn prelude_generics() -> Generics {
 
 // String literals keep their source text with escapes uninterpreted: the bytes
 // between the quotes are already valid C string body, so emission can reuse them.
+#[allow(clippy::vec_box)]
 #[derive(Debug, Clone)]
 enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Box<Expr>, Type, usize, usize), FloatToString(Box<Expr>, usize, usize), BoolLit(bool), StrLit(String, usize, usize), Variable(usize, Type, usize, usize), Call(usize, Vec<Argument>, Type), Index(usize, usize, Box<Expr>, usize, usize), VecLit(Vec<Expr>, Type, usize, usize), VecIndex(usize, Box<Expr>, usize, usize, bool, Type), Len(Box<Expr>, usize, usize), ReadFile(Box<Expr>, usize, usize), WriteFile(Box<Expr>, Box<Expr>, usize, usize), Bytes(Box<Expr>, usize, usize), Contains(Box<Expr>, Box<Expr>, usize, usize), Slice(Box<Expr>, Box<Expr>, Box<Expr>, usize, usize), Split(Box<Expr>, Box<Expr>, usize, usize), Args(usize, usize), Join(usize, Box<Expr>, usize, usize), StrVecIndex(usize, Box<Expr>, usize, usize, bool), SliceView(usize, Option<String>, Box<Expr>, Box<Expr>, usize, usize),
     // Lazy token cursor: (base variable, base field, separator, line, column).
@@ -800,12 +826,13 @@ struct ResolvedExpressions {
     owned_field_writes: HashSet<usize>,
 }
 
-struct Parser<'a> { file: String, source: &'a str, tokens: Rc<Vec<Token>>, shared_source: Rc<str>, pos: usize, names: HashMap<String, (usize, bool, Type)>, binding_ranges: HashMap<usize, std::ops::Range<usize>>, capture_origins: HashMap<usize, usize>, resolved_expressions: Rc<OnceCell<ResolvedExpressions>>, next_var: usize, expression_depth: usize, expression_nodes: usize, block_depth: usize, loop_depth: usize, loop_scopes: Vec<usize>, loop_labels: Vec<Option<usize>>, next_label: usize, unsafe_depth: usize, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, id_order: Vec<usize>, in_main: bool, return_type: Type, moved: std::collections::HashSet<usize>, borrows: Vec<(usize, usize, BorrowKind)>, deferred_write_conflicts: Vec<(usize, usize, String, &'static str, Option<String>)>, deferred_borrow_spawns: Vec<(usize, Vec<usize>, usize)>, call_borrows: Vec<(usize, usize)>, mut_borrows: Vec<(usize, usize)>, plus_operand_depth: usize, scopes: Vec<Vec<(usize, Type)>>, owned_params: Vec<(usize, Type)>, subst: HashMap<String, Type>, trait_bounds: HashMap<String, Vec<usize>>, receiver: Option<Type>, impl_self: Option<Type>, inherent_impl: bool, shadow_ok: bool, pending: Vec<Function> }
+struct Parser<'a> { file: String, source: &'a str, tokens: Rc<Vec<Token>>, shared_source: Rc<str>, pos: usize, names: HashMap<String, (usize, bool, Type)>, binding_ranges: HashMap<usize, std::ops::Range<usize>>, capture_origins: HashMap<usize, usize>, resolved_expressions: Rc<OnceCell<ResolvedExpressions>>, next_var: usize, expression_depth: usize, expression_nodes: usize, block_depth: usize, loop_depth: usize, loop_scopes: Vec<usize>, loop_labels: Vec<Option<usize>>, next_label: usize, unsafe_depth: usize, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext, id_order: Vec<usize>, in_main: bool, return_type: Type, moved: std::collections::HashSet<usize>, borrows: Vec<(usize, usize, BorrowKind)>, deferred_write_conflicts: Vec<(usize, usize, String, &'static str, Option<String>)>, deferred_borrow_spawns: Vec<(usize, Vec<usize>, usize)>, call_borrows: Vec<(usize, usize)>, mut_borrows: Vec<(usize, usize)>, plus_operand_depth: usize, scopes: Vec<Vec<(usize, Type)>>, owned_params: Vec<(usize, Type)>, subst: HashMap<String, Type>, trait_bounds: HashMap<String, Vec<usize>>, receiver: Option<Type>, impl_self: Option<Type>, inherent_impl: bool, shadow_ok: bool, pending: Vec<Function> }
 #[derive(Debug, Default)]
-struct Program { files: Vec<Vec<Function>>, structs: Vec<StructDef>, enums: Vec<EnumDef> }
+struct Program { files: Vec<Vec<Function>>, structs: Vec<StructDef>, enums: Vec<EnumDef>, ctx: CompileContext }
 
-fn make_parser<'a>(file: &str, source: &'a str, tokens: Rc<Vec<Token>>, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics) -> Parser<'a> {
-    Parser { file: file.to_owned(), source, tokens, shared_source: Rc::from(source), pos: 0, names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::default(), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0, loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0, functions, structs, struct_names, enums, enum_names, generics, id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(), borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(), subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new() }
+#[allow(clippy::too_many_arguments)]
+fn make_parser<'a>(file: &str, source: &'a str, tokens: Rc<Vec<Token>>, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext) -> Parser<'a> {
+    Parser { file: file.to_owned(), source, tokens, shared_source: Rc::from(source), pos: 0, names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::default(), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0, loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0, functions, structs, struct_names, enums, enum_names, generics, ctx, id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(), borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(), owned_params: Vec::new(), subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new() }
 }
 
 #[allow(dead_code)] // exercised by in-memory unit tests
@@ -834,28 +861,34 @@ pub(crate) fn check_source_diagnostic(source: &str) -> Result<(), FrontendDiagno
 }
 
 fn check_source_here(source: &str) -> Result<(), FrontendDiagnostic> {
-    reset_compilation_state();
     let mut shared: SharedFunctions = HashMap::new();
     let mut structs: Vec<StructDef> = Vec::new();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
     // Prelude result types are registered first, so their ids are stable.
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
+    let mut ctx = CompileContext::new();
     let mut next_id = 0usize;
-    parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut next_id).map(|_| ())
+    parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).map(|_| ())
 }
 #[allow(dead_code)] // exercised by in-memory unit tests
 pub fn compile(source: &str) -> Result<String, String> {
-    reset_compilation_state();
+    compile_with_context(source).map(|(c, _)| c)
+}
+
+pub fn compile_with_context(source: &str) -> Result<(String, CompileContext), String> {
     let mut shared: SharedFunctions = HashMap::new();
     let mut structs: Vec<StructDef> = Vec::new();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
     // Prelude result types are registered first, so their ids are stable.
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
+    let mut ctx = CompileContext::new();
     let mut next_id = 0usize;
-    let functions = parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut next_id).map_err(|diagnostic| diagnostic.to_string())?;
-    emit_program(Program { files: vec![functions], structs, enums }).map(|g| g.full)
+    let functions = parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).map_err(|diagnostic| diagnostic.to_string())?;
+    let mut program = Program { files: vec![functions], structs, enums, ctx };
+    let generated = emit_program(&mut program)?;
+    Ok((generated.full, program.ctx))
 }
 /// One-paragraph explanation for each stable diagnostic code, shared by
 /// `ae explain` and any editor that wants the text without the compiler.
@@ -893,11 +926,27 @@ pub fn explain(code: &str) -> Option<&'static str> {
 pub fn compile_path(path: &Path) -> Result<String, String> {
     compile_path_parts(path).map(|(runtime, user)| runtime + &user)
 }
+
+pub fn compile_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    compile_path_parts_with_imports(path, imports).map(|(runtime, user)| runtime + &user)
+}
+
 /// The build driver's incremental view: `(runtime_prefix, program_suffix)`.
 /// Concatenating the two reproduces `compile_path` exactly, so `emit-c` stays
 /// the authority for what a program means.
 pub fn compile_path_parts(path: &Path) -> Result<(String, String), String> {
-    let generated = emit_program(load_program(path)?)?;
+    let mut program = load_program(path)?;
+    let generated = emit_program(&mut program)?;
+    let GeneratedC { full, runtime_len } = generated;
+    let user = full[runtime_len..].to_owned();
+    let mut runtime = full;
+    runtime.truncate(runtime_len);
+    Ok((runtime, user))
+}
+
+pub fn compile_path_parts_with_imports(path: &Path, imports: &PackageImports) -> Result<(String, String), String> {
+    let mut program = load_program_with_imports(path, imports)?;
+    let generated = emit_program(&mut program)?;
     let GeneratedC { full, runtime_len } = generated;
     let user = full[runtime_len..].to_owned();
     let mut runtime = full;
@@ -915,16 +964,28 @@ pub fn tree_path(path: &Path) -> Result<String, String> {
     tree::tree_path(path)
 }
 
+pub fn tree_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    tree::tree_path_with_imports(path, imports)
+}
+
 /// The control-flow graph of each function: blocks whose contents are the
 /// statement tree's own statements, printed as text (`ae emit-cfg`).
 pub fn cfg_path(path: &Path) -> Result<String, String> {
     cfg::cfg_path(path)
 }
 
+pub fn cfg_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    cfg::cfg_path_with_imports(path, imports)
+}
+
 /// The MIR: places, rvalues, and explicit temporaries over the CFG, printed
 /// as text (`ae emit-mir`).
 pub fn mir_path(path: &Path) -> Result<String, String> {
     mir::mir_path(path)
+}
+
+pub fn mir_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    mir::mir_path_with_imports(path, imports)
 }
 
 /// Which C backend the driver will pick (M2.3). Part of the frontend cache's
@@ -939,14 +1000,22 @@ pub fn interpret_path(path: &Path) -> Result<(String, u8), (String, String)> {
     interp::interpret_path(path)
 }
 
+pub fn interpret_path_with_imports(path: &Path, imports: &PackageImports) -> Result<(String, u8), (String, String)> {
+    interp::interpret_path_with_imports(path, imports)
+}
+
 /// Compile a file and report what the output depends on, in one pass. This is
 /// the only entry point that exposes the unit list; the plain `compile_path`
 /// forms stay the authority for what a program means.
 pub fn compile_path_tracked(path: &Path) -> Result<TrackedC, String> {
+    compile_path_tracked_with_imports(path, &PackageImports::new())
+}
+
+pub fn compile_path_tracked_with_imports(path: &Path, imports: &PackageImports) -> Result<TrackedC, String> {
     let t0 = std::time::Instant::now();
-    let (program, units) = loader::load_with_units(path).map_err(String::from)?;
+    let (mut program, units) = loader::load_with_units_and_imports(path, imports).map_err(String::from)?;
     let t1 = std::time::Instant::now();
-    let GeneratedC { full, runtime_len } = emit_program(program)?;
+    let GeneratedC { full, runtime_len } = emit_program(&mut program)?;
     let t2 = std::time::Instant::now();
     if std::env::var_os("AE_PHASE_SPLIT").is_some() {
         eprintln!("ae phase: load_ms={:.3} emit_ms={:.3}", (t1-t0).as_secs_f64()*1000.0, (t2-t1).as_secs_f64()*1000.0);
@@ -969,30 +1038,28 @@ mod tests {
     fn compilation_registries_do_not_leak_between_programs() {
         // Program A: an `unsafe fn` at id 0 (E0704 wants the doc comment).
         let a = "/// Preconditions: v is a valid i64; single-threaded context.\nunsafe fn risky(v: i64) -> i64 { return v * 2; }\nfn main() { unsafe { print(risky(1)); } }";
-        assert!(compile(a).is_ok(), "{}", compile(a).unwrap_err());
-        assert!(is_unsafe_fn(0), "program A registers its unsafe fn at id 0");
-        // Program B: id 0 is an ordinary safe function. The marker must be
-        // gone — the registries restart empty for every program.
+        let (_, ctx_a) = compile_with_context(a).expect("program A compiles");
+        assert!(ctx_a.is_unsafe_fn(0), "program A registers its unsafe fn at id 0");
+        // Program B: id 0 is an ordinary safe function. Each compilation owns
+        // its own CompileContext, so Program B starts from empty registries.
         let b = "fn safe(v: i64) -> i64 { return v + 1; }\nfn main() { print(safe(1)); }";
-        assert!(compile(b).is_ok(), "{}", compile(b).unwrap_err());
-        assert!(!is_unsafe_fn(0), "the unsafe marker leaked from program A");
+        let (_, ctx_b) = compile_with_context(b).expect("program B compiles");
+        assert!(!ctx_b.is_unsafe_fn(0), "the unsafe marker leaked from program A");
 
         // Pointees: a program with an address cast fills the registry; the
         // next one starts from empty.
         let c = "fn main() { var v = 1; let raw = &mut v as *mut i64; print(2); }";
-        assert!(compile(c).is_ok(), "{}", compile(c).unwrap_err());
-        let filled = PTR_POINTEES.with(|registry| registry.borrow().len());
-        assert!(filled > 0, "the cast registered a pointee");
-        assert!(compile("fn main() { print(3); }").is_ok());
-        let cleared = PTR_POINTEES.with(|registry| registry.borrow().len());
-        assert_eq!(cleared, 0, "the pointee registry carried entries across programs");
+        let (_, ctx_c) = compile_with_context(c).expect("program C compiles");
+        assert!(!ctx_c.ptr_pointees.is_empty(), "the cast registered a pointee");
+        let (_, ctx_plain) = compile_with_context("fn main() { print(3); }").expect("plain program compiles");
+        assert_eq!(ctx_plain.ptr_pointees.len(), 0, "the pointee registry carried entries across programs");
 
         // Extern names: same rule for the C-symbol map.
         let d = "/// Preconditions: size is a positive byte count; the block is released once.\nextern \"C\" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;\nfn main() { unsafe { let _slot = ae_std_alloc(8, 1, 1); } print(1); }";
-        assert!(compile(d).is_ok(), "{}", compile(d).unwrap_err());
-        assert!(extern_name(0).is_some(), "the extern declaration registered");
-        assert!(compile("fn main() { print(4); }").is_ok());
-        assert_eq!(extern_name(0), None, "an extern entry leaked from the previous program");
+        let (_, ctx_d) = compile_with_context(d).expect("program D compiles");
+        assert!(ctx_d.extern_name(0).is_some(), "the extern declaration registered");
+        let (_, ctx_plain2) = compile_with_context("fn main() { print(4); }").expect("plain program 2 compiles");
+        assert_eq!(ctx_plain2.extern_name(0), None, "an extern entry leaked from the previous program");
     }
 
     #[test] fn rejects_invalid_semantics() {
@@ -1185,10 +1252,11 @@ mod tests {
         // ADR-40: a constraint whitelist must be a subset of the types that
         // actually support the operation, or the declaration would promise
         // something the per-instantiation type checker cannot deliver.
+        let ctx = CompileContext::new();
         for &ty in AUDIT_TYPES {
-            if Bound::Add.allows(ty) { assert!(Capability::Add.supports(ty), "Add admits {}", ty.name()); }
-            if Bound::Ord.allows(ty) { assert!(Capability::Ord.supports(ty), "Ord admits {}", ty.name()); }
-            if Bound::Eq.allows(ty) { assert!(Capability::Eq.supports(ty), "Eq admits {}", ty.name()); }
+            if Bound::Add.allows(ty) { assert!(Capability::Add.supports(ty), "Add admits {}", ty.name(&ctx)); }
+            if Bound::Ord.allows(ty) { assert!(Capability::Ord.supports(ty), "Ord admits {}", ty.name(&ctx)); }
+            if Bound::Eq.allows(ty) { assert!(Capability::Eq.supports(ty), "Eq admits {}", ty.name(&ctx)); }
         }
     }
 
@@ -1250,13 +1318,14 @@ mod tests {
         let mut struct_names = HashMap::new();
         let (mut enums, mut enum_names) = prelude_enums();
         let mut generics = prelude_generics();
+        let mut ctx = CompileContext::new();
         let mut next_id = 0usize;
         let source = "fn f[T: Add](a: T, b: T) -> T { return a + b; }\n\
 fn g[U: Ord](a: U, b: U) -> U { return a + b; }\n\
 fn h[V: Eq](a: V, b: V) -> bool { return a == b; }\n\
 fn main() { print(f[i64](1, 2)); print(g[i64](3, 4)); print(h[bool](true, true)); }";
         parse_source("", source, &mut shared, &mut structs, &mut struct_names,
-            &mut enums, &mut enum_names, &mut generics, &mut next_id).unwrap();
+            &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).unwrap();
         assert_eq!(generics.fn_defs.len(), 3, "expected three generic declarations");
         let tokens = Rc::clone(&generics.fn_defs[0].tokens);
         let text = Rc::clone(&generics.fn_defs[0].source);

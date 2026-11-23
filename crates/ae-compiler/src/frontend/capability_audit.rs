@@ -9,9 +9,11 @@ fn audit_kind(tokens: &[Token], i: usize) -> &Kind {
 // generic keeps ADR-33 behaviour, where the per-instantiation check reports the
 // error. Unproven cases are skipped rather than rejected, so the check cannot
 // break a valid program; correctness still rests on the full type check.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn audit_generic_fn(
     file: &str, source: &str, tokens: &[Token], start: usize, end: usize,
     name: &str, params: &[String], bounds: &[Vec<Bound>], declared_at: usize,
+    ctx: &CompileContext,
 ) -> Result<(), ae_span::Diagnostic> {
     if !bounds.iter().any(|b| !b.is_empty()) { return Ok(()); }
     let at = |i: usize| audit_kind(tokens, i);
@@ -75,12 +77,9 @@ pub(super) fn audit_generic_fn(
                             match at(j) {
                                 Kind::Semi | Kind::RBrace => break,
                                 Kind::LBrace => { unknown = true; break; }
-                                Kind::Ident(n) => match vars.get(n) {
-                                    Some(Some(t)) => {
-                                        if taint.is_some() && taint != Some(*t) { unknown = true; }
-                                        taint = Some(*t);
-                                    }
-                                    _ => {}
+                                Kind::Ident(n) => if let Some(Some(t)) = vars.get(n) {
+                                    if taint.is_some() && taint != Some(*t) { unknown = true; }
+                                    taint = Some(*t);
                                 },
                                 _ => {}
                             }
@@ -100,9 +99,8 @@ pub(super) fn audit_generic_fn(
         if let Some(cap) = Capability::from_op(at(i)) {
             for neighbour in [i.wrapping_sub(1), i + 1] {
                 if neighbour < body_start + 1 || neighbour >= body_end { continue; }
-                if let Kind::Ident(n) = at(neighbour) {
-                    if let Some(Some(t)) = vars.get(n) { demands.push((*t, cap)); }
-                }
+                if let Kind::Ident(n) = at(neighbour)
+                    && let Some(Some(t)) = vars.get(n) { demands.push((*t, cap)); }
             }
         }
         i += 1;
@@ -116,11 +114,11 @@ pub(super) fn audit_generic_fn(
             .collect();
         let bad: Vec<String> = effective.iter().copied()
             .filter(|ty| !cap.supports(*ty))
-            .map(|ty| ty.name())
+            .map(|ty| ty.name(ctx))
             .collect();
         if bad.is_empty() { continue; }
         let constraint_text = declared.iter().map(|b| b.name()).collect::<Vec<_>>().join(" + ");
-        let effective_text = effective.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+        let effective_text = effective.iter().map(|t| t.name(ctx)).collect::<Vec<_>>().join(", ");
         let end = tokens.binary_search_by_key(&declared_at, |token| token.offset)
             .ok().map_or(declared_at, |index| tokens[index].end);
         return Err(ae_syntax::diagnostic_range(file, source, declared_at..end, &format!(

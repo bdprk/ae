@@ -342,8 +342,14 @@ pub struct Document {
     /// read the def table instead of matching text). The imports resolve
     /// from disk next to the document, so imported defs carry their own
     /// file's name for cross-file definition.
-    pub resolution: OnceCell<Option<std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>>>,
+    pub resolution: OnceCell<Option<std::sync::Arc<CachedResolution>>>,
 }
+
+type CachedResolution = (
+    ae_resolve::module::Module,
+    Vec<(String, ae_resolve::module::Module)>,
+    ae_resolve::resolve::Resolution,
+);
 
 impl Document {
     pub fn new(uri: String, version: i64, text: String) -> Self {
@@ -370,7 +376,7 @@ impl Document {
     /// their own file's name. Documents the shared module parse rejects
     /// (lex or declaration diagnostics) have none: their features fall
     /// back to the text heuristics.
-    pub fn resolution(&self) -> Option<&std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>> {
+    pub fn resolution(&self) -> Option<&std::sync::Arc<CachedResolution>> {
         // A failed parse caches its failure: an unparseable buffer (a
         // half-typed `p.`, say) must not re-lex and re-parse on every
         // request — that cost 160 ms per completion on a 100k-line file.
@@ -988,17 +994,17 @@ impl LspServer {
                 // An imported function's signature comes from its own
                 // module's declaration text; the entry-side def table has
                 // no parameter spellings for it.
-                if def.imported {
-                    if let Some(signature) = imported_fn_signature(&cached.1, def) {
-                        return Some(format!("```ae\n{signature}\n```"));
-                    }
+                if def.imported
+                    && let Some(signature) = imported_fn_signature(&cached.1, def)
+                {
+                    return Some(format!("```ae\n{signature}\n```"));
                 }
                 let mut params = String::new();
                 for entry in resolution.defs.iter().filter(|entry| {
                     entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
                 }) {
                     if !params.is_empty() { params.push_str(", "); }
-                    let ty = entry.inferred.as_ref().map(&describe).unwrap_or_else(|| "deferred".to_owned());
+                    let ty = entry.inferred.as_ref().map(describe).unwrap_or_else(|| "deferred".to_owned());
                     params.push_str(&format!("{}: {}", entry.name, ty));
                 }
                 let mut returns = String::new();
@@ -1021,7 +1027,7 @@ impl LspServer {
             }
             ae_resolve::DefKind::Binding | ae_resolve::DefKind::Parameter
             | ae_resolve::DefKind::ForBinding | ae_resolve::DefKind::PatternBinding => {
-                let ty = def.inferred.as_ref().map(&describe).unwrap_or_else(|| "deferred".to_owned());
+                let ty = def.inferred.as_ref().map(describe).unwrap_or_else(|| "deferred".to_owned());
                 Some(format!("{} {}\ntype: {ty}", kind_label(def.kind), def.name))
             }
             _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
@@ -1323,8 +1329,8 @@ impl LspServer {
                 }
                 b'{' if !in_block_comment => open.push(line),
                 b'}' if !in_block_comment => {
-                    if let Some(start) = open.pop() {
-                        if line > start { ranges.push((start, line, "")); }
+                    if let Some(start) = open.pop() && line > start {
+                        ranges.push((start, line, ""));
                     }
                 }
                 b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => { in_block_comment = true; index += 1; }
@@ -1503,7 +1509,7 @@ impl LspServer {
         let resolution = &cached.2;
         let def = def_at(resolution, offset)?;
         if def.imported {
-            return self.imported_definition(doc, &cached, def);
+            return self.imported_definition(doc, cached, def);
         }
         let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
         let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
@@ -1516,7 +1522,7 @@ impl LspServer {
     fn imported_definition(
         &self,
         doc: &Document,
-        cached: &std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>,
+        cached: &std::sync::Arc<CachedResolution>,
         def: &ae_resolve::DefEntry,
     ) -> Option<Location> {
         let (_, imports, _) = &**cached;
@@ -1587,21 +1593,21 @@ impl LspServer {
 
         for (line_idx, line) in doc.text.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("fn ") || trimmed.starts_with("struct ") || trimmed.starts_with("let ") || trimmed.starts_with("var ") {
-                if let Some(col) = line.find(ident) {
-                    let start = Position {
-                        line: line_idx as u32,
-                        character: line[..col].encode_utf16().count() as u32,
-                    };
-                    let end = Position {
-                        line: line_idx as u32,
-                        character: line[..col + ident.len()].encode_utf16().count() as u32,
-                    };
-                    return Some(Location {
-                        uri: uri.to_owned(),
-                        range: Range { start, end },
-                    });
-                }
+            if (trimmed.starts_with("fn ") || trimmed.starts_with("struct ") || trimmed.starts_with("let ") || trimmed.starts_with("var "))
+                && let Some(col) = line.find(ident)
+            {
+                let start = Position {
+                    line: line_idx as u32,
+                    character: line[..col].encode_utf16().count() as u32,
+                };
+                let end = Position {
+                    line: line_idx as u32,
+                    character: line[..col + ident.len()].encode_utf16().count() as u32,
+                };
+                return Some(Location {
+                    uri: uri.to_owned(),
+                    range: Range { start, end },
+                });
             }
         }
         None
@@ -1614,7 +1620,7 @@ impl LspServer {
         };
 
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
-        let prefix_bytes = doc.text[..offset].as_bytes();
+        let prefix_bytes = &doc.text.as_bytes()[..offset];
 
         let is_dot = prefix_bytes.iter().rev().find(|&&b| !b.is_ascii_whitespace()) == Some(&b'.');
         if is_dot {
@@ -1680,10 +1686,10 @@ impl LspServer {
                 if def.imported {
                     // An imported function's declared shape comes from its
                     // own module's declaration text.
-                    if def.kind == ae_resolve::DefKind::Function {
-                        if let Some(signature) = imported_fn_signature(&cached.1, def) {
-                            out.push((def.name.clone(), 3, Some(signature)));
-                        }
+                    if def.kind == ae_resolve::DefKind::Function
+                        && let Some(signature) = imported_fn_signature(&cached.1, def)
+                    {
+                        out.push((def.name.clone(), 3, Some(signature)));
                     }
                     continue;
                 }
@@ -1735,7 +1741,7 @@ impl LspServer {
     fn imported_rename(
         &self,
         doc: &Document,
-        cached: &std::sync::Arc<(ae_resolve::module::Module, Vec<(String, ae_resolve::module::Module)>, ae_resolve::resolve::Resolution)>,
+        cached: &std::sync::Arc<CachedResolution>,
         def: &ae_resolve::DefEntry,
         new_name: &str,
     ) -> Option<JsonValue> {
@@ -1809,7 +1815,7 @@ impl LspServer {
         let resolution = &cached.2;
         let def = def_at(resolution, offset)?;
         if def.imported {
-            return self.imported_rename(doc, &cached, def, new_name);
+            return self.imported_rename(doc, cached, def, new_name);
         }
         let mut edits: Vec<(usize, JsonValue)> = Vec::new();
         let mut push_edit = |range: std::ops::Range<usize>| {
@@ -1856,9 +1862,9 @@ impl LspServer {
             let mut search_start = 0;
             while let Some(rel_pos) = line[search_start..].find(ident) {
                 let col = search_start + rel_pos;
-                let before_ok = col == 0 || !line[..col].chars().next_back().unwrap().is_alphanumeric() && line[..col].chars().next_back().unwrap() != '_';
+                let before_ok = line[..col].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '_');
                 let after_idx = col + ident.len();
-                let after_ok = after_idx >= line.len() || !line[after_idx..].chars().next().unwrap().is_alphanumeric() && line[after_idx..].chars().next().unwrap() != '_';
+                let after_ok = line[after_idx..].chars().next().is_none_or(|c| !c.is_alphanumeric() && c != '_');
 
                 if before_ok && after_ok {
                     let range = Range {
@@ -1962,6 +1968,8 @@ fn is_ident(s: &str) -> bool {
     (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
+const MAX_LSP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn read_lsp_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     let mut size: Option<usize> = None;
     let mut line = String::new();
@@ -1983,6 +1991,12 @@ pub fn read_lsp_message(reader: &mut impl BufRead) -> io::Result<Option<String>>
     let Some(content_length) = size else {
         return Ok(None);
     };
+    if content_length > MAX_LSP_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Content-Length exceeds maximum message size",
+        ));
+    }
 
     let mut buf = vec![0u8; content_length];
     reader.read_exact(&mut buf)?;

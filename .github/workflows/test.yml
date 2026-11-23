@@ -12,6 +12,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo build and registry
         uses: Swatinem/rust-cache@v2
@@ -33,11 +35,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python scripts/check_commit_ids.py --base origin/${{ github.base_ref }}
       - name: Clippy
-        # Reporting gate: `-W clippy::all` surfaces the debt list in
-        # docs/implementation-ledger.md §7 without failing the build while
-        # that list is still being paid down. Tighten to `-D warnings` as
-        # the audit's P0 items land.
-        run: cargo clippy --workspace --all-targets -- -W clippy::all
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
       - name: Body-route coverage ratchet (P1.1)
@@ -59,4 +57,4 @@ jobs:
         run: python3 scripts/verify_generated_c.py --sanitize
       - name: Verify generated C (Windows)
         if: runner.os == 'Windows'
-        run: python scripts/verify_generated_c.py
+        run: python scripts/verify_generated_c.py --leak

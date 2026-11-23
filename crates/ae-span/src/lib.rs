@@ -20,11 +20,45 @@ impl SourceFile<'_> {
     pub fn span(&self, range: Range<usize>) -> Option<Span> {
         if range.start > range.end || self.text.get(range.clone()).is_none() { return None; }
         let prefix = &self.text[..range.start];
+        let line_start = prefix.as_bytes().iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let line_prefix = &prefix[line_start..];
+        let column = if line_prefix.is_ascii() { line_prefix.len() } else { line_prefix.chars().count() } + 1;
         Some(Span {
             file: self.name.filter(|name| !name.is_empty()).map(str::to_owned),
             range,
             line: prefix.bytes().filter(|b| *b == b'\n').count() + 1,
-            column: prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
+            column,
+        })
+    }
+}
+
+/// Precomputed line-start byte offsets for O(log L) line/column span lookups
+/// when constructing many spans against the same source text.
+pub struct LineIndex<'a> {
+    pub name: Option<&'a str>,
+    pub text: &'a str,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    pub fn new(name: Option<&'a str>, text: &'a str) -> Self {
+        let mut line_starts = vec![0];
+        for (i, &b) in text.as_bytes().iter().enumerate() {
+            if b == b'\n' { line_starts.push(i + 1); }
+        }
+        Self { name, text, line_starts }
+    }
+
+    pub fn span(&self, range: Range<usize>) -> Option<Span> {
+        if range.start > range.end || self.text.get(range.clone()).is_none() { return None; }
+        let line_idx = self.line_starts.partition_point(|&start| start <= range.start) - 1;
+        let line_prefix = &self.text[self.line_starts[line_idx]..range.start];
+        let column = if line_prefix.is_ascii() { line_prefix.len() } else { line_prefix.chars().count() } + 1;
+        Some(Span {
+            file: self.name.filter(|name| !name.is_empty()).map(str::to_owned),
+            range,
+            line: line_idx + 1,
+            column,
         })
     }
 }
@@ -94,5 +128,15 @@ mod tests {
         let span = source.span(2..2).unwrap();
         assert_eq!((span.line, span.column), (2, 1));
         assert_eq!(Diagnostic::at(span, "end").to_string(), "2:1: end");
+    }
+    #[test]
+    fn line_index_matches_source_file_span() {
+        let text = "fn main() {\n    let s = \"中文\";\r\n    😀\n}\n";
+        let sf = SourceFile { name: Some("main.ae"), text };
+        let idx = LineIndex::new(Some("main.ae"), text);
+        for pos in 0..=text.len() {
+            assert_eq!(idx.span(pos..pos), sf.span(pos..pos));
+        }
+        assert!(idx.span(0..999).is_none());
     }
 }
