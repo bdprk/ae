@@ -1974,7 +1974,7 @@ impl<'a> Parser<'a> {
                                                 if ENUM_RESULT_BUILTINS.iter().any(|(name, _)| *name == builtin.as_str()) {
                                                     expressions.enum_bindings.insert(id);
                                                 }
-                                                if builtin == "keys" || builtin == "args" || builtin == "strvec_new" || builtin == "f64vec_new" {
+                                                if matches!(builtin.as_str(), "keys" | "args" | "bytes" | "strvec_new" | "f64vec_new") {
                                                     expressions.vector_definitions.insert(id);
                                                     expressions.owned_vectors.insert(id);
                                                 }
