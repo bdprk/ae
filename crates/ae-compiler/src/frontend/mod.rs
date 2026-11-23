@@ -4,6 +4,7 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
+pub(crate) use ae_ty::Type;
 mod parser;
 mod route_marks;
 mod route_body_expr;
@@ -48,8 +49,6 @@ use c_output::*;
 
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Type { Int, Bool, F64, String, StrView, Vec, StrVec, VecF, VecRef, StrVecRef, VecFRef, Map, MapF, Array(usize), Struct(usize), StructRef(usize), StructMut(usize), Enum(&'static str, usize), Tokens, Closure(usize), Fn(usize), Ptr(usize), PtrMut(usize), Thread(usize), Atomic, Shared(usize), Mutex, Guard, Chan, Exec, TaskScope, Pool }
 #[derive(Debug, Default, Clone)]
 pub struct CompileContext {
     ptr_pointees: Vec<Type>,
@@ -180,14 +179,13 @@ impl CompileContext {
         &self.package_imports
     }
 }
-impl Type {
-    fn scalar_c_layout(self) -> Option<(i64, i64)> {
-        match self {
-            Type::Int | Type::F64 => Some((8, 8)),
-            Type::Bool => Some((1, 1)),
-            _ => None,
-        }
-    }
+pub(crate) trait TypeDisplay {
+    fn name(self, ctx: &CompileContext) -> String;
+    fn c_temp(self, ctx: &CompileContext) -> String;
+}
+// The concrete enum lives in `ae-ty` (P1.2); the context-dependent
+// spelling/layout lookups stay with the compiler's registries as a trait.
+impl TypeDisplay for Type {
     fn name(self, ctx: &CompileContext) -> String {
         match self {
             Type::Int => "i64".to_owned(),
@@ -283,15 +281,8 @@ impl Type {
             _ => "int64_t ".to_owned(),
         }
     }
-    // Owned types carry heap resources: they move, and every live slot is
-    // released on scope exit and control-flow jumps. Enums own their payload
-    // slots, which may hold strings.
-    fn owned(self) -> bool {
-        matches!(self, Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Thread(_) | Type::Guard | Type::TaskScope)
-        // A raw pointer is a plain value (M2.12): copying it moves nothing,
-        // so it neither moves nor releases.
-    }
 }
+
 enum MoveKind { Var(usize), Field, StrVecElement }
 // Names owned by the prelude rather than by any file on disk.
 const PRELUDE: &str = "<prelude>";
