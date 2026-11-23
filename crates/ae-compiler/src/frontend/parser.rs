@@ -360,6 +360,19 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         || resolved.struct_field_handles.contains(&argument.range.start)
                 });
             }
+            // An explicit generic call: `identity[i64](41)`. The scan admits
+            // the shape permissively; the lowering instantiates the function
+            // and re-checks the substituted argument list.
+            if let ExpressionKind::BracketedCallTarget { base, .. } = &callee.kind {
+                let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return false };
+                return supports_call(name, base.range.start)
+                    && arguments.iter().all(|argument| {
+                        scalar_body_expression(argument, resolved, supports_call, supports_field)
+                            || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
+                            || resolved.struct_field_views.contains(&argument.range.start)
+                            || resolved.struct_field_handles.contains(&argument.range.start)
+                    });
+            }
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
                     || resolved.unresolved_calls.contains(&callee.range.start))
@@ -1945,6 +1958,13 @@ impl<'a> Parser<'a> {
             // The pure value builtins lower natively (lower_resolved_builtin);
             // every other reserved name keeps the typed body.
             if resolved_builtin(name) { return true; }
+            // A generic function joins the route only when the call spells
+            // its type arguments (`identity[i64](41)`); a bare call keeps the
+            // typed route's pinned "write its type arguments" diagnostic.
+            if self.generics.fn_names.contains_key(name) {
+                let index = self.tokens.partition_point(|token| token.offset < offset);
+                return self.tokens.get(index + 1).is_some_and(|token| token.kind == Kind::LBracket);
+            }
             !RESERVED.contains(&name) && self.functions.get(name).is_some_and(|signature| {
                 // File-local resolution leaves imports open. The compiler's
                 // registry already contains the signatures of loaded modules.
@@ -3026,6 +3046,52 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(expression.range.end);
                     let (line, column) = self.position();
                     return Ok((Expr::DerefPtr(Box::new(operand), line, column), super::ptr_pointee(id)));
+                }
+                if let ExpressionKind::BracketedCallTarget { base, .. } = &callee.kind {
+                    let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
+                        return Err(self.fail("this call form is not supported by the body route"));
+                    };
+                    let Some(&gid) = self.generics.fn_names.get(name) else {
+                        return Err(self.error_at(base.range.start, &format!("'{name}' is not a generic function")));
+                    };
+                    // An explicit generic call: the type arguments choose the
+                    // instance. Instantiate first (the same instance map the
+                    // typed route fills), then lower the argument list against
+                    // the substituted signature.
+                    self.seek_scalar_offset(base.range.start);
+                    // `seek_scalar_offset` lands on the name; the type
+                    // argument reader starts at the `[` that follows.
+                    self.pos += 1;
+                    let type_args = self.generic_call_type_arguments(base.range.start)?;
+                    let (id, params, ret) = self.instantiate_fn(gid, type_args, base.range.start)?;
+                    // The argument list follows the type arguments; lower it
+                    // against the substituted signature with the shared
+                    // argument rules (borrows, views, moves).
+                    let budget = 128usize.checked_sub(self.expression_nodes)
+                        .ok_or_else(|| self.fail("expression node limit exceeded"))?;
+                    let remaining = 128usize.checked_sub(self.expression_depth).map(|depth| depth.min(64))
+                        .ok_or_else(|| self.fail("expression depth limit exceeded"))?;
+                    let mut nodes_left = budget;
+                    let mut effects = SharedExpressionEffects::default();
+                    let shared = self.lower_shared_call_arguments(arguments, &params, remaining, &mut nodes_left, &mut effects);
+                    let args = match shared {
+                        Some(args) => {
+                            self.commit_shared_effects(effects);
+                            self.expression_nodes += budget - nodes_left;
+                            args
+                        }
+                        // The generic template's own argument list may not be
+                        // indexed in the shared tree; the typed argument
+                        // reader still owns the exact diagnostics (and its
+                        // error falls the whole body back to the typed route).
+                        None => {
+                            let open = self.tokens.partition_point(|token| token.offset < callee.range.end);
+                            self.pos = open;
+                            self.call_arguments(name, &params)?
+                        }
+                    };
+                    self.seek_scalar_offset(expression.range.end);
+                    return Ok((Expr::Call(id, args, ret), ret));
                 }
                 if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
                     if resolved_builtin(name) {

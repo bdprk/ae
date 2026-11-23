@@ -1742,10 +1742,29 @@ parity → 50k → WSL → commit.
   file, excluding the two module fragments that need their bundle entry).
 - Still blocking the rest, in size order: closure literals and the
   `spawn`/`task_spawn`/`scope_spawn`/`pool_spawn`/`wait` family (the typed
-  route owns closure-literal capture inference today); explicit generic call
-  syntax (`identity[i64](41)`, `wrap[T](x)`); owned vector returns; map
-  returns from user calls (`count_words`); enum payload construction as a
-  call argument; method calls on temporary results.
+  route owns closure-literal capture inference today); owned vector returns;
+  map returns from user calls (`count_words`); enum payload construction as a
+  call argument; method calls on temporary results; the `Slice` struct's
+  `s.len` field reads in `std/core/slice.ae`.
+
+### Slice 27 — explicit generic calls (landed)
+
+- A `BracketedCallTarget` callee (`identity[i64](41)`, `wrap[T](x)`)
+  joins the route only when the type arguments are spelled: `supports_call`
+  answers by looking at the token after the generic name, so the bare-call
+  diagnostic stays with the typed route.
+- Lowering: position at the `[`, read the type arguments with the shared
+  generic-call reader, `instantiate_fn` (same instance map), then lower the
+  argument list with the shared borrow/view/move rules; if the shared list is
+  not indexed for a template body's inner call, fall back to the typed
+  argument reader (its error falls the body back whole).
+- `examples/constraints.ae` and `generic_constraints.ae` are legacy-free;
+  coverage 224 → 217, files 84 → 82; deny manifest 94.
+- Pitfall to remember: `specialization_type_arguments` expects the cursor on
+  the `[` (the typed call site is positioned after the name), and
+  `lower_indexed_argument_list` requires the resolved
+  `specialized_call_arguments` map — read the argument AST from the callee
+  arm instead when the map is missing.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

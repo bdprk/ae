@@ -352,6 +352,13 @@ impl Parser<'_> {
         Ok(arguments)
     }
 
+    /// Read the type arguments of an explicit generic call (`f[i64](..)`) for
+    /// the resolved body route: same reader and diagnostics as the typed
+    /// call site.
+    pub(super) fn generic_call_type_arguments(&mut self, name_offset: usize) -> Result<Vec<Type>, ae_span::Diagnostic> {
+        self.specialization_type_arguments(name_offset, Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS, Self::generic_call_type_argument)
+    }
+
     // Verify the exact token boundaries before trusting the indexed types.
     // The caller remains at the committed specialization site.
     fn resolved_specialization_end(&self, ranges: &[std::ops::Range<usize>]) -> Option<usize> {
