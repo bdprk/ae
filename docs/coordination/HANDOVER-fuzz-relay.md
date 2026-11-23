@@ -1941,6 +1941,25 @@ parity → 50k → WSL → commit.
   lowering (`let cfg2 = duplicate[Config](cfg1); cfg2.port`).
 - All eight trait fixtures are legacy-free; coverage 47 → 40, files
   36 → 29; deny manifest 147.
+
+### Slice 37 — `Self` literals, builtin `?`, method-result locals (landed)
+
+- `Self { .. }` in a concrete impl body marks through the owning declaration
+  (`impl_owner` → declaration name → struct registry — stateless) and lowers
+  to that layout.
+- A result-returning builtin carries `?` like a user function, in both the
+  statement (`try_copy_file(..)?;`) and binding (`let a = try_read_file(f)?;`)
+  forms.
+- A local from a call whose concrete return type exists only at lowering
+  (explicit generic call or method call, `let s = r.shifted(1, 2);`) is in
+  `generic_call_bindings`: field reads and method calls on it are admitted
+  permissively and validated at lowering.
+- `self_type.ae` and `copy_notes.ae` are legacy-free; coverage 40 → 31,
+  files 29 → 24; deny manifest 152.
+- Remaining one-offs: C layout queries (`c_size_of[T]()`), extern/unsafe fn
+  calls, pointer arithmetic/retag, map returns (`word_count`), nested
+  generic literals, chained temporary method calls, sync_markers' trait
+  markers, box_wrapper.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

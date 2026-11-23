@@ -776,9 +776,10 @@ struct ResolvedExpressions {
     /// Bindings initialized by a closure literal: a call on such a name is a
     /// closure call (captures read at the call site), not a plain function.
     closure_bindings: HashSet<ae_resolve::DefId>,
-    /// Bindings initialized by an explicit generic call (`let x = f[T](..)`):
-    /// the instantiated return type exists only at lowering time, so field and
-    /// method use of such a local is admitted permissively there.
+    /// Bindings initialized by an explicit generic call (`let x = f[T](..)`) or
+    /// a method call (`let x = r.shifted(..)`): the concrete return type exists
+    /// only at lowering time, so field and method use of such a local is
+    /// admitted permissively there.
     generic_call_bindings: HashSet<ae_resolve::DefId>,
     /// Call sites whose callee is a local binding (a function value): the
     /// callee offset names the def.

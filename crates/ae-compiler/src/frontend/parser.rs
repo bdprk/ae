@@ -582,7 +582,11 @@ fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_s
     let StatementKind::Expr { value, propagates: true } = &statement.kind else { return None };
     let ExpressionKind::Propagate(operand) = &value.kind else { return None };
     let ExpressionKind::Call { callee, .. } = &operand.kind else { return None };
-    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name)) if !RESERVED.contains(&name.as_str()))
+    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
+        if !RESERVED.contains(&name.as_str())
+            // A result-returning builtin (`try_copy_file(..)?`) propagates
+            // exactly like a user function: its error enum carries `?`.
+            || (resolved_builtin(name) && ENUM_RESULT_BUILTINS.iter().any(|(builtin, _)| *builtin == name)))
         .then_some(operand)
 }
 
@@ -607,12 +611,14 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                     | ae_syntax::expression::ExpressionKind::Vector(elements) => elements.iter()
                         .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
                     ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
-                    // `let x = foo()?;` — a direct-call propagation binding;
-                    // RESERVED callees stay on the typed route.
+                    // `let x = foo()?;` — a direct-call propagation binding. A result-returning
+                    // builtin (`let a = try_read_file(first)?;`) propagates the
+                    // same way; other RESERVED callees stay typed.
                     ae_syntax::expression::ExpressionKind::Propagate(operand) => {
                         matches!(&operand.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
                             if matches!(&callee.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
-                                if !RESERVED.contains(&name.as_str())))
+                                if !RESERVED.contains(&name.as_str())
+                                    || (resolved_builtin(name) && ENUM_RESULT_BUILTINS.iter().any(|(builtin, _)| *builtin == name))))
                     }
                     _ => iterator_constructor(initializer).is_some()
                         || resolved.enum_constructors.contains(&initializer.range.start)
@@ -1638,12 +1644,15 @@ impl<'a> Parser<'a> {
                                     }
                                 }
                             }
-                            // A binding from an explicit generic call
-                            // (`let x = f[T](..)`): the instantiated return
-                            // type exists only at lowering time, so its fields
-                            // and methods are admitted permissively there.
+                            // A binding from an explicit generic call (`let x = f[T](..)`)
+                            // or a method call (`let x = r.shifted(..)`): the
+                            // instantiated return type exists only at lowering
+                            // time, so its fields and methods are admitted
+                            // permissively there.
                             if let ExpressionKind::Call { callee, .. } = &initializer.kind {
-                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }) {
+                                if matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }
+                                    | ExpressionKind::Field { .. })
+                                {
                                     expressions.generic_call_bindings.insert(id);
                                 }
                             }
@@ -1880,16 +1889,24 @@ impl<'a> Parser<'a> {
                             // the expression is lowered.
                             if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &expression.kind {
                                 if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
-                                    if expressions.struct_constructors.contains(&target.range.start) {
-                                        if let Some(&sid) = self.struct_names.get(name) {
-                                            let defn = &self.structs[sid];
-                                            if (defn.file == self.file || defn.public) && defn.drop_fn.is_none() {
-                                                let constructed = Type::Struct(sid);
-                                                if owned_plain_struct(constructed, self.structs) {
-                                                    expressions.drop_free_constructions.insert(expression.range.start);
-                                                } else if owned_field_struct(constructed, self.structs) {
-                                                    expressions.owned_constructions.insert(expression.range.start);
-                                                }
+                                    // `Self { .. }` inside an impl resolves through
+                                    // the declaration that owns the body (stateless:
+                                    // the owner is the declaration index).
+                                    let resolved_name = if name == "Self" {
+                                        impl_owner
+                                            .and_then(|owner| module.declarations.get(owner))
+                                            .map(|declaration| declaration.name.clone())
+                                    } else {
+                                        Some(name.clone())
+                                    };
+                                    if let Some(&sid) = resolved_name.as_ref().and_then(|struct_name| self.struct_names.get(struct_name)) {
+                                        let defn = &self.structs[sid];
+                                        if (defn.file == self.file || defn.public) && defn.drop_fn.is_none() {
+                                            let constructed = Type::Struct(sid);
+                                            if owned_plain_struct(constructed, self.structs) {
+                                                expressions.drop_free_constructions.insert(expression.range.start);
+                                            } else if owned_field_struct(constructed, self.structs) {
+                                                expressions.owned_constructions.insert(expression.range.start);
                                             }
                                         }
                                     }
@@ -3362,7 +3379,16 @@ impl<'a> Parser<'a> {
                 // Validate in source order and emit in layout order.
                 let sid = match &target.kind {
                     ExpressionKind::Atom(Kind::Ident(name)) => {
-                        *self.struct_names.get(name).expect("scalar construction target")
+                        if name == "Self" {
+                            // `Self { .. }` inside a concrete impl body builds
+                            // the impl target's struct layout.
+                            match self.impl_self {
+                                Some(Type::Struct(sid)) => sid,
+                                _ => return Err(self.fail("'Self' does not name a struct here; write the struct's name")),
+                            }
+                        } else {
+                            *self.struct_names.get(name).expect("scalar construction target")
+                        }
                     }
                     // A generic instance (`Cell[T] { .. }`): the body was parsed
                     // with `T` substituted, so the registry already holds the
