@@ -822,6 +822,10 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                         // generated function).
                         || matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Closure { body, .. }
                             if resolved.scalar_bodies.contains_key(&body.start))
+                        // A field read as the bound value: a scalar field is a
+                        // copy, an owned one is the typed route's "cannot move
+                        // a field out of a struct" rejection.
+                        || matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Field { .. })
                         // `let copy = owned;` moves an owned value (the
                         // lowering marks the source moved; the view-after-
                         // last-use case defers through the move graph).
@@ -3134,6 +3138,13 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(initializer.range.end);
                         lowered
                     };
+                    // An owned field cannot be moved out of its struct: the
+                    // typed route's rule (a struct owns its fields as a whole).
+                    if ty.owned()
+                        && matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
+                            self.seek_scalar_offset(initializer.range.end);
+                            return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
+                        }
                     // Binding an owned value moves it: the new slot owns what
                     // the old one did, and later reads of the source fail with
                     // E0102 (the typed route's rule).
