@@ -305,9 +305,29 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         }
         ExpressionKind::Call { callee, arguments } => {
             if let ExpressionKind::Field { base, name } = &callee.kind {
-                return name == "deref" && arguments.is_empty()
+                if name == "deref" && arguments.is_empty()
                     && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
-                    && resolved.scalar_pointer_receivers.contains(&base.range.start);
+                    && resolved.scalar_pointer_receivers.contains(&base.range.start)
+                {
+                    return true;
+                }
+                // A method call: the gate answers `Role::Call` for the callee
+                // node. The scan is permissive (a bare-ident receiver with
+                // admissible arguments); the lowering's re-check resolves the
+                // method and rejects the rest, which falls the body back to
+                // the typed route.
+                return supports_field(callee, ae_resolve::Role::Call)
+                    && arguments.iter().all(|argument| {
+                        scalar_body_expression(argument, resolved, supports_call, supports_field)
+                            || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
+                            || resolved.struct_field_views.contains(&argument.range.start)
+                            || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                                if name != "self" && resolved.scalar_reads.get(&argument.range.start)
+                                    .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                        || resolved.owned_string_bindings.contains(id)
+                                        || resolved.owned_vectors.contains(id)
+                                        || resolved.map_definitions.contains(id)))
+                    });
             }
             matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
                 if (resolved.direct_calls.contains(&callee.range.start)
@@ -882,6 +902,36 @@ impl<'a> Parser<'a> {
             || self.generics.inherent.values().any(|m| m.signature.id == id)
             || self.generics.fn_done.values().any(|(iid, _, _)| *iid == id)
             || self.generics.generic_impl_done.values().any(|(iid, _, _)| *iid == id)
+    }
+
+    /// The inherent (non-generic) method a receiver type names, if the call
+    /// is one the resolved route can lower: a borrowed receiver, a return
+    /// the route admits, and value parameters only. The call gate and the
+    /// lowering share this, so the route admits exactly what it can emit.
+    /// Generic-instance methods need `instantiate_impl_method` (a `&mut self`
+    /// operation) and stay on the typed route.
+    fn resolve_inherent_method(&self, method_name: &str, base_ty: Type) -> Option<(Signature, Option<Type>, Type)> {
+        let type_name = match base_ty {
+            Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => self.structs.get(sid)?.name.clone(),
+            Type::Enum(name, _) => name.to_owned(),
+            _ => return None,
+        };
+        let definition = self.generics.inherent.get(&format!("{type_name}#{method_name}"))?;
+        let receiver = definition.receiver;
+        if !matches!(receiver, Some(Type::StructMut(_)) | Some(Type::StructRef(_))) {
+            return None;
+        }
+        let signature = definition.signature.clone();
+        let ret = signature.ret;
+        let ret_ok = scalar_type(ret) || matches!(ret, Type::String | Type::Enum(..))
+            || owned_plain_struct(ret, self.structs) || owned_field_struct(ret, self.structs);
+        // `params[0]` is the receiver; the value parameters follow it.
+        let params_ok = signature.params.iter().skip(1).copied()
+            .all(|ty| scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String));
+        if !ret_ok || !params_ok {
+            return None;
+        }
+        Some((signature, receiver, base_ty))
     }
 
     pub(super) fn adjudicate_deferred_conflicts(&mut self, function: &Function) -> Result<(), ae_span::Diagnostic> {
@@ -1497,6 +1547,12 @@ impl<'a> Parser<'a> {
                     if function.impl_owner.is_some() && receiver_field_root(expression).is_some() {
                         return true;
                     }
+                    // A method-call callee: permissive at scan time; the
+                    // lowering's re-check resolves the method.
+                    if role == ae_resolve::Role::Call {
+                        return matches!(&expression.kind, ae_syntax::expression::ExpressionKind::Field { base, .. }
+                            if matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))));
+                    }
                     match role {
                         ae_resolve::Role::Read => expressions.struct_field_reads.contains(&expression.range.start),
                         ae_resolve::Role::Write => expressions.struct_field_writes.contains(&expression.range.start)
@@ -1554,7 +1610,9 @@ impl<'a> Parser<'a> {
         // the typed route until their ownership and layout are covered.
         if !self.subst.values().copied().all(scalar_type)
             || self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_)))
-            || (self.impl_self.is_some() && self.subst.is_empty())
+            // A trait-impl body without a receiver can still spell `Self`;
+            // inherent methods (receiver set) join the route like functions.
+            || (self.impl_self.is_some() && self.subst.is_empty() && self.receiver.is_none())
             || !(scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
                 || (matches!(self.return_type, Type::Struct(_))
                     && (self.receiver == Some(self.return_type)
@@ -1634,12 +1692,57 @@ impl<'a> Parser<'a> {
                 .or_else(|| capture_starts.iter().find_map(|&(capture, start)| (capture == slot).then_some(start)))?;
             slots.insert(*resolved.scalar_definitions.get(&start)?, (slot, ty));
         }
+        // Method-call verdicts, precomputed with `&self` so the gate closure below
+// captures only this map. A receiver is a parameter/`self` (known through
+// `names` already) or a local bound to a struct construction; anything
+// else — generic-instance receivers included — is rejected here and the
+// body falls back whole.
+        let mut method_calls: HashMap<usize, bool> = HashMap::new();
+        let mut local_structs: HashMap<String, Type> = HashMap::new();
+        for statement in body.iter() {
+            ae_syntax::statement::visit_statements(statement, &mut |statement| {
+                if let ae_syntax::statement::StatementKind::Binding { name, initializer, .. } = &statement.kind {
+                    if let ae_syntax::expression::ExpressionKind::Struct { target, .. } = &initializer.kind {
+                        if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind {
+                            if let Some(&sid) = self.struct_names.get(struct_name) {
+                                local_structs.insert(name.clone(), Type::Struct(sid));
+                            }
+                        }
+                    }
+                }
+                for root in statement.expressions() {
+                    visit_expression_tree(root, &mut |expression| {
+                        let ae_syntax::expression::ExpressionKind::Call { callee, arguments } = &expression.kind else { return };
+                        let ae_syntax::expression::ExpressionKind::Field { base, name } = &callee.kind else { return };
+                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else { return };
+                        let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
+                            .or_else(|| local_structs.get(receiver).copied());
+                        let Some(ty) = ty else { return };
+                        let ok = if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
+                            name == "deref" && arguments.is_empty()
+                        } else {
+                            // Arity is part of the gate: a mismatched call
+                            // falls back instead of reaching the lowering.
+                            self.resolve_inherent_method(name, ty)
+                                .is_some_and(|(signature, _, _)| arguments.len() + 1 == signature.params.len())
+                        };
+                        method_calls.insert(callee.range.start, ok);
+                    });
+                }
+            });
+        }
         // Any routed struct slot can root a field chain: the root ident's
         // occurrence names the def, the def names the slot, and the slot's
         // type drives the field walk (a `&mut` struct parameter roots its
         // writes the same way `self` does). Reads and stores lower through
         // the same slot lookups the impl path uses.
         let supports_field = |expression: &ae_syntax::expression::Expression, role| {
+            // A method-call callee: the precomputed verdict above decides;
+            // anything the route cannot lower rejects the body, which falls
+            // back whole.
+            if role == ae_resolve::Role::Call {
+                return method_calls.get(&expression.range.start).copied().unwrap_or(false);
+            }
             let Some(root) = field_chain_root(expression) else { return false };
             let occurrences = match role {
                 ae_resolve::Role::Read => &resolved.scalar_reads,
@@ -2532,7 +2635,21 @@ impl<'a> Parser<'a> {
                 self.lower_infix(lhs, operator.clone(), rhs, position, fact)?
             }
             ExpressionKind::Call { callee, arguments } => {
-                if let ExpressionKind::Field { base, .. } = &callee.kind {
+                if let ExpressionKind::Field { base, name: method_name } = &callee.kind {
+                    // A method receiver is a borrow, not a value read: its
+                    // slot comes from `names`. The re-check admitted only
+                    // calls `resolve_inherent_method` answers, so this path
+                    // and the gate agree.
+                    if let ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind {
+                        if let Some(&(slot, _, ty)) = self.names.get(receiver) {
+                            if !matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
+                                if let Some((signature, _, _)) = self.resolve_inherent_method(method_name, ty) {
+                                    return self.lower_method_call(method_name, slot, ty, signature, expression, arguments, slots);
+                                }
+                                return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
+                            }
+                        }
+                    }
                     let (operand, ty) = self.lower_scalar_body_expression(base, slots)?;
                     let (Type::Ptr(id) | Type::PtrMut(id)) = ty else {
                         return Err(self.fail(&format!("type {} has no fields or methods", ty.name())));
@@ -2551,7 +2668,9 @@ impl<'a> Parser<'a> {
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
                     unreachable!("scalar call eligibility");
                 };
-                let signature = self.functions.get(name).expect("scalar call signature").clone();
+                let Some(signature) = self.functions.get(name).cloned() else {
+                    return Err(self.fail(&format!("unknown function '{name}'")).with_code("E0101"));
+                };
                 let mut args = Vec::with_capacity(arguments.len());
                 for (index, argument) in arguments.iter().enumerate() {
                     self.seek_scalar_offset(argument.range.start);
@@ -3215,6 +3334,74 @@ impl<'a> Parser<'a> {
         } else {
             Statement::VecPop(slot, line, column)
         })
+    }
+
+    /// A method call on a bare struct variable (`self.m(...)` included).
+    /// `signature.params[0]` is the receiver; the argument list follows it.
+    /// The receiver bookkeeping mirrors the typed postfix path, so the
+    /// borrow graph and the pinned diagnostics stay identical.
+    fn lower_method_call(
+        &mut self,
+        method_name: &str,
+        slot: usize,
+        base_ty: Type,
+        signature: Signature,
+        expression: &ae_syntax::expression::Expression,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let wants_mut = matches!(signature.params.first(), Some(Type::StructMut(_)));
+        self.seek_scalar_offset(expression.range.end);
+        if self.moved.contains(&slot) {
+            return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow the receiver of '{method_name}' because it was moved")).with_code("E0102"), slot)));
+        }
+        if wants_mut {
+            // A read-only receiver cannot grant a mutable borrow; the pinned
+            // diagnostic reads exactly like the typed route's.
+            if matches!(base_ty, Type::StructRef(_)) {
+                return Err(self.fail(&format!("'{method_name}' borrows its receiver mutably, which a read-only borrow cannot grant; call it on the owned variable")));
+            }
+            let mutable = self.names.iter().find(|(_, (id, _, _))| *id == slot).map(|(_, (_, mutable, _))| *mutable).unwrap_or(false);
+            if !mutable {
+                return Err(self.fail(&format!("'{method_name}' borrows its receiver mutably, but the variable was declared without 'var'")));
+            }
+            if self.is_borrowed(slot) {
+                if !self.only_view_borrows_active(slot) {
+                    return Err(self.fail(&format!("cannot borrow the receiver of '{method_name}' mutably while it is borrowed in this statement")));
+                }
+                let receiver_name = self.names.iter().find(|(_, (id, _, _))| *id == slot).map(|(name, _)| name.clone()).unwrap_or_else(|| format!("v{slot}"));
+                // The typed route records the conflict at the last token
+                // before the statement's end (the call's closing paren).
+                let conflict_at = self.tokens.partition_point(|token| token.offset < expression.range.end).saturating_sub(1);
+                let conflict_at = self.tokens.get(conflict_at).map(|token| token.offset).unwrap_or(expression.range.start);
+                self.deferred_write_conflicts.push((slot, conflict_at, receiver_name, "mutate", None));
+            }
+            self.mut_borrows.push((slot, self.scopes.len()));
+        } else {
+            if self.mut_borrows.iter().any(|&(bid, _)| bid == slot) {
+                return Err(self.fail(&format!("cannot borrow the receiver of '{method_name}' while it is mutably borrowed in this statement")));
+            }
+            if !self.is_borrowed(slot) {
+                self.call_borrows.push((slot, self.scopes.len()));
+            }
+        }
+        let mut args = vec![Argument::Borrow(slot, matches!(base_ty, Type::Struct(_)))];
+        for (index, argument) in arguments.iter().enumerate() {
+            self.seek_scalar_offset(argument.range.start);
+            let Some(expected) = signature.params.get(index + 1).copied() else {
+                return Err(self.fail(&format!("too many arguments to '{method_name}'")));
+            };
+            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+            self.check_value_argument_type(method_name, index, expected, actual, Some(&argument.range))?;
+            if actual.owned() {
+                if let Expr::Variable(source, ..) = &value {
+                    self.moved.insert(*source);
+                }
+            }
+            args.push(Argument::Value(value));
+        }
+        self.seek_scalar_offset(expression.range.end);
+        Ok((Expr::Call(signature.id, args, signature.ret), signature.ret))
     }
 
     fn lower_scalar_array_index(

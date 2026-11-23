@@ -1336,3 +1336,34 @@ above matter for the next attempt:
   `expression.range.end`; the rest of the receiver bookkeeping mirrors the
   typed postfix branch, including `deferred_write_conflicts` for view
   borrows.
+
+## P1.1 slice 16 landed: inherent method bodies and method calls (v2)
+
+The reverted attempt paid off: the corrected design works.
+
+- The guard clause `impl_self.is_some() && subst.is_empty()` excluded every
+  plain method body; it now excludes only a receiver-less trait-impl body.
+  `self.n = self.n + 1; return self.n;` and `return self.doubled();` route.
+- A method call on a bare struct variable lowers to `Expr::Call` with the
+  receiver as `Argument::Borrow`, the typed postfix path's bookkeeping
+  (`mut_borrows`, `call_borrows`, deferred view conflicts recorded at the
+  call's closing paren — the pinned `borrow_mut_call_during_*` positions)
+  and value arguments after `params[0]` (the stored signature keeps the
+  receiver first).
+- The gate is a precomputed verdict per call node, decided by
+  `resolve_inherent_method`: inherent table only, a borrowed receiver, an
+  admitted return, value parameters only, exact arity. The re-check and the
+  lowering share it, so generic-instance receivers and unresolvable calls
+  fall back whole instead of erroring (the two structural traps the first
+  attempt hit — now covered by the robustness sweep, which found two
+  panics in the first version and now stays clean).
+- `examples/struct_mut_borrow.ae` and its run fixture are legacy-free and
+  joined the deny manifest (15 files).
+
+Coverage: 391 → **351**, files with fallbacks 107 → 102. Byte parity held
+(50 examples + 663 CLI invocations), 511/0 on Windows.
+
+Next: borrow parameters on methods (`&string`/`&vec` method params — the
+gate currently requires value parameters), `Signature`-driven associated
+calls, generic-instance methods via `instantiate_impl_method`, effectful
+builtins, generic-instance structs, concurrency builtins.

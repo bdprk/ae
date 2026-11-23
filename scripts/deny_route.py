@@ -25,9 +25,11 @@ FILES = [
     "examples/option_propagate.ae",
     "examples/sensor_stats.ae",
     "examples/strings.ae",
+    "examples/struct_mut_borrow.ae",
     "examples/tokens.ae",
     "tests/run/mut_param_fields.ae",
     "tests/run/owned_string_fields.ae",
+    "tests/run/struct_mut_borrow.ae",
     "tests/run/struct_value_params.ae",
 ]
 
