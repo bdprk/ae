@@ -780,6 +780,11 @@ struct ResolvedExpressions {
     /// is the typed route's "cannot store a borrowed struct in a variable"
     /// error, so the scan admits the read for the binding arm to answer.
     struct_borrow_reads: HashSet<ae_resolve::DefId>,
+    /// Statement-level errors the shared module parse recovered from, keyed
+    /// by the body's opening brace (the same key a collected body uses). The
+    /// deny switch reports the shared diagnostic for that body; the default
+    /// route still falls back to the typed parser, whose message matches.
+    shared_body_errors: HashMap<usize, ae_span::Diagnostic>,
     struct_field_reads: HashSet<usize>,
     struct_field_chains: HashSet<usize>,
     /// String-typed field reads: a view, never a move. Lowered in concat

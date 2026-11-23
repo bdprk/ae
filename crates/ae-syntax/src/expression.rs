@@ -265,7 +265,9 @@ impl Parser<'_> {
                     self.cursor += 1;
                     ExpressionKind::Atom(token.kind.clone())
                 }
-                _ => return Err(self.error("expected an expression")),
+                // The typed route's wording and code: these fixtures pin it
+                // through `check --json`, and the two parsers must agree.
+                _ => return Err(self.error("expected expression").with_code("E0011")),
             }
         };
         let left = self.postfix(Expression { kind, range }, no_struct)?;
@@ -419,7 +421,11 @@ impl Parser<'_> {
     }
 
     fn postfix(&mut self, mut base: Expression, no_struct: bool) -> Result<Expression, Diagnostic> {
-        while matches!(self.current().kind, Kind::LParen | Kind::LBracket | Kind::Dot | Kind::ColonColon | Kind::As)
+        // `[` continues the postfix chain only after a name (the typed
+        // parser's index rule); any other base leaves the bracket for the
+        // caller's own diagnostic (`expected RParen, found LBracket`).
+        while matches!(self.current().kind, Kind::LParen | Kind::Dot | Kind::ColonColon | Kind::As)
+            || (self.current().kind == Kind::LBracket && matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_))))
             || (!no_struct && self.current().kind == Kind::LBrace
                 && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Specialization { .. }))
         {

@@ -38,21 +38,48 @@ pub fn parse_module(file: &str, source: &str) -> Result<Module, Diagnostic> {
     parse_module_tokens(file, source, &tokens)
 }
 
-/// Assemble a module from the lexer-produced tokens for `source`.
+/// Assemble a module from the lexer-produced tokens for `source`. A
+/// statement-level error inside a body is fatal here; the compiler's index
+/// uses the recovering form below.
 pub fn parse_module_tokens(file: &str, source: &str, tokens: &[Token]) -> Result<Module, Diagnostic> {
+    let (module, errors) = parse_module_tokens_recovering(file, source, tokens)?;
+    match errors.into_iter().next() {
+        Some((_, diagnostic)) => Err(diagnostic),
+        None => Ok(module),
+    }
+}
+
+/// Assemble a module, recovering from a statement-level error inside one
+/// function body: the diagnostic is recorded against the body's opening brace
+/// (the key the compiler uses for a collected body) and the parse continues
+/// with the next declaration. Header and declaration-level errors stay fatal.
+pub fn parse_module_tokens_recovering(
+    file: &str,
+    source: &str,
+    tokens: &[Token],
+) -> Result<(Module, Vec<(usize, Diagnostic)>), Diagnostic> {
     let headers = ae_syntax::module::parse_use_headers(file, source, tokens)?;
     let declarations = parse_declaration_tokens(file, source, tokens, headers.body_start)?;
     let mut functions = Vec::new();
+    let mut errors: Vec<(usize, Diagnostic)> = Vec::new();
     for (index, declaration) in declarations.iter().enumerate() {
         match &declaration.kind {
-            DeclarationKind::Function { .. } => {
-                let body = body_statements(file, source, tokens, declaration)?;
-                functions.push(FnUnit { declaration: declaration.clone(), impl_owner: None, body });
-            }
+            DeclarationKind::Function { .. } => match body_statements(file, source, tokens, declaration) {
+                Ok(body) => functions.push(FnUnit { declaration: declaration.clone(), impl_owner: None, body }),
+                Err(diagnostic) => {
+                    errors.push((declaration.body.as_ref().map(|range| range.start).unwrap_or(declaration.range.start), diagnostic));
+                    functions.push(FnUnit { declaration: declaration.clone(), impl_owner: None, body: None });
+                }
+            },
             DeclarationKind::Impl { .. } => {
                 for method in impl_methods(file, source, tokens, declaration)? {
-                    let body = body_statements(file, source, tokens, &method)?;
-                    functions.push(FnUnit { declaration: method, impl_owner: Some(index), body });
+                    match body_statements(file, source, tokens, &method) {
+                        Ok(body) => functions.push(FnUnit { declaration: method, impl_owner: Some(index), body }),
+                        Err(diagnostic) => {
+                            errors.push((method.body.as_ref().map(|range| range.start).unwrap_or(method.range.start), diagnostic));
+                            functions.push(FnUnit { declaration: method, impl_owner: Some(index), body: None });
+                        }
+                    }
                 }
             }
             // Struct bodies are fields, enum bodies are variants: both are
@@ -61,13 +88,13 @@ pub fn parse_module_tokens(file: &str, source: &str, tokens: &[Token]) -> Result
             DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait => {}
         }
     }
-    Ok(Module {
+    Ok((Module {
         file: file.to_owned(),
         source: source.to_owned(),
         use_paths: headers.paths,
         declarations,
         functions,
-    })
+    }, errors))
 }
 
 /// Parse a function body whose declaration carries `body` covering

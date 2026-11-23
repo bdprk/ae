@@ -1126,6 +1126,12 @@ impl Parser<'_> {
                 // how the old parser's surface is measured down to zero.
                 if std::env::var_os("AE_DENY_LEGACY_ROUTE").is_some() {
                     let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                    // The shared module parse recovered from a statement-level
+                    // error in THIS body: its diagnostic is the typed route's
+                    // answer, so the deny switch reports it instead of denying.
+                    if let Some(diagnostic) = self.resolved_expressions().shared_body_errors.get(&offset).cloned() {
+                        return Err(diagnostic);
+                    }
                     return Err(self.error_at(offset, "the legacy body parser is disabled (AE_DENY_LEGACY_ROUTE=1); this function's body is not on the resolved route yet"));
                 }
                 self.block()

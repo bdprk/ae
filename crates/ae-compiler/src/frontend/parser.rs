@@ -1595,7 +1595,7 @@ impl<'a> Parser<'a> {
         eprintln!("route reason {label} {}:{line}: {}", self.file, text.chars().take(80).collect::<String>());
     }
 
-    fn resolved_expressions(&self) -> &ResolvedExpressions {
+    pub(super) fn resolved_expressions(&self) -> &ResolvedExpressions {
         self.resolved_expressions.get_or_init(|| self.build_resolved_expressions())
     }
 
@@ -1604,9 +1604,10 @@ impl<'a> Parser<'a> {
     /// keep the reference off `self`.
     fn build_resolved_expressions(&self) -> ResolvedExpressions {
         let mut expressions = ResolvedExpressions::default();
-            let Ok(module) = ae_resolve::module::parse_module_tokens(&self.file, self.source, &self.tokens) else {
+            let Ok((module, body_errors)) = ae_resolve::module::parse_module_tokens_recovering(&self.file, self.source, &self.tokens) else {
                 return expressions;
             };
+            expressions.shared_body_errors.extend(body_errors);
             let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &[], &self.tokens);
             expressions.enum_bindings.extend(resolution.defs.iter().filter_map(|entry| {
                 use ae_resolve::TypeSpelling;

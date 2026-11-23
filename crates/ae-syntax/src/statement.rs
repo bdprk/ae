@@ -561,7 +561,7 @@ mod tests {
         let source = "{ let a = ; }";
         let tokens = crate::lex_diagnostic(source).unwrap();
         let failure = parse_block("case.ae", source, &tokens, 0).unwrap_err();
-        assert_eq!(failure.code.as_deref(), None);
-        assert!(failure.message.contains("expected an expression"));
+        assert_eq!(failure.code.as_deref(), Some("E0011"));
+        assert!(failure.message.contains("expected expression"));
     }
 }
