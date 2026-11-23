@@ -90,7 +90,7 @@ fn resolved_builtin(name: &str) -> bool {
 /// The scan admits their calls, and the lowering parses them with the typed
 /// postfix code (whose operational checks and shapes are authoritative).
 fn typed_intrinsic(name: &str) -> bool {
-    matches!(name, "ptr_write" | "ptr_drop_in_place" | "bytes")
+    matches!(name, "ptr_write" | "ptr_drop_in_place" | "bytes" | "tokenize")
 }
 
 /// A struct the body route can own outright: no `Drop` impl and only scalar
@@ -994,9 +994,15 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
         }
         StatementKind::ForIn { binding_range, iterable, body, .. } => {
             resolved.scalar_definitions.contains_key(&binding_range.start)
-                && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.scalar_reads.get(&iterable.range.start)
-                    .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id))
+                // A bare local is the fast path. A call iterable (a temporary
+                // cursor, `for t in tokenize(..)`) is admitted so the
+                // lowering's loop check reports the typed route's own
+                // diagnostic instead of denying the body.
+                && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))
+                    | ae_syntax::expression::ExpressionKind::Call { .. })
+                && (matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Call { .. })
+                    || resolved.scalar_reads.get(&iterable.range.start)
+                        .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id)))
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::Match { subject, arms } => {
