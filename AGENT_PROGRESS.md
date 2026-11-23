@@ -369,3 +369,5 @@
 
 - 2026-11-24 14:30 (+08:00): **P1.4 slice 7: bare bracket indexes lower from the tree; typed fallbacks 9 -> 8.** A name binding indexed by a bare name/number re-parses the bracket with the shared expression parser and emits the Index arm's array/vector/string-vector nodes from the binding table, with the base's moved check. Other bracket shapes keep typed disambiguation. Remaining eight: seven returned-receiver method chains plus one parenthesized spawn callable. Evidence: Windows and WSL suites 532/0, both 50k mutation sweeps green, deny 176/176, clippy clean.
 
+- 2026-11-24 15:00 (+08:00): **P1.4 slice 8: parenthesized spawn callables; typed fallbacks 8 -> 7.** `spawn_callable_with` lowers a parenthesized/bare closure variable from the shared tree; closure literals keep the typed capture machinery. The single remaining shape in all seven cases is a method call on a returned receiver temporary (chain on an associated call) — the recorded boundary of the current ratchet, which needs a chain-type precompute over associated roots and a temporary ownership review. Evidence: Windows suite 532/0, deny 176/176, clippy clean.
+

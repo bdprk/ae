@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
             return Err(self.fail(&format!("{name} expects {art} {} handle as its first argument", expected_ty.name(self.ctx))));
         }
         self.take(Kind::Comma)?;
-        let (callable, callable_ty) = self.spawn_callable()?;
+        let (callable, callable_ty) = self.spawn_callable_with(arguments.get(1), slots)?;
         self.take(Kind::RParen)?;
         self.take(Kind::Semi)?;
         let mut capture_slots = Vec::new();
@@ -299,6 +299,33 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn spawn_callable(&mut self) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        self.spawn_callable_with(None, &HashMap::new())
+    }
+
+    /// The spawn callable, with the shared callable node when the resolved
+    /// route has it. A parenthesized or bare closure variable lowers from the
+    /// tree; a closure literal keeps the typed closure machinery (capture
+    /// inference); anything else keeps the typed token parse.
+    fn spawn_callable_with(
+        &mut self,
+        callable: Option<&ae_syntax::expression::Expression>,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        if let Some(argument) = callable {
+            let inner = match &argument.kind {
+                ExpressionKind::Group(inner) => inner.as_ref(),
+                _ => argument,
+            };
+            if let ExpressionKind::Atom(Kind::Ident(name)) = &inner.kind
+                && matches!(self.names.get(name), Some(&(_, _, Type::Closure(_))))
+            {
+                self.seek_scalar_offset(argument.range.start);
+                let lowered = self.lower_scalar_body_expression(argument, slots)?;
+                self.seek_scalar_offset(argument.range.end);
+                return Ok(lowered);
+            }
+        }
         if let Some(header) = self.shared_closure_header() {
             let end = self.tokens.partition_point(|token| token.offset < header.range.end);
             if self.tokens.get(end).is_some_and(|token| token.kind == Kind::RParen)
