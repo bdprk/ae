@@ -1997,6 +1997,25 @@ parity → 50k → WSL → commit.
   each segment's real type.
 - `nested_generics.ae` and `box_wrapper.ae` are legacy-free; coverage
   21 → 17, files 19 → 16; deny manifest 160.
+
+### Slice 41 — bracket tuples, array params, struct field moves (landed)
+
+- A trailing `x[y]` the syntax tree kept as `Specialization` is admitted as
+  an index when the base names an array/vector; the lowering delegates the
+  whole expression to the typed parser's disambiguation (`arr[j]` at the
+  end of a comparison).
+- `&[i64; N]` parameters mark as array definitions from the declaration's
+  type range (the resolver does not spell bracket types).
+- A struct literal field can take an owned struct/enum value by move
+  (`SocketAddrV4 { ip: ip, .. }`).
+- A field on an ident-rooted chain whose marks the resolver cannot supply
+  (generic-instance parameters, open spellings) is admitted via the
+  permissive field gate; the re-check answers from the slot table.
+- Coverage 17 → 9, files 16 → 9; deny manifest 167.
+- Pitfall: the syntax layer's `Specialization` is overloaded (type
+  arguments, indexing, constructor targets); the scan must gate it by the
+  base's resolved kind and the lowering should delegate the ambiguous
+  value case to the typed disambiguation rather than re-implement it.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

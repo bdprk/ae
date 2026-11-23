@@ -341,7 +341,12 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                         || matches!(&field.value.kind, ExpressionKind::Atom(Kind::Ident(name))
                             if name != "self" && resolved.scalar_reads.get(&field.value.range.start)
                                 .is_some_and(|id| resolved.owned_text_bindings.contains(id)
-                                    || resolved.owned_string_bindings.contains(id)))
+                                    || resolved.owned_string_bindings.contains(id)
+                                    // An owned struct or enum value moves into
+                                    // the field (`SocketAddrV4 { ip: ip, .. }`).
+                                    || resolved.struct_definitions.contains(id)
+                                    || resolved.owned_struct_bindings.contains(id)
+                                    || resolved.enum_bindings.contains(id)))
                 })
         }
         // A struct parameter's field read, possibly nested (`o.inner.x`):
@@ -378,16 +383,32 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 // return type exists only at lowering time.
                 || matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)))
                     && resolved.scalar_reads.get(&base.range.start)
-                        .is_some_and(|id| resolved.generic_call_bindings.contains(id)))
+                        .is_some_and(|id| resolved.generic_call_bindings.contains(id))
+                // A struct-typed parameter or local whose spelling the resolver
+                // leaves open (a generic instance, an imported type): the scan
+                // is permissive for an ident-rooted chain and the lowering's
+                // re-check answers from the slot table.
+                || supports_field(expression, ae_resolve::Role::Read))
+        }
+        // A name with a bracket that the syntax tree kept as a specialization
+        // (`arr[j]` at the end of an expression): the typed expression parser
+        // disambiguates it against the known names and builds the index.
+        ExpressionKind::Specialization { base, arguments } => {
+            matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                && arguments.len() == 1
+                && resolved.scalar_reads.get(&base.range.start).is_some_and(|id| {
+                    resolved.array_definitions.contains(id) || resolved.vector_definitions.contains(id)
+                })
         }
         ExpressionKind::Index { base, index } => {
             matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.scalar_reads.get(&base.range.start)
-                    .is_some_and(|id| resolved.array_definitions.contains(id)
+                && resolved.scalar_reads.get(&base.range.start).is_some_and(|id| {
+                    resolved.array_definitions.contains(id)
                         // A vector indexes as element copies/views, whether
                         // the binding owns the vector or borrows it
                         // (`values: &vec`); the vector itself never moves.
-                        || resolved.vector_definitions.contains(id))
+                        || resolved.vector_definitions.contains(id)
+                })
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_)) => true,
@@ -587,12 +608,17 @@ fn propagation_call(statement: &ae_syntax::statement::Statement) -> Option<&ae_s
     let StatementKind::Expr { value, propagates: true } = &statement.kind else { return None };
     let ExpressionKind::Propagate(operand) = &value.kind else { return None };
     let ExpressionKind::Call { callee, .. } = &operand.kind else { return None };
-    matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
-        if !RESERVED.contains(&name.as_str())
+    match &callee.kind {
+        ExpressionKind::Atom(Kind::Ident(name)) => (!RESERVED.contains(&name.as_str())
             // A result-returning builtin (`try_copy_file(..)?`) propagates
             // exactly like a user function: its error enum carries `?`.
             || (resolved_builtin(name) && ENUM_RESULT_BUILTINS.iter().any(|(builtin, _)| *builtin == name)))
-        .then_some(operand)
+            .then_some(operand),
+        // A variant construction (`Option[i64]::Some(10)?`): the typed
+        // expression parser builds the payload, `?` reads the enum result.
+        ExpressionKind::Qualified { .. } => Some(operand),
+        _ => None,
+    }
 }
 
 fn iterator_constructor(expression: &ae_syntax::expression::Expression) -> Option<Type> {
@@ -624,6 +650,10 @@ fn scalar_body_statement(statement: &ae_syntax::statement::Statement, resolved: 
                             if matches!(&callee.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                                 if !RESERVED.contains(&name.as_str())
                                     || (resolved_builtin(name) && ENUM_RESULT_BUILTINS.iter().any(|(builtin, _)| *builtin == name))))
+                            // A variant construction (`let a = Option[i64]::Some(10)?;`).
+                            || (matches!(&operand.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
+                                if matches!(callee.kind, ae_syntax::expression::ExpressionKind::Qualified { .. }))
+                                && resolved.enum_constructors.contains(&operand.range.start))
                     }
                     _ => iterator_constructor(initializer).is_some()
                         || resolved.enum_constructors.contains(&initializer.range.start)
@@ -1540,6 +1570,21 @@ impl<'a> Parser<'a> {
                 // borrowed parameter (`&P`, `&mut P`) only views one.
                 if matches!(definition.inferred, Some(TypeSpelling::Named { .. })) {
                     expressions.owned_struct_bindings.insert(definition.id);
+                }
+            }
+            // A range-bracket parameter type (`arr: &[i64; 8]`) indexes like a
+            // local array; the resolver does not spell bracket types, so read
+            // the declaration's source range.
+            for function in &module.functions {
+                let ae_syntax::declaration::DeclarationKind::Function { parameters, .. } = &function.declaration.kind else { continue };
+                for parameter in parameters {
+                    let spelling = self.source.get(parameter.ty.clone()).unwrap_or("").trim().trim_start_matches('&').trim();
+                    if !spelling.starts_with('[') { continue }
+                    if let Some(entry) = resolution.defs.iter().find(|entry| {
+                        entry.kind == ae_resolve::DefKind::Parameter && entry.range.start == parameter.name_range.start
+                    }) {
+                        expressions.array_definitions.insert(entry.id);
+                    }
                 }
             }
             let closure_statements = resolution.functions.iter()
@@ -2639,12 +2684,13 @@ impl<'a> Parser<'a> {
                     // failure on, mirroring the typed route's binding
                     // propagation.
                     let ae_syntax::expression::ExpressionKind::Call { callee, .. } = &operand.kind else {
-                        unreachable!("resolved propagation eligibility");
+                        return Err(self.fail("a propagation binding must call a function or construct a result variant"));
                     };
-                    let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(call_name)) = &callee.kind else {
-                        unreachable!("resolved propagation eligibility");
-                    };
-                    let _ = call_name;
+                    match &callee.kind {
+                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))
+                        | ae_syntax::expression::ExpressionKind::Qualified { .. } => {}
+                        _ => return Err(self.fail("a propagation binding must call a function or construct a result variant")),
+                    }
                     self.seek_scalar_offset(operand.range.start);
                     let (value, call_ty) = match self.lower_shared_value(Some(Kind::Question), true) {
                         Some(pair) => pair,
@@ -3892,6 +3938,13 @@ impl<'a> Parser<'a> {
                     return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", signature.params.len(), args.len())));
                 }
                 (Expr::Call(signature.id, args, signature.ret), signature.ret)
+            }
+            ExpressionKind::Specialization { .. } => {
+                // A bracket the syntax tree kept as a specialization on a
+                // value name (`arr[j]`): the typed expression parser
+                // disambiguates it against the known names and indexes.
+                self.seek_scalar_offset(expression.range.start);
+                self.expression(0, false)?
             }
             ExpressionKind::Index { base, index } => {
                 let def = self.resolved_expressions().scalar_reads[&base.range.start];
