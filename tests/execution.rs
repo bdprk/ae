@@ -8816,3 +8816,45 @@ fn main() {
     fs::remove_file(path).unwrap();
     assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
 }
+
+// P1.1 drop rung: a construction of a struct that declares `drop` lowers on
+// the resolved route, and the user's `drop` runs on every exit path (the
+// early return and the falling exit), exactly where the typed route ran it.
+#[test]
+fn drop_carrying_constructions_lower_on_the_resolved_route() {
+    let source = r#"struct Guard {
+    id: i64,
+}
+impl Guard {
+    fn drop(&mut self) -> i64 {
+        print(self.id);
+        return 0;
+    }
+}
+fn early(flag: bool) -> i64 {
+    let g = Guard { id: 7 };
+    if flag {
+        return 1;
+    }
+    return 2;
+}
+fn main() {
+    print(early(true));
+    print(early(false));
+}"#;
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "7\n1\n7\n2\n");
+
+    // Every body is on the resolved route: the deny switch compiles it.
+    let path = std::env::temp_dir().join(format!("ae-drop-route-deny-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let deny = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .env("AE_DENY_LEGACY_ROUTE", "1")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+}

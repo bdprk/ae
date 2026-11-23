@@ -759,6 +759,11 @@ struct ResolvedExpressions {
     /// an impl method's `self.n = v` does.
     struct_field_writes: HashSet<usize>,
     drop_free_constructions: HashSet<usize>,
+    /// Constructions of a file-local struct that declares `fn drop(&mut
+    /// self)` and whose fields are all plain: the generated `ae_tN_release`
+    /// calls the user's drop (then clears the handle), so the body route owns
+    /// the value exactly as the typed route does.
+    drop_constructions: HashSet<usize>,
     /// Constructions of a file-local struct whose fields are scalar or
     /// `string`: the literal itself is pure, and every owned field value
     /// moves into it (the generated `ae_tN_release` releases them later).

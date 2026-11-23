@@ -326,7 +326,11 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         // `to_string` call). Field types are checked when the literal lowers.
         ExpressionKind::Struct { target, fields } => {
             let marked = resolved.drop_free_constructions.contains(&expression.range.start)
-                || resolved.owned_constructions.contains(&expression.range.start);
+                || resolved.owned_constructions.contains(&expression.range.start)
+                // A struct that declares `drop`: the value is owned, and
+                // every exit path releases it through the generated routine,
+                // which calls the user's `drop` first.
+                || resolved.drop_constructions.contains(&expression.range.start);
             // A specialization (`Cell[T] { .. }`) is permissive here: the
             // instance's field types exist only at lowering time and are
             // checked there.
@@ -412,6 +416,13 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_)) => true,
+        // A collection literal used as a value (`print(vec[1])`): the scan
+        // admits it when every element does, and the lowering builds the same
+        // `Expr::VecLit`/array the typed route builds. The print arm's type
+        // check then rejects a vector exactly as the typed route does.
+        ExpressionKind::Array(elements) | ExpressionKind::Vector(elements) => {
+            elements.iter().all(|element| scalar_body_expression(element, resolved, supports_call, supports_field))
+        }
         ExpressionKind::AddressCast { binding_range, .. } => {
             resolved.scalar_address_casts.contains(&expression.range.start)
                 && resolved.scalar_reads.contains_key(&binding_range.start)
@@ -2043,12 +2054,24 @@ impl<'a> Parser<'a> {
                                     };
                                     if let Some(&sid) = resolved_name.as_ref().and_then(|struct_name| self.struct_names.get(struct_name)) {
                                         let defn = &self.structs[sid];
-                                        if (defn.file == self.file || defn.public) && defn.drop_fn.is_none() {
+                                        if defn.file == self.file || defn.public {
                                             let constructed = Type::Struct(sid);
-                                            if owned_plain_struct(constructed, self.structs) {
-                                                expressions.drop_free_constructions.insert(expression.range.start);
-                                            } else if owned_field_struct(constructed, self.structs) {
-                                                expressions.owned_constructions.insert(expression.range.start);
+                                            if defn.drop_fn.is_none() {
+                                                if owned_plain_struct(constructed, self.structs) {
+                                                    expressions.drop_free_constructions.insert(expression.range.start);
+                                                } else if owned_field_struct(constructed, self.structs) {
+                                                    expressions.owned_constructions.insert(expression.range.start);
+                                                }
+                                            } else if defn.fields.iter().all(|(_, ty)| {
+                                                // A drop-carrying struct with plain
+                                                // fields: the generated release calls
+                                                // the user's `drop` exactly where the
+                                                // typed route would. Owned fields
+                                                // alongside `drop` stay typed (the
+                                                // release order is the typed route's).
+                                                scalar_type(*ty) || owned_plain_struct(*ty, self.structs)
+                                            }) {
+                                                expressions.drop_constructions.insert(expression.range.start);
                                             }
                                         }
                                     }
@@ -7855,7 +7878,15 @@ mod tests {
         parser.names.remove("p");
 
         parser.seek_scalar_offset(source.find("{ let g = Guard { id: 1").unwrap());
-        assert!(parser.lower_resolved_scalar_body().is_none(), "drop-carrying constructions stay typed");
+        let body = parser.lower_resolved_scalar_body().expect("resolved drop construction").unwrap();
+        assert!(matches!(body.as_slice(),
+            [Statement::Declare(slot, Expr::StructLit(sid, _)),
+             Statement::Return(Expr::Field(_, fname, fty), frees),
+             Statement::Frees(scope_frees)]
+            if *sid == 4 && fname == "id" && *fty == Type::Int
+                && *frees == vec![(*slot, Type::Struct(4))]
+                && *scope_frees == vec![(*slot, Type::Struct(4))]),
+            "a drop-carrying construction is owned and released on every exit path");
 
         parser.seek_scalar_offset(source.find("{ let wrong = Point").unwrap());
         let error = parser.lower_resolved_scalar_body().expect("resolved constructor field error").err().unwrap();

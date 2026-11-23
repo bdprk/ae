@@ -2064,3 +2064,43 @@ the resolved statement lowering needs the same `Release`/`Drop` bookkeeping the
 typed route's Frees lists perform. Probe the typed route's `emit-tree` for
 `Guard` first (`ae emit-tree tests/run/native_layout_abi.ae`) and mirror its
 exact release placement.
+
+## Coverage milestone: 0 route fallbacks (2026-11-23 18:05)
+
+The whole `examples` + `tests/run` + `std/std` corpus compiles with
+`AE_DENY_LEGACY_ROUTE=1`: **0 fallbacks / 0 files**. The last fixture
+(`native_layout_abi.ae`) joined because a drop-carrying construction with plain
+fields is now owned by the body route (new `drop_constructions` mark; the
+generated `ae_tN_release` calls the user's `drop`). `scalar_body_expression`
+also admits vector/array literals, so `print(vec[1])` reports the print arm's
+own E0206 instead of falling back.
+
+The deny manifest lists 176 files; the CI ratchet is 0; the checklist's P1.1
+coverage chain ends at 0.
+
+Next: the P1.1 exit gate also names `tests/ui` and `tests/ui-json`. Under
+`AE_DENY_LEGACY_ROUTE=1` those corpora currently fail with the denial message
+for **25 fixtures** (15 `tests/ui`, 10 `tests/ui-json`), in four categories:
+
+1. Unresolved names — `unknown_variables.ae` (E0101) and
+   `unknown_functions.ae` (E0207). The resolved lowering already emits the
+   same messages/spans; the scan rejects the shapes first. Admit an unresolved
+   ident in value position and an unresolved call whose name is not a known
+   function, and let the lowering answer.
+2. In-body syntax errors — `missing_expression.ae`, `missing_closing_paren.ae`,
+   `invalid_indexing.ae`, `mixed_syntax.ae`, `multiple_names.ae`: the shared
+   module parse itself fails, so the deny branch should report the shared
+   parse diagnostic instead of a denial (the expression grammar is shared, so
+   the message/span match the typed route; verify against every snapshot).
+3. Borrow-check fixtures — `borrow_element_write`, `borrow_view_escape`,
+   `struct_borrow_*`, `shared_borrow_field_write`, `borrow_mut_call_in_branch`,
+   `mutex_guard_escape_spawn`: the scan's view/move gates keep them typed; the
+   resolved lowering must reach the same diagnostics.
+4. Pinned diagnostics — `method_assoc_as_method`, `method_receiver_as_assoc`,
+   `method_unknown_assoc`, `pointer_no_such_method`,
+   `pointer_write_owned_rejected`, `clock_builtin_demoted`, `closure_return`,
+   `impl_methods`, `move_self_assignment_enum`.
+
+Run `AE_DENY_LEGACY_ROUTE=1 cargo test --test snapshots` to see the current
+mismatch list; fix categories in order 1, 2, then 3/4 (each is a diagnostic-
+parity slice under the 10-step rule).
