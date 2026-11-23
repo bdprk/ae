@@ -51,12 +51,10 @@ use c_output::*;
 
 #[derive(Debug, Default, Clone)]
 pub struct CompileContext {
-    ptr_pointees: Vec<Type>,
+    types: ae_ty::TypeInterner,
     extern_names: BTreeMap<usize, (String, Vec<Type>, Type)>,
     exposure_names: HashMap<usize, String>,
     unsafe_fns: HashSet<usize>,
-    shared_types: Vec<Type>,
-    fn_sigs: Vec<(Vec<Type>, Type)>,
     closure_fn_ids: Vec<usize>,
     spawned_threads: Vec<closures::SpawnedThread>,
     closure_borrow_captures: Vec<Vec<(usize, Type)>>,
@@ -105,35 +103,27 @@ impl CompileContext {
     }
 
     fn intern_pointee(&mut self, pointee: Type) -> usize {
-        if let Some(index) = self.ptr_pointees.iter().position(|t| *t == pointee) {
-            return index;
-        }
-        self.ptr_pointees.push(pointee);
-        self.ptr_pointees.len() - 1
+        self.types.intern_pointee(pointee)
     }
 
     fn find_pointee(&self, pointee: Type) -> Option<usize> {
-        self.ptr_pointees.iter().position(|t| *t == pointee)
+        self.types.find_pointee(pointee)
     }
 
     fn ptr_pointee(&self, id: usize) -> Type {
-        self.ptr_pointees[id]
+        self.types.pointee(id)
     }
 
     fn intern_shared(&mut self, elem: Type) -> usize {
-        if let Some(index) = self.shared_types.iter().position(|existing| *existing == elem) {
-            return index;
-        }
-        self.shared_types.push(elem);
-        self.shared_types.len() - 1
+        self.types.intern_shared(elem)
     }
 
     fn shared_types_get(&self, id: usize) -> Type {
-        self.shared_types[id]
+        self.types.shared(id)
     }
 
     fn fn_sig(&self, id: usize) -> (Vec<Type>, Type) {
-        self.fn_sigs[id].clone()
+        self.types.fn_sig(id)
     }
 
     /// The signature an interned id names, or `None` when the id does not
@@ -141,15 +131,11 @@ impl CompileContext {
     /// meeting an id it did not create). The walkers use this so a foreign id
     /// cannot panic.
     fn fn_sig_checked(&self, id: usize) -> Option<(Vec<Type>, Type)> {
-        self.fn_sigs.get(id).cloned()
+        self.types.fn_sig_checked(id)
     }
 
     fn intern_fn_sig(&mut self, params: Vec<Type>, ret: Type) -> usize {
-        if let Some(index) = self.fn_sigs.iter().position(|(p, r)| *p == params && *r == ret) {
-            return index;
-        }
-        self.fn_sigs.push((params, ret));
-        self.fn_sigs.len() - 1
+        self.types.intern_fn_sig(params, ret)
     }
 
     fn closure_fn_id(&self, cid: usize) -> usize {
@@ -1056,9 +1042,9 @@ mod tests {
         // next one starts from empty.
         let c = "fn main() { var v = 1; let raw = &mut v as *mut i64; print(2); }";
         let (_, ctx_c) = compile_with_context(c).expect("program C compiles");
-        assert!(!ctx_c.ptr_pointees.is_empty(), "the cast registered a pointee");
+        assert!(ctx_c.types.pointee_count() > 0, "the cast registered a pointee");
         let (_, ctx_plain) = compile_with_context("fn main() { print(3); }").expect("plain program compiles");
-        assert_eq!(ctx_plain.ptr_pointees.len(), 0, "the pointee registry carried entries across programs");
+        assert_eq!(ctx_plain.types.pointee_count(), 0, "the pointee registry carried entries across programs");
 
         // Extern names: same rule for the C-symbol map.
         let d = "/// Preconditions: size is a positive byte count; the block is released once.\nextern \"C\" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;\nfn main() { unsafe { let _slot = ae_std_alloc(8, 1, 1); } print(1); }";
