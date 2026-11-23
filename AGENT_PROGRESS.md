@@ -353,3 +353,5 @@
 
 - 2026-11-24 09:30 (+08:00): **P1.2 slice 6: canonical scalar bridge and value acceptance.** `TyKind::scalar()` / `Scalar::ty()` and `ae_ty::accepts_value(expected, actual, checked)` now decide every compatibility check (checked scalar fact first, otherwise exact concrete type — no implicit coercions); the compiler's local `operator_scalar`/`concrete_scalar` helpers are deleted and `matches_value_type` delegates. Two ae-ty unit tests pin the rule. Evidence: ae-ty 2/2, Windows suite 522/0, clippy clean.
 
+- 2026-11-24 10:00 (+08:00): **P1.2 slice 7: `ae_ty::unify` exists.** Structural unification over `Term` (concrete/variable/composite/pointer/borrow) into a `Substitution` with chain resolution and an occurs check; four unit tests pin binding, composite descent, mismatches, chains and occurs. Not wired into the compiler yet — the next slice replaces the shape-only generic instantiation check with it. Evidence: ae-ty 6/6, Windows suite 522/0, clippy clean.
+
