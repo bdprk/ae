@@ -267,6 +267,14 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(expression.range.end);
                     return Ok(parsed);
                 }
+                // An enum variant with payload (`Shape::Circle(3)`): lower
+                // the payload from the shared nodes. A qualified name that is
+                // not a variant (an associated call) returns None and keeps
+                // the typed delegation below.
+                if self.resolved_expressions().enum_constructors.contains(&expression.range.start)
+                    && let Some((value, ty)) = self.lower_shared_enum_construction(callee, arguments, slots)? {
+                        return Ok((value, ty));
+                    }
                 // An associated call (`Point::new(1)`): the typed postfix layer
                 // builds the instance and owns the pinned diagnostics. Bounded
                 // by the following operator, like a chained method receiver.
@@ -687,14 +695,7 @@ impl<'a> Parser<'a> {
                         }
                         continue;
                     }
-                    let (value, actual) = if self.resolved_expressions().enum_constructors.contains(&argument.range.start) {
-                        // An enum construction as an argument (`area(Shape::Circle(3))`):
-                        // the typed expression parser owns the variant layout.
-                        self.seek_scalar_offset(argument.range.start);
-                        self.fallback_expression(0, true)?
-                    } else {
-                        self.lower_scalar_body_expression(argument, slots)?
-                    };
+                    let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
                     // A `&string` parameter is a read-only view: the argument
                     // lowers as `Argument::View` and nothing moves (the typed
                     // route's `typed_call_argument` for a `StrView`).
@@ -725,6 +726,18 @@ impl<'a> Parser<'a> {
                     return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", signature.params.len(), args.len())));
                 }
                 (Expr::Call(signature.id, args, signature.ret), signature.ret)
+            }
+            ExpressionKind::Qualified { .. } => {
+                // A payload-free variant path (`Shape::Empty`) lowers from the
+                // shared node; any other qualified value keeps the typed
+                // parser (an associated function used as a value).
+                if let Some((value, ty)) = self.lower_shared_enum_construction(expression, &[], slots)? {
+                    return Ok((value, ty));
+                }
+                self.seek_scalar_offset(expression.range.start);
+                let parsed = self.fallback_expression(0, false)?;
+                self.seek_scalar_offset(expression.range.end);
+                return Ok(parsed);
             }
             ExpressionKind::Specialization { .. } => {
                 // A bracket the syntax tree kept as a specialization on a
@@ -791,4 +804,68 @@ impl<'a> Parser<'a> {
         })
     }
 
+
+    /// A variant path the shared tree spells `Enum::Variant` or
+    /// `Enum::Variant(payload, ...)`: lower the payload from the shared nodes
+    /// instead of handing the tokens back to the typed parser. `None` means
+    /// the path names no variant (an associated call or function value), and
+    /// the caller keeps the typed delegation for it.
+    pub(super) fn lower_shared_enum_construction(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        let ExpressionKind::Qualified { base, name: vname } = &expression.kind else {
+            return Ok(None);
+        };
+        let ExpressionKind::Atom(Kind::Ident(enum_name)) = &base.kind else {
+            // A generic enum instance (`Opt[i64]::Some(..)`) keeps the typed
+            // parser's instantiation path for now.
+            return Ok(None);
+        };
+        let eid = if enum_name == "Self" {
+            match self.impl_self {
+                Some(Type::Enum(_, eid)) => eid,
+                _ => return Ok(None),
+            }
+        } else {
+            match self.enum_names.get(enum_name) {
+                Some(&eid) => eid,
+                None => return Ok(None),
+            }
+        };
+        let def = self.enums[eid].clone();
+        let Some((vidx, fields)) = def.variant_payload(vname) else {
+            return Ok(None);
+        };
+        self.require_public("enum", def.name, &def.file, def.public)?;
+        if arguments.len() > fields.len() {
+            self.seek_scalar_offset(arguments[fields.len()].range.start);
+            return Err(self.fail(&format!("variant '{}::{}' takes {} payload value(s)", def.name, vname, fields.len())));
+        }
+        let mut values = Vec::with_capacity(fields.len());
+        for (index, field) in fields.iter().enumerate() {
+            let Some(argument) = arguments.get(index) else {
+                self.seek_scalar_offset(expression.range.end);
+                return Err(self.fail(&format!("variant '{}::{}' needs {} payload value(s)", def.name, vname, fields.len())));
+            };
+            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+            if !self.matches_value_type(*field, actual, Some(&argument.range)) {
+                self.seek_scalar_offset(argument.range.end);
+                return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name(self.ctx))));
+            }
+            // An owned payload value moves into the variant, exactly like an
+            // owned struct field: the source slot's Frees is trimmed.
+            if actual.owned()
+                && let Expr::Variable(slot, ..) = &value {
+                    self.check_variable_move(*slot)?;
+                    self.moved.insert(*slot);
+                }
+            values.push(value);
+        }
+        self.seek_scalar_offset(expression.range.end);
+        Ok(Some((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid))))
+    }
 }

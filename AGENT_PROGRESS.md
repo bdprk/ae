@@ -357,3 +357,5 @@
 
 - 2026-11-24 10:30 (+08:00): **P1.4 slice 1: typed-expression fallbacks are counted.** Lowering sites that still call the typed Pratt parser go through `fallback_expression`; under `AE_ROUTE_REPORT` each prints `route typed-expression at <offset>`, `route_report.py` reports `typed=<n> typed_files=<m>`, and CI ratchets the measured **257 fallbacks / 50 files** as the ceiling. This makes the remaining dual-parser gap measurable and regression-proof (the body ladder sits at 0). Evidence: Windows suite 522/0, ratchet typed=257.
 
+- 2026-11-24 11:15 (+08:00): **P1.4 slice 2: enum constructions lower from the shared tree; typed fallbacks 257 -> 96.** `lower_shared_enum_construction` builds `EnumLit` from `Enum::Variant(...)` nodes (plain enums, `Self::Variant`, prelude result enums), checks payload types and moves owned payloads like struct fields; associated calls keep the typed delegation via a `None` return. Removed the three lower_stmt delegation branches and the argument branch; CI ceiling now 96. A new route regression test pins zero typed-expression fallbacks for enum constructions. Evidence: Windows suite 523/0, deny 176/176, clippy clean.
+

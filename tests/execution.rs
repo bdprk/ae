@@ -8862,3 +8862,41 @@ fn main() {
     fs::remove_file(path).unwrap();
     assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
 }
+
+// P1.4 slice 2: enum constructions lower from the shared syntax tree. The
+// payload-free path (`Shape::Empty`) and the payload path (`Shape::Circle(3)`)
+// both go through lower_shared_enum_construction, so the route report for
+// this program carries no typed-expression fallback line.
+#[test]
+fn enum_constructions_lower_on_the_resolved_route() {
+    let source = r#"enum Shape {
+    Circle(i64),
+    Empty,
+}
+
+fn area(shape: Shape) -> i64 {
+    match shape {
+        Shape::Circle(r) => { return r * r; }
+        Shape::Empty => { return 0; }
+    }
+}
+
+fn main() {
+    let circle = Shape::Circle(3);
+    print(area(circle));
+    let empty = Shape::Empty;
+    print(area(empty));
+}"#;
+    let path = std::env::temp_dir().join(format!("ae-enum-construction-route-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .env("AE_ROUTE_REPORT", "1")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("route typed-expression"), "{stderr}");
+}

@@ -103,9 +103,7 @@ impl<'a> Parser<'a> {
                         let literal = self.closure_literal()?;
                         self.seek_scalar_offset(initializer.range.end);
                         literal
-                    } else if iterator_constructor(initializer).is_some()
-                        || self.resolved_expressions().enum_constructors.contains(&initializer.range.start)
-                    {
+                    } else if iterator_constructor(initializer).is_some() {
                         self.seek_scalar_offset(initializer.range.start);
                         self.fallback_expression(0, false)?
                     } else {
@@ -390,15 +388,7 @@ impl<'a> Parser<'a> {
                 // Assigning to an already-moved variable is a legal
                 // re-initialization, so the flag clears either way.
                 let moved_before = self.moved.contains(&slot);
-                let (rhs, rhs_ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
-                    // An enum construction on the right-hand side
-                    // (`current = Message::Number(9);`): the typed expression
-                    // parser owns the variant layout and payload lowering.
-                    self.seek_scalar_offset(value.range.start);
-                    self.fallback_expression(0, true)?
-                } else {
-                    self.lower_scalar_body_expression(value, slots)?
-                };
+                let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
                 // An owned right-hand side moves into the target: the source
                 // slot's Frees is trimmed, and assigning the target to itself
                 // fails as a same-statement move (the typed rule).
@@ -471,14 +461,7 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(statement.range.end);
                     return Err(self.fail("a closure cannot be returned: it has no storage, and its captures live in this frame"));
                 }
-                let (lowered, ty) = if self.resolved_expressions().enum_constructors.contains(&value.range.start) {
-                    self.seek_scalar_offset(value.range.start);
-                    let result = self.fallback_expression(0, true)?;
-                    self.take(Kind::Semi)?;
-                    result
-                } else {
-                    self.lower_scalar_body_expression(value, slots)?
-                };
+                let (lowered, ty) = self.lower_scalar_body_expression(value, slots)?;
                 // Returning an owned value moves it out of the body: the
                 // caller owns it, so the drops pass must trim this slot's
                 // Frees and later reads are rejected (E0102). This covers
