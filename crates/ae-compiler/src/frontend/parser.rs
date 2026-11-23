@@ -1359,12 +1359,19 @@ impl<'a> Parser<'a> {
                             // the route too. The walk peels any bracket or
                             // specialization wrapper off the base.
                             let mut names_enum = false;
+                            let mut names_struct_path = false;
                             if let ExpressionKind::Qualified { base, .. } = &target.kind {
                                 let mut node = base.as_ref();
                                 loop {
                                     match &node.kind {
                                         ExpressionKind::Atom(Kind::Ident(name)) => {
                                             names_enum = self.enum_names.contains_key(name) || self.generics.names.contains_key(name);
+                                            // `Point::new(..)` / `Pair[string, i64]::new(..)`:
+                                            // the typed expression parser owns the
+                                            // resolution; the mark only lets a
+                                            // Return/Binding hand the expression to it.
+                                            names_struct_path = self.struct_names.contains_key(name)
+                                                || self.generics.struct_names.contains_key(name);
                                             break;
                                         }
                                         ExpressionKind::Specialization { base, .. }
@@ -1373,7 +1380,9 @@ impl<'a> Parser<'a> {
                                     }
                                 }
                             }
-                            if names_enum || (end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset)) {
+                            if names_struct_path {
+                                expressions.enum_constructors.insert(top_level.range.start);
+                            } else if names_enum || (end > 0 && expressions.enum_variants.contains(&self.tokens[end - 1].offset)) {
                                 expressions.enum_constructors.insert(top_level.range.start);
                                 if let StatementKind::Binding { name_range, .. } = &statement.kind {
                                     if let Some(&id) = expressions.scalar_definitions.get(&name_range.start) {

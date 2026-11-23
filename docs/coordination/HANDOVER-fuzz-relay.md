@@ -1505,3 +1505,15 @@ only a rarer mutation reaches:
 is green again (≈36 s); 511/0, byte parity and the 328-fallback count are
 unchanged. Lesson: run the ignored 50k gate whenever a slice widens a scan
 predicate — the 10k default sample is not a substitute.
+
+## P1.1 slice 22 landed: struct/enum associated calls
+
+A `Qualified` path whose peeled base names a struct (plain or generic
+declaration) is now marked the way enum constructors are, so `Return` and
+`Binding` hand it to the typed expression parser — which owns associated-call
+resolution (`associated_call`, `Pair[T]::new` via `instantiate_impl_method`).
+The binding is deliberately not marked enum-typed. Fallback count is
+unchanged (328) because the affected bodies also call generic-impl methods
+(`p.count()`), which the inherent-only method gate still rejects; this slice
+is the prerequisite for widening that gate with `generic_impls` +
+`struct_origin`.
