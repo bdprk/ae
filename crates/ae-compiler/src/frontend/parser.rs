@@ -225,8 +225,14 @@ fn scalar_body_expression(expression: &ae_syntax::expression::Expression, resolv
         ExpressionKind::Struct { target, fields } => {
             let marked = resolved.drop_free_constructions.contains(&expression.range.start)
                 || resolved.owned_constructions.contains(&expression.range.start);
-            matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)))
-                && marked
+            // A specialization (`Cell[T] { .. }`) is permissive here: the
+            // instance's field types exist only at lowering time and are
+            // checked there.
+            let specializes = matches!(&target.kind, ExpressionKind::Specialization { base, .. }
+                if matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))));
+            let named = matches!(target.kind, ExpressionKind::Atom(Kind::Ident(_)));
+            (named || specializes)
+                && (marked || specializes)
                 && fields.iter().all(|field| {
                     scalar_body_expression(&field.value, resolved, supports_call, supports_field)
                         || matches!(field.value.kind, ExpressionKind::Atom(Kind::Text(_)))
@@ -1572,10 +1578,15 @@ impl<'a> Parser<'a> {
                         return matches!(&expression.kind, ae_syntax::expression::ExpressionKind::Field { base, .. }
                             if matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))));
                     }
+                    let field_on_ident = role != ae_resolve::Role::Borrow
+                        && matches!(expression.kind, ae_syntax::expression::ExpressionKind::Field { .. })
+                        && field_chain_root(expression).is_some();
                     match role {
-                        ae_resolve::Role::Read => expressions.struct_field_reads.contains(&expression.range.start),
+                        ae_resolve::Role::Read => expressions.struct_field_reads.contains(&expression.range.start)
+                            || field_on_ident,
                         ae_resolve::Role::Write => expressions.struct_field_writes.contains(&expression.range.start)
-                            || expressions.owned_field_writes.contains(&expression.range.start),
+                            || expressions.owned_field_writes.contains(&expression.range.start)
+                            || field_on_ident,
                         _ => false,
                     }
                 };
@@ -2564,10 +2575,31 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Struct { target, fields } => {
                 // Validate in source order and emit in layout order.
-                let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
-                    unreachable!("scalar construction eligibility");
+                let sid = match &target.kind {
+                    ExpressionKind::Atom(Kind::Ident(name)) => {
+                        *self.struct_names.get(name).expect("scalar construction target")
+                    }
+                    // A generic instance (`Cell[T] { .. }`): the body was parsed
+                    // with `T` substituted, so the registry already holds the
+                    // concrete `StructDef` under the instance name.
+                    ExpressionKind::Specialization { base, arguments } => {
+                        let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
+                            unreachable!("scalar construction eligibility");
+                        };
+                        if let Some(sid) = self.cached_struct_specialization(name, arguments) {
+                            sid
+                        } else {
+                            // The typed route instantiates a generic struct
+                            // literal on first sight; do the same here.
+                            let &gid = self.generics.struct_names.get(name)
+                                .ok_or_else(|| self.fail(&format!("'{name}' is not a generic struct")))?;
+                            let args = self.shared_specialization_types(arguments)
+                                .ok_or_else(|| self.error_at(target.range.start, &format!("cannot read the type arguments of '{name}'")))?;
+                            self.instantiate_struct(gid, args, target.range.start)?
+                        }
+                    }
+                    _ => unreachable!("scalar construction eligibility"),
                 };
-                let &sid = self.struct_names.get(name).expect("scalar construction target");
                 let mut values: Vec<Option<Expr>> = (0..self.structs[sid].fields.len()).map(|_| None).collect();
                 for field in fields {
                     let next = self.tokens.partition_point(|token| token.offset < field.name_range.end);

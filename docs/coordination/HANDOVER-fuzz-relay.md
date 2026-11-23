@@ -1430,3 +1430,22 @@ Still typed in the concurrency family: `task_spawn`/`scope_spawn`/
 `pool_spawn` (they move a callable plus its captures into the executor —
 `concurrency_stmt`'s machinery), `spawn`/`wait`, and the `shared_*`/
 `mutex_*`/`chan_*` expression builtins.
+
+## P1.1 slice 21 landed: generic-instance structs and field reads
+
+- A specialized construction (`Cell[T] { .. }`, `Box[i64] { .. }`) is
+  admitted permissively at scan time and lowered through the registry:
+  `cached_struct_specialization`, or `shared_specialization_types` +
+  `instantiate_struct` when the instance is first seen — the typed route
+  instantiates on sight, and the resolved route now does the same.
+- The scan's field gate is permissive for any ident-rooted chain; a
+  `Cell[T]`/`ListNode[T]` parameter's scalar fields reach the lowering,
+  where the slot types (already concrete after substitution) validate the
+  read. The recheck still rejects string/owned field reads and non-struct
+  roots.
+- The deny-route test's legacy sample is now an effectful `try_read_file`
+  body (the generic construction it used to use now routes).
+
+Coverage: 333 → **328**. Still typed in the generic family: associated
+calls (`Pair[string, i64]::new(...)` — `instantiate_impl_method`), generic
+`impl` bodies, and the deep instantiation-budget programs.
