@@ -1388,6 +1388,9 @@ impl<'a> Parser<'a> {
     /// `resolve_trait_call` (the typed route's E0207).
     fn call_has_signature(&self, name: &str) -> bool {
         if RESERVED.contains(&name) { return true; }
+        // The pointer intrinsics are dispatched by the typed expression parser
+        // by name and live in neither table; a call to one is known.
+        if matches!(name, "ptr_write" | "ptr_drop_in_place") { return true; }
         if self.functions.contains_key(name) || self.generics.fn_names.contains_key(name) { return true; }
         self.trait_bounds.values().flatten().any(|&tid| {
             self.generics.traits.get(tid).is_some_and(|defn| defn.methods.iter().any(|method| method.name == name))
@@ -3603,6 +3606,12 @@ impl<'a> Parser<'a> {
                 // name, where the typed arm's `fail` lands), everything else is
                 // an unknown variable at the name itself.
                 let Some(def) = self.resolved_expressions().scalar_reads.get(&expression.range.start).copied() else {
+                    // A generic enum template in value position has the typed
+                    // route's own reminder; a plain enum name has none (the
+                    // typed arm reports it as an unknown variable).
+                    if self.generics.names.contains_key(name) {
+                        return Err(self.error_at(expression.range.start, &format!("'{name}' is a generic enum; write '{name}[string]::Variant'")));
+                    }
                     if self.struct_names.contains_key(name) {
                         self.seek_scalar_offset(expression.range.end);
                         return Err(self.fail(&format!("'{name}' is a struct name; construct it with '{name} {{ ... }}'")));
