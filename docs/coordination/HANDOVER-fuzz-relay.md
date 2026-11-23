@@ -1986,6 +1986,17 @@ parity → 50k → WSL → commit.
   impl's construction (`native_layout_abi`'s Guard), nested generic literal
   field typing, chained temporary method calls, `sync_markers` trait
   markers, `box_wrapper`'s generic call returning an instance struct.
+
+### Slice 40 — nested generic fields and generic-call chains (landed)
+
+- `owned_field_struct` recurses into struct-typed fields (the release
+  generator already recurses), so `Ledger { entries: Pair[i64, Pair[string,
+  f64]] { .. } }` is ownable and the nested literal routes.
+- A chain rooted in a generic-call local (`let b = box_new[Node](..);
+  b.val.val`) marks as chains AND reads permissively; the lowering validates
+  each segment's real type.
+- `nested_generics.ae` and `box_wrapper.ae` are legacy-free; coverage
+  21 → 17, files 19 → 16; deny manifest 160.
 - Gate note: after the slice-25 ledger edit the checklist-freshness test
   caught a stale `docs/checklist.md` on the real-Linux gate — run
   `gen_checklist.py` and the script unit tests after every ledger edit, and

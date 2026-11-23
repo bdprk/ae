@@ -105,8 +105,10 @@ fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
         && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
             || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex)
-            // A nested plain struct carries no release surface of its own.
-            || owned_plain_struct(*ty, structs)))
+            // A nested struct carries its own release routine; the generated
+            // release recurses into every struct field (c_output).
+            || owned_plain_struct(*ty, structs)
+            || owned_field_struct(*ty, structs)))
 }
 
 /// The registry struct a field expression reads from: a parameter's
@@ -1871,6 +1873,7 @@ impl<'a> Parser<'a> {
                                     .and_then(|sid| field_ty_in(sid, name, self.structs))
                                     .map(ShapeArg::Value)
                                     .or_else(|| resolved_field_shape(base, name, &expressions, self.struct_names, self.structs, &self.generics));
+                                let has_shape = field_shape.is_some();
                                 if let Some(field_shape) = field_shape {
                                     match field_shape {
                                         ShapeArg::Value(field_ty) if scalar_type(field_ty) => {
@@ -1891,6 +1894,20 @@ impl<'a> Parser<'a> {
                                             expressions.struct_field_handles.insert(expression.range.start);
                                         }
                                         _ => {}
+                                    }
+                                }
+                                if !has_shape {
+                                    // A chain rooted in a generic-call local: every
+                                    // segment's type exists only at lowering, so the
+                                    // marks are permissive and the lowering validates
+                                    // (scalar read or a further chain).
+                                    if let Some(root) = field_chain_root(expression) {
+                                        if expressions.scalar_reads.get(&root.range.start)
+                                            .is_some_and(|id| expressions.generic_call_bindings.contains(id))
+                                        {
+                                            expressions.struct_field_chains.insert(expression.range.start);
+                                            expressions.struct_field_reads.insert(expression.range.start);
+                                        }
                                     }
                                 }
                             }
