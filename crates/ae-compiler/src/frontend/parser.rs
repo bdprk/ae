@@ -102,7 +102,11 @@ fn typed_intrinsic(name: &str) -> bool {
 fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
     let Type::Struct(sid) = ty else { return false };
     structs.get(sid).is_some_and(|defn| defn.drop_fn.is_none()
-        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty) || owned_plain_struct(*ty, structs)))
+        && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
+            // A raw pointer is an address, not an owned value: it carries no
+            // release surface, so a plain struct may hold one.
+            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
+            || owned_plain_struct(*ty, structs)))
 }
 
 /// A struct whose fields are scalar or `string`: it carries one owned value
@@ -1529,6 +1533,16 @@ impl<'a> Parser<'a> {
             ExpressionKind::Atom(Kind::Float(_)) => Some(Type::F64),
             ExpressionKind::Atom(Kind::True) | ExpressionKind::Atom(Kind::False) => Some(Type::Bool),
             ExpressionKind::Group(inner) => self.chain_call_type(inner, local_structs),
+            ExpressionKind::Field { base, name } => {
+                // A field read types its chain: the base's struct supplies the
+                // field's declared type (`self.ptr` is *mut i64, `buf.len` i64).
+                let ty = self.chain_call_type(base, local_structs)?;
+                let sid = match ty {
+                    Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                    _ => return None,
+                };
+                field_ty_in(sid, name, self.structs)
+            }
             ExpressionKind::PointerCast { base, mutable, pointee } => {
                 // The address stays; the pointee spelling names the new view.
                 if !matches!(self.chain_call_type(base, local_structs)?, Type::Ptr(_) | Type::PtrMut(_)) {
@@ -2033,7 +2047,12 @@ impl<'a> Parser<'a> {
                             // permissively there.
                             if let ExpressionKind::Call { callee, .. } = &initializer.kind
                                 && matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }
-                                    | ExpressionKind::Field { .. })
+                                    | ExpressionKind::Field { .. }
+                                    // An associated call (`MyVec[Elem]::new()`):
+                                    // the instance's type exists only at
+                                    // lowering, so the receiver's methods
+                                    // resolve lazily.
+                                    | ExpressionKind::Qualified { .. })
                                 {
                                     expressions.generic_call_bindings.insert(id);
                                 }
@@ -2550,6 +2569,9 @@ impl<'a> Parser<'a> {
             scalar_type(ty) || matches!(ty, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF)
                 || owned_plain_struct(ty, self.structs)
                 || owned_field_struct(ty, self.structs)
+                // A drop-carrying struct with plain fields as a substitution:
+                // the instantiated body owns and releases it.
+                || plain_drop_struct(ty, self.structs)
         });
         let receiver_supported = !self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Enum(..)));
         // A receiver-less impl body (an associated function, or a trait impl's
@@ -2562,7 +2584,8 @@ impl<'a> Parser<'a> {
             || (matches!(self.return_type, Type::Struct(_))
                 && (self.receiver == Some(self.return_type)
                     || owned_plain_struct(self.return_type, self.structs)
-                    || owned_field_struct(self.return_type, self.structs)));
+                    || owned_field_struct(self.return_type, self.structs)
+                    || plain_drop_struct(self.return_type, self.structs)));
         let slots_supported = self.names.iter().all(|(name, &(_, _, ty))| {
             // A value capture moves into the closure's slot; the body's
             // own Frees releases it after the call (the FnOnce shape),
@@ -2758,7 +2781,13 @@ impl<'a> Parser<'a> {
                             .or_else(|| local_structs.get(receiver).copied());
                         let Some(ty) = ty else { return };
                         let ok = if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
-                            name == "deref" && arguments.is_empty()
+                            match name.as_str() {
+                                "deref" => arguments.is_empty(),
+                                "offset" | "byte_offset" => arguments.len() == 1,
+                                // The lowering answers any other name with the
+                                // pointer's own diagnostic.
+                                _ => true,
+                            }
                         } else if let Some((signature, _, _)) = self.resolve_inherent_method(name, ty) {
                             // Arity is part of the gate: a mismatched call
                             // falls back instead of reaching the lowering.
@@ -2915,8 +2944,9 @@ impl<'a> Parser<'a> {
                 let ty = self.names.get(receiver).map(|&(_, _, ty)| ty)
                     .or_else(|| local_structs.get(receiver).copied());
                 if ty.is_none()
-                    && resolved.scalar_reads.get(&base.range.start)
-                        .is_some_and(|id| resolved.generic_call_bindings.contains(id))
+                    && (resolved.scalar_reads.get(&base.range.start)
+                            .or_else(|| resolved.call_definitions.get(&base.range.start))
+                            .is_some_and(|id| resolved.generic_call_bindings.contains(id)))
                 {
                     // A local from an explicit generic call: the lowering has
                     // its concrete type once the call is instantiated.
@@ -2924,7 +2954,7 @@ impl<'a> Parser<'a> {
                 }
                 let Some(ty) = ty else { return false };
                 if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
-                    return name == "deref";
+                    return matches!(name.as_str(), "deref" | "offset" | "byte_offset");
                 }
                 return matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::StructRef(_) | Type::Enum(..));
             }
@@ -2965,6 +2995,9 @@ impl<'a> Parser<'a> {
                 // view and read marks.
                 receiver_field_type(expression, ty, self.structs)
                     .is_some_and(|field| scalar_type(field)
+                        // A raw pointer field reads as its address (a copyable
+                        // value with no release surface).
+                        || (role == ae_resolve::Role::Read && matches!(field, Type::Ptr(_) | Type::PtrMut(_)))
                         // A string field reads as a borrowed view (print, a
                         // borrow argument, a comparison); binding it as a value
                         // is the binding arm's own move rejection.

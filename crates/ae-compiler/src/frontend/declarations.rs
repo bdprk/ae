@@ -1120,19 +1120,21 @@ impl Parser<'_> {
                     let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
                     eprintln!("route legacy function id={id} at {offset}");
                 }
-                // The endgame switch (P1.1): with AE_DENY_LEGACY_ROUTE=1 a
-                // body the resolved route does not take is a diagnostic
-                // instead of a silent fallback. Flipping it file by file is
-                // how the old parser's surface is measured down to zero.
-                if std::env::var_os("AE_DENY_LEGACY_ROUTE").is_some() {
+                // The endgame switch (P1.4): the resolved route IS the body
+                // parser. A body it does not take is a diagnostic, not a
+                // silent fallback; the legacy typed block parser stays
+                // reachable during its deletion behind the escape hatch
+                // AE_ALLOW_LEGACY_ROUTE=1. (AE_DENY_LEGACY_ROUTE is kept as a
+                // no-op alias for the gates that still set it.)
+                if std::env::var_os("AE_ALLOW_LEGACY_ROUTE").is_none() {
                     let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
                     // The shared module parse recovered from a statement-level
-                    // error in THIS body: its diagnostic is the typed route's
-                    // answer, so the deny switch reports it instead of denying.
+                    // error in THIS body: its diagnostic is the answer, so it
+                    // is reported instead of a route denial.
                     if let Some(diagnostic) = self.resolved_expressions().shared_body_errors.get(&offset).cloned() {
                         return Err(diagnostic);
                     }
-                    return Err(self.error_at(offset, "the legacy body parser is disabled (AE_DENY_LEGACY_ROUTE=1); this function's body is not on the resolved route yet"));
+                    return Err(self.error_at(offset, "the legacy body parser is disabled (AE_ALLOW_LEGACY_ROUTE=1 re-enables it); this function's body is not on the resolved route yet"));
                 }
                 self.block()
             }
