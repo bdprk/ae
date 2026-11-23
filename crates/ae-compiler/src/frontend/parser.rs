@@ -932,10 +932,12 @@ impl<'a> Parser<'a> {
             _ => return None,
         };
         let definition = self.generics.inherent.get(&format!("{type_name}#{method_name}"))?;
+        // Any receiver kind is admitted: borrowed receivers keep their
+        // bookkeeping and a by-value receiver moves (enum receivers are by
+        // value only). A receiver-less associated function is not a method
+        // call through a value.
         let receiver = definition.receiver;
-        if !matches!(receiver, Some(Type::StructMut(_)) | Some(Type::StructRef(_))) {
-            return None;
-        }
+        receiver?;
         let signature = definition.signature.clone();
         let ret = signature.ret;
         let ret_ok = scalar_type(ret) || matches!(ret, Type::String | Type::Enum(..))
@@ -1365,6 +1367,16 @@ impl<'a> Parser<'a> {
                                 loop {
                                     match &node.kind {
                                         ExpressionKind::Atom(Kind::Ident(name)) => {
+                                            if name == "Self" {
+                                                // Inside an instantiated impl body `Self`
+                                                // is the concrete target the sub-parser
+                                                // was built for.
+                                                if let Some(impl_ty) = self.impl_self {
+                                                    names_enum = matches!(impl_ty, Type::Enum(..));
+                                                    names_struct_path = matches!(impl_ty, Type::Struct(_));
+                                                }
+                                                break;
+                                            }
                                             names_enum = self.enum_names.contains_key(name) || self.generics.names.contains_key(name);
                                             // `Point::new(..)` / `Pair[string, i64]::new(..)`:
                                             // the typed expression parser owns the
@@ -1728,18 +1740,29 @@ impl<'a> Parser<'a> {
                             match &base.kind {
                                 ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } => {
                                     if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind {
-                                        if let Some(&gid) = self.generics.struct_names.get(struct_name) {
-                                            if let Some(args) = self.shared_specialization_types(arguments) {
+                                        if let Some(args) = self.shared_specialization_types(arguments) {
+                                            if let Some(&gid) = self.generics.struct_names.get(struct_name) {
                                                 if let Ok(sid) = self.instantiate_struct(gid, args, base.range.start) {
                                                     local_structs.insert(name.clone(), Type::Struct(sid));
+                                                }
+                                            } else if let Some(&gid) = self.generics.names.get(struct_name) {
+                                                if let Ok(eid) = self.instantiate_enum(gid, args, base.range.start) {
+                                                    let display = self.enums[eid].name;
+                                                    local_structs.insert(name.clone(), Type::Enum(display, eid));
                                                 }
                                             }
                                         }
                                     }
                                 }
                                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) => {
-                                    if let Some(&sid) = self.struct_names.get(struct_name) {
+                                    if struct_name == "Self" {
+                                        if let Some(impl_ty) = self.impl_self {
+                                            local_structs.insert(name.clone(), impl_ty);
+                                        }
+                                    } else if let Some(&sid) = self.struct_names.get(struct_name) {
                                         local_structs.insert(name.clone(), Type::Struct(sid));
+                                    } else if let Some(&eid) = self.enum_names.get(struct_name) {
+                                        local_structs.insert(name.clone(), Type::Enum(self.enums[eid].name, eid));
                                     }
                                 }
                                 _ => {}
@@ -3620,8 +3643,9 @@ impl<'a> Parser<'a> {
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         let wants_mut = matches!(signature.params.first(), Some(Type::StructMut(_)));
+        let wants_ref = matches!(signature.params.first(), Some(Type::StructRef(_)));
         self.seek_scalar_offset(expression.range.end);
-        if self.moved.contains(&slot) {
+        if (wants_mut || wants_ref) && self.moved.contains(&slot) {
             return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot borrow the receiver of '{method_name}' because it was moved")).with_code("E0102"), slot)));
         }
         if wants_mut {
@@ -3646,15 +3670,34 @@ impl<'a> Parser<'a> {
                 self.deferred_write_conflicts.push((slot, conflict_at, receiver_name, "mutate", None));
             }
             self.mut_borrows.push((slot, self.scopes.len()));
-        } else {
+        } else if wants_ref {
             if self.mut_borrows.iter().any(|&(bid, _)| bid == slot) {
                 return Err(self.fail(&format!("cannot borrow the receiver of '{method_name}' while it is mutably borrowed in this statement")));
             }
             if !self.is_borrowed(slot) {
                 self.call_borrows.push((slot, self.scopes.len()));
             }
+        } else {
+            // A by-value receiver moves: the typed postfix path's rules.
+            if self.is_borrowed(slot) && !self.all_borrows_are_views(slot) {
+                return Err(self.fail(&format!("cannot move the receiver of '{method_name}' while it is borrowed")));
+            }
+            if self.is_borrowed(slot) {
+                let receiver_name = self.names.iter().find(|(_, (id, _, _))| *id == slot).map(|(name, _)| name.clone()).unwrap_or_else(|| format!("v{slot}"));
+                let conflict_at = self.tokens.partition_point(|token| token.offset < expression.range.end).saturating_sub(1);
+                let conflict_at = self.tokens.get(conflict_at).map(|token| token.offset).unwrap_or(expression.range.start);
+                self.deferred_write_conflicts.push((slot, conflict_at, receiver_name, "move", None));
+            }
+            if self.moved.contains(&slot) {
+                return Err(moved_value_hint(self.binding_label(self.fail(&format!("cannot use a moved value as the receiver of '{method_name}'")).with_code("E0102"), slot)));
+            }
+            self.moved.insert(slot);
         }
-        let mut args = vec![Argument::Borrow(slot, matches!(base_ty, Type::Struct(_)))];
+        let mut args = if wants_mut || wants_ref {
+            vec![Argument::Borrow(slot, matches!(base_ty, Type::Struct(_)))]
+        } else {
+            vec![Argument::Value(Expr::Variable(slot, base_ty, 0, 0))]
+        };
         for (index, argument) in arguments.iter().enumerate() {
             self.seek_scalar_offset(argument.range.start);
             let Some(expected) = signature.params.get(index + 1).copied() else {

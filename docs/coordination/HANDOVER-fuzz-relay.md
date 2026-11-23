@@ -1654,3 +1654,24 @@ Self::None;` inside a generic enum impl (the `Self` path needs the impl's
 enum instance, not a named base) and enum-instance locals from associated
 calls (`let a = Opt[i64]::some(..); a.is_some()`) need the same local-type
 inference for `Type::Enum(sid)` plus `enum_origin` in the lazy branch.
+
+## P1.1 slice 24 landed: by-value receivers and `Self` paths
+
+- A by-value method receiver (an enum, or an owned struct) moves:
+  `Argument::Value`, borrow conflicts deferred as a "move", E0102 for a
+  moved value — the typed postfix rules; enum receivers are by-value only
+  and `resolve_inherent_method` now admits every receiver kind (a
+  receiver-less associated function still answers `None`).
+- `Self::Variant` / `Self::assoc` inside an instantiated impl is marked
+  through the sub-parser's `impl_self`.
+- A local bound from `Opt[i64]::Some(..)`, a plain-enum constructor, or
+  `Self::..` gets the concrete `Type::Enum` in the receiver precompute.
+
+Remaining for `tests/run/enum_generic_impls.ae`: the instantiated generic
+enum method bodies (`is_some(self)`, `unwrap_or(self, ..)`) fall back at
+`match self` — the scan's Match arm requires the subject's def to be in
+`enum_bindings`, and a by-value `self` of an enum dispatch has no spelling
+the builder can classify today. Next: teach the Match scan arm to accept
+`self` when the body's `receiver` is an enum (the same `impl_self`/
+receiver knowledge the lowering already has), then the file joins the deny
+manifest.
