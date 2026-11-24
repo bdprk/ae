@@ -42,7 +42,7 @@ The compiler's reserved-name registry (`RESERVED`, `crates/ae-compiler/src/front
 | JSON | `json_get`, `json_int`, `json_bool`, `json_len`, `json_has` | `std::json` — `json::get(doc, "$.a.b")` survives until derive-based serialization (M3.3) replaces it |
 | FFI layout | **[keep]** `c_size_of`, `c_align_of`, `c_offset_of` | stays with the `#[repr(C)]` family (`spec/unsafe.md` §5) — not a stdlib item |
 
-The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-compatible custom-enum contract dissolve into `Result[T, E]` + `Option[T]` (M1.11): fallible built-ins return `Result[T, std::io::Error]`-shaped values, `?` propagates the one generic type, and the one-family-per-function restriction disappears with it.
+The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-compatible custom-enum contract dissolve into `Result[T, E]` + `Option[T]` (M1.11, P2.4): every preset family is the `Result[payload, string]` instantiation of the one generic declaration, the family names remain pattern aliases, and the C runtime's macro ids are generated from the registered enum ids (ADR-0233). Fallible built-ins therefore return `Result`-shaped values, `?` propagates the one generic type, and the one-family-per-function restriction disappears with it.
 
 ## 4. Migration Policy (plan §5.3)
 

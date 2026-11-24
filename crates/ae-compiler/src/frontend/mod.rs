@@ -307,42 +307,68 @@ const MATH_FNS: &[(&str, &str, usize)] = &[
 // type, so a program can name them without importing anything. They are
 // expected to move into a stdlib module once generics and a module search path
 // exist (ADR-11).
-#[allow(clippy::type_complexity)]
+// The one generic result declaration every preset family specializes. The
+// prelude enums and the generic registry share this shape (P2.4).
+fn result_generic_enum() -> GenericEnum {
+    GenericEnum {
+        name: "Result".to_owned(),
+        params: vec!["T".to_owned(), "E".to_owned()],
+        variants: vec![
+            ("Ok".to_owned(), vec![Payload::Param(0)]),
+            ("Err".to_owned(), vec![Payload::Param(1)]),
+        ],
+        file: PRELUDE.to_owned(),
+        public: true,
+        is_copy: false,
+    }
+}
+
+// The preset result families: alias name plus the `[T, E]` arguments of their
+// `Result` instantiation. The order fixes the prelude enum ids and the C
+// runtime's macro ids; the runtime alias block is generated from the same
+// list. `FileInfo` (struct id 0) and `CommandOutput` (struct id 1) are the
+// prelude payload structs registered before any source.
+pub(super) fn prelude_result_families() -> [(&'static str, [Type; 2]); 8] {
+    [
+        ("ReadResult", [Type::String, Type::String]),
+        ("IntResult", [Type::Int(IntTy::I64), Type::String]),
+        ("DirResult", [Type::StrVec, Type::String]),
+        ("FileResult", [Type::Struct(0), Type::String]),
+        ("StatusResult", [Type::Unit, Type::String]),
+        ("BoolResult", [Type::Bool, Type::String]),
+        ("CommandResult", [Type::Struct(1), Type::String]),
+        ("FloatResult", [Type::Float(FloatTy::F64), Type::String]),
+    ]
+}
+
+// Substitute one family's arguments into the generic Result's variants.
+fn specialize_result_variants(def: &GenericEnum, args: &[Type; 2]) -> Vec<(String, Vec<Type>)> {
+    def.variants.iter().map(|(name, fields)| {
+        let fields = fields.iter().map(|payload| match payload {
+            Payload::Param(index) => args[*index],
+            Payload::Concrete(ty) => *ty,
+            Payload::Nested(_) => unreachable!("the prelude Result has no nested payloads"),
+        }).collect();
+        (name.clone(), fields)
+    }).collect()
+}
+
 fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
-    // `aliases` names the generic `Result[...]` spelling once a family is
-    // unified with its instantiation (P2.4). `WriteResult` is not a definition
-    // of its own: it shares the `Result[i64, string]` instantiation with
-    // `IntResult`, so it is registered as an alias name below. A preset with
-    // no alias is still a legacy monomorphic layout and is next on the
-    // migration ladder.
-    let defs: Vec<(&'static str, Vec<(&'static str, Vec<Type>)>, &'static [&'static str])> = vec![
-        ("ReadResult", vec![("Ok", vec![Type::String]), ("Err", vec![Type::String])], &["Result"]),
-        ("IntResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])], &["Result", "WriteResult"]),
-        ("DirResult", vec![("Ok", vec![Type::StrVec]), ("Err", vec![Type::String])], &["Result"]),
-        // Metadata: byte size, modification time in seconds since the Unix
-        // epoch, and whether the target is a directory.
-        ("FileResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::Int(IntTy::I64), Type::Bool]), ("Err", vec![Type::String])], &[]),
-        // Operations with no value to report: success carries the unit payload, so
-        // `Result[(), string]` is exactly this family.
-        ("StatusResult", vec![("Ok", vec![Type::Unit]), ("Err", vec![Type::String])], &["Result"]),
-        // JSON answers: a document field can be a flag, so booleans need their
-        // own result shape (there is no "true" placeholder like 0 or "").
-        ("BoolResult", vec![("Ok", vec![Type::Bool]), ("Err", vec![Type::String])], &["Result"]),
-        // A finished child process: a non-zero status is a result, not an
-        // error, so the status travels in Ok next to the output it produced.
-        ("CommandResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::String]), ("Err", vec![Type::String])], &[]),
-        // map[string, f64] lookups (ADR-65).
-        ("FloatResult", vec![("Ok", vec![Type::Float(FloatTy::F64)]), ("Err", vec![Type::String])], &["Result"]),
-    ];
+    // Every preset family is an instantiation of the one generic Result; the
+    // definitions derive its Ok/Err variants with the family's arguments, so
+    // no payload-specific variant list exists (Hard Rule 1).
+    let result = result_generic_enum();
     let mut enums = Vec::new();
     let mut names = HashMap::new();
-    for (name, variants, aliases) in defs {
+    for (name, args) in prelude_result_families() {
         names.insert(name.to_owned(), enums.len());
-        enums.push(EnumDef { name, variants: variants.into_iter().map(|(v, fields)| (v.to_owned(), fields)).collect(), file: PRELUDE.to_owned(), public: true, pattern: name.to_owned(), aliases: aliases.to_vec(), is_copy: false });
+        let variants = specialize_result_variants(&result, &args);
+        enums.push(EnumDef { name, variants, file: PRELUDE.to_owned(), public: true, pattern: name.to_owned(), aliases: vec!["Result"], is_copy: false });
     }
     // The write family's Ok/Err payloads are identical to the integer family's;
     // one instantiation serves both names (P2.4 slice 3).
     let int_eid = names["IntResult"];
+    enums[int_eid].aliases.push("WriteResult");
     names.insert("WriteResult".to_owned(), int_eid);
     (enums, names)
 }
@@ -399,14 +425,7 @@ fn prelude_generics() -> Generics {
         is_copy: false,
     });
     generics.names.insert("Result".to_owned(), 1);
-    generics.defs.push(GenericEnum {
-        name: "Result".to_owned(),
-        params: vec!["T".to_owned(), "E".to_owned()],
-        variants: vec![("Ok".to_owned(), vec![Payload::Param(0)]), ("Err".to_owned(), vec![Payload::Param(1)])],
-        file: PRELUDE.to_owned(),
-        public: true,
-        is_copy: false,
-    });
+    generics.defs.push(result_generic_enum());
     generics
 }
 
@@ -1088,7 +1107,6 @@ fn check_source_here(source: &str) -> Result<(), FrontendDiagnostic> {
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
     let mut ctx = CompileContext::new();
-    types::wire_prelude_result_payloads(&mut enums, &mut generics, &enum_names, &ctx);
     types::seed_preset_result_instantiations(&mut generics, &enum_names, &ctx);
     let mut next_id = 0usize;
     parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).map(|_| ())
@@ -1106,7 +1124,6 @@ pub fn compile_with_context(source: &str) -> Result<(String, CompileContext), St
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
     let mut ctx = CompileContext::new();
-    types::wire_prelude_result_payloads(&mut enums, &mut generics, &enum_names, &ctx);
     types::seed_preset_result_instantiations(&mut generics, &enum_names, &ctx);
     let mut next_id = 0usize;
     let functions = parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).map_err(|diagnostic| diagnostic.to_string())?;
@@ -1253,6 +1270,30 @@ pub fn compile_path_tracked_with_imports(path: &Path, imports: &PackageImports) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // P2.4: every preset result family derives from the one generic Result
+    // declaration, and the two multi-value families name the prelude payload
+    // structs (ADR-0234). This pins the family order the C ids depend on.
+    #[test]
+    fn prelude_result_families_are_result_instantiations() {
+        let (enums, names) = prelude_enums();
+        let result = result_generic_enum();
+        for (index, (alias, args)) in prelude_result_families().iter().enumerate() {
+            assert_eq!(enums[index].name, *alias);
+            assert_eq!(names[*alias], index);
+            let variants = specialize_result_variants(&result, args);
+            assert_eq!(enums[index].variants, variants);
+            assert_eq!(variants[0].1, vec![args[0]]);
+            assert_eq!(variants[1].1, vec![Type::String]);
+            assert!(enums[index].aliases.contains(&"Result"));
+        }
+        assert_eq!(names["WriteResult"], names["IntResult"]);
+        let structs = prelude_payload_structs();
+        assert_eq!(structs[0].name, "FileInfo");
+        assert_eq!(structs[1].name, "CommandOutput");
+        assert!(matches!(prelude_result_families()[3].1[0], Type::Struct(0)));
+        assert!(matches!(prelude_result_families()[6].1[0], Type::Struct(1)));
+    }
 
     // The audit's P0.2 acceptance: two programs compiled one after the
     // other must not answer from each other's registries. Function ids
@@ -1722,12 +1763,12 @@ mod tests {
             "static void ae_plain(void) { }\n",
             "static void ae_win(void) { /* win32-header */ }\n",
         );
-        let (plain, len) = prune_runtime(prefix, "", &[], "int main(void) { ae_plain(); return 0; }\n");
+        let (plain, len) = prune_runtime(prefix, "", &[], &[], "", "int main(void) { ae_plain(); return 0; }\n");
         assert!(plain[..len].contains(WIN32_HEADER_OMITTED), "header should be dropped");
         assert!(!plain[..len].contains(WIN32_HEADER_INCLUDE), "include line must be gone");
         assert!(!plain.contains("ae_win"), "unreachable Win32 function must be pruned");
 
-        let (win, len) = prune_runtime(prefix, "", &[], "int main(void) { ae_win(); return 0; }\n");
+        let (win, len) = prune_runtime(prefix, "", &[], &[], "", "int main(void) { ae_win(); return 0; }\n");
         assert!(win[..len].contains(WIN32_HEADER_INCLUDE), "header must stay for Win32 functions");
         assert!(win[..len].contains(WIN32_HEADER_MARKER));
     }

@@ -112,3 +112,17 @@ Take option A for this slice, and stage the rest of P2.4 behind it.
   information is introduced.
 - Exit gate for the whole item remains P2.4: zero hardcoded per-type
   container families and zero hardcoded monomorphic result enums.
+5. **Single source for the preset families (slice 6).**
+   `prelude_result_families()` is the only family table: one row per alias
+   with its `[T, E]` arguments. `prelude_enums()` derives each definition by
+   substituting those arguments into the one `Result` declaration
+   (`result_generic_enum()`, shared with `prelude_generics()`), so no
+   payload-specific variant list remains in the compiler. The C runtime's
+   `AE_<FAMILY>_RESULT` / `_OK` / `_ERR` defines are generated from the
+   registered enum ids (`runtime_result_aliases`) and emitted between the
+   prelude layouts and the runtime extension, only when an extension unit
+   survives pruning; `runtime_ex.c` contains no enum ids, and the pruner's
+   macro-prefix map resolves from the same family list. With this the
+   result-enum half of P2.4 is complete: every preset result family is an
+   instantiation of the one generic `Result`; the remaining P2.4 work is the
+   container ladder (`Vec[T]`, `Map[K, V]`, `[T; N]`, `&[T]`).

@@ -13,50 +13,18 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
     format!("{gid}:{}", arguments.iter().map(|ty| ty.name(ctx)).collect::<Vec<_>>().join(","))
 }
 
-/// P2.4: the preset families whose `Ok` payload is a single flat type (unit
-/// included) are exactly the `Result[payload, string]` instantiations of the
-/// prelude generic. Seeding the specialization cache makes a program's own
-/// `Result[...]` spelling resolve to the preset layout — one type, one C id —
-/// while the family name stays usable as a pattern alias. `WriteResult` shares
-/// the `IntResult` instantiation (identical payloads) and has no id of its
-/// own. The two multi-value families get their payload structs attached after
-/// loading (ADR-0234).
+/// P2.4: every preset result family is a `Result[payload, string]`
+/// instantiation of the prelude generic. Seeding the specialization cache
+/// makes a program's own `Result[...]` spelling resolve to the preset layout —
+/// one type, one C id — while the family name stays usable as a pattern alias.
+/// `WriteResult` shares the `IntResult` instantiation (identical payloads) and
+/// has no id of its own.
 pub(super) fn seed_preset_result_instantiations(generics: &mut Generics, enum_names: &HashMap<String, usize>, ctx: &CompileContext) {
     let Some(&gid) = generics.names.get("Result") else { return };
-    let families: [(&str, Vec<Type>); 6] = [
-        ("ReadResult", vec![Type::String, Type::String]),
-        ("IntResult", vec![Type::Int(IntTy::I64), Type::String]),
-        ("DirResult", vec![Type::StrVec, Type::String]),
-        ("StatusResult", vec![Type::Unit, Type::String]),
-        ("BoolResult", vec![Type::Bool, Type::String]),
-        ("FloatResult", vec![Type::Float(FloatTy::F64), Type::String]),
-    ];
-    for (alias, args) in families {
+    for (alias, args) in prelude_result_families() {
         let Some(&eid) = enum_names.get(alias) else { continue };
         generics.done.insert(specialization_key(gid, &args, ctx), eid);
-        generics.enum_origin.insert(eid, (gid, args));
-    }
-}
-
-/// ADR-0234: the two result families whose `Ok` carries several values point
-/// at the prelude payload structs (`FileInfo` id 0, `CommandOutput` id 1) and
-/// join the `Result[Struct, string]` instantiation cache. Called right after
-/// the prelude is built, before any source is parsed, so the route scan reads
-/// the one-payload variant shape.
-pub(super) fn wire_prelude_result_payloads(
-    enums: &mut [EnumDef],
-    generics: &mut Generics,
-    enum_names: &HashMap<String, usize>,
-    ctx: &CompileContext,
-) {
-    let Some(&gid) = generics.names.get("Result") else { return };
-    for (alias, sid) in [("FileResult", 0usize), ("CommandResult", 1usize)] {
-        let Some(&eid) = enum_names.get(alias) else { continue };
-        enums[eid].variants[0].1 = vec![Type::Struct(sid)];
-        enums[eid].aliases = vec!["Result"];
-        let args = vec![Type::Struct(sid), Type::String];
-        generics.done.insert(specialization_key(gid, &args, ctx), eid);
-        generics.enum_origin.insert(eid, (gid, args));
+        generics.enum_origin.insert(eid, (gid, args.to_vec()));
     }
 }
 

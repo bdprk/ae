@@ -335,13 +335,37 @@ pub(super) fn strip_define_lines(text: &str) -> String {
     out
 }
 
-/// Which prelude enum an `AE_<NAME>_...` macro belongs to. The layout of
-/// that enum must exist whenever a kept function uses any of its macros.
-pub(super) const PRELUDE_MACRO_PREFIXES: &[(&str, usize)] = &[
-    ("AE_READ_", 0), ("AE_INT_", 1), ("AE_WRITE_", 1), ("AE_DIR_", 2),
-    ("AE_FILE_", 3), ("AE_STATUS_", 4), ("AE_BOOL_", 5), ("AE_COMMAND_", 6),
-    ("AE_FLOAT_", 7),
+/// The C macro prefix each preset result family answers to. The runtime uses
+/// these names; their values (enum ids and tag constants) are generated from
+/// the registered enums, never hardcoded (P2.4).
+pub(super) const RESULT_FAMILY_PREFIXES: &[(&str, &str)] = &[
+    ("ReadResult", "AE_READ_"), ("IntResult", "AE_INT_"), ("IntResult", "AE_WRITE_"),
+    ("DirResult", "AE_DIR_"), ("FileResult", "AE_FILE_"), ("StatusResult", "AE_STATUS_"),
+    ("BoolResult", "AE_BOOL_"), ("CommandResult", "AE_COMMAND_"), ("FloatResult", "AE_FLOAT_"),
 ];
+
+/// The generated `AE_<FAMILY>_RESULT`/`_OK`/`_ERR` defines the runtime source
+/// names. Emitted between the prelude layouts and the runtime extension, so
+/// the typedefs already exist and the functions that use the macros compile.
+pub(super) fn runtime_result_aliases(enums: &[EnumDef]) -> String {
+    let mut out = String::new();
+    for (name, prefix) in RESULT_FAMILY_PREFIXES {
+        let Some(eid) = enums.iter().position(|def| def.name == *name) else { continue };
+        let _ = writeln!(out, "#define {prefix}RESULT ae_e{eid}");
+        let _ = writeln!(out, "#define {prefix}OK AE_E{eid}_0");
+        let _ = writeln!(out, "#define {prefix}ERR AE_E{eid}_1");
+    }
+    out
+}
+
+/// Which prelude enum an `AE_<NAME>_...` macro belongs to, resolved from the
+/// registered enums. The layout of that enum must exist whenever a kept
+/// function uses any of its macros.
+pub(super) fn prelude_macro_prefixes(enums: &[EnumDef]) -> Vec<(&'static str, usize)> {
+    RESULT_FAMILY_PREFIXES.iter().filter_map(|(name, prefix)| {
+        enums.iter().position(|def| def.name == *name).map(|eid| (*prefix, eid))
+    }).collect()
+}
 
 /// Keep only runtime functions reachable from the program. Roots are the
 /// symbols in the program suffix plus every symbol in the always-retained
@@ -350,7 +374,7 @@ pub(super) const PRELUDE_MACRO_PREFIXES: &[(&str, usize)] = &[
 /// retained functions. Prelude enum layouts are emitted on demand (ADR-66):
 /// a layout exists when user code names the type, or when a kept function
 /// uses one of the enum's `AE_<NAME>_` macros.
-pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, String)], suffix: &str) -> (String, usize) {
+pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, String)], prefixes: &[(&str, usize)], aliases: &str, suffix: &str) -> (String, usize) {
     let core_units = runtime_units(core);
     let ex_units = runtime_units(ex);
     // The layout release/forfeit functions are ordinary named units: they join
@@ -394,7 +418,7 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
                     // A kept function that uses a prelude result macro needs that
                     // enum's typedef, even though the body only names the macro.
                     let body = units[index].1;
-                    for (macro_prefix, eid) in PRELUDE_MACRO_PREFIXES {
+                    for (macro_prefix, eid) in prefixes {
                         if body.contains(macro_prefix) {
                             let typedef = format!("ae_e{eid}");
                             if !keep.contains(&typedef) { queue.push(typedef); }
@@ -438,6 +462,15 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
         if keep.contains(&format!("ae_e{eid}_release")) { out.push_str(release); }
         if keep.contains(&format!("ae_e{eid}_forfeit")) { out.push_str(forfeit); }
     }
+    // The generated result-family defines must precede the runtime extension
+    // functions that name them. A program whose extension units were all
+    // pruned carries none of the block (the runtime's fixed text never
+    // references the macros once the static block moved here).
+    let ex_kept = ex_units.iter().any(|(name, body)| match name {
+        Some(n) => keep.contains(n),
+        None => strip_define_lines(body).contains("AE_"),
+    });
+    if ex_kept { out.push_str(aliases); }
     for (name, body) in &ex_units {
         if name.is_none() || name.as_ref().is_some_and(|n| keep.contains(n)) { out.push_str(body); }
     }
@@ -869,6 +902,8 @@ typedef struct {{
     // The fixed prefix is program-independent; emit only its reachable part.
     // `split_off` avoids copying the 100 KB runtime text.
     let user = if fn_typedefs.is_empty() { out } else { format!("{fn_typedefs}{out}") };
-    let (full, pruned_len) = prune_runtime(core, ex, &prelude, &user);
+    let prefixes = prelude_macro_prefixes(enums);
+    let aliases = runtime_result_aliases(enums);
+    let (full, pruned_len) = prune_runtime(core, ex, &prelude, &prefixes, &aliases, &user);
     Ok(GeneratedC { full, runtime_len: pruned_len })
 }
