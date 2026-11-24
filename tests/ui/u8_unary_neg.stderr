@@ -1,0 +1,1 @@
+ae: $DIR/u8_unary_neg.ae:3:15: unary '-' is not allowed on unsigned integer operands

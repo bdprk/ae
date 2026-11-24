@@ -31,6 +31,7 @@ pub struct ClosureParam {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExpressionKind {
     Atom(Kind),
+    Unit,
     Group(Box<Expression>),
     Propagate(Box<Expression>),
     AddressCast { binding: String, binding_range: Range<usize>, mutable: bool, pointee: Range<usize> },
@@ -229,11 +230,17 @@ impl Parser<'_> {
                 }
                 Kind::LParen => {
                     self.cursor += 1;
-                    let inner = self.expression(0)?;
-                    crate::expect_token(self.file, self.source, self.current(), Kind::RParen)?;
-                    range.end = self.current().end;
-                    self.cursor += 1;
-                    ExpressionKind::Group(Box::new(inner))
+                    if self.current().kind == Kind::RParen {
+                        range.end = self.current().end;
+                        self.cursor += 1;
+                        ExpressionKind::Unit
+                    } else {
+                        let inner = self.expression(0)?;
+                        crate::expect_token(self.file, self.source, self.current(), Kind::RParen)?;
+                        range.end = self.current().end;
+                        self.cursor += 1;
+                        ExpressionKind::Group(Box::new(inner))
+                    }
                 }
                 Kind::LBracket => {
                     let elements = self.collection(false)?;

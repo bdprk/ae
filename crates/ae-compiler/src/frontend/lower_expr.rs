@@ -1,5 +1,16 @@
 //! Lowering module: expr (P1.4 parser split).
 use super::*;
+
+fn constant_int_literal(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::Number(value) => Some(*value as i128),
+        Expr::Neg(inner, ..) => match &**inner {
+            Expr::Number(value) => Some(-(*value as i128)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 use super::parser::{moved_value_hint, SharedExpressionEffects};
 use super::route_marks::*;
 
@@ -13,8 +24,10 @@ impl<'a> Parser<'a> {
         Ok(match &expression.kind {
             ExpressionKind::Atom(Kind::Number(value)) => (Expr::Number(*value), Type::Int(IntTy::I64)),
             ExpressionKind::Atom(Kind::Float(value)) => (Expr::FloatLit(*value), Type::Float(FloatTy::F64)),
+            ExpressionKind::Atom(Kind::Char(value)) => (Expr::CharLit(*value), Type::Char),
             ExpressionKind::Atom(Kind::True) => (Expr::BoolLit(true), Type::Bool),
             ExpressionKind::Atom(Kind::False) => (Expr::BoolLit(false), Type::Bool),
+            ExpressionKind::Unit => (Expr::Unit, Type::Unit),
             ExpressionKind::Atom(Kind::Text(value)) => {
                 self.seek_scalar_offset(expression.range.start);
                 let (line, column) = self.position();
@@ -81,9 +94,12 @@ impl<'a> Parser<'a> {
             ExpressionKind::PointerCast { base, mutable, pointee } => {
                 self.seek_scalar_offset(expression.range.start);
                 let (operand, base_type) = self.lower_scalar_body_expression(base, slots)?;
-                if !matches!(base_type, Type::Ptr(_) | Type::PtrMut(_)) {
+                if !matches!(base_type, Type::Ptr(_) | Type::PtrMut(_) | Type::Int(IntTy::Usize)) {
                     self.seek_scalar_offset(expression.range.start);
                     return Err(self.fail(&format!("'as' retags a raw pointer, and {} is not a pointer", base_type.name(self.ctx))));
+                }
+                if base_type == Type::Int(IntTy::Usize) && self.unsafe_depth == 0 {
+                    return Err(self.error_at(expression.range.start, "integer-to-pointer cast requires 'unsafe'").with_code("E0701"));
                 }
                 let name = self.source.get(pointee.clone())
                     .ok_or_else(|| self.error_at(pointee.start, "cannot read the pointer's pointee type"))?;
@@ -102,13 +118,32 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error_at(target.start, "cannot read the cast's target type"))?;
                 let to = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))
                     .ok_or_else(|| self.error_at(target.start, &format!("'{name}' is not a scalar type")))?;
-                if !matches!(to, Type::Int(_) | Type::Float(_)) {
-                    self.seek_scalar_offset(target.start);
-                    return Err(self.fail(&format!("'{name}' is not a numeric type; 'as' converts numbers")));
+                if matches!(from, Type::Ptr(_) | Type::PtrMut(_)) && to == Type::Int(IntTy::Usize) {
+                    if self.unsafe_depth == 0 {
+                        return Err(self.error_at(expression.range.start, "pointer-to-integer cast requires 'unsafe'").with_code("E0701"));
+                    }
+                    let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                    let token = self.tokens.get(end).ok_or_else(|| self.fail("expected the end of the cast"))?;
+                    return Ok((Expr::ScalarCast(Box::new(operand), from, to, token.line, token.column), to));
                 }
-                if !matches!((from, to), (Type::Int(IntTy::I64), Type::Float(FloatTy::F64)) | (Type::Float(FloatTy::F64), Type::Int(IntTy::I64)) | (Type::Int(IntTy::I64), Type::Int(IntTy::I64)) | (Type::Float(FloatTy::F64), Type::Float(FloatTy::F64))) {
+                let valid = match (from.scalar(), to.scalar()) {
+                    (Some(from_scalar), Some(to_scalar)) => ae_ty::valid_scalar_cast(from_scalar, to_scalar),
+                    _ => false,
+                };
+                if !valid {
                     self.seek_scalar_offset(target.start);
-                    return Err(self.fail(&format!("conversion from {} to {name} is not implemented yet", from.name(self.ctx))));
+                    return Err(self.fail(&format!("conversion from {} to {name} is not allowed", from.name(self.ctx))));
+                }
+                if let Type::Int(target_int) = to
+                    && let Some(value) = constant_int_literal(&operand)
+                    && !target_int.contains(value)
+                {
+                    let (min, max) = target_int.range();
+                    self.seek_scalar_offset(target.start);
+                    return Err(self.fail(&format!(
+                        "integer literal {value} is out of range for '{}' ({min}..={max})",
+                        target_int.name(),
+                    )));
                 }
                 if from == to {
                     return Ok((operand, to));
@@ -348,6 +383,57 @@ impl<'a> Parser<'a> {
                                     return Err(self.error_at(name_range.start, &message));
                                 }
                         }
+                    }
+                    if let Some(int_method) = IntMethodKind::from_name(method_name) {
+                        let (receiver_expr, receiver_ty) = if let ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind {
+                            let &(slot, _, ty) = self.names.get(receiver).ok_or_else(|| {
+                                self.fail(&format!("unknown variable '{receiver}'")).with_code("E0101")
+                            })?;
+                            self.seek_scalar_offset(base.range.start);
+                            let (line, column) = self.position();
+                            (Expr::Variable(slot, ty, line, column), ty)
+                        } else {
+                            self.seek_scalar_offset(base.range.start);
+                            self.lower_scalar_body_expression(base, slots)?
+                        };
+                        let Type::Int(width) = receiver_ty else {
+                            self.seek_scalar_offset(callee.range.end);
+                            return Err(self.fail(&format!("type {} has no method '{method_name}'", receiver_ty.name(self.ctx))));
+                        };
+                        if int_method == IntMethodKind::CheckedNeg && !width.signed() {
+                            self.seek_scalar_offset(callee.range.end);
+                            return Err(self.fail("checked_neg is only defined for signed integer types"));
+                        }
+                        let expected_arity = if int_method.is_unary() { 0 } else { 1 };
+                        if arguments.len() != expected_arity {
+                            self.seek_scalar_offset(callee.range.end);
+                            return Err(self.fail(&format!("'{method_name}' takes {expected_arity} argument(s), found {}", arguments.len())));
+                        }
+                        let arg_expr = if int_method.is_unary() {
+                            None
+                        } else {
+                            let arg = &arguments[0];
+                            self.seek_scalar_offset(arg.range.start);
+                            let (arg_val, arg_ty) = self.lower_scalar_body_expression(arg, slots)?;
+                            if arg_ty != receiver_ty {
+                                self.seek_scalar_offset(arg.range.end);
+                                return Err(self.fail(&format!(
+                                    "argument to '{method_name}' must be {}, found {}",
+                                    receiver_ty.name(self.ctx),
+                                    arg_ty.name(self.ctx),
+                                )));
+                            }
+                            Some(Box::new(arg_val))
+                        };
+                        self.seek_scalar_offset(expression.range.end);
+                        let (line, column) = self.position();
+                        let result_ty = if int_method.is_checked() {
+                            let eid = self.instantiate_enum(0, vec![Type::Int(width)], callee.range.end)?;
+                            Type::Enum(self.enums[eid].name, eid)
+                        } else {
+                            Type::Int(width)
+                        };
+                        return Ok((Expr::IntMethod(int_method, Box::new(receiver_expr), arg_expr, result_ty, line, column), result_ty));
                     }
                     // A borrow argument the shared rules cannot classify keeps
                     // the typed postfix layer's diagnostics; delegate the whole
@@ -1383,7 +1469,7 @@ let mut args = Vec::with_capacity(arguments.len());
                     // The typed route admits only the flat payload-capable
                     // arguments for a generic enum; a struct or enum argument
                     // is a diagnostic, not an instantiation.
-                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
                         return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, string, vec, or vec[string]"));
                     }
                     self.instantiate_enum(gid, args, base.range.start)?

@@ -161,6 +161,14 @@ impl SpellingParser<'_> {
                 self.cursor += 1;
                 self.named(name)
             }
+            Kind::LParen => {
+                self.cursor += 1;
+                if self.take(Kind::RParen) {
+                    TypeSpelling::Primitive("()")
+                } else {
+                    TypeSpelling::Unknown(String::new())
+                }
+            }
             _ => {
                 self.cursor += 1;
                 TypeSpelling::Unknown(String::new())
@@ -169,15 +177,13 @@ impl SpellingParser<'_> {
     }
 
     fn named(&mut self, name: String) -> TypeSpelling {
+        if let Some(scalar) = ae_ty::Scalar::from_spelling(name.as_str()) {
+            return TypeSpelling::Primitive(scalar.spelling());
+        }
+        if name == "string" {
+            return TypeSpelling::Primitive("string");
+        }
         match name.as_str() {
-            "i64" | "f64" | "bool" | "string" => {
-                return TypeSpelling::Primitive(match name.as_str() {
-                    "i64" => "i64",
-                    "f64" => "f64",
-                    "bool" => "bool",
-                    _ => "string",
-                });
-            }
             "atomic" | "mutex" | "guard" | "chan" | "exec" | "task_scope" | "pool" => {
                 return TypeSpelling::Handle(match name.as_str() {
                     "atomic" => "atomic",

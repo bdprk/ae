@@ -1,0 +1,1 @@
+ae: $DIR/u8_cast_literal_oob.ae:2:20: integer literal 256 is out of range for 'u8' (0..=255)

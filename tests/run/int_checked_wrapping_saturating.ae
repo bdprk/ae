@@ -1,0 +1,64 @@
+fn print_opt_i8(opt: Option[i8]) {
+    match opt {
+        Option::Some(v) => { print(v); }
+        Option::None => { print("none"); }
+    }
+}
+
+fn print_opt_u8(opt: Option[u8]) {
+    match opt {
+        Option::Some(v) => { print(v); }
+        Option::None => { print("none"); }
+    }
+}
+
+fn safe_sum_i8(a: i8, b: i8, c: i8) -> Option[i8] {
+    let ab = a.checked_add(b)?;
+    let abc = ab.checked_add(c)?;
+    return Option[i8]::Some(abc);
+}
+
+fn main() {
+    let imax = 127 as i8;
+    let imin = (-128) as i8;
+    let umax = 255 as u8;
+    let umin = 0 as u8;
+
+    print(imax.wrapping_add(1 as i8));
+    print(imin.wrapping_sub(1 as i8));
+    print((16 as i8).wrapping_mul(16 as i8));
+    print(imin.wrapping_neg());
+    print(umax.wrapping_add(1 as u8));
+    print(umin.wrapping_sub(1 as u8));
+    print((1 as u8).wrapping_neg());
+    let u64_high = (1 as u64) << (63 as u64);
+    let u64_max = u64_high + (u64_high - (1 as u64));
+    print(u64_max.wrapping_add(1 as u64));
+
+    print((120 as i8).saturating_add(20 as i8));
+    print(((-120) as i8).saturating_sub(20 as i8));
+    print(((-100) as i8).saturating_mul(2 as i8));
+    print((250 as u8).saturating_add(20 as u8));
+    print((5 as u8).saturating_sub(20 as u8));
+    print((2000000000 as i32).saturating_add(2000000000 as i32));
+    print((5 as u32).saturating_sub(100 as u32));
+
+    print_opt_i8((10 as i8).checked_add(5 as i8));
+    print_opt_i8(imax.checked_add(1 as i8));
+    print_opt_i8(imin.checked_sub(1 as i8));
+    print_opt_i8((16 as i8).checked_mul(16 as i8));
+    print_opt_i8(imin.checked_div((-1) as i8));
+    print_opt_i8(imin.checked_rem((-1) as i8));
+    print_opt_i8((10 as i8).checked_div(0 as i8));
+    print_opt_i8((10 as i8).checked_rem(0 as i8));
+    print_opt_i8(imin.checked_neg());
+    print_opt_i8((10 as i8).checked_neg());
+
+    print_opt_u8(umax.checked_add(1 as u8));
+    print_opt_u8(umin.checked_sub(1 as u8));
+    print_opt_u8((20 as u8).checked_div(3 as u8));
+    print_opt_u8((20 as u8).checked_rem(0 as u8));
+
+    print_opt_i8(safe_sum_i8(50 as i8, 50 as i8, 20 as i8));
+    print_opt_i8(safe_sum_i8(100 as i8, 50 as i8, 1 as i8));
+}

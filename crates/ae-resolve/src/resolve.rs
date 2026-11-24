@@ -545,7 +545,13 @@ impl<'m> Pass<'m> {
             // value` sits on the closing brace (probes r1-r5: if/else both,
             // full match arms and unsafe blocks count, `while true` does
             // not).
-            if matches!(unit.declaration.kind, DeclarationKind::Function { returns: Some(_), .. })
+            let non_unit_return = match &unit.declaration.kind {
+                DeclarationKind::Function { returns: Some(range), .. } => {
+                    self.module.source.get(range.clone()).map(str::trim) != Some("()")
+                }
+                _ => false,
+            };
+            if non_unit_return
                 && let Some(body) = &unit.body
                     && !Walker::definitely_returns(body)
                         && let Some(end) = body_end {
@@ -673,7 +679,9 @@ impl Walker<'_> {
             ExpressionKind::Atom(Kind::Number(_)) => Some(TypeSpelling::Primitive("i64")),
             ExpressionKind::Atom(Kind::Float(_)) => Some(TypeSpelling::Primitive("f64")),
             ExpressionKind::Atom(Kind::Text(_)) => Some(TypeSpelling::Primitive("string")),
+            ExpressionKind::Atom(Kind::Char(_)) => Some(TypeSpelling::Primitive("char")),
             ExpressionKind::Atom(Kind::True) | ExpressionKind::Atom(Kind::False) => Some(TypeSpelling::Primitive("bool")),
+            ExpressionKind::Unit => Some(TypeSpelling::Primitive("()")),
             // A name read resolves through the live bindings — the walk is
             // at this statement, so the map answers exactly what the
             // compiler's single pass would see here. Module items and the
@@ -709,6 +717,12 @@ impl Walker<'_> {
                 let mutable = *mutable;
                 let shape = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), pointee.clone()).spelling;
                 Some(TypeSpelling::Pointer { mutable, pointee: Box::new(shape) })
+            }
+            ExpressionKind::ScalarCast { target, .. } => {
+                let name = self.module.source.get(target.clone())?.trim();
+                let scalar = crate::typecheck::Scalar::from_spelling(name)?;
+                matches!(scalar, crate::typecheck::Scalar::Int(_) | crate::typecheck::Scalar::Float(_) | crate::typecheck::Scalar::Char)
+                    .then(|| TypeSpelling::Primitive(scalar.spelling()))
             }
             // Field and index reads infer through the base's shape.
             ExpressionKind::Field { base, name } => {
@@ -756,6 +770,23 @@ impl Walker<'_> {
                     }
                     return None;
                 }
+                if let ExpressionKind::Field { base, name } = &callee.kind {
+                    if matches!(
+                        name.as_str(),
+                        "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_neg"
+                            | "saturating_add" | "saturating_sub" | "saturating_mul"
+                    ) {
+                        return self.infer_expression(base);
+                    }
+                    if matches!(
+                        name.as_str(),
+                        "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem" | "checked_neg"
+                    ) {
+                        let base_shape = self.infer_expression(base)?;
+                        return Some(TypeSpelling::Prelude { name: "Option", arguments: vec![base_shape] });
+                    }
+                    return None;
+                }
                 // The root names the module function being called; its
                 // return spelling is the shape.
                 let ExpressionKind::Atom(Kind::Ident(fn_name)) = &callee.kind else {
@@ -766,7 +797,9 @@ impl Walker<'_> {
                 let DeclarationKind::Function { returns, .. } = &declaration.kind else {
                     return None;
                 };
-                let range = returns.clone()?;
+                let Some(range) = returns.clone() else {
+                    return (declaration.name != "main").then_some(TypeSpelling::Primitive("()"));
+                };
                 let params: Vec<String> = declaration.type_parameters.iter().map(|parameter| parameter.name.clone()).collect();
                 Some(classify(self.tokens, &|name: &str| self.items.get(name).copied(), &params, None, range).spelling)
             }
@@ -1382,8 +1415,9 @@ impl Walker<'_> {
             _ => None,
         };
         let result = match &expression.kind {
-            ExpressionKind::Atom(Kind::Number(_)) => return Checked(Scalar::Int),
-            ExpressionKind::Atom(Kind::Float(_)) => return Checked(Scalar::Float),
+            ExpressionKind::Atom(Kind::Number(_)) => return Checked(Scalar::Int(ae_ty::IntTy::I64)),
+            ExpressionKind::Atom(Kind::Float(_)) => return Checked(Scalar::Float(ae_ty::FloatTy::F64)),
+            ExpressionKind::Atom(Kind::Char(_)) => return Checked(Scalar::Char),
             ExpressionKind::Atom(Kind::True | Kind::False) => return Checked(Scalar::Bool),
             ExpressionKind::Atom(Kind::Ident(_)) => {
                 let scalar = target.and_then(|id| {
@@ -1412,8 +1446,8 @@ impl Walker<'_> {
             ExpressionKind::ScalarCast { base, target } => {
                 let Some(target_scalar) = self.module.source.get(target.clone())
                     .and_then(|name| Scalar::from_spelling(name.trim())) else { return Deferred };
-                if !matches!(target_scalar, Scalar::Int | Scalar::Float) { return Deferred; }
-                if !matches!(checked_child(base), Some(Scalar::Int | Scalar::Float)) { return Deferred; }
+                let Some(base_scalar) = checked_child(base) else { return Deferred };
+                if !ae_ty::valid_scalar_cast(base_scalar, target_scalar) { return Deferred; }
                 return Checked(target_scalar);
             }
             _ => return Deferred,
@@ -1430,7 +1464,7 @@ impl Walker<'_> {
                 };
                 self.occurrence(name, expression.range.clone(), role, mode)
             }
-            ExpressionKind::Atom(_) => None,
+            ExpressionKind::Atom(_) | ExpressionKind::Unit => None,
             ExpressionKind::Group(inner) | ExpressionKind::Propagate(inner) => self.expr(inner, role),
             ExpressionKind::AddressCast { binding, binding_range, mutable, pointee } => {
                 self.pointer_cast_targets.insert(pointee.start, *mutable);

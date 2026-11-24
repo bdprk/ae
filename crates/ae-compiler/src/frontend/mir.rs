@@ -100,6 +100,8 @@ pub(super) enum MirOperand {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Char(char),
+    Unit,
     Str(Rc<str>, usize, usize),
 }
 
@@ -190,6 +192,8 @@ fn lower_expr(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut MirLow
         Expr::Number(n) => MirRvalue::Use(MirOperand::Int(*n)),
         Expr::FloatLit(x) => MirRvalue::Use(MirOperand::Float(*x)),
         Expr::BoolLit(b) => MirRvalue::Use(MirOperand::Bool(*b)),
+        Expr::CharLit(c) => MirRvalue::Use(MirOperand::Char(*c)),
+        Expr::Unit => MirRvalue::Use(MirOperand::Unit),
         Expr::StrLit(text, line, col) => MirRvalue::Use(MirOperand::Str(Rc::from(text.as_str()), *line, *col)),
         Expr::Variable(id, ty, ..) => MirRvalue::Use(MirOperand::Place(MirPlace::Local(*id, *ty))),
         Expr::Field(base, fname, fty) => MirRvalue::Use(MirOperand::Place(MirPlace::Field(Box::new(base_place(base, bindings, lowering)), fname.clone(), *fty))),
@@ -237,6 +241,8 @@ fn lower_operand(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mir
         Expr::Number(n) => MirOperand::Int(*n),
         Expr::FloatLit(x) => MirOperand::Float(*x),
         Expr::BoolLit(b) => MirOperand::Bool(*b),
+        Expr::CharLit(c) => MirOperand::Char(*c),
+        Expr::Unit => MirOperand::Unit,
         Expr::StrLit(text, line, col) => MirOperand::Str(Rc::from(text.as_str()), *line, *col),
         Expr::Variable(id, ty, ..) => MirOperand::Place(MirPlace::Local(*id, *ty)),
         other => {
@@ -374,6 +380,13 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             vec![lower_operand(e, bindings, lowering), lower_operand(c, bindings, lowering)],
         ),
         Expr::ScalarCast(e, ..) => ("scalar_cast", vec![lower_operand(e, bindings, lowering)]),
+        Expr::IntMethod(kind, recv, arg, ..) => {
+            let mut operands = vec![lower_operand(recv, bindings, lowering)];
+            if let Some(arg) = arg {
+                operands.push(lower_operand(arg, bindings, lowering));
+            }
+            (kind.mir_name(), operands)
+        }
         Expr::PtrCast(e, mutable, _pointee_id, ..) => (
             if *mutable { "ptr_cast_mut" } else { "ptr_cast" },
             vec![lower_operand(e, bindings, lowering)],
@@ -501,6 +514,8 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,
         Expr::FloatLit(..) | Expr::ToF64(..) => Type::Float(FloatTy::F64),
+        Expr::CharLit(..) => Type::Char,
+        Expr::Unit => Type::Unit,
         Expr::BoolLit(..) | Expr::StrEq(..) | Expr::Contains(..) => Type::Bool,
         Expr::Variable(_, ty, ..) | Expr::Field(_, _, ty) | Expr::VecLit(_, ty, ..) => *ty,
         Expr::StructLit(sid, _) => Type::Struct(*sid),
@@ -543,6 +558,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         // A retag's type is the new pointer, taken from the variant's own
         // fields — recursing on the same expression here would not terminate.
         Expr::ScalarCast(_, _, to, ..) => *to,
+        Expr::IntMethod(_, _, _, ty, ..) => *ty,
         Expr::PtrCast(_, mutable, pointee_id, ..) => {
             if *mutable { Type::PtrMut(*pointee_id) } else { Type::Ptr(*pointee_id) }
         }
@@ -689,8 +705,8 @@ fn thread_edges(blocks: &mut [MirBlock]) -> bool {
 // real side effect (§2.2 Rule 7: optimizations must not change behavior).
 fn condition_is_pure(expr: &Expr) -> bool {
     match expr {
-        Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) => true,
-        Expr::Variable(_, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64), ..) => true,
+        Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::CharLit(..) | Expr::Unit => true,
+        Expr::Variable(_, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit, ..) => true,
         Expr::Not(value) => condition_is_pure(value),
         Expr::Binary(left, op, right, ..) => {
             // Arithmetic can trap on overflow or division by zero.
@@ -1093,6 +1109,8 @@ fn print_operand(operand: &MirOperand, out: &mut String, ctx: &CompileContext) {
         // not `4`, which would read as an integer operand.
         MirOperand::Float(x) => out.push_str(&format!("{x:?}")),
         MirOperand::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        MirOperand::Char(c) => out.push_str(&format!("{c:?}")),
+        MirOperand::Unit => out.push_str("()"),
         MirOperand::Borrow { slot, take_address } => {
             let operation = if *take_address { "address_of" } else { "forward_borrow" };
             out.push_str(&format!("{operation}(v{slot})"));

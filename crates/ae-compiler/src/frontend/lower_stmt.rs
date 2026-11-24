@@ -41,6 +41,8 @@ impl<'a> Parser<'a> {
                     match &callee.kind {
                         ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))
                         | ae_syntax::expression::ExpressionKind::Qualified { .. } => {}
+                        ae_syntax::expression::ExpressionKind::Field { name, .. }
+                            if IntMethodKind::from_name(name).is_some_and(IntMethodKind::is_checked) => {}
                         _ => return Err(self.fail("a propagation binding must call a function or construct a result variant")),
                     }
                     self.seek_scalar_offset(operand.range.start);
@@ -448,7 +450,7 @@ impl<'a> Parser<'a> {
                     return Ok(Statement::Print(Printed::Text(text.clone())));
                 }
                 let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
-                if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::StrView) {
+                if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::StrView) {
                     self.seek_scalar_offset(argument.range.end);
                     return Err(self.fail(&format!("cannot print a value of type {}", ty.name(self.ctx))).with_code("E0206"));
                 }
@@ -466,6 +468,11 @@ impl<'a> Parser<'a> {
             }
             StatementKind::Return(value) => {
                 if self.in_main {
+                    if matches!(&value.kind, ae_syntax::expression::ExpressionKind::Unit) {
+                        self.seek_scalar_offset(statement.range.end);
+                        let frees = self.live_owned();
+                        return Ok(Statement::Return(Expr::Number(0), frees));
+                    }
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
                 }
@@ -566,10 +573,16 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(value.range.start);
                 // The name answers nowhere, so the callee resolution fails
                 // with the typed route's E0207 (the error precedes the
-                // statement-level "must end with '?'" check). If it somehow
-                // resolves, fall through to that statement rule.
-                let _ = self.lower_scalar_body_expression(value, slots)?;
-                return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+                // statement-level "must end with '?'" check). Unit-returning
+                // calls are valid bare statements; all others must end with '?'.
+                let (expr, ty) = self.lower_scalar_body_expression(value, slots)?;
+                if ty == Type::Unit {
+                    let slot = self.next_var;
+                    self.next_var += 1;
+                    Statement::Declare(slot, expr)
+                } else {
+                    return Err(self.fail("a statement that only calls a function must end with '?' to propagate its result"));
+                }
             }
             StatementKind::Expr { .. } => {
                 // Not `exit` and not a bare call the earlier arm took (a bare

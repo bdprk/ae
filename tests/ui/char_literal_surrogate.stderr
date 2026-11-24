@@ -1,0 +1,1 @@
+ae: $DIR/char_literal_surrogate.ae:2:13: invalid Unicode scalar value in character literal

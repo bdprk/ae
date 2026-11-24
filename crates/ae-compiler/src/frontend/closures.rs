@@ -417,6 +417,10 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         }
         // A retag uses the base without consuming it.
         Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) | Expr::ScalarCast(e, ..) => walk_expr(e, used, mutated),
+        Expr::IntMethod(_, recv, arg, ..) => {
+            walk_expr(recv, used, mutated);
+            if let Some(arg) = arg { walk_expr(arg, used, mutated); }
+        }
         Expr::Index(id, _, index, ..) | Expr::VecIndex(id, index, ..) | Expr::StrVecIndex(id, index, ..) => {
             used.insert(*id);
             walk_expr(index, used, mutated);
@@ -481,7 +485,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         Expr::ExecRun(ex) | Expr::PoolNew(ex) | Expr::PoolJoin(ex) => walk_expr(ex, used, mutated),
         Expr::AtomicAdd(handle, value) => { walk_expr(handle, used, mutated); walk_expr(value, used, mutated); }
         Expr::AtomicCas(handle, expect, new) => { walk_expr(handle, used, mutated); walk_expr(expect, used, mutated); walk_expr(new, used, mutated); }
-        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(..) | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::NowMs | Expr::NowS | Expr::ClosureLit(_) | Expr::MapNew(..) => {}
+        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::StrLit(..) | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::NowMs | Expr::NowS | Expr::ClosureLit(_) | Expr::MapNew(..) => {}
     }
 }
 

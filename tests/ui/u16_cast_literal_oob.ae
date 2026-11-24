@@ -1,0 +1,4 @@
+fn main() {
+    let a = 65536 as u16;
+    print(a);
+}

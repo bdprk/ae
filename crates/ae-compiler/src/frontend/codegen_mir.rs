@@ -78,7 +78,11 @@ fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: 
         }
         CfgTerminator::Return(expr) => {
             let result = codegen::emit_value_before_cleanup(expr, frees, out, next, true, ctx);
-            out.push_str(&format!("    return {result};\n"));
+            if result.is_empty() {
+                out.push_str("    return;\n");
+            } else {
+                out.push_str(&format!("    return {result};\n"));
+            }
         }
         CfgTerminator::Exit(code) => {
             let result = codegen::emit_value_before_cleanup(code, frees, out, next, false, ctx);

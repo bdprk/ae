@@ -1,0 +1,4 @@
+fn main() {
+    let a = 256 as u8;
+    print(a);
+}

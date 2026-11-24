@@ -430,6 +430,17 @@ static ae_string ae_to_string(int64_t value, size_t line, size_t column) {
     if (length < 0) ae_fail("cannot format integer", line, column);
     return ae_str_from_len(buffer, (int64_t)length, line, column);
 }
+static ae_string ae_to_string_u64(uint64_t value, size_t line, size_t column) {
+    char buffer[24];
+    const int length = snprintf(buffer, sizeof buffer, "%" PRIu64, value);
+    if (length < 0) ae_fail("cannot format integer", line, column);
+    return ae_str_from_len(buffer, (int64_t)length, line, column);
+}
+static ae_string ae_to_string_char(uint32_t value, size_t line, size_t column) {
+    char buf[4];
+    const size_t len = ae_utf8_encode(value, buf);
+    return ae_str_from_len(buf, (int64_t)len, line, column);
+}
 
 // ---- f64 text (ADR-37) ------------------------------------------------------
 // One spelling on every platform. `%g` alone is not enough: UCRT writes a NaN
@@ -538,6 +549,10 @@ static double ae_f64_div(double a, double b, size_t line, size_t column) {
     if (b == 0.0) ae_fail("f64 division by zero", line, column);
     return a / b;
 }
+static float ae_f32_div(float a, float b, size_t line, size_t column) {
+    if (b == 0.0f) ae_fail("f32 division by zero", line, column);
+    return a / b;
+}
 
 static double ae_f64_from_i64(int64_t value, size_t line, size_t column) {
     // Every integer up to 2^53 is exact; beyond that the conversion would
@@ -554,6 +569,104 @@ static int64_t ae_f64_to_i64_trunc(double value, size_t line, size_t column) {
         ae_fail("float-to-integer cast out of range", line, column);
     }
     return (int64_t)value;
+}
+static int8_t ae_f64_to_i8_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -129.0 || value >= 128.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int8_t)value;
+}
+static uint8_t ae_f64_to_u8_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 256.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (uint8_t)(int16_t)value;
+}
+static int16_t ae_f64_to_i16_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -32769.0 || value >= 32768.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int16_t)value;
+}
+static uint16_t ae_f64_to_u16_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 65536.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (uint16_t)(int32_t)value;
+}
+static int32_t ae_f64_to_i32_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -2147483649.0 || value >= 2147483648.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int32_t)value;
+}
+static uint32_t ae_f64_to_u32_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 4294967296.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (uint32_t)(int64_t)value;
+}
+static intptr_t ae_f64_to_isize_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (intptr_t)value;
+}
+static uint64_t ae_f64_to_u64_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 18446744073709551616.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    if (value < 0.0) return 0;
+    return (uint64_t)value;
+}
+static uintptr_t ae_f64_to_usize_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 18446744073709551616.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    if (value < 0.0) return 0;
+    return (uintptr_t)value;
+}
+static int8_t ae_f32_to_i8_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -129.0f || value >= 128.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int8_t)value;
+}
+static uint8_t ae_f32_to_u8_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 256.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (uint8_t)(int16_t)value;
+}
+static int16_t ae_f32_to_i16_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -32769.0f || value >= 32768.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int16_t)value;
+}
+static uint16_t ae_f32_to_u16_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 65536.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (uint16_t)(int32_t)value;
+}
+static int32_t ae_f32_to_i32_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -2147483648.0f || value >= 2147483648.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int32_t)value;
+}
+static uint32_t ae_f32_to_u32_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 4294967296.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (uint32_t)(int64_t)value;
+}
+static int64_t ae_f32_to_i64_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -9223372036854775808.0f || value >= 9223372036854775808.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int64_t)value;
+}
+static intptr_t ae_f32_to_isize_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -9223372036854775808.0f || value >= 9223372036854775808.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (intptr_t)value;
+}
+static uint64_t ae_f32_to_u64_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 18446744073709551616.0f) ae_fail("float-to-integer cast out of range", line, column);
+    if (value < 0.0f) return 0;
+    return (uint64_t)value;
+}
+static uintptr_t ae_f32_to_usize_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 18446744073709551616.0f) ae_fail("float-to-integer cast out of range", line, column);
+    if (value < 0.0f) return 0;
+    return (uintptr_t)value;
 }
 
 static AE_INT_RESULT ae_f64_to_i64(double value, size_t line, size_t column) {

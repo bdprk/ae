@@ -358,6 +358,7 @@ fn expression_node<'a>(expression: &'a Expression, facts: &HashMap<usize, Expres
     let mut children = Vec::new();
     let kind = match &expression.kind {
         ExpressionKind::Atom(_) => "atom",
+        ExpressionKind::Unit => "unit",
         ExpressionKind::Group(base) => {
             children.push(expression_node(base, facts, ids));
             "group"

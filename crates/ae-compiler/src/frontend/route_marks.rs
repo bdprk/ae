@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn scalar_type(ty: Type) -> bool {
-    matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool)
+    matches!(ty, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit)
 }
 
 /// A builtin call that builds a fresh `string`: assigning its result to an
@@ -388,7 +388,7 @@ impl<'a> Parser<'a> {
             }
             Expr::Binary(a, _, b, ..) => self.expr_has_unchecked_operation(a) || self.expr_has_unchecked_operation(b),
             Expr::Field(base, ..) => self.expr_has_unchecked_operation(base),
-            Expr::Variable(..) | Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::StrLit(..) => false,
+            Expr::Variable(..) | Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::CharLit(..) | Expr::Unit | Expr::StrLit(..) => false,
             _ => false,
         }
     }}

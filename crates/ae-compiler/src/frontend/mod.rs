@@ -178,6 +178,8 @@ impl TypeDisplay for Type {
             Type::Int(width) => width.name().to_owned(),
             Type::Bool => "bool".to_owned(),
             Type::Float(width) => width.name().to_owned(),
+            Type::Char => "char".to_owned(),
+            Type::Unit => "()".to_owned(),
             Type::String => "string".to_owned(),
             Type::StrView => "string view".to_owned(),
             Type::Vec => "vec".to_owned(),
@@ -390,7 +392,74 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // `&mut expr as *mut T` take the address of a local; the bool records
     // mutability. `p.deref()` reads through it, inside `unsafe` only.
     #[allow(dead_code)]
-    BorrowAs(Box<Expr>, bool, usize, usize), #[allow(dead_code)] DerefPtr(Box<Expr>, usize, usize), #[allow(dead_code)] PtrOffset(Box<Expr>, Box<Expr>, bool, usize, usize), #[allow(dead_code)] PtrCast(Box<Expr>, bool, usize, usize, usize), #[allow(dead_code)] PtrDropInPlace(Box<Expr>, Type, usize, usize), #[allow(dead_code)] PtrWrite(Box<Expr>, Box<Expr>, Type, usize, usize), ScalarCast(Box<Expr>, Type, Type, usize, usize) }
+    BorrowAs(Box<Expr>, bool, usize, usize), #[allow(dead_code)] DerefPtr(Box<Expr>, usize, usize), #[allow(dead_code)] PtrOffset(Box<Expr>, Box<Expr>, bool, usize, usize), #[allow(dead_code)] PtrCast(Box<Expr>, bool, usize, usize, usize), #[allow(dead_code)] PtrDropInPlace(Box<Expr>, Type, usize, usize), #[allow(dead_code)] PtrWrite(Box<Expr>, Box<Expr>, Type, usize, usize), ScalarCast(Box<Expr>, Type, Type, usize, usize), CharLit(char), Unit, IntMethod(IntMethodKind, Box<Expr>, Option<Box<Expr>>, Type, usize, usize) }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IntMethodKind {
+    WrappingAdd,
+    WrappingSub,
+    WrappingMul,
+    WrappingNeg,
+    SaturatingAdd,
+    SaturatingSub,
+    SaturatingMul,
+    CheckedAdd,
+    CheckedSub,
+    CheckedMul,
+    CheckedDiv,
+    CheckedRem,
+    CheckedNeg,
+}
+
+impl IntMethodKind {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "wrapping_add" => Some(Self::WrappingAdd),
+            "wrapping_sub" => Some(Self::WrappingSub),
+            "wrapping_mul" => Some(Self::WrappingMul),
+            "wrapping_neg" => Some(Self::WrappingNeg),
+            "saturating_add" => Some(Self::SaturatingAdd),
+            "saturating_sub" => Some(Self::SaturatingSub),
+            "saturating_mul" => Some(Self::SaturatingMul),
+            "checked_add" => Some(Self::CheckedAdd),
+            "checked_sub" => Some(Self::CheckedSub),
+            "checked_mul" => Some(Self::CheckedMul),
+            "checked_div" => Some(Self::CheckedDiv),
+            "checked_rem" => Some(Self::CheckedRem),
+            "checked_neg" => Some(Self::CheckedNeg),
+            _ => None,
+        }
+    }
+
+    pub(super) fn mir_name(self) -> &'static str {
+        match self {
+            Self::WrappingAdd => "wrapping_add",
+            Self::WrappingSub => "wrapping_sub",
+            Self::WrappingMul => "wrapping_mul",
+            Self::WrappingNeg => "wrapping_neg",
+            Self::SaturatingAdd => "saturating_add",
+            Self::SaturatingSub => "saturating_sub",
+            Self::SaturatingMul => "saturating_mul",
+            Self::CheckedAdd => "checked_add",
+            Self::CheckedSub => "checked_sub",
+            Self::CheckedMul => "checked_mul",
+            Self::CheckedDiv => "checked_div",
+            Self::CheckedRem => "checked_rem",
+            Self::CheckedNeg => "checked_neg",
+        }
+    }
+
+    pub(super) fn is_unary(self) -> bool {
+        matches!(self, Self::WrappingNeg | Self::CheckedNeg)
+    }
+
+    pub(super) fn is_checked(self) -> bool {
+        matches!(
+            self,
+            Self::CheckedAdd | Self::CheckedSub | Self::CheckedMul | Self::CheckedDiv | Self::CheckedRem | Self::CheckedNeg
+        )
+    }
+}
 // Which value type a map holds: the builtins dispatch on it (ADR-65).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MapKind { Int, Float }
@@ -1084,6 +1153,255 @@ mod tests {
             "fn pick(flag: bool, a: i64, b: i64) -> i64 { if flag { return a; } else { return b; } } fn main() { print(pick(1 < 2, 3, 4)); }",
             "fn main() { print(\"hello, 世界\"); print(true); print(1 < 2 && 2 < 3); assert(1 == 1); }",
         ] { assert!(compile(s).is_ok(), "{s}"); }
+    }
+    #[test] fn i8_u8_frontend_accepts_and_rejects_width_rules() {
+        let parse_ok = |source: &str| -> Result<(), String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(())
+        };
+
+        let valid = "
+            struct Pair { a: i8, b: u8 }
+            fn step(x: i8, y: u8) -> i8 {
+                let n = -x;
+                let s = n + (1 as i8);
+                let b = (y & (15 as u8)) << (1 as u8);
+                let ok = x < s && y >= b;
+                let wide = s as i64;
+                let flt = y as f64;
+                let back_i = flt as i8;
+                let back_u = wide as u8;
+                let p = Pair { a: (-128) as i8, b: 255 as u8 };
+                if ok { return back_i + (back_u as i8) + p.a; }
+                return 127 as i8;
+            }
+            fn main() {
+                let r = step(10 as i8, 20 as u8);
+                print(r);
+            }
+        ";
+        assert!(parse_ok(valid).is_ok(), "{:?}", parse_ok(valid));
+
+        for bad in [
+            "fn main() { let x = 128 as i8; }",
+            "fn main() { let x = (-129) as i8; }",
+            "fn main() { let x = 256 as u8; }",
+            "fn main() { let x = (-1) as u8; }",
+            "fn main() { let a = 1 as i8; let b = 2; let c = a + b; }",
+            "fn main() { let a = 1 as i8; let b = 2 as u8; let c = a + b; }",
+            "fn main() { let a = 1 as u8; let b = -a; }",
+            "fn main() { let a = 1 as i8; let b = 2 as u8; let c = a < b; }",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
+        }
+    }
+    #[test] fn all_int_widths_frontend_accepts_and_rejects_width_rules() {
+        let parse_ok = |source: &str| -> Result<(), String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(())
+        };
+
+        let valid = "
+            struct AllInts {
+                a: i16, b: i32, c: isize,
+                d: u16, e: u32, f: u64, g: usize,
+            }
+            fn take_all(p: AllInts) -> usize {
+                let x = -p.a + (1 as i16);
+                let y = p.b << (1 as i32);
+                let z = -p.c - (1 as isize);
+                let u = p.d + (1 as u16);
+                let v = p.e & (7 as u32);
+                let w = p.f ^ (3 as u64);
+                let s = p.g + (x as usize) + (y as usize) + (z as usize) + (u as usize) + (v as usize) + (w as usize);
+                let f = s as f64;
+                return f as usize;
+            }
+            fn main() {
+                let p = AllInts {
+                    a: (-32768) as i16, b: 2147483647 as i32, c: (-1) as isize,
+                    d: 65535 as u16, e: 4294967295 as u32, f: 9223372036854775807 as u64, g: 0 as usize,
+                };
+                print(take_all(p));
+            }
+        ";
+        assert!(parse_ok(valid).is_ok(), "{:?}", parse_ok(valid));
+
+        for bad in [
+            "fn main() { let x = 32768 as i16; }",
+            "fn main() { let x = (-32769) as i16; }",
+            "fn main() { let x = (-1) as u16; }",
+            "fn main() { let x = 65536 as u16; }",
+            "fn main() { let x = 2147483648 as i32; }",
+            "fn main() { let x = (-2147483649) as i32; }",
+            "fn main() { let x = (-1) as u32; }",
+            "fn main() { let x = 4294967296 as u32; }",
+            "fn main() { let x = (-1) as u64; }",
+            "fn main() { let x = (-1) as usize; }",
+            "fn main() { let a = 1 as isize; let b = 2; let c = a + b; }",
+            "fn main() { let a = 1 as usize; let b = 2 as u64; let c = a + b; }",
+            "fn main() { let a = 1 as u16; let b = -a; }",
+            "fn main() { let a = 1 as u32; let b = -a; }",
+            "fn main() { let a = 1 as u64; let b = -a; }",
+            "fn main() { let a = 1 as usize; let b = -a; }",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
+        }
+    }
+    #[test] fn wave3a_f32_char_unit_ptr_usize_frontend() {
+        let parse_ok = |source: &str| -> Result<(), String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(())
+        };
+
+        let valid = "
+            fn side_effect(u: ()) {
+                let c = 'a';
+                let d = '\\u{4E2D}';
+                if c < d { return; }
+                return ();
+            }
+            fn take_f32(x: f32) -> f32 {
+                let y = -x + (1.5 as f32);
+                let z = (y as f64) as f32;
+                let n = 10 as f32;
+                return z * n;
+            }
+            fn main() {
+                let u = ();
+                side_effect(u);
+                let f = take_f32(2.5 as f32);
+                print(f);
+                let c = (65 as u32) as char;
+                let code = c as u32;
+                print(c);
+                print(code);
+                var v = 42;
+                unsafe {
+                    let p = &mut v as *mut i64;
+                    let addr = p as usize;
+                    let q = addr as *mut i64;
+                    *q = 99;
+                }
+                return;
+            }
+        ";
+        assert!(parse_ok(valid).is_ok(), "{:?}", parse_ok(valid));
+
+        for bad in [
+            "fn main() { let a = 1.0 as f32; let b = a + 1.0; }",
+            "fn main() { let a = 1.0 as f32; let b = a % (2.0 as f32); }",
+            "fn main() { let c = 'a' + 'b'; }",
+            "fn main() { let c = -'a'; }",
+            "fn main() { let c = 'a' as i64; }",
+            "fn main() { let c = 65 as char; }",
+            "fn main() { let x = 1; let p = &x as *const i64; let a = p as usize; }",
+            "fn main() { let a = 0 as usize; let p = a as *const i64; }",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
+        }
+    }
+    #[test] fn wave3b_int_methods_frontend() {
+        let parse_ok = |source: &str| -> Result<(), String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(())
+        };
+
+        let valid = "
+            fn add_checked(a: i8, b: i8) -> Option[i8] {
+                let v = a.checked_add(b)?;
+                return Option[i8]::Some(v);
+            }
+            fn main() {
+                let a = 127 as i8;
+                let w1 = a.wrapping_add(1 as i8);
+                let w2 = ((-128) as i8).wrapping_neg();
+                let s1 = a.saturating_add(10 as i8);
+                let u = (5 as u8).saturating_sub(20 as u8);
+                let wu = (1 as u64).wrapping_neg();
+                let res = add_checked(a, 1 as i8);
+                match res {
+                    Option::Some(v) => { print(v); }
+                    Option::None => { print(w1); print(w2); print(s1); print(u); print(wu); }
+                }
+            }
+        ";
+        assert!(parse_ok(valid).is_ok(), "{:?}", parse_ok(valid));
+
+        for bad in [
+            "fn main() { let x = (1 as i8).checked_add(1 as i64); }",
+            "fn main() { let x = (1 as i8).wrapping_add(1 as u8); }",
+            "fn main() { let x = (1 as i8).wrapping_add(); }",
+            "fn main() { let x = (1 as u8).checked_neg(); }",
+            "fn main() { let x = (1.0).wrapping_add(1.0); }",
+            "fn main() { let x = true.wrapping_add(false); }",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
+        }
     }
     #[test] fn rejects_invalid_string_literals() {
         for s in ["fn main() { print(\"bad \\q\"); }", "fn main() { print(\"open }", "fn main() { print(\"\n\"); }"] { assert!(compile(s).is_err(), "{s}"); }

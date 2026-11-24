@@ -462,6 +462,11 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
         }
         // A retag moves no value either.
         Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) | Expr::ScalarCast(e, ..) => walk_expr(e, moved),
+        Expr::IntMethod(_, recv, arg, ..) => {
+            if let Some(slot) = walk_expr(recv, moved) { return Some(slot); }
+            if let Some(arg) = arg { return walk_expr(arg, moved); }
+            None
+        }
         Expr::Variable(id, ..) => {
             // A moving context consumes the value; the caller decides which
             // reads are moves, so nothing is inserted here.
@@ -603,7 +608,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
         }
         Expr::ClosureLit(_) | Expr::NowMs | Expr::NowS | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::MapNew(..) | Expr::JsonHas(..) => None,
         // Literals and constants own nothing and reference nothing.
-        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(..) => None,
+        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::StrLit(..) => None,
     }
 }
 

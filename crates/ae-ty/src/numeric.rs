@@ -83,6 +83,19 @@ impl IntTy {
             (0, (1i128 << self.bits()) - 1)
         }
     }
+
+    pub fn min_value(self) -> i128 {
+        self.range().0
+    }
+
+    pub fn max_value(self) -> i128 {
+        self.range().1
+    }
+
+    pub fn contains(self, value: i128) -> bool {
+        let (min, max) = self.range();
+        value >= min && value <= max
+    }
 }
 
 impl FloatTy {
@@ -137,5 +150,7 @@ mod tests {
         assert_eq!(IntTy::U32.range(), (0, 4294967295));
         assert_eq!(IntTy::I64.range(), (i64::MIN as i128, i64::MAX as i128));
         assert_eq!(IntTy::U64.range(), (0, u64::MAX as i128));
+        assert_eq!(IntTy::Isize.range(), (i64::MIN as i128, i64::MAX as i128));
+        assert_eq!(IntTy::Usize.range(), (0, u64::MAX as i128));
     }
 }

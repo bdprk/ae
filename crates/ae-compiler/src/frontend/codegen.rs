@@ -167,7 +167,12 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 format!("const {} *", c_type_field(pointee, ctx))
             };
             let target_ty = if *mutable { Type::PtrMut(*pointee_id) } else { Type::Ptr(*pointee_id) };
-            Emitted::value(format!("({ptr_c})({})", inner.text), target_ty)
+            let cast_arg = if inner.ty == Type::Int(IntTy::Usize) {
+                format!("(uintptr_t)({})", inner.text)
+            } else {
+                format!("({})", inner.text)
+            };
+            Emitted::value(format!("({ptr_c}){cast_arg}"), target_ty)
         }
         Expr::PtrWrite(pointer, value, ..) => {
             let pointer = emit_expr(pointer, out, next, false, ctx);
@@ -220,23 +225,104 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         }
         Expr::Number(n) => Emitted::value(format!("INT64_C({n})"), Type::Int(IntTy::I64)),
         Expr::FloatLit(x) => Emitted::value(c_float_literal(*x), Type::Float(FloatTy::F64)),
+        Expr::CharLit(c) => Emitted::value(format!("UINT32_C({})", *c as u32), Type::Char),
+        Expr::Unit => Emitted::value(String::new(), Type::Unit),
+        Expr::IntMethod(kind, receiver, arg, result_ty, _, _) => {
+            let recv = emit_expr(receiver, out, next, false, ctx);
+            let Type::Int(width) = recv.ty else { unreachable!("IntMethod receiver must be integer") };
+            let w = width.name();
+            let rhs = arg.as_ref().map(|a| emit_expr(a, out, next, false, ctx));
+            let id = *next;
+            *next += 1;
+            match kind {
+                IntMethodKind::WrappingAdd
+                | IntMethodKind::WrappingSub
+                | IntMethodKind::WrappingMul
+                | IntMethodKind::WrappingNeg
+                | IntMethodKind::SaturatingAdd
+                | IntMethodKind::SaturatingSub
+                | IntMethodKind::SaturatingMul => {
+                    let prefix = match kind {
+                        IntMethodKind::WrappingAdd => "ae_wrap_add",
+                        IntMethodKind::WrappingSub => "ae_wrap_sub",
+                        IntMethodKind::WrappingMul => "ae_wrap_mul",
+                        IntMethodKind::WrappingNeg => "ae_wrap_neg",
+                        IntMethodKind::SaturatingAdd => "ae_sat_add",
+                        IntMethodKind::SaturatingSub => "ae_sat_sub",
+                        IntMethodKind::SaturatingMul => "ae_sat_mul",
+                        _ => unreachable!(),
+                    };
+                    if let Some(r) = rhs {
+                        out.push_str(&format!("    {}t{id} = {prefix}_{w}({}, {});\n", result_ty.c_temp(ctx), recv.text, r.text));
+                    } else {
+                        out.push_str(&format!("    {}t{id} = {prefix}_{w}({});\n", result_ty.c_temp(ctx), recv.text));
+                    }
+                }
+                IntMethodKind::CheckedAdd
+                | IntMethodKind::CheckedSub
+                | IntMethodKind::CheckedMul
+                | IntMethodKind::CheckedDiv
+                | IntMethodKind::CheckedRem
+                | IntMethodKind::CheckedNeg => {
+                    let Type::Enum(_, eid) = *result_ty else { unreachable!("checked_* must return Option[T]") };
+                    let prefix = match kind {
+                        IntMethodKind::CheckedAdd => "ae_opt_add",
+                        IntMethodKind::CheckedSub => "ae_opt_sub",
+                        IntMethodKind::CheckedMul => "ae_opt_mul",
+                        IntMethodKind::CheckedDiv => "ae_opt_div",
+                        IntMethodKind::CheckedRem => "ae_opt_mod",
+                        IntMethodKind::CheckedNeg => "ae_opt_neg",
+                        _ => unreachable!(),
+                    };
+                    let val_id = *next;
+                    *next += 1;
+                    out.push_str(&format!("    {} r{val_id} = 0;\n", width.c_name()));
+                    out.push_str(&format!("    ae_e{eid} t{id};\n"));
+                    let call = if let Some(r) = rhs {
+                        format!("{prefix}_{w}({}, {}, &r{val_id})", recv.text, r.text)
+                    } else {
+                        format!("{prefix}_{w}({}, &r{val_id})", recv.text)
+                    };
+                    out.push_str(&format!("    if ({call}) {{\n"));
+                    out.push_str(&format!("        t{id} = (ae_e{eid}){{ AE_E{eid}_0, {{ .v0 = {{ r{val_id} }} }} }};\n"));
+                    out.push_str("    } else {\n");
+                    out.push_str(&format!("        t{id} = (ae_e{eid}){{ AE_E{eid}_1 }};\n"));
+                    out.push_str("    }\n");
+                }
+            }
+            Emitted { text: format!("t{id}"), ty: *result_ty, owned: false, moves: Vec::new(), materialized: true }
+        }
         Expr::ScalarCast(value, from, to, line, column) => {
             let v = emit_expr(value, out, next, false, ctx);
             let id = *next; *next += 1;
             match (from, to) {
                 // Int -> float rounds to nearest (IEEE); no trap.
-                (Type::Int(IntTy::I64), Type::Float(FloatTy::F64)) => {
-                    out.push_str(&format!("    double t{id} = (double)({});
-", v.text));
+                (Type::Int(_), Type::Float(FloatTy::F64)) => {
+                    out.push_str(&format!("    double t{id} = (double)({});\n", v.text));
                 }
-                // Float -> int truncates and traps outside the i64 range or
+                (Type::Int(_), Type::Float(FloatTy::F32)) => {
+                    out.push_str(&format!("    float t{id} = (float)({});\n", v.text));
+                }
+                (Type::Float(FloatTy::F64), Type::Float(FloatTy::F32)) => {
+                    out.push_str(&format!("    float t{id} = (float)({});\n", v.text));
+                }
+                (Type::Float(FloatTy::F32), Type::Float(FloatTy::F64)) => {
+                    out.push_str(&format!("    double t{id} = (double)({});\n", v.text));
+                }
+                // Float -> int truncates and traps outside the target range or
                 // on non-finite values, identically to the interpreter.
-                (Type::Float(FloatTy::F64), Type::Int(IntTy::I64)) => {
-                    out.push_str(&format!("    int64_t t{id} = ae_f64_to_i64_trunc({}, {line}, {column});
-", v.text));
+                (Type::Float(FloatTy::F64), Type::Int(width)) => {
+                    let helper = format!("ae_f64_to_{}_trunc", width.name());
+                    out.push_str(&format!("    {}t{id} = {helper}({}, {line}, {column});\n", to.c_temp(ctx), v.text));
                 }
-                _ => out.push_str(&format!("    {}t{id} = ({}) ({});
-", to.c_temp(ctx), to.c_temp(ctx).trim_end(), v.text)),
+                (Type::Float(FloatTy::F32), Type::Int(width)) => {
+                    let helper = format!("ae_f32_to_{}_trunc", width.name());
+                    out.push_str(&format!("    {}t{id} = {helper}({}, {line}, {column});\n", to.c_temp(ctx), v.text));
+                }
+                (Type::Int(IntTy::U32), Type::Char) => {
+                    out.push_str(&format!("    uint32_t t{id} = ae_u32_to_char({}, {line}, {column});\n", v.text));
+                }
+                _ => out.push_str(&format!("    {}t{id} = ({}) ({});\n", to.c_temp(ctx), to.c_temp(ctx).trim_end(), v.text)),
             }
             Emitted { text: format!("t{id}"), ty: *to, owned: false, moves: v.moves, materialized: true }
         }
@@ -269,7 +355,11 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::FloatToString(value, line, column) => {
             let t = emit_expr(value, out, next, false, ctx);
             let id = *next; *next += 1;
-            out.push_str(&format!("    ae_string t{id} = ae_f64_to_string({}, {line}, {column});\n", t.text));
+            if t.ty == Type::Float(FloatTy::F32) {
+                out.push_str(&format!("    ae_string t{id} = ae_f64_to_string((double)({}), {line}, {column});\n", t.text));
+            } else {
+                out.push_str(&format!("    ae_string t{id} = ae_f64_to_string({}, {line}, {column});\n", t.text));
+            }
             Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true }
         }
         Expr::BoolLit(b) => Emitted::value(if *b { "true" } else { "false" }.to_owned(), Type::Bool),
@@ -329,26 +419,36 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // (literal or `+` result) stays owned by this expression and is
             // released after the call. Without this, `f("a" + b)` leaks.
             let mut view_temps: Vec<String> = Vec::new();
-            let arguments = args.iter().map(|arg| match arg {
-                Argument::Value(e) => { let t = emit_expr(e, out, next, true, ctx); moves.extend(t.moves); t.text }
-                Argument::Borrow(id, is_vec) => if *is_vec { format!("&v{id}") } else { format!("v{id}") },
+            let arguments = args.iter().filter_map(|arg| match arg {
+                Argument::Value(e) => {
+                    let t = emit_expr(e, out, next, true, ctx);
+                    moves.extend(t.moves);
+                    (t.ty != Type::Unit).then_some(t.text)
+                }
+                Argument::Borrow(id, is_vec) => Some(if *is_vec { format!("&v{id}") } else { format!("v{id}") }),
                 Argument::View(e) => {
                     let t = emit_expr(e, out, next, false, ctx);
                     moves.extend(t.moves);
                     if t.owned { view_temps.push(t.text.clone()); }
-                    format!("AE_VIEW({})", t.text)
+                    Some(format!("AE_VIEW({})", t.text))
                 }
                 // The function pointer goes into the argument list directly:
                 // a temporary of function type would need C's parenthesized
                 // declarator form, which the temp template cannot print.
-                Argument::FnPtr(id) => ctx.exposure_name(*id).unwrap_or_else(|| format!("ae_fn_{id}")),
+                Argument::FnPtr(id) => Some(ctx.exposure_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))),
             }).collect::<Vec<_>>().join(", ");
-            let t = *next; *next += 1;
             let callee = if matches!(expr, Expr::FnCall(..)) {
                 format!("v{id}")
             } else {
                 ctx.extern_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))
             };
+            if *ret == Type::Unit {
+                out.push_str(&format!("    {callee}({arguments});\n"));
+                for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
+                null_moves(out, &moves);
+                return Emitted { text: String::new(), ty: Type::Unit, owned: false, moves: Vec::new(), materialized: true };
+            }
+            let t = *next; *next += 1;
             out.push_str(&format!("    {}t{t} = {callee}({arguments});\n", ret.c_temp(ctx)));
             for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
             null_moves(out, &moves);
@@ -417,10 +517,13 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         }
         Expr::Neg(a, line, column) => {
             let t = emit_expr(a, out, next, false, ctx);
-            if t.ty == Type::Float(FloatTy::F64) {
-                Emitted { text: format!("-({})", t.text), ty: Type::Float(FloatTy::F64), owned: false, moves: t.moves, materialized: false }
-            } else {
-                Emitted { text: format!("ae_neg({}, {line}, {column})", t.text), ty: Type::Int(IntTy::I64), owned: false, moves: t.moves, materialized: false }
+            match t.ty {
+                Type::Float(FloatTy::F64) | Type::Float(FloatTy::F32) => Emitted { text: format!("-({})", t.text), ty: t.ty, owned: false, moves: t.moves, materialized: false },
+                Type::Int(IntTy::I64) => Emitted { text: format!("ae_neg({}, {line}, {column})", t.text), ty: Type::Int(IntTy::I64), owned: false, moves: t.moves, materialized: false },
+                Type::Int(width) if width.signed() => {
+                    Emitted { text: format!("ae_neg_{}({}, {line}, {column})", width.name(), t.text), ty: t.ty, owned: false, moves: t.moves, materialized: false }
+                }
+                other => unreachable!("unsupported neg type: {other:?}"),
             }
         }
         Expr::Not(a) => {
@@ -906,7 +1009,13 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::ToString(value, line, col) => {
             let t = emit_expr(value, out, next, false, ctx);
             let id = *next; *next += 1;
-            out.push_str(&format!("    ae_string t{id} = ae_to_string({}, {line}, {col});\n", t.text));
+            if matches!(t.ty, Type::Int(IntTy::U64 | IntTy::Usize)) {
+                out.push_str(&format!("    ae_string t{id} = ae_to_string_u64((uint64_t)({}), {line}, {col});\n", t.text));
+            } else if t.ty == Type::Char {
+                out.push_str(&format!("    ae_string t{id} = ae_to_string_char({}, {line}, {col});\n", t.text));
+            } else {
+                out.push_str(&format!("    ae_string t{id} = ae_to_string({}, {line}, {col});\n", t.text));
+            }
             if t.owned { drop_owned_temp(out, &t); }
             Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true }
         }
@@ -1042,17 +1151,22 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // the digits are formatted into a stack buffer that dies with the
             // expression, so `"k" + to_string(n)` performs one allocation in
             // total. Same formatter, same value, no owned temporary.
-            let digits_of = |part: &Expr, out: &mut String, next: &mut usize| -> Option<String> {
-                if let Expr::ToString(inner, _, _) = part {
+            let digits_of = |part: &Expr, out: &mut String, next: &mut usize| -> Option<(String, Type)> {
+                if let Expr::ToString(inner, _, _) = part
+                    && matches!(crate::frontend::mir::expr_type(inner, ctx), Type::Int(_))
+                {
                     let v = emit_expr(inner, out, next, false, ctx);
-                    debug_assert_eq!(v.ty, Type::Int(IntTy::I64));
-                    return Some(v.text);
+                    return Some((v.text, v.ty));
                 }
                 None
             };
             if let Expr::StrLit(text, _, _) = a.as_ref() {
-                if let Some(value) = digits_of(b, out, next) {
-                    out.push_str(&format!("    char buf{id}[24];\n    const int64_t dlen{id} = ae_int_to_buf({value}, buf{id}, {line}, {column});\n"));
+                if let Some((value, vty)) = digits_of(b, out, next) {
+                    if matches!(vty, Type::Int(IntTy::U64 | IntTy::Usize)) {
+                        out.push_str(&format!("    char buf{id}[24];\n    const int64_t dlen{id} = ae_u64_to_buf((uint64_t)({value}), buf{id}, {line}, {column});\n"));
+                    } else {
+                        out.push_str(&format!("    char buf{id}[24];\n    const int64_t dlen{id} = ae_int_to_buf({value}, buf{id}, {line}, {column});\n"));
+                    }
                     out.push_str(&format!("    ae_string t{id} = ae_str_cat_lit_buf(\"{text}\", buf{id}, dlen{id}, {line}, {column});\n"));
                     return Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true };
                 }
@@ -1063,8 +1177,12 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 return Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true };
             }
             if let Expr::StrLit(text, _, _) = b.as_ref() {
-                if let Some(value) = digits_of(a, out, next) {
-                    out.push_str(&format!("    char buf{id}[24];\n    const int64_t dlen{id} = ae_int_to_buf({value}, buf{id}, {line}, {column});\n"));
+                if let Some((value, vty)) = digits_of(a, out, next) {
+                    if matches!(vty, Type::Int(IntTy::U64 | IntTy::Usize)) {
+                        out.push_str(&format!("    char buf{id}[24];\n    const int64_t dlen{id} = ae_u64_to_buf((uint64_t)({value}), buf{id}, {line}, {column});\n"));
+                    } else {
+                        out.push_str(&format!("    char buf{id}[24];\n    const int64_t dlen{id} = ae_int_to_buf({value}, buf{id}, {line}, {column});\n"));
+                    }
                     out.push_str(&format!("    ae_string t{id} = ae_str_cat_buf_lit(buf{id}, dlen{id}, \"{text}\", {line}, {column});\n"));
                     return Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true };
                 }
@@ -1091,7 +1209,14 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // f64 arithmetic maps to the C operators: no overflow trapping, no
             // fast-math, and division goes through a checked helper so `x / 0.0`
             // is a reported failure instead of a silent infinity (ADR-37).
-            let floating = l.ty == Type::Float(FloatTy::F64);
+            let floating_f64 = l.ty == Type::Float(FloatTy::F64);
+            let floating_f32 = l.ty == Type::Float(FloatTy::F32);
+            let floating = floating_f64 || floating_f32;
+            let suffix = match l.ty {
+                Type::Int(IntTy::I64) => String::new(),
+                Type::Int(width) => format!("_{}", width.name()),
+                _ => String::new(),
+            };
             let text = match op {
                 Kind::EqEq => format!("{} == {}", l.text, r.text),
                 Kind::NotEq => format!("{} != {}", l.text, r.text),
@@ -1102,25 +1227,41 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 Kind::Plus if floating => format!("{} + {}", l.text, r.text),
                 Kind::Minus if floating => format!("{} - {}", l.text, r.text),
                 Kind::Star if floating => format!("{} * {}", l.text, r.text),
-                Kind::Slash if floating => format!("ae_f64_div({}, {}, {line}, {column})", l.text, r.text),
-                Kind::Plus => format!("ae_add({}, {}, {line}, {column})", l.text, r.text),
-                Kind::Minus => format!("ae_sub({}, {}, {line}, {column})", l.text, r.text),
-                Kind::Star => format!("ae_mul({}, {}, {line}, {column})", l.text, r.text),
-                Kind::Slash => format!("ae_div({}, {}, {line}, {column})", l.text, r.text),
-                Kind::Percent => format!("ae_mod({}, {}, {line}, {column})", l.text, r.text),
-                Kind::Pipe => format!("({} | {})", l.text, r.text),
-                Kind::Caret => format!("({} ^ {})", l.text, r.text),
-                Kind::Amp => format!("({} & {})", l.text, r.text),
-                Kind::Shl => format!("((int64_t)((uint64_t)({}) << (({}) & 63)))", l.text, r.text),
-                Kind::Shr => format!("({} >> (({}) & 63))", l.text, r.text),
+                Kind::Slash if floating_f32 => format!("ae_f32_div({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Slash if floating_f64 => format!("ae_f64_div({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Plus => format!("ae_add{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Minus => format!("ae_sub{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Star => format!("ae_mul{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Slash => format!("ae_div{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Percent => format!("ae_mod{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                Kind::Pipe => match l.ty {
+                    Type::Int(width) if width != IntTy::I64 => format!("({})({} | {})", width.c_name(), l.text, r.text),
+                    _ => format!("({} | {})", l.text, r.text),
+                },
+                Kind::Caret => match l.ty {
+                    Type::Int(width) if width != IntTy::I64 => format!("({})({} ^ {})", width.c_name(), l.text, r.text),
+                    _ => format!("({} ^ {})", l.text, r.text),
+                },
+                Kind::Amp => match l.ty {
+                    Type::Int(width) if width != IntTy::I64 => format!("({})({} & {})", width.c_name(), l.text, r.text),
+                    _ => format!("({} & {})", l.text, r.text),
+                },
+                Kind::Shl => match l.ty {
+                    Type::Int(IntTy::I64) => format!("((int64_t)((uint64_t)({}) << (({}) & 63)))", l.text, r.text),
+                    Type::Int(_) => format!("ae_shl{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                    _ => unreachable!(),
+                },
+                Kind::Shr => match l.ty {
+                    Type::Int(IntTy::I64) => format!("({} >> (({}) & 63))", l.text, r.text),
+                    Type::Int(_) => format!("ae_shr{suffix}({}, {}, {line}, {column})", l.text, r.text),
+                    _ => unreachable!(),
+                },
                 _ => unreachable!(),
             };
             let ty = if matches!(op, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq) {
                 Type::Bool
-            } else if floating {
-                Type::Float(FloatTy::F64)
             } else {
-                Type::Int(IntTy::I64)
+                l.ty
             };
             Emitted { text, ty, owned: false, moves: Vec::new(), materialized: false }
         }
@@ -1213,6 +1354,9 @@ pub(super) fn emit_print(printed: &Printed, out: &mut String, next: &mut usize, 
                 }
                 Type::Bool => out.push_str(&format!("    ae_print_bool({});\n", t.text)),
                 Type::Float(FloatTy::F64) => out.push_str(&format!("    ae_f64_print({});\n", t.text)),
+                Type::Float(FloatTy::F32) => out.push_str(&format!("    ae_f64_print((double)({}));\n", t.text)),
+                Type::Char => out.push_str(&format!("    ae_print_char({});\n", t.text)),
+                Type::Int(IntTy::U64 | IntTy::Usize) => out.push_str(&format!("    ae_print_u64((uint64_t)({}));\n", t.text)),
                 _ => out.push_str(&format!("    ae_print_i64({});\n", t.text)),
             }
         }
@@ -1246,7 +1390,9 @@ pub(super) fn emit_value_before_cleanup(
 ) -> String {
     let value = emit_expr(expr, out, next, moving, ctx);
     // An inline value can still refer to storage a destructor can modify.
-    let result = if frees.is_empty() {
+    let result = if value.ty == Type::Unit {
+        String::new()
+    } else if frees.is_empty() {
         value.text
     } else {
         let id = *next;
@@ -1268,7 +1414,11 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
         match stmt {
             Statement::Return(expr, frees) => {
                 let result = emit_value_before_cleanup(expr, frees, out, next, true, ctx);
-                out.push_str(&format!("    return {result};\n"));
+                if result.is_empty() {
+                    out.push_str("    return;\n");
+                } else {
+                    out.push_str(&format!("    return {result};\n"));
+                }
             }
             Statement::Declare(id, e) => {
                 // A closure binding names its generated function and stores
@@ -1276,7 +1426,9 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 if matches!(e, Expr::ClosureLit(_)) { }
                 else {
                     let t = emit_expr(e, out, next, true, ctx);
-                    out.push_str(&format!("    {}v{id} = {};\n", t.ty.c_temp(ctx), t.text));
+                    if t.ty != Type::Unit {
+                        out.push_str(&format!("    {}v{id} = {};\n", t.ty.c_temp(ctx), t.text));
+                    }
                     null_moves(out, &t.moves);
                 }
             }
@@ -1410,7 +1562,9 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             Statement::Assign(id, e, release_old) => {
                 let t = emit_expr(e, out, next, true, ctx);
                 if *release_old { release_var(out, *id, t.ty); }
-                out.push_str(&format!("    v{id} = {};\n", t.text));
+                if t.ty != Type::Unit {
+                    out.push_str(&format!("    v{id} = {};\n", t.text));
+                }
                 null_moves(out, &t.moves);
             }
             Statement::Print(printed) => emit_print(printed, out, next, ctx),
@@ -1624,10 +1778,12 @@ fn emit_payload_binding(out: &mut String, bid: usize, subject: usize, variant: u
     match pty {
         Type::String => out.push_str(&format!("    ae_strview v{bid} = AE_VIEW({member});\n")),
         Type::Bool => out.push_str(&format!("    bool v{bid} = {member};\n")),
-        Type::Float(FloatTy::F64) => out.push_str(&format!("    double v{bid} = {member};\n")),
+        Type::Float(width) => out.push_str(&format!("    {} v{bid} = {member};\n", width.c_name())),
+        Type::Char => out.push_str(&format!("    uint32_t v{bid} = {member};\n")),
         Type::Vec => out.push_str(&format!("    const ae_vec *v{bid} = &{member};\n")),
         Type::VecF => out.push_str(&format!("    const ae_f64vec *v{bid} = &{member};\n")),
         Type::StrVec => out.push_str(&format!("    const ae_strvec *v{bid} = &{member};\n")),
+        Type::Int(width) => out.push_str(&format!("    {} v{bid} = {member};\n", width.c_name())),
         _ => out.push_str(&format!("    int64_t v{bid} = {member};\n")),
     }
 }

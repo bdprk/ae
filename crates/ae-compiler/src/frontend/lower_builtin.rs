@@ -75,8 +75,8 @@ impl<'a> Parser<'a> {
                     let argument = &arguments[0];
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
                     let value = match actual {
-                        Type::Int(IntTy::I64) => Expr::ToString(Box::new(value), line, column),
-                        Type::Float(FloatTy::F64) => Expr::FloatToString(Box::new(value), line, column),
+                        Type::Int(_) | Type::Char => Expr::ToString(Box::new(value), line, column),
+                        Type::Float(_) => Expr::FloatToString(Box::new(value), line, column),
                         _ => {
                             self.seek_scalar_offset(argument.range.end);
                             return Err(self.fail("to_string expects an i64 or f64"));

@@ -1,0 +1,1 @@
+ae: $DIR/u64_cast_neg_literal_oob.ae:2:21: integer literal -1 is out of range for 'u64' (0..=18446744073709551615)

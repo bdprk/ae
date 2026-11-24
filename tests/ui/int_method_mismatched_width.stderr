@@ -1,0 +1,1 @@
+ae: $DIR/int_method_mismatched_width.ae:4:29: argument to 'checked_add' must be i8, found i64

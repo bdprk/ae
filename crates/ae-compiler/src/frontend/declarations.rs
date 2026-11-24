@@ -46,7 +46,7 @@ impl Parser<'_> {
     #[allow(clippy::only_used_in_recursion)]
     pub(super) fn c_abi_shape(&self, ty: &Type, offset: usize) -> bool {
         match ty {
-            Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) => true,
+            Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char => true,
             Type::Ptr(_) | Type::PtrMut(_) => true,
             Type::Struct(sid) => {
                 let def = &self.structs[*sid];
@@ -352,8 +352,12 @@ impl Parser<'_> {
             if name == "main" {
                 if !types.is_empty() { return Err(self.fail("main cannot have parameters")); }
             } else {
-                self.take(Kind::Arrow)?;
-                let ret = self.return_annotation()?;
+                let ret = if *self.current() == Kind::Arrow {
+                    self.pos += 1;
+                    self.return_annotation()?
+                } else {
+                    Type::Unit
+                };
                 // A public signature may not name a type importers cannot see;
                 // catching it here beats a puzzling error at every call site.
                 if public { self.check_export_types(&name, &types, ret)?; }
@@ -1099,9 +1103,11 @@ impl Parser<'_> {
         let returns_type = if is_main {
             if !params.is_empty() { return Err(self.fail("main cannot have parameters")); }
             Type::Int(IntTy::I64)
-        } else {
-            self.take(Kind::Arrow)?;
+        } else if *self.current() == Kind::Arrow {
+            self.pos += 1;
             self.return_annotation()?
+        } else {
+            Type::Unit
         };
         self.in_main = is_main;
         self.return_type = returns_type;
@@ -1135,8 +1141,16 @@ impl Parser<'_> {
         let params_scope = self.scopes.pop().unwrap();
         let mut body = body?;
         let param_owned: Vec<(usize, Type)> = params_scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
-        if !param_owned.is_empty() { body.push(Statement::Frees(param_owned)); }
-        if !is_main && !returns(&body) { return Err(self.fail("function may exit without returning a value")); }
+        if !is_main && !returns(&body) {
+            if returns_type == Type::Unit {
+                body.push(Statement::Return(Expr::Unit, param_owned));
+            } else {
+                if !param_owned.is_empty() { body.push(Statement::Frees(param_owned)); }
+                return Err(self.fail("function may exit without returning a value"));
+            }
+        } else if !param_owned.is_empty() {
+            body.push(Statement::Frees(param_owned));
+        }
         let function = Function { id, params, body, is_main, returns: returns_type };
         self.adjudicate_deferred_conflicts(&function)?;
         Ok(function)

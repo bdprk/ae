@@ -19,4 +19,4 @@ pub use spelling::TypeSpelling;
 pub use unify::{unify, Substitution, Term, TypeVar, UnifyError};
 pub use interner::TypeInterner;
 pub use numeric::{FloatTy, IntTy};
-pub use op::{infix, prefix, scalar_compound_assignment, valid_array_index, OperatorError, Scalar};
+pub use op::{infix, prefix, scalar_compound_assignment, valid_array_index, valid_scalar_cast, OperatorError, Scalar};

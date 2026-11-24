@@ -11,7 +11,7 @@ pub mod statement;
 use ae_span::{Diagnostic, SourceFile};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
-    Ident(String), Number(i64), Float(f64), Text(String), Fn, Let, Var, Mut, Print, If, Else, While, For, In, Return, Break, Continue, Assert, True, False, Use,
+    Ident(String), Number(i64), Float(f64), Text(String), Char(char), Fn, Let, Var, Mut, Print, If, Else, While, For, In, Return, Break, Continue, Assert, True, False, Use,
     EqEq, NotEq, Less, LessEq, Greater, GreaterEq, And, Or, Bang, Pipe,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Colon, Arrow, Amp, Semi, Equal, Plus, Minus, Star, Slash, Percent, Caret, Shl, Shr, PlusEqual, MinusEqual, StarEqual, SlashEqual, PercentEqual, Dot, DotDot, Struct,
     Enum, Match, ColonColon, FatArrow, Question, Trait, Impl, Unsafe, Const, As, Extern, Hash, Eof,
@@ -27,7 +27,7 @@ pub fn lex_kind_names(source: &str) -> Result<Vec<&'static str>, String> {
 
 fn kind_name(kind: &Kind) -> &'static str {
     match kind {
-        Kind::Ident(_) => "Ident", Kind::Number(_) => "Number", Kind::Float(_) => "Float", Kind::Text(_) => "Text",
+        Kind::Ident(_) => "Ident", Kind::Number(_) => "Number", Kind::Float(_) => "Float", Kind::Text(_) => "Text", Kind::Char(_) => "Char",
         Kind::Fn => "Fn", Kind::Let => "Let", Kind::Var => "Var", Kind::Mut => "Mut", Kind::Print => "Print",
         Kind::If => "If", Kind::Else => "Else", Kind::While => "While", Kind::For => "For",
         Kind::In => "In", Kind::Return => "Return", Kind::Break => "Break", Kind::Continue => "Continue",
@@ -253,6 +253,62 @@ fn lex_inner(source: &str, mut recovered: Option<&mut Vec<Diagnostic>>) -> Resul
             if i >= bytes.len() { return Err(lex_error(source, start, "E0003", "unterminated string literal").into()); }
             i += 1;
             Kind::Text(source[start + 1..i - 1].to_owned())
+        } else if c == '\'' {
+            i += 1;
+            if i >= bytes.len() {
+                return Err(lex_error(source, start, "E0001", "unterminated character literal").into());
+            }
+            if bytes[i] == b'\'' {
+                return Err(lex_error(source, start, "E0001", "empty character literal").into());
+            }
+            if bytes[i] == b'\n' || bytes[i] == b'\0' {
+                return Err(lex_error(source, i, "E0001", "character literals must not contain raw newlines or NUL; use escapes").into());
+            }
+            let ch = if bytes[i] == b'\\' {
+                i += 1;
+                match bytes.get(i).copied() {
+                    Some(b'n') => { i += 1; '\n' }
+                    Some(b'r') => { i += 1; '\r' }
+                    Some(b't') => { i += 1; '\t' }
+                    Some(b'\\') => { i += 1; '\\' }
+                    Some(b'\'') => { i += 1; '\'' }
+                    Some(b'"') => { i += 1; '"' }
+                    Some(b'0') => { i += 1; '\0' }
+                    Some(b'u') => {
+                        i += 1;
+                        if bytes.get(i) != Some(&b'{') {
+                            return Err(lex_error(source, start, "E0001", "invalid unicode escape in character literal; expected \\u{HEX}").into());
+                        }
+                        i += 1;
+                        let hex_start = i;
+                        while i < bytes.len() && bytes[i].is_ascii_hexdigit() { i += 1; }
+                        let hex = &source[hex_start..i];
+                        if hex.is_empty() || hex.len() > 6 || bytes.get(i) != Some(&b'}') {
+                            return Err(lex_error(source, start, "E0001", "invalid unicode escape in character literal; expected 1-6 hex digits in \\u{...}").into());
+                        }
+                        i += 1;
+                        let Some(ch) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) else {
+                            return Err(lex_error(source, start, "E0001", "invalid Unicode scalar value in character literal").into());
+                        };
+                        ch
+                    }
+                    _ => return Err(lex_error(source, start, "E0001", "unsupported escape in character literal").into()),
+                }
+            } else {
+                let Some(ch) = source[i..].chars().next() else {
+                    return Err(lex_error(source, start, "E0001", "unterminated character literal").into());
+                };
+                i += ch.len_utf8();
+                ch
+            };
+            if i >= bytes.len() {
+                return Err(lex_error(source, start, "E0001", "unterminated character literal").into());
+            }
+            if bytes[i] != b'\'' {
+                return Err(lex_error(source, start, "E0001", "character literal may only contain a single character").into());
+            }
+            i += 1;
+            Kind::Char(ch)
         } else if c.is_ascii_alphabetic() || c == '_' {
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }

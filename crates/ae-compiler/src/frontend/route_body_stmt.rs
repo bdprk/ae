@@ -104,6 +104,11 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                             || (matches!(&operand.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
                                 if matches!(callee.kind, ae_syntax::expression::ExpressionKind::Qualified { .. }))
                                 && resolved.enum_constructors.contains(&operand.range.start))
+                            // A checked integer method (`let v = a.checked_add(b)?;`).
+                            || (matches!(&operand.kind, ae_syntax::expression::ExpressionKind::Call { callee, .. }
+                                if matches!(&callee.kind, ae_syntax::expression::ExpressionKind::Field { name, .. }
+                                    if IntMethodKind::from_name(name).is_some_and(IntMethodKind::is_checked)))
+                                && scalar_body_expression(operand, resolved, supports_call, supports_field))
                     }
                     _ => iterator_constructor(initializer).is_some()
                         || resolved.enum_constructors.contains(&initializer.range.start)

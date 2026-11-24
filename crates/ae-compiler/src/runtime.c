@@ -223,6 +223,369 @@ static int64_t ae_neg(int64_t a, size_t line, size_t column) {
     return -a;
 }
 
+static int8_t ae_add_i8(int8_t a, int8_t b, size_t line, size_t column) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+    int8_t r;
+    if (__builtin_add_overflow(a, b, &r)) ae_fail("integer overflow", line, column);
+    return r;
+#else
+    int16_t r = (int16_t)a + (int16_t)b;
+    if (r < INT8_MIN || r > INT8_MAX) ae_fail("integer overflow", line, column);
+    return (int8_t)r;
+#endif
+}
+static int8_t ae_sub_i8(int8_t a, int8_t b, size_t line, size_t column) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+    int8_t r;
+    if (__builtin_sub_overflow(a, b, &r)) ae_fail("integer overflow", line, column);
+    return r;
+#else
+    int16_t r = (int16_t)a - (int16_t)b;
+    if (r < INT8_MIN || r > INT8_MAX) ae_fail("integer overflow", line, column);
+    return (int8_t)r;
+#endif
+}
+static int8_t ae_mul_i8(int8_t a, int8_t b, size_t line, size_t column) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+    int8_t r;
+    if (__builtin_mul_overflow(a, b, &r)) ae_fail("integer overflow", line, column);
+    return r;
+#else
+    int16_t r = (int16_t)a * (int16_t)b;
+    if (r < INT8_MIN || r > INT8_MAX) ae_fail("integer overflow", line, column);
+    return (int8_t)r;
+#endif
+}
+static int8_t ae_div_i8(int8_t a, int8_t b, size_t line, size_t column) {
+    if (b == 0) ae_fail("division by zero", line, column);
+    if (a == INT8_MIN && b == -1) ae_fail("integer overflow", line, column);
+    return (int8_t)(a / b);
+}
+static int8_t ae_mod_i8(int8_t a, int8_t b, size_t line, size_t column) {
+    if (b == 0) ae_fail("division by zero", line, column);
+    if (a == INT8_MIN && b == -1) ae_fail("integer overflow", line, column);
+    return (int8_t)(a % b);
+}
+static int8_t ae_neg_i8(int8_t a, size_t line, size_t column) {
+    if (a == INT8_MIN) ae_fail("integer overflow", line, column);
+    return (int8_t)(-a);
+}
+static int8_t ae_shl_i8(int8_t a, int8_t b, size_t line, size_t column) {
+    if (b < 0 || b >= 8) ae_fail("shift count out of range", line, column);
+    uint8_t u = (uint8_t)((uint8_t)a << b);
+    int8_t r;
+    memcpy(&r, &u, 1);
+    return r;
+}
+static int8_t ae_shr_i8(int8_t a, int8_t b, size_t line, size_t column) {
+    if (b < 0 || b >= 8) ae_fail("shift count out of range", line, column);
+    return (int8_t)(a >> b);
+}
+
+static uint8_t ae_add_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+    uint8_t r;
+    if (__builtin_add_overflow(a, b, &r)) ae_fail("integer overflow", line, column);
+    return r;
+#else
+    uint16_t r = (uint16_t)a + (uint16_t)b;
+    if (r > UINT8_MAX) ae_fail("integer overflow", line, column);
+    return (uint8_t)r;
+#endif
+}
+static uint8_t ae_sub_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+    uint8_t r;
+    if (__builtin_sub_overflow(a, b, &r)) ae_fail("integer overflow", line, column);
+    return r;
+#else
+    if (a < b) ae_fail("integer overflow", line, column);
+    return (uint8_t)(a - b);
+#endif
+}
+static uint8_t ae_mul_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+    uint8_t r;
+    if (__builtin_mul_overflow(a, b, &r)) ae_fail("integer overflow", line, column);
+    return r;
+#else
+    uint16_t r = (uint16_t)a * (uint16_t)b;
+    if (r > UINT8_MAX) ae_fail("integer overflow", line, column);
+    return (uint8_t)r;
+#endif
+}
+static uint8_t ae_div_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+    if (b == 0) ae_fail("division by zero", line, column);
+    return (uint8_t)(a / b);
+}
+static uint8_t ae_mod_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+    if (b == 0) ae_fail("division by zero", line, column);
+    return (uint8_t)(a % b);
+}
+static uint8_t ae_shl_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+    if (b >= 8) ae_fail("shift count out of range", line, column);
+    return (uint8_t)(a << b);
+}
+static uint8_t ae_shr_u8(uint8_t a, uint8_t b, size_t line, size_t column) {
+    if (b >= 8) ae_fail("shift count out of range", line, column);
+    return (uint8_t)(a >> b);
+}
+
+// unit: ae_int_macros
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+#define AE_CHK_ADD_S(T, MIN, MAX, a, b, l, c) do { T r; if (__builtin_add_overflow((a), (b), &r)) ae_fail("integer overflow", (l), (c)); return r; } while (0)
+#define AE_CHK_SUB_S(T, MIN, MAX, a, b, l, c) do { T r; if (__builtin_sub_overflow((a), (b), &r)) ae_fail("integer overflow", (l), (c)); return r; } while (0)
+#define AE_CHK_MUL_S(T, MIN, MAX, a, b, l, c) do { T r; if (__builtin_mul_overflow((a), (b), &r)) ae_fail("integer overflow", (l), (c)); return r; } while (0)
+#define AE_CHK_ADD_U(T, MAX, a, b, l, c) do { T r; if (__builtin_add_overflow((a), (b), &r)) ae_fail("integer overflow", (l), (c)); return r; } while (0)
+#define AE_CHK_SUB_U(T, a, b, l, c) do { T r; if (__builtin_sub_overflow((a), (b), &r)) ae_fail("integer overflow", (l), (c)); return r; } while (0)
+#define AE_CHK_MUL_U(T, MAX, a, b, l, c) do { T r; if (__builtin_mul_overflow((a), (b), &r)) ae_fail("integer overflow", (l), (c)); return r; } while (0)
+#else
+#define AE_CHK_ADD_S(T, MIN, MAX, a, b, l, c) do { if (((b) > 0 && (a) > (MAX) - (b)) || ((b) < 0 && (a) < (MIN) - (b))) ae_fail("integer overflow", (l), (c)); return (T)((a) + (b)); } while (0)
+#define AE_CHK_SUB_S(T, MIN, MAX, a, b, l, c) do { if (((b) < 0 && (a) > (MAX) + (b)) || ((b) > 0 && (a) < (MIN) + (b))) ae_fail("integer overflow", (l), (c)); return (T)((a) - (b)); } while (0)
+#define AE_CHK_MUL_S(T, MIN, MAX, a, b, l, c) do { if ((a) > 0 ? ((b) > 0 ? (a) > (MAX) / (b) : (b) < (MIN) / (a)) : ((a) < 0 ? ((b) > 0 ? (a) < (MIN) / (b) : (b) < 0 && (a) < (MAX) / (b)) : 0)) ae_fail("integer overflow", (l), (c)); return (T)((a) * (b)); } while (0)
+#define AE_CHK_ADD_U(T, MAX, a, b, l, c) do { if ((a) > (MAX) - (b)) ae_fail("integer overflow", (l), (c)); return (T)((a) + (b)); } while (0)
+#define AE_CHK_SUB_U(T, a, b, l, c) do { if ((a) < (b)) ae_fail("integer overflow", (l), (c)); return (T)((a) - (b)); } while (0)
+#define AE_CHK_MUL_U(T, MAX, a, b, l, c) do { if ((b) != 0 && (a) > (MAX) / (b)) ae_fail("integer overflow", (l), (c)); return (T)((a) * (b)); } while (0)
+#endif
+#define AE_CHK_DIV_S(T, MIN, a, b, l, c) do { if ((b) == 0) ae_fail("division by zero", (l), (c)); if ((a) == (MIN) && (b) == -1) ae_fail("integer overflow", (l), (c)); return (T)((a) / (b)); } while (0)
+#define AE_CHK_MOD_S(T, MIN, a, b, l, c) do { if ((b) == 0) ae_fail("division by zero", (l), (c)); if ((a) == (MIN) && (b) == -1) ae_fail("integer overflow", (l), (c)); return (T)((a) % (b)); } while (0)
+#define AE_CHK_NEG_S(T, MIN, a, l, c) do { if ((a) == (MIN)) ae_fail("integer overflow", (l), (c)); return (T)(-(a)); } while (0)
+#define AE_CHK_SHL_S(T, U, BITS, a, b, l, c) do { if ((b) < 0 || (b) >= (BITS)) ae_fail("shift count out of range", (l), (c)); U u = (U)((U)(a) << (b)); T r; memcpy(&r, &u, sizeof(r)); return r; } while (0)
+#define AE_CHK_SHR_S(T, BITS, a, b, l, c) do { if ((b) < 0 || (b) >= (BITS)) ae_fail("shift count out of range", (l), (c)); return (T)((a) >> (b)); } while (0)
+#define AE_CHK_DIV_U(T, a, b, l, c) do { if ((b) == 0) ae_fail("division by zero", (l), (c)); return (T)((a) / (b)); } while (0)
+#define AE_CHK_MOD_U(T, a, b, l, c) do { if ((b) == 0) ae_fail("division by zero", (l), (c)); return (T)((a) % (b)); } while (0)
+#define AE_CHK_SHL_U(T, BITS, a, b, l, c) do { if ((b) >= (BITS)) ae_fail("shift count out of range", (l), (c)); return (T)((a) << (b)); } while (0)
+#define AE_CHK_SHR_U(T, BITS, a, b, l, c) do { if ((b) >= (BITS)) ae_fail("shift count out of range", (l), (c)); return (T)((a) >> (b)); } while (0)
+#define AE_WRAP_BIN_S(T, U, op, a, b) do { U u = (U)((U)(a) op (U)(b)); T r; memcpy(&r, &u, sizeof(r)); return r; } while (0)
+#define AE_WRAP_NEG_S(T, U, a) do { U u = (U)(0 - (U)(a)); T r; memcpy(&r, &u, sizeof(r)); return r; } while (0)
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
+#define AE_SAT_ADD_S(T, MIN, MAX, a, b) do { T r; if (__builtin_add_overflow((a), (b), &r)) return (b) > 0 ? (MAX) : (MIN); return r; } while (0)
+#define AE_SAT_SUB_S(T, MIN, MAX, a, b) do { T r; if (__builtin_sub_overflow((a), (b), &r)) return (b) < 0 ? (MAX) : (MIN); return r; } while (0)
+#define AE_SAT_MUL_S(T, MIN, MAX, a, b) do { T r; if (__builtin_mul_overflow((a), (b), &r)) return (((a) > 0) == ((b) > 0)) ? (MAX) : (MIN); return r; } while (0)
+#define AE_SAT_ADD_U(T, MAX, a, b) do { T r; if (__builtin_add_overflow((a), (b), &r)) return (MAX); return r; } while (0)
+#define AE_SAT_SUB_U(T, a, b) do { T r; if (__builtin_sub_overflow((a), (b), &r)) return 0; return r; } while (0)
+#define AE_SAT_MUL_U(T, MAX, a, b) do { T r; if (__builtin_mul_overflow((a), (b), &r)) return (MAX); return r; } while (0)
+#define AE_OPT_ADD_S(T, MIN, MAX, a, b, out) return !__builtin_add_overflow((a), (b), (out))
+#define AE_OPT_SUB_S(T, MIN, MAX, a, b, out) return !__builtin_sub_overflow((a), (b), (out))
+#define AE_OPT_MUL_S(T, MIN, MAX, a, b, out) return !__builtin_mul_overflow((a), (b), (out))
+#define AE_OPT_ADD_U(T, MAX, a, b, out) return !__builtin_add_overflow((a), (b), (out))
+#define AE_OPT_SUB_U(T, a, b, out) return !__builtin_sub_overflow((a), (b), (out))
+#define AE_OPT_MUL_U(T, MAX, a, b, out) return !__builtin_mul_overflow((a), (b), (out))
+#else
+#define AE_SAT_ADD_S(T, MIN, MAX, a, b) do { if ((b) > 0 && (a) > (MAX) - (b)) return (MAX); if ((b) < 0 && (a) < (MIN) - (b)) return (MIN); return (T)((a) + (b)); } while (0)
+#define AE_SAT_SUB_S(T, MIN, MAX, a, b) do { if ((b) < 0 && (a) > (MAX) + (b)) return (MAX); if ((b) > 0 && (a) < (MIN) + (b)) return (MIN); return (T)((a) - (b)); } while (0)
+#define AE_SAT_MUL_S(T, MIN, MAX, a, b) do { if ((a) > 0 ? ((b) > 0 ? (a) > (MAX) / (b) : (b) < (MIN) / (a)) : ((a) < 0 ? ((b) > 0 ? (a) < (MIN) / (b) : (b) < 0 && (a) < (MAX) / (b)) : 0)) return (((a) > 0) == ((b) > 0)) ? (MAX) : (MIN); return (T)((a) * (b)); } while (0)
+#define AE_SAT_ADD_U(T, MAX, a, b) return ((a) > (MAX) - (b)) ? (MAX) : (T)((a) + (b))
+#define AE_SAT_SUB_U(T, a, b) return ((a) < (b)) ? 0 : (T)((a) - (b))
+#define AE_SAT_MUL_U(T, MAX, a, b) return ((b) != 0 && (a) > (MAX) / (b)) ? (MAX) : (T)((a) * (b))
+#define AE_OPT_ADD_S(T, MIN, MAX, a, b, out) do { if (((b) > 0 && (a) > (MAX) - (b)) || ((b) < 0 && (a) < (MIN) - (b))) return false; *(out) = (T)((a) + (b)); return true; } while (0)
+#define AE_OPT_SUB_S(T, MIN, MAX, a, b, out) do { if (((b) < 0 && (a) > (MAX) + (b)) || ((b) > 0 && (a) < (MIN) + (b))) return false; *(out) = (T)((a) - (b)); return true; } while (0)
+#define AE_OPT_MUL_S(T, MIN, MAX, a, b, out) do { if ((a) > 0 ? ((b) > 0 ? (a) > (MAX) / (b) : (b) < (MIN) / (a)) : ((a) < 0 ? ((b) > 0 ? (a) < (MIN) / (b) : (b) < 0 && (a) < (MAX) / (b)) : 0)) return false; *(out) = (T)((a) * (b)); return true; } while (0)
+#define AE_OPT_ADD_U(T, MAX, a, b, out) do { if ((a) > (MAX) - (b)) return false; *(out) = (T)((a) + (b)); return true; } while (0)
+#define AE_OPT_SUB_U(T, a, b, out) do { if ((a) < (b)) return false; *(out) = (T)((a) - (b)); return true; } while (0)
+#define AE_OPT_MUL_U(T, MAX, a, b, out) do { if ((b) != 0 && (a) > (MAX) / (b)) return false; *(out) = (T)((a) * (b)); return true; } while (0)
+#endif
+#define AE_OPT_DIV_S(T, MIN, a, b, out) do { if ((b) == 0 || ((a) == (MIN) && (b) == -1)) return false; *(out) = (T)((a) / (b)); return true; } while (0)
+#define AE_OPT_MOD_S(T, MIN, a, b, out) do { if ((b) == 0 || ((a) == (MIN) && (b) == -1)) return false; *(out) = (T)((a) % (b)); return true; } while (0)
+#define AE_OPT_NEG_S(T, MIN, a, out) do { if ((a) == (MIN)) return false; *(out) = (T)(-(a)); return true; } while (0)
+#define AE_OPT_DIV_U(T, a, b, out) do { if ((b) == 0) return false; *(out) = (T)((a) / (b)); return true; } while (0)
+#define AE_OPT_MOD_U(T, a, b, out) do { if ((b) == 0) return false; *(out) = (T)((a) % (b)); return true; } while (0)
+// unit: -
+
+static int16_t ae_add_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_S(int16_t, INT16_MIN, INT16_MAX, a, b, line, column); }
+static int16_t ae_sub_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_S(int16_t, INT16_MIN, INT16_MAX, a, b, line, column); }
+static int16_t ae_mul_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_S(int16_t, INT16_MIN, INT16_MAX, a, b, line, column); }
+static int16_t ae_div_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_S(int16_t, INT16_MIN, a, b, line, column); }
+static int16_t ae_mod_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_S(int16_t, INT16_MIN, a, b, line, column); }
+static int16_t ae_neg_i16(int16_t a, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_NEG_S(int16_t, INT16_MIN, a, line, column); }
+static int16_t ae_shl_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_S(int16_t, uint16_t, 16, a, b, line, column); }
+static int16_t ae_shr_i16(int16_t a, int16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_S(int16_t, 16, a, b, line, column); }
+
+static int32_t ae_add_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_S(int32_t, INT32_MIN, INT32_MAX, a, b, line, column); }
+static int32_t ae_sub_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_S(int32_t, INT32_MIN, INT32_MAX, a, b, line, column); }
+static int32_t ae_mul_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_S(int32_t, INT32_MIN, INT32_MAX, a, b, line, column); }
+static int32_t ae_div_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_S(int32_t, INT32_MIN, a, b, line, column); }
+static int32_t ae_mod_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_S(int32_t, INT32_MIN, a, b, line, column); }
+static int32_t ae_neg_i32(int32_t a, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_NEG_S(int32_t, INT32_MIN, a, line, column); }
+static int32_t ae_shl_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_S(int32_t, uint32_t, 32, a, b, line, column); }
+static int32_t ae_shr_i32(int32_t a, int32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_S(int32_t, 32, a, b, line, column); }
+
+static intptr_t ae_add_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b, line, column); }
+static intptr_t ae_sub_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b, line, column); }
+static intptr_t ae_mul_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b, line, column); }
+static intptr_t ae_div_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_S(intptr_t, INTPTR_MIN, a, b, line, column); }
+static intptr_t ae_mod_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_S(intptr_t, INTPTR_MIN, a, b, line, column); }
+static intptr_t ae_neg_isize(intptr_t a, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_NEG_S(intptr_t, INTPTR_MIN, a, line, column); }
+static intptr_t ae_shl_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_S(intptr_t, uintptr_t, (intptr_t)(sizeof(intptr_t) * 8), a, b, line, column); }
+static intptr_t ae_shr_isize(intptr_t a, intptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_S(intptr_t, (intptr_t)(sizeof(intptr_t) * 8), a, b, line, column); }
+
+static uint16_t ae_add_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_U(uint16_t, UINT16_MAX, a, b, line, column); }
+static uint16_t ae_sub_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_U(uint16_t, a, b, line, column); }
+static uint16_t ae_mul_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_U(uint16_t, UINT16_MAX, a, b, line, column); }
+static uint16_t ae_div_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_U(uint16_t, a, b, line, column); }
+static uint16_t ae_mod_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_U(uint16_t, a, b, line, column); }
+static uint16_t ae_shl_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_U(uint16_t, 16, a, b, line, column); }
+static uint16_t ae_shr_u16(uint16_t a, uint16_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_U(uint16_t, 16, a, b, line, column); }
+
+static uint32_t ae_add_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_U(uint32_t, UINT32_MAX, a, b, line, column); }
+static uint32_t ae_sub_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_U(uint32_t, a, b, line, column); }
+static uint32_t ae_mul_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_U(uint32_t, UINT32_MAX, a, b, line, column); }
+static uint32_t ae_div_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_U(uint32_t, a, b, line, column); }
+static uint32_t ae_mod_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_U(uint32_t, a, b, line, column); }
+static uint32_t ae_shl_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_U(uint32_t, 32, a, b, line, column); }
+static uint32_t ae_shr_u32(uint32_t a, uint32_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_U(uint32_t, 32, a, b, line, column); }
+
+static uint64_t ae_add_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_U(uint64_t, UINT64_MAX, a, b, line, column); }
+static uint64_t ae_sub_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_U(uint64_t, a, b, line, column); }
+static uint64_t ae_mul_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_U(uint64_t, UINT64_MAX, a, b, line, column); }
+static uint64_t ae_div_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_U(uint64_t, a, b, line, column); }
+static uint64_t ae_mod_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_U(uint64_t, a, b, line, column); }
+static uint64_t ae_shl_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_U(uint64_t, 64, a, b, line, column); }
+static uint64_t ae_shr_u64(uint64_t a, uint64_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_U(uint64_t, 64, a, b, line, column); }
+
+static uintptr_t ae_add_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_ADD_U(uintptr_t, UINTPTR_MAX, a, b, line, column); }
+static uintptr_t ae_sub_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SUB_U(uintptr_t, a, b, line, column); }
+static uintptr_t ae_mul_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MUL_U(uintptr_t, UINTPTR_MAX, a, b, line, column); }
+static uintptr_t ae_div_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_DIV_U(uintptr_t, a, b, line, column); }
+static uintptr_t ae_mod_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_MOD_U(uintptr_t, a, b, line, column); }
+static uintptr_t ae_shl_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHL_U(uintptr_t, (uintptr_t)(sizeof(uintptr_t) * 8), a, b, line, column); }
+static uintptr_t ae_shr_usize(uintptr_t a, uintptr_t b, size_t line, size_t column) { /* ae_int_macros */ AE_CHK_SHR_U(uintptr_t, (uintptr_t)(sizeof(uintptr_t) * 8), a, b, line, column); }
+
+static int8_t ae_wrap_add_i8(int8_t a, int8_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int8_t, uint8_t, +, a, b); }
+static int8_t ae_wrap_sub_i8(int8_t a, int8_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int8_t, uint8_t, -, a, b); }
+static int8_t ae_wrap_mul_i8(int8_t a, int8_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int8_t, uint8_t, *, a, b); }
+static int8_t ae_wrap_neg_i8(int8_t a) { /* ae_int_macros */ AE_WRAP_NEG_S(int8_t, uint8_t, a); }
+static int8_t ae_sat_add_i8(int8_t a, int8_t b) { /* ae_int_macros */ AE_SAT_ADD_S(int8_t, INT8_MIN, INT8_MAX, a, b); }
+static int8_t ae_sat_sub_i8(int8_t a, int8_t b) { /* ae_int_macros */ AE_SAT_SUB_S(int8_t, INT8_MIN, INT8_MAX, a, b); }
+static int8_t ae_sat_mul_i8(int8_t a, int8_t b) { /* ae_int_macros */ AE_SAT_MUL_S(int8_t, INT8_MIN, INT8_MAX, a, b); }
+static bool ae_opt_add_i8(int8_t a, int8_t b, int8_t *out) { /* ae_int_macros */ AE_OPT_ADD_S(int8_t, INT8_MIN, INT8_MAX, a, b, out); }
+static bool ae_opt_sub_i8(int8_t a, int8_t b, int8_t *out) { /* ae_int_macros */ AE_OPT_SUB_S(int8_t, INT8_MIN, INT8_MAX, a, b, out); }
+static bool ae_opt_mul_i8(int8_t a, int8_t b, int8_t *out) { /* ae_int_macros */ AE_OPT_MUL_S(int8_t, INT8_MIN, INT8_MAX, a, b, out); }
+static bool ae_opt_div_i8(int8_t a, int8_t b, int8_t *out) { /* ae_int_macros */ AE_OPT_DIV_S(int8_t, INT8_MIN, a, b, out); }
+static bool ae_opt_mod_i8(int8_t a, int8_t b, int8_t *out) { /* ae_int_macros */ AE_OPT_MOD_S(int8_t, INT8_MIN, a, b, out); }
+static bool ae_opt_neg_i8(int8_t a, int8_t *out) { /* ae_int_macros */ AE_OPT_NEG_S(int8_t, INT8_MIN, a, out); }
+
+static int16_t ae_wrap_add_i16(int16_t a, int16_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int16_t, uint16_t, +, a, b); }
+static int16_t ae_wrap_sub_i16(int16_t a, int16_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int16_t, uint16_t, -, a, b); }
+static int16_t ae_wrap_mul_i16(int16_t a, int16_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int16_t, uint16_t, *, a, b); }
+static int16_t ae_wrap_neg_i16(int16_t a) { /* ae_int_macros */ AE_WRAP_NEG_S(int16_t, uint16_t, a); }
+static int16_t ae_sat_add_i16(int16_t a, int16_t b) { /* ae_int_macros */ AE_SAT_ADD_S(int16_t, INT16_MIN, INT16_MAX, a, b); }
+static int16_t ae_sat_sub_i16(int16_t a, int16_t b) { /* ae_int_macros */ AE_SAT_SUB_S(int16_t, INT16_MIN, INT16_MAX, a, b); }
+static int16_t ae_sat_mul_i16(int16_t a, int16_t b) { /* ae_int_macros */ AE_SAT_MUL_S(int16_t, INT16_MIN, INT16_MAX, a, b); }
+static bool ae_opt_add_i16(int16_t a, int16_t b, int16_t *out) { /* ae_int_macros */ AE_OPT_ADD_S(int16_t, INT16_MIN, INT16_MAX, a, b, out); }
+static bool ae_opt_sub_i16(int16_t a, int16_t b, int16_t *out) { /* ae_int_macros */ AE_OPT_SUB_S(int16_t, INT16_MIN, INT16_MAX, a, b, out); }
+static bool ae_opt_mul_i16(int16_t a, int16_t b, int16_t *out) { /* ae_int_macros */ AE_OPT_MUL_S(int16_t, INT16_MIN, INT16_MAX, a, b, out); }
+static bool ae_opt_div_i16(int16_t a, int16_t b, int16_t *out) { /* ae_int_macros */ AE_OPT_DIV_S(int16_t, INT16_MIN, a, b, out); }
+static bool ae_opt_mod_i16(int16_t a, int16_t b, int16_t *out) { /* ae_int_macros */ AE_OPT_MOD_S(int16_t, INT16_MIN, a, b, out); }
+static bool ae_opt_neg_i16(int16_t a, int16_t *out) { /* ae_int_macros */ AE_OPT_NEG_S(int16_t, INT16_MIN, a, out); }
+
+static int32_t ae_wrap_add_i32(int32_t a, int32_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int32_t, uint32_t, +, a, b); }
+static int32_t ae_wrap_sub_i32(int32_t a, int32_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int32_t, uint32_t, -, a, b); }
+static int32_t ae_wrap_mul_i32(int32_t a, int32_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int32_t, uint32_t, *, a, b); }
+static int32_t ae_wrap_neg_i32(int32_t a) { /* ae_int_macros */ AE_WRAP_NEG_S(int32_t, uint32_t, a); }
+static int32_t ae_sat_add_i32(int32_t a, int32_t b) { /* ae_int_macros */ AE_SAT_ADD_S(int32_t, INT32_MIN, INT32_MAX, a, b); }
+static int32_t ae_sat_sub_i32(int32_t a, int32_t b) { /* ae_int_macros */ AE_SAT_SUB_S(int32_t, INT32_MIN, INT32_MAX, a, b); }
+static int32_t ae_sat_mul_i32(int32_t a, int32_t b) { /* ae_int_macros */ AE_SAT_MUL_S(int32_t, INT32_MIN, INT32_MAX, a, b); }
+static bool ae_opt_add_i32(int32_t a, int32_t b, int32_t *out) { /* ae_int_macros */ AE_OPT_ADD_S(int32_t, INT32_MIN, INT32_MAX, a, b, out); }
+static bool ae_opt_sub_i32(int32_t a, int32_t b, int32_t *out) { /* ae_int_macros */ AE_OPT_SUB_S(int32_t, INT32_MIN, INT32_MAX, a, b, out); }
+static bool ae_opt_mul_i32(int32_t a, int32_t b, int32_t *out) { /* ae_int_macros */ AE_OPT_MUL_S(int32_t, INT32_MIN, INT32_MAX, a, b, out); }
+static bool ae_opt_div_i32(int32_t a, int32_t b, int32_t *out) { /* ae_int_macros */ AE_OPT_DIV_S(int32_t, INT32_MIN, a, b, out); }
+static bool ae_opt_mod_i32(int32_t a, int32_t b, int32_t *out) { /* ae_int_macros */ AE_OPT_MOD_S(int32_t, INT32_MIN, a, b, out); }
+static bool ae_opt_neg_i32(int32_t a, int32_t *out) { /* ae_int_macros */ AE_OPT_NEG_S(int32_t, INT32_MIN, a, out); }
+
+static int64_t ae_wrap_add_i64(int64_t a, int64_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int64_t, uint64_t, +, a, b); }
+static int64_t ae_wrap_sub_i64(int64_t a, int64_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int64_t, uint64_t, -, a, b); }
+static int64_t ae_wrap_mul_i64(int64_t a, int64_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(int64_t, uint64_t, *, a, b); }
+static int64_t ae_wrap_neg_i64(int64_t a) { /* ae_int_macros */ AE_WRAP_NEG_S(int64_t, uint64_t, a); }
+static int64_t ae_sat_add_i64(int64_t a, int64_t b) { /* ae_int_macros */ AE_SAT_ADD_S(int64_t, INT64_MIN, INT64_MAX, a, b); }
+static int64_t ae_sat_sub_i64(int64_t a, int64_t b) { /* ae_int_macros */ AE_SAT_SUB_S(int64_t, INT64_MIN, INT64_MAX, a, b); }
+static int64_t ae_sat_mul_i64(int64_t a, int64_t b) { /* ae_int_macros */ AE_SAT_MUL_S(int64_t, INT64_MIN, INT64_MAX, a, b); }
+static bool ae_opt_add_i64(int64_t a, int64_t b, int64_t *out) { /* ae_int_macros */ AE_OPT_ADD_S(int64_t, INT64_MIN, INT64_MAX, a, b, out); }
+static bool ae_opt_sub_i64(int64_t a, int64_t b, int64_t *out) { /* ae_int_macros */ AE_OPT_SUB_S(int64_t, INT64_MIN, INT64_MAX, a, b, out); }
+static bool ae_opt_mul_i64(int64_t a, int64_t b, int64_t *out) { /* ae_int_macros */ AE_OPT_MUL_S(int64_t, INT64_MIN, INT64_MAX, a, b, out); }
+static bool ae_opt_div_i64(int64_t a, int64_t b, int64_t *out) { /* ae_int_macros */ AE_OPT_DIV_S(int64_t, INT64_MIN, a, b, out); }
+static bool ae_opt_mod_i64(int64_t a, int64_t b, int64_t *out) { /* ae_int_macros */ AE_OPT_MOD_S(int64_t, INT64_MIN, a, b, out); }
+static bool ae_opt_neg_i64(int64_t a, int64_t *out) { /* ae_int_macros */ AE_OPT_NEG_S(int64_t, INT64_MIN, a, out); }
+
+static intptr_t ae_wrap_add_isize(intptr_t a, intptr_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(intptr_t, uintptr_t, +, a, b); }
+static intptr_t ae_wrap_sub_isize(intptr_t a, intptr_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(intptr_t, uintptr_t, -, a, b); }
+static intptr_t ae_wrap_mul_isize(intptr_t a, intptr_t b) { /* ae_int_macros */ AE_WRAP_BIN_S(intptr_t, uintptr_t, *, a, b); }
+static intptr_t ae_wrap_neg_isize(intptr_t a) { /* ae_int_macros */ AE_WRAP_NEG_S(intptr_t, uintptr_t, a); }
+static intptr_t ae_sat_add_isize(intptr_t a, intptr_t b) { /* ae_int_macros */ AE_SAT_ADD_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b); }
+static intptr_t ae_sat_sub_isize(intptr_t a, intptr_t b) { /* ae_int_macros */ AE_SAT_SUB_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b); }
+static intptr_t ae_sat_mul_isize(intptr_t a, intptr_t b) { /* ae_int_macros */ AE_SAT_MUL_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b); }
+static bool ae_opt_add_isize(intptr_t a, intptr_t b, intptr_t *out) { /* ae_int_macros */ AE_OPT_ADD_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b, out); }
+static bool ae_opt_sub_isize(intptr_t a, intptr_t b, intptr_t *out) { /* ae_int_macros */ AE_OPT_SUB_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b, out); }
+static bool ae_opt_mul_isize(intptr_t a, intptr_t b, intptr_t *out) { /* ae_int_macros */ AE_OPT_MUL_S(intptr_t, INTPTR_MIN, INTPTR_MAX, a, b, out); }
+static bool ae_opt_div_isize(intptr_t a, intptr_t b, intptr_t *out) { /* ae_int_macros */ AE_OPT_DIV_S(intptr_t, INTPTR_MIN, a, b, out); }
+static bool ae_opt_mod_isize(intptr_t a, intptr_t b, intptr_t *out) { /* ae_int_macros */ AE_OPT_MOD_S(intptr_t, INTPTR_MIN, a, b, out); }
+static bool ae_opt_neg_isize(intptr_t a, intptr_t *out) { /* ae_int_macros */ AE_OPT_NEG_S(intptr_t, INTPTR_MIN, a, out); }
+
+static uint8_t ae_wrap_add_u8(uint8_t a, uint8_t b) { return (uint8_t)(a + b); }
+static uint8_t ae_wrap_sub_u8(uint8_t a, uint8_t b) { return (uint8_t)(a - b); }
+static uint8_t ae_wrap_mul_u8(uint8_t a, uint8_t b) { return (uint8_t)(a * b); }
+static uint8_t ae_wrap_neg_u8(uint8_t a) { return (uint8_t)(0 - a); }
+static uint8_t ae_sat_add_u8(uint8_t a, uint8_t b) { /* ae_int_macros */ AE_SAT_ADD_U(uint8_t, UINT8_MAX, a, b); }
+static uint8_t ae_sat_sub_u8(uint8_t a, uint8_t b) { /* ae_int_macros */ AE_SAT_SUB_U(uint8_t, a, b); }
+static uint8_t ae_sat_mul_u8(uint8_t a, uint8_t b) { /* ae_int_macros */ AE_SAT_MUL_U(uint8_t, UINT8_MAX, a, b); }
+static bool ae_opt_add_u8(uint8_t a, uint8_t b, uint8_t *out) { /* ae_int_macros */ AE_OPT_ADD_U(uint8_t, UINT8_MAX, a, b, out); }
+static bool ae_opt_sub_u8(uint8_t a, uint8_t b, uint8_t *out) { /* ae_int_macros */ AE_OPT_SUB_U(uint8_t, a, b, out); }
+static bool ae_opt_mul_u8(uint8_t a, uint8_t b, uint8_t *out) { /* ae_int_macros */ AE_OPT_MUL_U(uint8_t, UINT8_MAX, a, b, out); }
+static bool ae_opt_div_u8(uint8_t a, uint8_t b, uint8_t *out) { /* ae_int_macros */ AE_OPT_DIV_U(uint8_t, a, b, out); }
+static bool ae_opt_mod_u8(uint8_t a, uint8_t b, uint8_t *out) { /* ae_int_macros */ AE_OPT_MOD_U(uint8_t, a, b, out); }
+
+static uint16_t ae_wrap_add_u16(uint16_t a, uint16_t b) { return (uint16_t)(a + b); }
+static uint16_t ae_wrap_sub_u16(uint16_t a, uint16_t b) { return (uint16_t)(a - b); }
+static uint16_t ae_wrap_mul_u16(uint16_t a, uint16_t b) { return (uint16_t)(a * b); }
+static uint16_t ae_wrap_neg_u16(uint16_t a) { return (uint16_t)(0 - a); }
+static uint16_t ae_sat_add_u16(uint16_t a, uint16_t b) { /* ae_int_macros */ AE_SAT_ADD_U(uint16_t, UINT16_MAX, a, b); }
+static uint16_t ae_sat_sub_u16(uint16_t a, uint16_t b) { /* ae_int_macros */ AE_SAT_SUB_U(uint16_t, a, b); }
+static uint16_t ae_sat_mul_u16(uint16_t a, uint16_t b) { /* ae_int_macros */ AE_SAT_MUL_U(uint16_t, UINT16_MAX, a, b); }
+static bool ae_opt_add_u16(uint16_t a, uint16_t b, uint16_t *out) { /* ae_int_macros */ AE_OPT_ADD_U(uint16_t, UINT16_MAX, a, b, out); }
+static bool ae_opt_sub_u16(uint16_t a, uint16_t b, uint16_t *out) { /* ae_int_macros */ AE_OPT_SUB_U(uint16_t, a, b, out); }
+static bool ae_opt_mul_u16(uint16_t a, uint16_t b, uint16_t *out) { /* ae_int_macros */ AE_OPT_MUL_U(uint16_t, UINT16_MAX, a, b, out); }
+static bool ae_opt_div_u16(uint16_t a, uint16_t b, uint16_t *out) { /* ae_int_macros */ AE_OPT_DIV_U(uint16_t, a, b, out); }
+static bool ae_opt_mod_u16(uint16_t a, uint16_t b, uint16_t *out) { /* ae_int_macros */ AE_OPT_MOD_U(uint16_t, a, b, out); }
+
+static uint32_t ae_wrap_add_u32(uint32_t a, uint32_t b) { return (uint32_t)(a + b); }
+static uint32_t ae_wrap_sub_u32(uint32_t a, uint32_t b) { return (uint32_t)(a - b); }
+static uint32_t ae_wrap_mul_u32(uint32_t a, uint32_t b) { return (uint32_t)(a * b); }
+static uint32_t ae_wrap_neg_u32(uint32_t a) { return (uint32_t)(0 - a); }
+static uint32_t ae_sat_add_u32(uint32_t a, uint32_t b) { /* ae_int_macros */ AE_SAT_ADD_U(uint32_t, UINT32_MAX, a, b); }
+static uint32_t ae_sat_sub_u32(uint32_t a, uint32_t b) { /* ae_int_macros */ AE_SAT_SUB_U(uint32_t, a, b); }
+static uint32_t ae_sat_mul_u32(uint32_t a, uint32_t b) { /* ae_int_macros */ AE_SAT_MUL_U(uint32_t, UINT32_MAX, a, b); }
+static bool ae_opt_add_u32(uint32_t a, uint32_t b, uint32_t *out) { /* ae_int_macros */ AE_OPT_ADD_U(uint32_t, UINT32_MAX, a, b, out); }
+static bool ae_opt_sub_u32(uint32_t a, uint32_t b, uint32_t *out) { /* ae_int_macros */ AE_OPT_SUB_U(uint32_t, a, b, out); }
+static bool ae_opt_mul_u32(uint32_t a, uint32_t b, uint32_t *out) { /* ae_int_macros */ AE_OPT_MUL_U(uint32_t, UINT32_MAX, a, b, out); }
+static bool ae_opt_div_u32(uint32_t a, uint32_t b, uint32_t *out) { /* ae_int_macros */ AE_OPT_DIV_U(uint32_t, a, b, out); }
+static bool ae_opt_mod_u32(uint32_t a, uint32_t b, uint32_t *out) { /* ae_int_macros */ AE_OPT_MOD_U(uint32_t, a, b, out); }
+
+static uint64_t ae_wrap_add_u64(uint64_t a, uint64_t b) { return (uint64_t)(a + b); }
+static uint64_t ae_wrap_sub_u64(uint64_t a, uint64_t b) { return (uint64_t)(a - b); }
+static uint64_t ae_wrap_mul_u64(uint64_t a, uint64_t b) { return (uint64_t)(a * b); }
+static uint64_t ae_wrap_neg_u64(uint64_t a) { return (uint64_t)(0 - a); }
+static uint64_t ae_sat_add_u64(uint64_t a, uint64_t b) { /* ae_int_macros */ AE_SAT_ADD_U(uint64_t, UINT64_MAX, a, b); }
+static uint64_t ae_sat_sub_u64(uint64_t a, uint64_t b) { /* ae_int_macros */ AE_SAT_SUB_U(uint64_t, a, b); }
+static uint64_t ae_sat_mul_u64(uint64_t a, uint64_t b) { /* ae_int_macros */ AE_SAT_MUL_U(uint64_t, UINT64_MAX, a, b); }
+static bool ae_opt_add_u64(uint64_t a, uint64_t b, uint64_t *out) { /* ae_int_macros */ AE_OPT_ADD_U(uint64_t, UINT64_MAX, a, b, out); }
+static bool ae_opt_sub_u64(uint64_t a, uint64_t b, uint64_t *out) { /* ae_int_macros */ AE_OPT_SUB_U(uint64_t, a, b, out); }
+static bool ae_opt_mul_u64(uint64_t a, uint64_t b, uint64_t *out) { /* ae_int_macros */ AE_OPT_MUL_U(uint64_t, UINT64_MAX, a, b, out); }
+static bool ae_opt_div_u64(uint64_t a, uint64_t b, uint64_t *out) { /* ae_int_macros */ AE_OPT_DIV_U(uint64_t, a, b, out); }
+static bool ae_opt_mod_u64(uint64_t a, uint64_t b, uint64_t *out) { /* ae_int_macros */ AE_OPT_MOD_U(uint64_t, a, b, out); }
+
+static uintptr_t ae_wrap_add_usize(uintptr_t a, uintptr_t b) { return (uintptr_t)(a + b); }
+static uintptr_t ae_wrap_sub_usize(uintptr_t a, uintptr_t b) { return (uintptr_t)(a - b); }
+static uintptr_t ae_wrap_mul_usize(uintptr_t a, uintptr_t b) { return (uintptr_t)(a * b); }
+static uintptr_t ae_wrap_neg_usize(uintptr_t a) { return (uintptr_t)(0 - a); }
+static uintptr_t ae_sat_add_usize(uintptr_t a, uintptr_t b) { /* ae_int_macros */ AE_SAT_ADD_U(uintptr_t, UINTPTR_MAX, a, b); }
+static uintptr_t ae_sat_sub_usize(uintptr_t a, uintptr_t b) { /* ae_int_macros */ AE_SAT_SUB_U(uintptr_t, a, b); }
+static uintptr_t ae_sat_mul_usize(uintptr_t a, uintptr_t b) { /* ae_int_macros */ AE_SAT_MUL_U(uintptr_t, UINTPTR_MAX, a, b); }
+static bool ae_opt_add_usize(uintptr_t a, uintptr_t b, uintptr_t *out) { /* ae_int_macros */ AE_OPT_ADD_U(uintptr_t, UINTPTR_MAX, a, b, out); }
+static bool ae_opt_sub_usize(uintptr_t a, uintptr_t b, uintptr_t *out) { /* ae_int_macros */ AE_OPT_SUB_U(uintptr_t, a, b, out); }
+static bool ae_opt_mul_usize(uintptr_t a, uintptr_t b, uintptr_t *out) { /* ae_int_macros */ AE_OPT_MUL_U(uintptr_t, UINTPTR_MAX, a, b, out); }
+static bool ae_opt_div_usize(uintptr_t a, uintptr_t b, uintptr_t *out) { /* ae_int_macros */ AE_OPT_DIV_U(uintptr_t, a, b, out); }
+static bool ae_opt_mod_usize(uintptr_t a, uintptr_t b, uintptr_t *out) { /* ae_int_macros */ AE_OPT_MOD_U(uintptr_t, a, b, out); }
+
 static size_t ae_index(int64_t index, size_t len, size_t line, size_t column) {
     if (index < 0 || (uint64_t)index >= len) ae_fail("array index out of bounds", line, column);
     return (size_t)index;
@@ -257,11 +620,48 @@ static void ae_print_i64(int64_t value) {
     const int length = snprintf(buffer, sizeof buffer, "%" PRId64, value);
     if (length <= 0 || !ae_emit(buffer, length, 1)) ae_fail("output error", 0, 0);
 }
+static void ae_print_u64(uint64_t value) {
+    char buffer[32];
+    const int length = snprintf(buffer, sizeof buffer, "%" PRIu64, value);
+    if (length <= 0 || !ae_emit(buffer, length, 1)) ae_fail("output error", 0, 0);
+}
 static void ae_print_cstr(const char *text) {
     ae_print_view((ae_strview){ text, (int64_t)strlen(text) });
 }
 static void ae_print_bool(bool value) {
     if (!ae_emit(value ? "true" : "false", value ? 4 : 5, 1)) ae_fail("output error", 0, 0);
+}
+static size_t ae_utf8_encode(uint32_t cp, char out[4]) {
+    if (cp <= 0x7Fu) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp <= 0x7FFu) {
+        out[0] = (char)(0xC0u | (cp >> 6));
+        out[1] = (char)(0x80u | (cp & 0x3Fu));
+        return 2;
+    } else if (cp <= 0xFFFFu) {
+        out[0] = (char)(0xE0u | (cp >> 12));
+        out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (cp & 0x3Fu));
+        return 3;
+    } else {
+        out[0] = (char)(0xF0u | (cp >> 18));
+        out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[3] = (char)(0x80u | (cp & 0x3Fu));
+        return 4;
+    }
+}
+static void ae_print_char(uint32_t value) {
+    char buf[4];
+    const size_t len = ae_utf8_encode(value, buf);
+    if (!ae_emit(buf, (int64_t)len, 1)) ae_fail("output error", 0, 0);
+}
+static uint32_t ae_u32_to_char(uint32_t value, size_t line, size_t column) {
+    if (value > 0x10FFFFu || (value >= 0xD800u && value <= 0xDFFFu)) {
+        ae_fail("invalid Unicode scalar value", line, column);
+    }
+    return value;
 }
 static ae_string ae_str_from(const char *text, size_t line, size_t column) {
     size_t n = strlen(text);
@@ -289,6 +689,11 @@ static ae_string ae_str_cat(ae_string a, ae_string b, size_t line, size_t column
 // a temp that dies inside one expression never needs to own memory.
 static int64_t ae_int_to_buf(int64_t value, char *buffer, size_t line, size_t column) {
     const int length = snprintf(buffer, 24, "%" PRId64, value);
+    if (length < 0 || length >= 24) ae_fail("cannot format integer", line, column);
+    return length;
+}
+static int64_t ae_u64_to_buf(uint64_t value, char *buffer, size_t line, size_t column) {
+    const int length = snprintf(buffer, 24, "%" PRIu64, value);
     if (length < 0 || length >= 24) ae_fail("cannot format integer", line, column);
     return length;
 }

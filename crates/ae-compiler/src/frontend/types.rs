@@ -14,12 +14,7 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
 }
 
 pub(super) fn scalar_type(name: &str) -> Option<Type> {
-    match name {
-        "i64" => Some(Type::Int(IntTy::I64)),
-        "f64" => Some(Type::Float(FloatTy::F64)),
-        "bool" => Some(Type::Bool),
-        _ => None,
-    }
+    ae_ty::Scalar::from_spelling(name).map(|scalar| scalar.ty())
 }
 
 impl Parser<'_> {
@@ -42,6 +37,11 @@ impl Parser<'_> {
     }
 
     pub(super) fn named_type(&mut self) -> Result<Type, ae_span::Diagnostic> {
+        if *self.current() == Kind::LParen {
+            self.pos += 1;
+            self.take(Kind::RParen)?;
+            return Ok(Type::Unit);
+        }
         let name = self.identifier()?;
         // Inside a generic instantiation a type parameter stands for the
         // argument the call site supplied; nothing must reach code generation
@@ -335,7 +335,7 @@ impl Parser<'_> {
         let fty = self.named_type()?;
         // Payloads stay flat: a variant may carry scalars, strings or a vector,
         // but not a struct or another enum (no layout recursion).
-        if !matches!(fty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
+        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
             return Err(self.fail("enum variant payloads must be i64, bool, f64, string, vec, vec[string], or a type parameter"));
         }
         Ok(Payload::Concrete(fty))
@@ -409,7 +409,7 @@ impl Parser<'_> {
                         "vec" => Some(Type::Vec),
                         _ => scalar_type(name),
                     })?;
-                    matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
+                    matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
                 }
                 [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
                  Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
@@ -495,7 +495,7 @@ impl Parser<'_> {
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let ty = self.named_type()?;
-        if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
+        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
             return Err(self.fail("type arguments must be i64, bool, f64, string, vec, or vec[string]"));
         }
         Ok(ty)

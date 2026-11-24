@@ -1,0 +1,82 @@
+fn add_i16(a: i16, b: i16) -> i16 { return a + b; }
+fn add_i32(a: i32, b: i32) -> i32 { return a + b; }
+fn add_isize(a: isize, b: isize) -> isize { return a + b; }
+fn add_u16(a: u16, b: u16) -> u16 { return a + b; }
+fn add_u32(a: u32, b: u32) -> u32 { return a + b; }
+fn add_u64(a: u64, b: u64) -> u64 { return a + b; }
+fn add_usize(a: usize, b: usize) -> usize { return a + b; }
+
+fn main() {
+    let i16_min = (-32768) as i16;
+    let i16_max = 32767 as i16;
+    let i32_min = (-2147483648) as i32;
+    let i32_max = 2147483647 as i32;
+    let isize_max = 9223372036854775807 as isize;
+    let isize_min = ((-9223372036854775807) as isize) - (1 as isize);
+
+    let u16_max = 65535 as u16;
+    let u32_max = 4294967295 as u32;
+    let u64_high = (1 as u64) << (63 as u64);
+    let u64_max = u64_high + (u64_high - (1 as u64));
+    let usize_high = (1 as usize) << (63 as usize);
+    let usize_max = usize_high + (usize_high - (1 as usize));
+
+    print(i16_min);
+    print(i16_max);
+    print(i32_min);
+    print(i32_max);
+    print(isize_min);
+    print(isize_max);
+    print(u16_max);
+    print(u32_max);
+    print(u64_high);
+    print(u64_max);
+    print(usize_max);
+
+    print(add_i16(300 as i16, (-50) as i16));
+    print(-(add_i32(100000 as i32, 23456 as i32)));
+    print(add_isize(1000 as isize, (-250) as isize));
+    print(add_u16(500 as u16, 250 as u16));
+    print(add_u32(70000 as u32, 30000 as u32));
+    print(add_u64(u64_high, 42 as u64));
+    print(add_usize(usize_high, 7 as usize));
+
+    print((12 as i16) << (4 as i16));
+    print((64 as i32) >> (2 as i32));
+    print((1 as u16) << (15 as u16));
+    print((1 as u32) << (31 as u32));
+    print((u64_max) >> (63 as u64));
+    print((usize_max) >> (60 as usize));
+
+    print(i16_min < i16_max);
+    print(i32_max > i32_min);
+    print(u64_max > u64_high);
+    print(usize_max == ((1 as usize) << (63 as usize)) + (((1 as usize) << (63 as usize)) - (1 as usize)));
+
+    let wide = 70000;
+    print(wide as i16);
+    print(wide as u16);
+    let neg_one = -1;
+    print(neg_one as u16);
+    print(neg_one as u32);
+    print(neg_one as u64);
+    print(neg_one as usize);
+    print(((-1) as i16) as i32);
+    print((65535 as u16) as i16);
+
+    print((123 as i16) as f64);
+    print(((-456) as i32) as f64);
+    print((789 as isize) as f64);
+    print((500 as u16) as f64);
+    print((1234 as u32) as f64);
+    print((12345 as u64) as f64);
+    print((6789 as usize) as f64);
+
+    print((-32768.5) as i16);
+    print((-0.5) as u16);
+    print(123456.75 as i32);
+    print(4294967295.25 as u32);
+    print((-99.9) as isize);
+    print(1024.5 as u64);
+    print((-0.25) as usize);
+}

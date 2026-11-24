@@ -8944,5 +8944,340 @@ fn scalar_as_casts_match_between_backends_and_trap_alike() {
     }
 
     let message = check_rejects("fn main() { let b = 3 as bool; print(b); }");
-    assert!(message.contains("'bool' is not a numeric type"), "{message}");
+    assert!(message.contains("conversion from i64 to bool is not allowed"), "{message}");
+}
+
+#[test]
+fn i8_u8_compiled_and_interp_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/i8_u8_primitives.ae");
+    let expected = fs::read_to_string(root.join("tests/run/i8_u8_primitives.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for extra in [vec![], vec!["--interp"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {:?} failed: {}",
+            extra,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {extra:?}"
+        );
+    }
+
+    let neg_i8 = check_rejects("fn main() { let x = (-129) as i8; print(x); }");
+    assert!(neg_i8.contains("out of range for 'i8'"), "{neg_i8}");
+    let neg_u8 = check_rejects("fn main() { let x = (-1) as u8; print(x); }");
+    assert!(neg_u8.contains("out of range for 'u8'"), "{neg_u8}");
+}
+
+#[test]
+fn i8_u8_runtime_traps_match_between_backends() {
+    let cases = [
+        ("i8_add_overflow", "fn main() { let a = 127 as i8; let b = 1 as i8; print(a + b); }", "integer overflow"),
+        ("i8_sub_underflow", "fn main() { let a = (-128) as i8; let b = 1 as i8; print(a - b); }", "integer overflow"),
+        ("i8_neg_min", "fn main() { let a = (-128) as i8; print(-a); }", "integer overflow"),
+        ("i8_div_min_neg1", "fn main() { let a = (-128) as i8; let b = (-1) as i8; print(a / b); }", "integer overflow"),
+        ("u8_add_overflow", "fn main() { let a = 255 as u8; let b = 1 as u8; print(a + b); }", "integer overflow"),
+        ("u8_sub_underflow", "fn main() { let a = 0 as u8; let b = 1 as u8; print(a - b); }", "integer overflow"),
+        ("i8_div_zero", "fn main() { let a = 1 as i8; let b = 0 as i8; print(a / b); }", "division by zero"),
+        ("i8_mod_zero", "fn main() { let a = 1 as i8; let b = 0 as i8; print(a % b); }", "division by zero"),
+        ("u8_div_zero", "fn main() { let a = 1 as u8; let b = 0 as u8; print(a / b); }", "division by zero"),
+        ("u8_mod_zero", "fn main() { let a = 1 as u8; let b = 0 as u8; print(a % b); }", "division by zero"),
+        ("i8_shl_oob", "fn main() { let a = 1 as i8; let b = 8 as i8; print(a << b); }", "shift count out of range"),
+        ("i8_shr_neg", "fn main() { let a = 1 as i8; let b = (-1) as i8; print(a >> b); }", "shift count out of range"),
+        ("u8_shl_oob", "fn main() { let a = 1 as u8; let b = 8 as u8; print(a << b); }", "shift count out of range"),
+        ("u8_shr_oob", "fn main() { let a = 1 as u8; let b = 8 as u8; print(a >> b); }", "shift count out of range"),
+        ("f64_to_i8_nan", "fn main() { let x = sqrt(-1.0); print(x as i8); }", "float-to-integer cast out of range"),
+        ("f64_to_u8_inf", "fn main() { let x = exp(1000.0); print(x as u8); }", "float-to-integer cast out of range"),
+        ("f64_to_i8_high", "fn main() { let x = 128.0; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f64_to_i8_low", "fn main() { let x = -129.0; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f64_to_u8_high", "fn main() { let x = 256.0; print(x as u8); }", "float-to-integer cast out of range"),
+        ("f64_to_u8_low", "fn main() { let x = -1.0; print(x as u8); }", "float-to-integer cast out of range"),
+    ];
+
+    let pid = std::process::id();
+    for (name, source, expected_trap) in cases {
+        for arguments in [vec![], vec!["--interp"]] {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ae-i8-u8-trap-{name}-{pid}-{seq}.ae"));
+            fs::write(&path, source).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+            command.arg("run").arg(&path);
+            for arg in &arguments {
+                command.arg(arg);
+            }
+            let output = command.output().unwrap();
+            let _ = fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{name} ({arguments:?}) unexpectedly succeeded"
+            );
+            assert!(
+                stderr.contains(expected_trap),
+                "{name} ({arguments:?}) stderr {stderr:?} missing {expected_trap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn all_int_widths_compiled_mir_and_interp_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/int_widths_primitives.ae");
+    let expected = fs::read_to_string(root.join("tests/run/int_widths_primitives.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+
+    for (src, needle) in [
+        ("fn main() { let x = (-32769) as i16; print(x); }", "out of range for 'i16'"),
+        ("fn main() { let x = (-1) as u16; print(x); }", "out of range for 'u16'"),
+        ("fn main() { let x = (-1) as u32; print(x); }", "out of range for 'u32'"),
+        ("fn main() { let x = (-1) as usize; print(x); }", "out of range for 'usize'"),
+        ("fn main() { let x = 1 as u32; print(-x); }", "unary '-' is not allowed on unsigned"),
+        ("fn main() { let x = 1 as u64; print(-x); }", "unary '-' is not allowed on unsigned"),
+        ("fn main() { let x = 1 as usize; print(-x); }", "unary '-' is not allowed on unsigned"),
+    ] {
+        let msg = check_rejects(src);
+        assert!(msg.contains(needle), "{src}: {msg}");
+    }
+}
+
+#[test]
+fn all_int_widths_runtime_traps_match_between_backends() {
+    let cases = [
+        ("i16_add_ovf", "fn main() { let a = 32767 as i16; print(a + (1 as i16)); }", "integer overflow"),
+        ("i16_neg_min", "fn main() { let a = (-32768) as i16; print(-a); }", "integer overflow"),
+        ("i16_div_zero", "fn main() { let a = 1 as i16; print(a / (0 as i16)); }", "division by zero"),
+        ("i16_shl_16", "fn main() { let a = 1 as i16; print(a << (16 as i16)); }", "shift count out of range"),
+        ("u16_add_ovf", "fn main() { let a = 65535 as u16; print(a + (1 as u16)); }", "integer overflow"),
+        ("u16_sub_udf", "fn main() { let a = 0 as u16; print(a - (1 as u16)); }", "integer overflow"),
+        ("u16_shr_16", "fn main() { let a = 1 as u16; print(a >> (16 as u16)); }", "shift count out of range"),
+        ("i32_add_ovf", "fn main() { let a = 2147483647 as i32; print(a + (1 as i32)); }", "integer overflow"),
+        ("i32_div_min", "fn main() { let a = (-2147483648) as i32; print(a / ((-1) as i32)); }", "integer overflow"),
+        ("i32_shl_neg", "fn main() { let a = 1 as i32; print(a << ((-1) as i32)); }", "shift count out of range"),
+        ("u32_add_ovf", "fn main() { let a = 4294967295 as u32; print(a + (1 as u32)); }", "integer overflow"),
+        ("u32_mod_zero", "fn main() { let a = 1 as u32; print(a % (0 as u32)); }", "division by zero"),
+        ("u32_shl_32", "fn main() { let a = 1 as u32; print(a << (32 as u32)); }", "shift count out of range"),
+        ("isize_add_ovf", "fn main() { let a = 9223372036854775807 as isize; print(a + (1 as isize)); }", "integer overflow"),
+        ("isize_div_zero", "fn main() { let a = 1 as isize; print(a / (0 as isize)); }", "division by zero"),
+        ("isize_shr_64", "fn main() { let a = 1 as isize; print(a >> (64 as isize)); }", "shift count out of range"),
+        ("u64_add_ovf", "fn main() { let h = (1 as u64) << (63 as u64); let m = h + (h - (1 as u64)); print(m + (1 as u64)); }", "integer overflow"),
+        ("u64_sub_udf", "fn main() { let a = 0 as u64; print(a - (1 as u64)); }", "integer overflow"),
+        ("u64_mod_zero", "fn main() { let a = 1 as u64; print(a % (0 as u64)); }", "division by zero"),
+        ("u64_shl_64", "fn main() { let a = 1 as u64; print(a << (64 as u64)); }", "shift count out of range"),
+        ("usize_sub_udf", "fn main() { let a = 0 as usize; print(a - (1 as usize)); }", "integer overflow"),
+        ("usize_shr_64", "fn main() { let a = 1 as usize; print(a >> (64 as usize)); }", "shift count out of range"),
+        ("f64_to_i16_high", "fn main() { let x = 32768.0; print(x as i16); }", "float-to-integer cast out of range"),
+        ("f64_to_i16_low", "fn main() { let x = -32769.0; print(x as i16); }", "float-to-integer cast out of range"),
+        ("f64_to_u16_high", "fn main() { let x = 65536.0; print(x as u16); }", "float-to-integer cast out of range"),
+        ("f64_to_u16_low", "fn main() { let x = -1.0; print(x as u16); }", "float-to-integer cast out of range"),
+        ("f64_to_i32_high", "fn main() { let x = 2147483648.0; print(x as i32); }", "float-to-integer cast out of range"),
+        ("f64_to_u32_high", "fn main() { let x = 4294967296.0; print(x as u32); }", "float-to-integer cast out of range"),
+        ("f64_to_isize_high", "fn main() { let x = 9223372036854775808.0; print(x as isize); }", "float-to-integer cast out of range"),
+        ("f64_to_u64_high", "fn main() { let x = 18446744073709551616.0; print(x as u64); }", "float-to-integer cast out of range"),
+        ("f64_to_usize_nan", "fn main() { let x = sqrt(-1.0); print(x as usize); }", "float-to-integer cast out of range"),
+        ("f64_to_usize_inf", "fn main() { let x = exp(1000.0); print(x as usize); }", "float-to-integer cast out of range"),
+    ];
+
+    let pid = std::process::id();
+    for (name, source, expected_trap) in cases {
+        for arguments in [vec![], vec!["--interp"]] {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ae-w2-trap-{name}-{pid}-{seq}.ae"));
+            fs::write(&path, source).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+            command.arg("run").arg(&path);
+            for arg in &arguments {
+                command.arg(arg);
+            }
+            let output = command.output().unwrap();
+            let _ = fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{name} ({arguments:?}) unexpectedly succeeded"
+            );
+            assert!(
+                stderr.contains(expected_trap),
+                "{name} ({arguments:?}) stderr {stderr:?} missing {expected_trap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wave3a_f32_char_unit_ptr_usize_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/f32_char_unit_ptr_usize.ae");
+    let expected = fs::read_to_string(root.join("tests/run/f32_char_unit_ptr_usize.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+
+    let mut_write_src = "fn main() { var y = 10; unsafe { let p = &mut y as *mut i64; let a = p as usize; let q = a as *mut i64; let _w = ptr_write(q, 99); } print(y); }\n";
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("ae-w3a-mut-ptr-{}-{seq}.ae", std::process::id()));
+    fs::write(&path, mut_write_src).unwrap();
+    for (label, mir) in [("compiled", false), ("mir", true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{label} mut ptr round-trip failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            "99\n"
+        );
+    }
+    let _ = fs::remove_file(&path);
+
+    let msg = check_rejects("fn main() { let x = 65 as char; print(x); }");
+    assert!(msg.contains("not allowed"), "{msg}");
+}
+
+#[test]
+fn wave3a_runtime_traps_match_between_backends() {
+    let cases = [
+        ("f32_to_i8_nan", "fn main() { let x = sqrt(-1.0) as f32; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f32_to_u8_inf", "fn main() { let x = exp(1000.0) as f32; print(x as u8); }", "float-to-integer cast out of range"),
+        ("f32_to_i8_high", "fn main() { let x = 128.0 as f32; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f32_to_u8_low", "fn main() { let x = (-1.0) as f32; print(x as u8); }", "float-to-integer cast out of range"),
+        ("f32_to_i32_high", "fn main() { let x = 2147483648.0 as f32; print(x as i32); }", "float-to-integer cast out of range"),
+        ("f32_to_u32_high", "fn main() { let x = 4294967296.0 as f32; print(x as u32); }", "float-to-integer cast out of range"),
+        ("f32_to_isize_high", "fn main() { let x = 9223372036854775808.0 as f32; print(x as isize); }", "float-to-integer cast out of range"),
+        ("f32_to_usize_high", "fn main() { let x = 18446744073709551616.0 as f32; print(x as usize); }", "float-to-integer cast out of range"),
+        ("f32_div_zero", "fn main() { let a = 1.0 as f32; let b = 0.0 as f32; print(a / b); }", "f32 division by zero"),
+        ("u32_to_char_d800", "fn main() { let v = 55296 as u32; print(v as char); }", "invalid Unicode scalar value"),
+        ("u32_to_char_dfff", "fn main() { let v = 57343 as u32; print(v as char); }", "invalid Unicode scalar value"),
+        ("u32_to_char_110000", "fn main() { let v = 1114112 as u32; print(v as char); }", "invalid Unicode scalar value"),
+    ];
+
+    let pid = std::process::id();
+    for (name, source, expected_trap) in cases {
+        for arguments in [vec![], vec!["--interp"]] {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ae-w3a-trap-{name}-{pid}-{seq}.ae"));
+            fs::write(&path, source).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+            command.arg("run").arg(&path);
+            for arg in &arguments {
+                command.arg(arg);
+            }
+            let output = command.output().unwrap();
+            let _ = fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{name} ({arguments:?}) unexpectedly succeeded"
+            );
+            assert!(
+                stderr.contains(expected_trap),
+                "{name} ({arguments:?}) stderr {stderr:?} missing {expected_trap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wave3b_int_checked_wrapping_saturating_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/int_checked_wrapping_saturating.ae");
+    let expected = fs::read_to_string(root.join("tests/run/int_checked_wrapping_saturating.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
 }

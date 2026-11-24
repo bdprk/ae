@@ -45,6 +45,7 @@ impl<'a> Parser<'a> {
                     || (resolved_builtin(name) && !typed_intrinsic(name))
             }
             ExpressionKind::Qualified { .. } => self.resolved_expressions().enum_constructors.contains(&operand.range.start),
+            ExpressionKind::Field { name, .. } => IntMethodKind::from_name(name).is_some_and(IntMethodKind::is_checked),
             _ => false,
         }
     }

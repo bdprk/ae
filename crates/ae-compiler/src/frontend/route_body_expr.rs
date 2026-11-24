@@ -134,7 +134,7 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 .is_some()
                 && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
-        ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_)) => true,
+        ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_) | Kind::Char(_)) | ExpressionKind::Unit => true,
         // A collection literal used as a value (`print(vec[1])`): the scan
         // admits it when every element does, and the lowering builds the same
         // `Expr::VecLit`/array the typed route builds. The print arm's type
@@ -228,6 +228,12 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 return true;
             }
             if let ExpressionKind::Field { base, name } = &callee.kind {
+                if IntMethodKind::from_name(name).is_some()
+                    && scalar_body_expression(base, resolved, supports_call, supports_field)
+                    && arguments.iter().all(|argument| scalar_body_expression(argument, resolved, supports_call, supports_field))
+                {
+                    return true;
+                }
                 if name == "deref" && arguments.is_empty()
                     && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
                     && resolved.scalar_pointer_receivers.contains(&base.range.start)

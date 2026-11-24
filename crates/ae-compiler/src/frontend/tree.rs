@@ -327,6 +327,8 @@ impl<'a> TreePrinter<'a> {
             Expr::Number(n) => out.push_str(&n.to_string()),
             Expr::FloatLit(x) => out.push_str(&x.to_string()),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),
+            Expr::CharLit(c) => out.push_str(&format!("{c:?}")),
+            Expr::Unit => out.push_str("()"),
             Expr::StrLit(text, line, col) => out.push_str(&format!("{:?} @ {}:{}", text, line, col)),
             Expr::Variable(id, ty, line, col) => out.push_str(&format!("v{} ({}) @ {}:{}", id, ty.name(self.ctx), line, col)),
             Expr::Field(base, fname, fty) => {
@@ -526,6 +528,15 @@ impl<'a> TreePrinter<'a> {
                 }
                 out.push_str(&format!(") @ {}:{}", line, col));
             }
+            Expr::IntMethod(kind, recv, arg, ty, line, col) => {
+                out.push_str(&format!("{}(", kind.mir_name()));
+                self.expression(recv, out);
+                if let Some(arg) = arg {
+                    out.push_str(", ");
+                    self.expression(arg, out);
+                }
+                out.push_str(&format!(") -> {} @ {}:{}", ty.name(self.ctx), line, col));
+            }
             other => out.push_str(&format!("<expr {:?}>", std::mem::discriminant(other))),
         }
     }
@@ -559,6 +570,8 @@ fn expr_type_name(expr: &Expr) -> &'static str {
     match expr {
         Expr::Number(..) | Expr::Binary(..) => "i64",
         Expr::FloatLit(..) | Expr::ToF64(..) => "f64",
+        Expr::CharLit(..) => "char",
+        Expr::Unit => "()",
         Expr::BoolLit(..) | Expr::StrEq(..) | Expr::Contains(..) | Expr::StartsWith(..) | Expr::EndsWith(..) => "bool",
         _ => "owned",
     }

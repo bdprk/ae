@@ -748,10 +748,12 @@ impl<'a> DeclarationParser<'a> {
                     return Err(self.error("main cannot have parameters"));
                 }
                 None
-            } else {
+            } else if foreign || self.current().kind == Kind::Arrow {
                 self.take(Kind::Arrow)?;
                 let stops = if foreign { &[Kind::LBrace, Kind::Semi][..] } else { &[Kind::LBrace][..] };
                 Some(self.ty(stops, false)?)
+            } else {
+                None
             };
             if foreign && !exposes_body {
                 crate::expect_token(self.file, self.source, self.current(), Kind::Semi)?;
@@ -873,11 +875,11 @@ mod tests {
     #[test]
     fn function_return_annotations_follow_the_entry_point_rule() {
         let source = "fn helper() {} fn main() {}";
-        let recovered = recover_declarations("case.ae", source);
-        assert_eq!(recovered.declarations.len(), 1);
-        assert_eq!(recovered.declarations[0].name, "main");
-        assert_eq!(recovered.diagnostics.len(), 1);
-        assert_eq!(recovered.diagnostics[0].message, "expected Arrow, found LBrace");
+        let declarations = parse_declarations("case.ae", source).unwrap();
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].name, "helper");
+        assert!(matches!(declarations[0].kind, DeclarationKind::Function { returns: None, .. }));
+        assert_eq!(declarations[1].name, "main");
 
         for invalid in ["fn main() -> i64 {}", "fn main[T]() {}", "fn main(x: i64) {}"] {
             assert!(parse_declarations("case.ae", invalid).is_err(), "{invalid}");

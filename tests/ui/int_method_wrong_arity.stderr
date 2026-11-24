@@ -1,0 +1,1 @@
+ae: $DIR/int_method_wrong_arity.ae:3:25: 'wrapping_add' takes 1 argument(s), found 0

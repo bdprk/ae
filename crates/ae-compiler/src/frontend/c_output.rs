@@ -6,6 +6,8 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::Int(width) => width.c_name().to_owned(),
         Type::Bool => "bool".to_owned(),
         Type::Float(width) => width.c_name().to_owned(),
+        Type::Char => "uint32_t".to_owned(),
+        Type::Unit => "uint8_t".to_owned(),
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
         Type::Vec => "ae_vec".to_owned(),
@@ -56,6 +58,8 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::Int(width) => format!("{} v{id}", width.c_name()),
         Type::Bool => format!("bool v{id}"),
         Type::Float(width) => format!("{} v{id}", width.c_name()),
+        Type::Char => format!("uint32_t v{id}"),
+        Type::Unit => "void".to_owned(),
         Type::String => format!("ae_string v{id}"),
         Type::StrView => format!("ae_strview v{id}"),
         Type::Vec => format!("ae_vec v{id}"),
@@ -129,7 +133,10 @@ pub(super) fn c_return(ty: Type, ctx: &CompileContext) -> String {
         // Never returned: a function value cannot be a return type yet.
         Type::Fn(_) => "void".to_owned(),
         Type::Bool => "bool".to_owned(),
-        Type::Float(FloatTy::F64) => "double".to_owned(),
+        Type::Int(width) => width.c_name().to_owned(),
+        Type::Float(width) => width.c_name().to_owned(),
+        Type::Char => "uint32_t".to_owned(),
+        Type::Unit => "void".to_owned(),
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
         Type::Vec | Type::StrVec | Type::VecF => c_type_field(ty, ctx),
@@ -631,7 +638,7 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
                             let _ = writeln!(release, "    v->{n} = false;");
                             let _ = writeln!(forfeit, "    v->{n} = false;");
                         }
-                        Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) => {
+                        Type::Int(_) | Type::Float(_) | Type::Char => {
                             let _ = writeln!(release, "    v->{n} = 0;");
                             let _ = writeln!(forfeit, "    v->{n} = 0;");
                         }
@@ -665,7 +672,8 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
     let all: Vec<&Function> = files.iter().flatten().collect();
     for function in &all {
         if function.is_main { continue; }
-        let params = if function.params.is_empty() { "void".to_owned() } else { function.params.iter().map(|&(id, ty)| c_type(ty, id, false, &program.ctx)).collect::<Vec<_>>().join(", ") };
+        let non_unit_params: Vec<_> = function.params.iter().copied().filter(|&(_, ty)| ty != Type::Unit).collect();
+        let params = if non_unit_params.is_empty() { "void".to_owned() } else { non_unit_params.iter().map(|&(id, ty)| c_type(ty, id, false, &program.ctx)).collect::<Vec<_>>().join(", ") };
         let ret = c_return(function.returns, &program.ctx);
         out.push_str(&format!("\nstatic {ret} ae_fn_{}({params});\n", function.id));
     }
@@ -723,7 +731,8 @@ typedef struct {{
     }
     for function in &all {
         if function.is_main { continue; }
-        let params = if function.params.is_empty() { "void".to_owned() } else { function.params.iter().map(|&(id, ty)| c_type(ty, id, true, &program.ctx)).collect::<Vec<_>>().join(", ") };
+        let non_unit_params: Vec<_> = function.params.iter().copied().filter(|&(_, ty)| ty != Type::Unit).collect();
+        let params = if non_unit_params.is_empty() { "void".to_owned() } else { non_unit_params.iter().map(|&(id, ty)| c_type(ty, id, true, &program.ctx)).collect::<Vec<_>>().join(", ") };
         let ret = c_return(function.returns, &program.ctx);
         let signature = match program.ctx.exposure_name(function.id) {
             // A `#[no_mangle]` exposure keeps its own name with external

@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
 
         if matches!(expression.kind, ExpressionKind::Field { .. }) {
             let (value, ty) = self.lower_shared_field(expression, remaining, nodes_left, effects)?;
-            return matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool | Type::String | Type::StrView)
+            return matches!(ty, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::String | Type::StrView)
                 .then_some((value, ty));
         }
         self.lower_shared_expression(expression, remaining, nodes_left, effects)
@@ -183,7 +183,7 @@ impl<'a> Parser<'a> {
         if matches!(expression.kind, ExpressionKind::Field { .. }) {
             let (value, ty) = self.lower_shared_field(expression, remaining, nodes_left, effects)?;
             // Owned fields need the typed parser's context-sensitive move checks.
-            return matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool).then_some((value, ty));
+            return matches!(ty, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char).then_some((value, ty));
         }
         let remaining = remaining.checked_sub(1)?;
         // The typed Pratt parser charges operands, groups and prefixes.
@@ -194,8 +194,10 @@ impl<'a> Parser<'a> {
         match &expression.kind {
             ExpressionKind::Atom(Kind::Number(value)) => Some((Expr::Number(*value), Type::Int(IntTy::I64))),
             ExpressionKind::Atom(Kind::Float(value)) => Some((Expr::FloatLit(*value), Type::Float(FloatTy::F64))),
+            ExpressionKind::Atom(Kind::Char(value)) => Some((Expr::CharLit(*value), Type::Char)),
             ExpressionKind::Atom(Kind::True) => Some((Expr::BoolLit(true), Type::Bool)),
             ExpressionKind::Atom(Kind::False) => Some((Expr::BoolLit(false), Type::Bool)),
+            ExpressionKind::Unit => Some((Expr::Unit, Type::Unit)),
             ExpressionKind::Atom(Kind::Text(value)) => {
                 let offset = expression.range.start;
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < offset))?;
@@ -203,7 +205,7 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 let (_, _, ty) = self.names.get(name)?;
-                if !matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool | Type::Closure(_) | Type::Ptr(_) | Type::PtrMut(_)) {
+                if !matches!(ty, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit | Type::Closure(_) | Type::Ptr(_) | Type::PtrMut(_)) {
                     return None;
                 }
                 self.lower_resolved_local(name, expression.range.start)
@@ -347,10 +349,10 @@ impl<'a> Parser<'a> {
                 };
                 if self.ctx.is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
                     || !params.iter().all(|ty| {
-                        matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::StrView
+                        matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::StrView
                             | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
                     })
-                    || !matches!(ret, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
+                    || !matches!(ret, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
                 {
                     return None;
                 }

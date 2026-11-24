@@ -262,7 +262,13 @@ impl Parser<'_> {
             }
             Kind::Return => {
                 self.pos += 1;
-                let value = self.expression(true, true)?;
+                let value = if self.current().kind == Kind::Semi {
+                    let start = self.tokens[self.pos - 1].offset;
+                    let end = self.current().offset;
+                    Expression { kind: crate::expression::ExpressionKind::Unit, range: start..end }
+                } else {
+                    self.expression(true, true)?
+                };
                 self.take(Kind::Semi)?;
                 StatementKind::Return(value)
             }
@@ -406,15 +412,14 @@ pub const STATEMENT_BUILTINS: &[&str] = &[
 ];
 
 impl StatementKind {
-    /// True for a call the compiler accepts as a statement on its own.
+    /// True for a call the compiler accepts as a statement on its own
+    /// (propagating calls, statement builtins, and bare unit-returning calls).
     pub fn is_effect_statement(&self) -> bool {
         let StatementKind::Expr { value, propagates } = self else { return false };
         if *propagates {
             return true;
         }
-        let crate::expression::ExpressionKind::Call { callee, .. } = &value.kind else { return false };
-        let crate::expression::ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return false };
-        STATEMENT_BUILTINS.contains(&name.as_str())
+        matches!(&value.kind, crate::expression::ExpressionKind::Call { .. })
     }
 }
 

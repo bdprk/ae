@@ -173,7 +173,7 @@ fn is_short_circuit(expression: &Expr) -> bool {
 
 fn lower_exit_operand(expr: &Expr, current: usize, lowering: &mut Lowering) -> (usize, Expr) {
     match expr {
-        Expr::Number(_) | Expr::BoolLit(_) | Expr::FloatLit(_) | Expr::Variable(..) => {
+        Expr::Number(_) | Expr::BoolLit(_) | Expr::FloatLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::Variable(..) => {
             (current, expr.clone())
         }
         _ if is_short_circuit(expr) => lower_boolean_value(expr, current, lowering),

@@ -1,0 +1,1 @@
+ae: $DIR/int_method_unsigned_checked_neg.ae:3:27: checked_neg is only defined for signed integer types

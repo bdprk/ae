@@ -1,0 +1,1 @@
+ae: $DIR/char_literal_multi.ae:2:13: character literal may only contain a single character

@@ -331,9 +331,9 @@ fn main() {
             let start = source.find(fragment).unwrap();
             facts.get(&(start..start + fragment.len())).copied()
         };
-        assert_eq!(fact("x + 2"), Some(Checked(Scalar::Int)));
-        assert_eq!(fact("n * 3"), Some(Checked(Scalar::Int)));
-        assert_eq!(fact("-(n * 3)"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("x + 2"), Some(Checked(Scalar::Int(ae_ty::IntTy::I64))));
+        assert_eq!(fact("n * 3"), Some(Checked(Scalar::Int(ae_ty::IntTy::I64))));
+        assert_eq!(fact("-(n * 3)"), Some(Checked(Scalar::Int(ae_ty::IntTy::I64))));
         assert_eq!(fact("1.5 % 2.0"), Some(Rejected(OperatorError::FloatRemainder)));
         assert_eq!(fact("(1.5 % 2.0) + 3.0"), Some(Deferred));
         assert_eq!(fact("scale(9) + 1"), Some(Deferred));

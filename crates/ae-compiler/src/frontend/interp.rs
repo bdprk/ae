@@ -16,8 +16,20 @@ const LF_CHAR: char = '\n';
 #[derive(Debug, Clone)]
 enum Val {
     Int(i64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    Isize(isize),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    Usize(usize),
+    F32(f32),
     Float(f64),
     Bool(bool),
+    Char(char),
+    Unit,
     Str(String),
     Array(Vec<i64>),
     VecI(Vec<i64>),
@@ -1035,6 +1047,8 @@ fn eval_expr(
         Expr::Number(n) => Ok(Val::Int(*n)),
         Expr::FloatLit(x) => Ok(Val::Float(*x)),
         Expr::BoolLit(b) => Ok(Val::Bool(*b)),
+        Expr::CharLit(c) => Ok(Val::Char(*c)),
+        Expr::Unit => Ok(Val::Unit),
         Expr::StrLit(s, _, _) => Ok(Val::Str(unescape_str(s))),
         Expr::Variable(id, ty, line, col) => {
             let val = read_var(locals, caller_locals, *id, *line, *col)?;
@@ -1907,6 +1921,11 @@ fn eval_expr(
         Expr::Neg(inner, line, col) => {
             match eval_expr(env, inner, locals, caller_locals, false)? {
                 Val::Int(n) => n.checked_neg().map(Val::Int).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::I8(n) => n.checked_neg().map(Val::I8).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::I16(n) => n.checked_neg().map(Val::I16).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::I32(n) => n.checked_neg().map(Val::I32).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::Isize(n) => n.checked_neg().map(Val::Isize).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::F32(x) => Ok(Val::F32(-x)),
                 Val::Float(x) => Ok(Val::Float(-x)),
                 _ => Err(Flow::Trap("internal: neg operand".to_owned())),
             }
@@ -1928,16 +1947,15 @@ fn eval_expr(
         }
         Expr::ScalarCast(inner, from, to, line, col) => {
             let value = eval_expr(env, inner, locals, caller_locals, false)?;
-            match (from, to, value) {
-                (Type::Int(IntTy::I64), Type::Float(FloatTy::F64), Val::Int(n)) => Ok(Val::Float(n as f64)),
-                (Type::Float(FloatTy::F64), Type::Int(IntTy::I64), Val::Float(x)) => {
-                    if !x.is_finite() || x < -9223372036854775808.0 || x >= 9223372036854775808.0 {
-                        return Err(trap("float-to-integer cast out of range", *line, *col));
-                    }
-                    Ok(Val::Int(x as i64))
-                }
-                (_, _, value) => Err(Flow::Trap(format!("internal: scalar cast on {value:?}"))),
-            }
+            eval_scalar_cast(from, to, value, *line, *col)
+        }
+        Expr::IntMethod(kind, receiver, arg, result_ty, _, _) => {
+            let recv = eval_expr(env, receiver, locals, caller_locals, false)?;
+            let rhs = match arg {
+                Some(a) => Some(eval_expr(env, a, locals, caller_locals, false)?),
+                None => None,
+            };
+            dispatch_int_method(*kind, recv, rhs, result_ty)
         }
         Expr::ToF64(inner, line, col) => {
             let Val::Int(n) = eval_expr(env, inner, locals, caller_locals, false)? else { return Err(Flow::Trap("internal: to_f64".to_owned())); };
@@ -1985,6 +2003,31 @@ fn eval_expr(
                     Kind::GreaterEq => Ok(Val::Bool(x >= y)),
                     _ => Err(Flow::Trap("internal: int op".to_owned())),
                 },
+                (Val::I8(x), Val::I8(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::I16(x), Val::I16(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::I32(x), Val::I32(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::Isize(x), Val::Isize(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U8(x), Val::U8(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U16(x), Val::U16(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U32(x), Val::U32(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U64(x), Val::U64(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::Usize(x), Val::Usize(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::F32(x), Val::F32(y)) => match op {
+                    Kind::Plus => Ok(Val::F32(x + y)),
+                    Kind::Minus => Ok(Val::F32(x - y)),
+                    Kind::Star => Ok(Val::F32(x * y)),
+                    Kind::Slash => {
+                        if y == 0.0 { return Err(trap("f32 division by zero", *line, *col)); }
+                        Ok(Val::F32(x / y))
+                    }
+                    Kind::EqEq => Ok(Val::Bool(x == y)),
+                    Kind::NotEq => Ok(Val::Bool(x != y)),
+                    Kind::Less => Ok(Val::Bool(x < y)),
+                    Kind::LessEq => Ok(Val::Bool(x <= y)),
+                    Kind::Greater => Ok(Val::Bool(x > y)),
+                    Kind::GreaterEq => Ok(Val::Bool(x >= y)),
+                    _ => Err(Flow::Trap("internal: float op".to_owned())),
+                },
                 (Val::Float(x), Val::Float(y)) => match op {
                     Kind::Plus => Ok(Val::Float(x + y)),
                     Kind::Minus => Ok(Val::Float(x - y)),
@@ -2006,6 +2049,15 @@ fn eval_expr(
                     Kind::NotEq => Ok(Val::Bool(x != y)),
                     _ => Err(Flow::Trap("internal: bool op".to_owned())),
                 },
+                (Val::Char(x), Val::Char(y)) => match op {
+                    Kind::EqEq => Ok(Val::Bool(x == y)),
+                    Kind::NotEq => Ok(Val::Bool(x != y)),
+                    Kind::Less => Ok(Val::Bool(x < y)),
+                    Kind::LessEq => Ok(Val::Bool(x <= y)),
+                    Kind::Greater => Ok(Val::Bool(x > y)),
+                    Kind::GreaterEq => Ok(Val::Bool(x >= y)),
+                    _ => Err(Flow::Trap("internal: char op".to_owned())),
+                },
                 (Val::Str(x), Val::Str(y)) if *op == Kind::Plus => Ok(Val::Str(x + &y)),
                 _ => Err(Flow::Trap("internal: binary operand mismatch".to_owned())),
             }
@@ -2025,7 +2077,10 @@ fn eval_expr(
         // reinterpret the bits, the slot hands back the stored value —
         // corpus shapes avoid the punning, and the limitation is stated in
         // the ADR rather than papered over.
-        Expr::PtrCast(operand, ..) => eval_expr(env, operand, locals, caller_locals, moving),
+        Expr::PtrCast(operand, ..) => match eval_expr(env, operand, locals, caller_locals, moving)? {
+            Val::Usize(addr) => Ok(Val::Ptr(addr.wrapping_sub(0x1000))),
+            other => Ok(other),
+        },
         // ADR-0209 step A: the interpreter's pointers are slots into the
         // frame, not addresses, so byte/element arithmetic has no model here
         // — the same story as extern calls (which trap by name). The
@@ -2357,19 +2412,339 @@ fn unescape_str(raw: &str) -> String {
     out
 }
 
+fn format_float(x: f64) -> String {
+    if x.is_nan() { return "nan".to_owned(); }
+    if x.is_infinite() { return if x < 0.0 { "-inf".to_owned() } else { "inf".to_owned() }; }
+    if x == 0.0 && x.is_sign_negative() { return "-0.0".to_owned(); }
+    let s = format!("{x:?}");
+    if s.contains(['.', 'e', 'E']) { s } else { format!("{s}.0") }
+}
+
 fn format_val(val: &Val) -> String {
     match val {
         Val::Int(n) => n.to_string(),
+        Val::I8(n) => n.to_string(),
+        Val::I16(n) => n.to_string(),
+        Val::I32(n) => n.to_string(),
+        Val::Isize(n) => n.to_string(),
+        Val::U8(n) => n.to_string(),
+        Val::U16(n) => n.to_string(),
+        Val::U32(n) => n.to_string(),
+        Val::U64(n) => n.to_string(),
+        Val::Usize(n) => n.to_string(),
         Val::Bool(b) => if *b { "true".to_owned() } else { "false".to_owned() },
+        Val::Char(c) => c.to_string(),
+        Val::Unit => "()".to_owned(),
         Val::Str(s) => s.clone(),
-        Val::Float(x) => {
-            if x.is_nan() { return "nan".to_owned(); }
-            if x.is_infinite() { return if *x < 0.0 { "-inf".to_owned() } else { "inf".to_owned() }; }
-            if *x == 0.0 && x.is_sign_negative() { return "-0.0".to_owned(); }
-            let s = format!("{x:?}");
-            if s.contains(['.', 'e', 'E']) { s } else { format!("{s}.0") }
-        }
+        Val::F32(x) => format_float(*x as f64),
+        Val::Float(x) => format_float(*x),
         _ => "<val>".to_owned(),
+    }
+}
+
+fn eval_scalar_cast(from: &Type, to: &Type, value: Val, line: usize, col: usize) -> Result<Val, Flow> {
+    match (from, to, &value) {
+        (Type::Char, Type::Int(IntTy::U32), Val::Char(c)) => return Ok(Val::U32(*c as u32)),
+        (Type::Int(IntTy::U32), Type::Char, Val::U32(v)) => {
+            return char::from_u32(*v)
+                .map(Val::Char)
+                .ok_or_else(|| trap("invalid Unicode scalar value", line, col));
+        }
+        (Type::Ptr(_) | Type::PtrMut(_), Type::Int(IntTy::Usize), Val::Ptr(slot)) => {
+            return Ok(Val::Usize(slot.wrapping_add(0x1000)));
+        }
+        (Type::Float(FloatTy::F32), Type::Float(FloatTy::F64), Val::F32(x)) => return Ok(Val::Float(*x as f64)),
+        (Type::Float(FloatTy::F64), Type::Float(FloatTy::F32), Val::Float(x)) => return Ok(Val::F32(*x as f32)),
+        (Type::Float(FloatTy::F32), Type::Float(FloatTy::F32), Val::F32(x)) => return Ok(Val::F32(*x)),
+        (Type::Float(FloatTy::F64), Type::Float(FloatTy::F64), Val::Float(x)) => return Ok(Val::Float(*x)),
+        _ => {}
+    }
+    if let Type::Float(ft) = to {
+        let as_f64 = match (from, &value) {
+            (Type::Int(IntTy::I64), Val::Int(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::I8), Val::I8(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::I16), Val::I16(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::I32), Val::I32(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::Isize), Val::Isize(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U8), Val::U8(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U16), Val::U16(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U32), Val::U32(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U64), Val::U64(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::Usize), Val::Usize(n)) => Some((*n as f64, *n as f32)),
+            _ => None,
+        };
+        if let Some((v64, v32)) = as_f64 {
+            return Ok(match ft {
+                FloatTy::F64 => Val::Float(v64),
+                FloatTy::F32 => Val::F32(v32),
+            });
+        }
+    }
+    let bits: Option<u64> = match (from, &value) {
+        (Type::Int(IntTy::I64), Val::Int(n)) => Some(*n as u64),
+        (Type::Int(IntTy::I8), Val::I8(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::I16), Val::I16(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::I32), Val::I32(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::Isize), Val::Isize(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::U8), Val::U8(n)) => Some(*n as u64),
+        (Type::Int(IntTy::U16), Val::U16(n)) => Some(*n as u64),
+        (Type::Int(IntTy::U32), Val::U32(n)) => Some(*n as u64),
+        (Type::Int(IntTy::U64), Val::U64(n)) => Some(*n),
+        (Type::Int(IntTy::Usize), Val::Usize(n)) => Some(*n as u64),
+        _ => None,
+    };
+    if let Some(b) = bits {
+        return match to {
+            Type::Int(IntTy::I64) => Ok(Val::Int(b as i64)),
+            Type::Int(IntTy::I8) => Ok(Val::I8(b as i8)),
+            Type::Int(IntTy::I16) => Ok(Val::I16(b as i16)),
+            Type::Int(IntTy::I32) => Ok(Val::I32(b as i32)),
+            Type::Int(IntTy::Isize) => Ok(Val::Isize(b as i64 as isize)),
+            Type::Int(IntTy::U8) => Ok(Val::U8(b as u8)),
+            Type::Int(IntTy::U16) => Ok(Val::U16(b as u16)),
+            Type::Int(IntTy::U32) => Ok(Val::U32(b as u32)),
+            Type::Int(IntTy::U64) => Ok(Val::U64(b)),
+            Type::Int(IntTy::Usize) => Ok(Val::Usize(b as usize)),
+            _ => Err(Flow::Trap(format!("internal: scalar cast on {value:?}"))),
+        };
+    }
+    if let (Type::Float(FloatTy::F64), Type::Int(ity), Val::Float(x)) = (from, to, &value) {
+        let out_of_range = !x.is_finite()
+            || match ity {
+                IntTy::I8 => *x <= -129.0 || *x >= 128.0,
+                IntTy::U8 => *x <= -1.0 || *x >= 256.0,
+                IntTy::I16 => *x <= -32769.0 || *x >= 32768.0,
+                IntTy::U16 => *x <= -1.0 || *x >= 65536.0,
+                IntTy::I32 => *x <= -2147483649.0 || *x >= 2147483648.0,
+                IntTy::U32 => *x <= -1.0 || *x >= 4294967296.0,
+                IntTy::I64 | IntTy::Isize => *x < -9223372036854775808.0 || *x >= 9223372036854775808.0,
+                IntTy::U64 | IntTy::Usize => *x <= -1.0 || *x >= 18446744073709551616.0,
+            };
+        if out_of_range {
+            return Err(trap("float-to-integer cast out of range", line, col));
+        }
+        return Ok(match ity {
+            IntTy::I8 => Val::I8(*x as i8),
+            IntTy::U8 => Val::U8(*x as u8),
+            IntTy::I16 => Val::I16(*x as i16),
+            IntTy::U16 => Val::U16(*x as u16),
+            IntTy::I32 => Val::I32(*x as i32),
+            IntTy::U32 => Val::U32(*x as u32),
+            IntTy::I64 => Val::Int(*x as i64),
+            IntTy::Isize => Val::Isize(*x as isize),
+            IntTy::U64 => Val::U64(*x as u64),
+            IntTy::Usize => Val::Usize(*x as usize),
+        });
+    }
+    if let (Type::Float(FloatTy::F32), Type::Int(ity), Val::F32(x)) = (from, to, &value) {
+        let out_of_range = !x.is_finite()
+            || match ity {
+                IntTy::I8 => *x <= -129.0f32 || *x >= 128.0f32,
+                IntTy::U8 => *x <= -1.0f32 || *x >= 256.0f32,
+                IntTy::I16 => *x <= -32769.0f32 || *x >= 32768.0f32,
+                IntTy::U16 => *x <= -1.0f32 || *x >= 65536.0f32,
+                IntTy::I32 => *x < -2147483648.0f32 || *x >= 2147483648.0f32,
+                IntTy::U32 => *x <= -1.0f32 || *x >= 4294967296.0f32,
+                IntTy::I64 | IntTy::Isize => *x < -9223372036854775808.0f32 || *x >= 9223372036854775808.0f32,
+                IntTy::U64 | IntTy::Usize => *x <= -1.0f32 || *x >= 18446744073709551616.0f32,
+            };
+        if out_of_range {
+            return Err(trap("float-to-integer cast out of range", line, col));
+        }
+        return Ok(match ity {
+            IntTy::I8 => Val::I8(*x as i8),
+            IntTy::U8 => Val::U8(*x as u8),
+            IntTy::I16 => Val::I16(*x as i16),
+            IntTy::U16 => Val::U16(*x as u16),
+            IntTy::I32 => Val::I32(*x as i32),
+            IntTy::U32 => Val::U32(*x as u32),
+            IntTy::I64 => Val::Int(*x as i64),
+            IntTy::Isize => Val::Isize(*x as isize),
+            IntTy::U64 => Val::U64(*x as u64),
+            IntTy::Usize => Val::Usize(*x as usize),
+        });
+    }
+    Err(Flow::Trap(format!("internal: scalar cast on {value:?}")))
+}
+
+trait WidthInt: Copy + Ord + Eq {
+    const ZERO: Self;
+    fn checked_add(self, rhs: Self) -> Option<Self>;
+    fn checked_sub(self, rhs: Self) -> Option<Self>;
+    fn checked_mul(self, rhs: Self) -> Option<Self>;
+    fn checked_div(self, rhs: Self) -> Option<Self>;
+    fn checked_rem(self, rhs: Self) -> Option<Self>;
+    fn checked_neg(self) -> Option<Self>;
+    fn wrapping_add(self, rhs: Self) -> Self;
+    fn wrapping_sub(self, rhs: Self) -> Self;
+    fn wrapping_mul(self, rhs: Self) -> Self;
+    fn wrapping_neg(self) -> Self;
+    fn saturating_add(self, rhs: Self) -> Self;
+    fn saturating_sub(self, rhs: Self) -> Self;
+    fn saturating_mul(self, rhs: Self) -> Self;
+    fn bit_or(self, rhs: Self) -> Self;
+    fn bit_xor(self, rhs: Self) -> Self;
+    fn bit_and(self, rhs: Self) -> Self;
+    fn wrapping_shl(self, rhs: u32) -> Self;
+    fn wrapping_shr(self, rhs: u32) -> Self;
+    fn valid_shift(self) -> Option<u32>;
+    fn from_val(val: &Val) -> Option<Self>;
+    fn into_val(self) -> Val;
+}
+
+macro_rules! impl_width_int {
+    ($ty:ty, $variant:ident, signed) => {
+        impl WidthInt for $ty {
+            const ZERO: Self = 0;
+            fn checked_add(self, rhs: Self) -> Option<Self> { <$ty>::checked_add(self, rhs) }
+            fn checked_sub(self, rhs: Self) -> Option<Self> { <$ty>::checked_sub(self, rhs) }
+            fn checked_mul(self, rhs: Self) -> Option<Self> { <$ty>::checked_mul(self, rhs) }
+            fn checked_div(self, rhs: Self) -> Option<Self> { <$ty>::checked_div(self, rhs) }
+            fn checked_rem(self, rhs: Self) -> Option<Self> { <$ty>::checked_rem(self, rhs) }
+            fn checked_neg(self) -> Option<Self> { <$ty>::checked_neg(self) }
+            fn wrapping_add(self, rhs: Self) -> Self { <$ty>::wrapping_add(self, rhs) }
+            fn wrapping_sub(self, rhs: Self) -> Self { <$ty>::wrapping_sub(self, rhs) }
+            fn wrapping_mul(self, rhs: Self) -> Self { <$ty>::wrapping_mul(self, rhs) }
+            fn wrapping_neg(self) -> Self { <$ty>::wrapping_neg(self) }
+            fn saturating_add(self, rhs: Self) -> Self { <$ty>::saturating_add(self, rhs) }
+            fn saturating_sub(self, rhs: Self) -> Self { <$ty>::saturating_sub(self, rhs) }
+            fn saturating_mul(self, rhs: Self) -> Self { <$ty>::saturating_mul(self, rhs) }
+            fn bit_or(self, rhs: Self) -> Self { self | rhs }
+            fn bit_xor(self, rhs: Self) -> Self { self ^ rhs }
+            fn bit_and(self, rhs: Self) -> Self { self & rhs }
+            fn wrapping_shl(self, rhs: u32) -> Self { <$ty>::wrapping_shl(self, rhs) }
+            fn wrapping_shr(self, rhs: u32) -> Self { <$ty>::wrapping_shr(self, rhs) }
+            fn valid_shift(self) -> Option<u32> {
+                (self >= 0 && (self as u64) < (<$ty>::BITS as u64)).then_some(self as u32)
+            }
+            fn from_val(val: &Val) -> Option<Self> {
+                if let Val::$variant(v) = val { Some(*v) } else { None }
+            }
+            fn into_val(self) -> Val { Val::$variant(self) }
+        }
+    };
+    ($ty:ty, $variant:ident, unsigned) => {
+        impl WidthInt for $ty {
+            const ZERO: Self = 0;
+            fn checked_add(self, rhs: Self) -> Option<Self> { <$ty>::checked_add(self, rhs) }
+            fn checked_sub(self, rhs: Self) -> Option<Self> { <$ty>::checked_sub(self, rhs) }
+            fn checked_mul(self, rhs: Self) -> Option<Self> { <$ty>::checked_mul(self, rhs) }
+            fn checked_div(self, rhs: Self) -> Option<Self> { <$ty>::checked_div(self, rhs) }
+            fn checked_rem(self, rhs: Self) -> Option<Self> { <$ty>::checked_rem(self, rhs) }
+            fn checked_neg(self) -> Option<Self> { None }
+            fn wrapping_add(self, rhs: Self) -> Self { <$ty>::wrapping_add(self, rhs) }
+            fn wrapping_sub(self, rhs: Self) -> Self { <$ty>::wrapping_sub(self, rhs) }
+            fn wrapping_mul(self, rhs: Self) -> Self { <$ty>::wrapping_mul(self, rhs) }
+            fn wrapping_neg(self) -> Self { <$ty>::wrapping_neg(self) }
+            fn saturating_add(self, rhs: Self) -> Self { <$ty>::saturating_add(self, rhs) }
+            fn saturating_sub(self, rhs: Self) -> Self { <$ty>::saturating_sub(self, rhs) }
+            fn saturating_mul(self, rhs: Self) -> Self { <$ty>::saturating_mul(self, rhs) }
+            fn bit_or(self, rhs: Self) -> Self { self | rhs }
+            fn bit_xor(self, rhs: Self) -> Self { self ^ rhs }
+            fn bit_and(self, rhs: Self) -> Self { self & rhs }
+            fn wrapping_shl(self, rhs: u32) -> Self { <$ty>::wrapping_shl(self, rhs) }
+            fn wrapping_shr(self, rhs: u32) -> Self { <$ty>::wrapping_shr(self, rhs) }
+            fn valid_shift(self) -> Option<u32> {
+                ((self as u64) < (<$ty>::BITS as u64)).then_some(self as u32)
+            }
+            fn from_val(val: &Val) -> Option<Self> {
+                if let Val::$variant(v) = val { Some(*v) } else { None }
+            }
+            fn into_val(self) -> Val { Val::$variant(self) }
+        }
+    };
+}
+
+impl_width_int!(i8, I8, signed);
+impl_width_int!(i16, I16, signed);
+impl_width_int!(i32, I32, signed);
+impl_width_int!(i64, Int, signed);
+impl_width_int!(isize, Isize, signed);
+impl_width_int!(u8, U8, unsigned);
+impl_width_int!(u16, U16, unsigned);
+impl_width_int!(u32, U32, unsigned);
+impl_width_int!(u64, U64, unsigned);
+impl_width_int!(usize, Usize, unsigned);
+
+fn dispatch_int_method(kind: IntMethodKind, recv: Val, rhs: Option<Val>, result_ty: &Type) -> Result<Val, Flow> {
+    match recv {
+        Val::Int(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::I8(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::I16(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::I32(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::Isize(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U8(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U16(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U32(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U64(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::Usize(x) => eval_int_method(kind, x, rhs, result_ty),
+        _ => Err(Flow::Trap("internal: integer method on non-integer".to_owned())),
+    }
+}
+
+fn eval_int_method<T: WidthInt>(kind: IntMethodKind, x: T, rhs: Option<Val>, result_ty: &Type) -> Result<Val, Flow> {
+    let option_val = |opt: Option<T>| -> Result<Val, Flow> {
+        let Type::Enum(_, eid) = result_ty else {
+            return Err(Flow::Trap("internal: checked_* result not enum".to_owned()));
+        };
+        Ok(match opt {
+            Some(v) => Val::Enum(*eid, 0, vec![v.into_val()]),
+            None => Val::Enum(*eid, 1, Vec::new()),
+        })
+    };
+    let get_rhs = || -> Result<T, Flow> {
+        rhs.as_ref()
+            .and_then(T::from_val)
+            .ok_or_else(|| Flow::Trap("internal: integer method rhs mismatch".to_owned()))
+    };
+    match kind {
+        IntMethodKind::WrappingAdd => Ok(x.wrapping_add(get_rhs()?).into_val()),
+        IntMethodKind::WrappingSub => Ok(x.wrapping_sub(get_rhs()?).into_val()),
+        IntMethodKind::WrappingMul => Ok(x.wrapping_mul(get_rhs()?).into_val()),
+        IntMethodKind::WrappingNeg => Ok(x.wrapping_neg().into_val()),
+        IntMethodKind::SaturatingAdd => Ok(x.saturating_add(get_rhs()?).into_val()),
+        IntMethodKind::SaturatingSub => Ok(x.saturating_sub(get_rhs()?).into_val()),
+        IntMethodKind::SaturatingMul => Ok(x.saturating_mul(get_rhs()?).into_val()),
+        IntMethodKind::CheckedAdd => option_val(x.checked_add(get_rhs()?)),
+        IntMethodKind::CheckedSub => option_val(x.checked_sub(get_rhs()?)),
+        IntMethodKind::CheckedMul => option_val(x.checked_mul(get_rhs()?)),
+        IntMethodKind::CheckedDiv => option_val(x.checked_div(get_rhs()?)),
+        IntMethodKind::CheckedRem => option_val(x.checked_rem(get_rhs()?)),
+        IntMethodKind::CheckedNeg => option_val(x.checked_neg()),
+    }
+}
+
+fn eval_width_binop<T: WidthInt>(x: T, y: T, op: &Kind, line: usize, col: usize) -> Result<Val, Flow> {
+    match op {
+        Kind::Plus => x.checked_add(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col)),
+        Kind::Minus => x.checked_sub(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col)),
+        Kind::Star => x.checked_mul(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col)),
+        Kind::Slash => {
+            if y == T::ZERO { return Err(trap("division by zero", line, col)); }
+            x.checked_div(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col))
+        }
+        Kind::Percent => {
+            if y == T::ZERO { return Err(trap("division by zero", line, col)); }
+            x.checked_rem(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col))
+        }
+        Kind::Pipe => Ok(x.bit_or(y).into_val()),
+        Kind::Caret => Ok(x.bit_xor(y).into_val()),
+        Kind::Amp => Ok(x.bit_and(y).into_val()),
+        Kind::Shl => {
+            let s = y.valid_shift().ok_or_else(|| trap("shift count out of range", line, col))?;
+            Ok(x.wrapping_shl(s).into_val())
+        }
+        Kind::Shr => {
+            let s = y.valid_shift().ok_or_else(|| trap("shift count out of range", line, col))?;
+            Ok(x.wrapping_shr(s).into_val())
+        }
+        Kind::EqEq => Ok(Val::Bool(x == y)),
+        Kind::NotEq => Ok(Val::Bool(x != y)),
+        Kind::Less => Ok(Val::Bool(x < y)),
+        Kind::LessEq => Ok(Val::Bool(x <= y)),
+        Kind::Greater => Ok(Val::Bool(x > y)),
+        Kind::GreaterEq => Ok(Val::Bool(x >= y)),
+        _ => Err(Flow::Trap("internal: int op".to_owned())),
     }
 }
 
