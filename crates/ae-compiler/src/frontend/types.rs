@@ -199,6 +199,7 @@ impl Parser<'_> {
     pub(super) fn parse_enum_def(
         &mut self,
         public: bool,
+        is_copy: bool,
         parsed_variants: Option<&[ae_syntax::declaration::EnumVariant]>,
     ) -> Result<(), ae_span::Diagnostic> {
         self.pos += 1;
@@ -246,15 +247,27 @@ impl Parser<'_> {
             // diagnostics can print the declared name.
             let interned: &'static str = Box::leak(name.clone().into_boxed_str());
             self.enum_names.insert(name.clone(), id);
-            let concrete = variants.into_iter().map(|(vname, fields)| (vname, fields.into_iter().map(|p| match p {
+            let concrete: Vec<(String, Vec<Type>)> = variants.into_iter().map(|(vname, fields)| (vname, fields.into_iter().map(|p| match p {
                 Payload::Concrete(ty) => ty,
                 Payload::Param(_) | Payload::Nested(_) => unreachable!("a non-generic enum has no type parameters"),
             }).collect())).collect();
-            self.enums.push(EnumDef { name: interned, variants: concrete, file: self.file.clone(), public, pattern: name });
+            if is_copy {
+                for (vname, fields) in &concrete {
+                    for &ty in fields {
+                        if !is_copy_type(ty, self.structs, self.enums) {
+                            return Err(self.fail(&format!(
+                                "cannot derive Copy for enum '{}': variant '{}' payload of type {} is not Copy",
+                                name, vname, ty.name(self.ctx),
+                            )));
+                        }
+                    }
+                }
+            }
+            self.enums.push(EnumDef { name: interned, variants: concrete, file: self.file.clone(), public, pattern: name, is_copy });
         } else {
             let gid = self.generics.defs.len();
             self.generics.names.insert(name.clone(), gid);
-            self.generics.defs.push(GenericEnum { name, params, variants, file: self.file.clone(), public });
+            self.generics.defs.push(GenericEnum { name, params, variants, file: self.file.clone(), public, is_copy });
         }
         Ok(())
     }
@@ -373,10 +386,22 @@ impl Parser<'_> {
         })();
         self.generics.instantiation_trace.pop();
         let variants = variants?;
+        if def.is_copy {
+            for (vname, fields) in &variants {
+                for &ty in fields {
+                    if !is_copy_type(ty, self.structs, self.enums) {
+                        return Err(self.error_at(offset, &format!(
+                            "cannot derive Copy for enum '{}': variant '{}' payload of type {} is not Copy",
+                            def.name, vname, ty.name(self.ctx),
+                        )));
+                    }
+                }
+            }
+        }
         let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "));
         let interned: &'static str = Box::leak(display.into_boxed_str());
         let eid = self.enums.len();
-        self.enums.push(EnumDef { name: interned, variants, file: def.file, public: def.public, pattern: def.name });
+        self.enums.push(EnumDef { name: interned, variants, file: def.file, public: def.public, pattern: def.name, is_copy: def.is_copy });
         self.generics.done.insert(key, eid);
         // Method calls on the instantiation resolve through its generic impl
         // block (same machinery as generic structs, ADR-0187/0196).
@@ -606,9 +631,22 @@ impl Parser<'_> {
         })();
         self.generics.instantiation_trace.pop();
         let fields = fields?;
+        if def.is_copy {
+            for (fname, ty) in &fields {
+                if !is_copy_type(*ty, self.structs, self.enums) {
+                    return Err(self.error_at(offset, &format!(
+                        "cannot derive Copy for struct '{}': field '{}' of type {} is not Copy",
+                        def.name, fname, ty.name(self.ctx),
+                    )));
+                }
+            }
+            if self.generics.generic_impls.get(&def.name).is_some_and(|imp| imp.methods.iter().any(|m| m.name == "drop")) {
+                return Err(self.error_at(offset, &format!("cannot implement 'drop' for Copy struct '{}'", def.name)));
+            }
+        }
         let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "));
         let sid = self.structs.len();
-        self.structs.push(StructDef { name: display, fields, file: def.file, public: def.public, repr_c: false, drop_fn: None });
+        self.structs.push(StructDef { name: display, fields, file: def.file, public: def.public, repr_c: false, is_copy: def.is_copy, drop_fn: None, drop_returns_unit: false });
         self.generics.struct_done.insert(key, sid);
         // Remember which declaration and arguments produced this layout, so
         // method calls on the instantiation can resolve through its generic
@@ -617,6 +655,7 @@ impl Parser<'_> {
         if self.generics.generic_impls.get(&def.name).is_some_and(|imp| imp.methods.iter().any(|m| m.name == "drop")) {
             let drop_inst = self.instantiate_impl_method(&def.name, "drop", sid, gid, &args, offset)?;
             self.structs[sid].drop_fn = Some(drop_inst.0);
+            self.structs[sid].drop_returns_unit = drop_inst.2 == Type::Unit;
         }
         Ok(sid)
     }
@@ -624,6 +663,7 @@ impl Parser<'_> {
         &mut self,
         public: bool,
         repr_c: bool,
+        is_copy: bool,
         parsed_fields: Option<&[ae_syntax::declaration::TypedName]>,
     ) -> Result<(), ae_span::Diagnostic> {
         self.pos += 1;
@@ -683,18 +723,24 @@ impl Parser<'_> {
                 if repr_c && ty.owned() && !matches!(ty, Type::Struct(sid) if self.structs[sid].repr_c) {
                     return Err(self.error_at(name_offset, &format!("field '{}' of '{}' owns storage, so the struct cannot claim a C layout", fname, name)));
                 }
+                if is_copy && !is_copy_type(ty, self.structs, self.enums) {
+                    return Err(self.error_at(name_offset, &format!(
+                        "cannot derive Copy for struct '{}': field '{}' of type {} is not Copy",
+                        name, fname, ty.name(self.ctx),
+                    )));
+                }
                 concrete.push((fname, ty));
             }
             let id = self.structs.len();
             self.struct_names.insert(name.clone(), id);
-            self.structs.push(StructDef { name, fields: concrete, file: self.file.clone(), public, repr_c, drop_fn: None });
+            self.structs.push(StructDef { name, fields: concrete, file: self.file.clone(), public, repr_c, is_copy, drop_fn: None, drop_returns_unit: false });
         } else {
             if repr_c {
                 return Err(self.fail(&format!("'{}' is generic, so it has no single C layout; '#[repr(C)]' belongs on a concrete struct", name)));
             }
             let gid = self.generics.struct_defs.len();
             self.generics.struct_names.insert(name.clone(), gid);
-            self.generics.struct_defs.push(GenericStruct { name, params, fields, file: self.file.clone(), public });
+            self.generics.struct_defs.push(GenericStruct { name, params, fields, file: self.file.clone(), public, is_copy });
         }
         Ok(())
     }

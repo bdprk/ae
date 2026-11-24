@@ -563,17 +563,7 @@ impl<'a> Parser<'a> {
                                                 } else if owned_field_struct(constructed, self.structs) {
                                                     expressions.owned_constructions.insert(expression.range.start);
                                                 }
-                                            } else if defn.fields.iter().all(|(_, ty)| {
-                                                // A drop-carrying struct with plain
-                                                // fields: the generated release calls
-                                                // the user's `drop` exactly where the
-                                                // typed route would. Owned fields
-                                                // alongside `drop` stay typed (the
-                                                // release order is the typed route's).
-                                                scalar_type(*ty)
-                                                    || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
-                                                    || owned_plain_struct(*ty, self.structs)
-                                            }) {
+                                            } else if plain_drop_struct(constructed, self.structs) {
                                                 expressions.drop_constructions.insert(expression.range.start);
                                             }
                                         }

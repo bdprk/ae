@@ -51,11 +51,11 @@ use super::*;
             public: false, extern_c: false,
         });
         let mut structs = vec![
-            StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int(IntTy::I64)), ("y".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Outer".into(), fields: vec![("inner".into(), Type::Struct(1)), ("tag".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Holder".into(), fields: vec![("ready".into(), Type::Bool), ("text".into(), Type::String)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Guard".into(), fields: vec![("id".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: Some(0) },
+            StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int(IntTy::I64)), ("y".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, is_copy: false, drop_fn: None, drop_returns_unit: false },
+            StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, is_copy: false, drop_fn: None, drop_returns_unit: false },
+            StructDef { name: "Outer".into(), fields: vec![("inner".into(), Type::Struct(1)), ("tag".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, is_copy: false, drop_fn: None, drop_returns_unit: false },
+            StructDef { name: "Holder".into(), fields: vec![("ready".into(), Type::Bool), ("text".into(), Type::String)], file: "case.ae".into(), public: false, repr_c: false, is_copy: false, drop_fn: None, drop_returns_unit: false },
+            StructDef { name: "Guard".into(), fields: vec![("id".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, is_copy: false, drop_fn: Some(0), drop_returns_unit: false },
         ];
         let mut struct_names = HashMap::new();
         struct_names.insert("Point".into(), 0);
@@ -65,13 +65,13 @@ use super::*;
         struct_names.insert("Guard".into(), 4);
         let mut enums = vec![EnumDef {
             name: "Reading", variants: vec![("Value".into(), vec![Type::Int(IntTy::I64)]), ("Empty".into(), vec![])],
-            file: "case.ae".into(), public: false, pattern: "Reading".into(),
+            file: "case.ae".into(), public: false, pattern: "Reading".into(), is_copy: false,
         }];
         let mut enum_names = HashMap::new();
         enum_names.insert("Reading".into(), 0);
         enums.push(EnumDef {
             name: "Maybe", variants: vec![("Some".into(), vec![Type::Int(IntTy::I64)]), ("None".into(), vec![])],
-            file: "case.ae".into(), public: false, pattern: "Maybe".into(),
+            file: "case.ae".into(), public: false, pattern: "Maybe".into(), is_copy: false,
         });
         enum_names.insert("Maybe".into(), 1);
         functions.insert("step".into(), Signature {
@@ -201,7 +201,7 @@ use super::*;
         parser.generics.defs.push(GenericEnum {
             name: "CachedBox".into(), params: vec!["T".into()],
             variants: vec![("Item".into(), vec![Payload::Param(0)])],
-            file: "case.ae".into(), public: false,
+            file: "case.ae".into(), public: false, is_copy: false,
         });
         let payload = source.find("specialized_text:").unwrap();
         parser.names.insert("specialized_text".into(), (82, false, Type::String));
@@ -226,7 +226,7 @@ use super::*;
         parser.generics.struct_defs.push(GenericStruct {
             name: "CachedRecord".into(), params: vec!["T".into()],
             fields: vec![("value".into(), Payload::Param(0)), ("count".into(), Payload::Concrete(Type::Int(IntTy::I64)))],
-            file: "case.ae".into(), public: false,
+            file: "case.ae".into(), public: false, is_copy: false,
         });
         let payload = source.find("record_text:").unwrap();
         parser.names.insert("record_text".into(), (83, false, Type::String));
@@ -390,7 +390,7 @@ use super::*;
         let instance = parser.structs.len();
         parser.structs.push(StructDef {
             name: "ScalarBox[i64]".into(), fields: vec![("item".into(), Type::Int(IntTy::I64))],
-            file: "case.ae".into(), public: false, repr_c: false, drop_fn: None,
+            file: "case.ae".into(), public: false, repr_c: false, is_copy: false, drop_fn: None, drop_returns_unit: false,
         });
         let receiver = Type::StructRef(instance);
         parser.receiver = Some(receiver);

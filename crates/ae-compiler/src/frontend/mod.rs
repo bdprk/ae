@@ -330,7 +330,7 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
     let mut names = HashMap::new();
     for (name, variants) in defs {
         names.insert(name.to_owned(), enums.len());
-        enums.push(EnumDef { name, variants: variants.into_iter().map(|(v, fields)| (v.to_owned(), fields)).collect(), file: PRELUDE.to_owned(), public: true, pattern: name.to_owned() });
+        enums.push(EnumDef { name, variants: variants.into_iter().map(|(v, fields)| (v.to_owned(), fields)).collect(), file: PRELUDE.to_owned(), public: true, pattern: name.to_owned(), is_copy: false });
     }
     (enums, names)
 }
@@ -347,6 +347,7 @@ fn prelude_generics() -> Generics {
         variants: vec![("Some".to_owned(), vec![Payload::Param(0)]), ("None".to_owned(), Vec::new())],
         file: PRELUDE.to_owned(),
         public: true,
+        is_copy: false,
     });
     generics
 }
@@ -518,7 +519,7 @@ fn returns(stmts: &[Statement]) -> bool {
     })
 }
 #[derive(Debug, Clone)]
-struct StructDef { name: String, fields: Vec<(String, Type)>, file: String, public: bool, repr_c: bool, drop_fn: Option<usize> }
+pub(super) struct StructDef { name: String, fields: Vec<(String, Type)>, file: String, public: bool, repr_c: bool, is_copy: bool, drop_fn: Option<usize>, drop_returns_unit: bool }
 
 impl StructDef {
     // The C layout of a `#[repr(C)]` struct: each field sits at its natural
@@ -554,7 +555,7 @@ impl StructDef {
 // version restricts payload fields to i64/bool/string so no enum can contain
 // itself and every payload has a trivial release.
 #[derive(Debug, Clone)]
-struct EnumDef { name: &'static str, variants: Vec<(String, Vec<Type>)>, file: String, public: bool, pattern: String }
+pub(super) struct EnumDef { name: &'static str, variants: Vec<(String, Vec<Type>)>, file: String, public: bool, pattern: String, is_copy: bool }
 
 impl EnumDef {
     fn c_layout(&self, structs: &[StructDef]) -> (i64, i64) {
@@ -602,7 +603,7 @@ struct NestedShape { gid: usize, is_struct: bool, args: Vec<Payload> }
 // `enum Option[T] { Some(T), None }` before it is instantiated. Kept apart from
 // EnumDef because a declaration has no layout: only instantiations do.
 #[derive(Debug, Clone)]
-struct GenericEnum { name: String, params: Vec<String>, variants: Vec<(String, Vec<Payload>)>, file: String, public: bool }
+struct GenericEnum { name: String, params: Vec<String>, variants: Vec<(String, Vec<Payload>)>, file: String, public: bool, is_copy: bool }
 // A trait declares the method signatures every impl must provide. The trait's
 // type parameter is always spelled `T`; `Payload::Param(0)` marks the positions
 // that stand for it, and every other type must be concrete. V1 deliberately
@@ -614,20 +615,34 @@ struct TraitDef { name: String, methods: Vec<TraitMethod>, file: String, public:
 // `struct Pair[K, V] { left: K, right: V }` before it is instantiated. Same
 // reason as GenericEnum: a declaration is a shape, not a layout.
 #[derive(Debug, Clone)]
-struct GenericStruct { name: String, params: Vec<String>, fields: Vec<(String, Payload)>, file: String, public: bool }
-// A constraint on a generic function's type parameter is a *shape check* at
-// the call site, not a proof about the generic body (ADR-33). The body is still
-// parsed and type-checked once per instantiation, so a constraint can only
-// reject an argument earlier and with a better message.
+struct GenericStruct { name: String, params: Vec<String>, fields: Vec<(String, Payload)>, file: String, public: bool, is_copy: bool }
+
+pub(super) fn is_copy_type(ty: Type, structs: &[StructDef], enums: &[EnumDef]) -> bool {
+    match ty {
+        Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit => true,
+        Type::Ptr(_) | Type::PtrMut(_) => true,
+        Type::StructRef(_) | Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StrView => true,
+        Type::Fn(_) => true,
+        Type::Atomic | Type::Shared(_) => true,
+        Type::Struct(sid) => structs.get(sid).is_some_and(|defn| defn.is_copy),
+        Type::Enum(_, eid) => enums.get(eid).is_some_and(|defn| defn.is_copy),
+        _ => false,
+    }
+}
+
+pub(super) fn is_owned_type(ty: Type, structs: &[StructDef], enums: &[EnumDef]) -> bool {
+    ty.owned() && !is_copy_type(ty, structs, enums)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bound { Add, Eq, Ord, Copy }
 impl Bound {
     fn name(self) -> &'static str {
         match self { Bound::Add => "Add", Bound::Eq => "Eq", Bound::Ord => "Ord", Bound::Copy => "Copy" }
     }
-    fn allows(self, ty: Type) -> bool {
+    fn allows(self, ty: Type, structs: &[StructDef], enums: &[EnumDef]) -> bool {
         match self {
-            Bound::Copy => matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64)),
+            Bound::Copy => is_copy_type(ty, structs, enums),
             Bound::Eq => matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::String | Type::Float(FloatTy::F64)),
             Bound::Ord => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)),
             Bound::Add => matches!(ty, Type::Int(IntTy::I64) | Type::String | Type::Float(FloatTy::F64)),
@@ -635,7 +650,7 @@ impl Bound {
     }
     fn allowed_types(self) -> &'static str {
         match self {
-            Bound::Copy => "i64, bool, f64",
+            Bound::Copy => "a Copy type (primitive scalar, raw pointer, shared reference, fn, atomic, shared, or #[derive(Copy)] struct/enum)",
             Bound::Eq => "i64, bool, string, f64",
             Bound::Ord => "i64, f64",
             Bound::Add => "i64, string, f64",
@@ -890,6 +905,11 @@ struct ResolvedExpressions {
 }
 
 struct Parser<'a> { file: String, source: &'a str, tokens: Rc<Vec<Token>>, shared_source: Rc<str>, pos: usize, names: HashMap<String, (usize, bool, Type)>, binding_ranges: HashMap<usize, std::ops::Range<usize>>, capture_origins: HashMap<usize, usize>, resolved_expressions: Rc<OnceCell<ResolvedExpressions>>, next_var: usize, expression_depth: usize, expression_nodes: usize, block_depth: usize, loop_depth: usize, loop_scopes: Vec<usize>, loop_labels: Vec<Option<usize>>, next_label: usize, unsafe_depth: usize, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext, id_order: Vec<usize>, in_main: bool, return_type: Type, moved: std::collections::HashSet<usize>, borrows: Vec<(usize, usize, BorrowKind)>, deferred_write_conflicts: Vec<(usize, usize, String, &'static str, Option<String>)>, deferred_borrow_spawns: Vec<(usize, Vec<usize>, usize)>, call_borrows: Vec<(usize, usize)>, mut_borrows: Vec<(usize, usize)>, scopes: Vec<Vec<(usize, Type)>>, owned_params: Vec<(usize, Type)>, subst: HashMap<String, Type>, trait_bounds: HashMap<String, Vec<usize>>, receiver: Option<Type>, impl_self: Option<Type>, inherent_impl: bool, shadow_ok: bool, pending: Vec<Function> }
+impl Parser<'_> {
+    pub(super) fn is_owned(&self, ty: Type) -> bool {
+        is_owned_type(ty, self.structs, self.enums)
+    }
+}
 #[derive(Debug, Default)]
 struct Program { files: Vec<Vec<Function>>, structs: Vec<StructDef>, enums: Vec<EnumDef>, ctx: CompileContext }
 
@@ -1403,6 +1423,75 @@ mod tests {
             assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
         }
     }
+    #[test] fn p2_2_copy_semantics_frontend() {
+        let parse_ok = |source: &str| -> Result<(), String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(())
+        };
+
+        let valid = "
+            #[derive(Copy)]
+            struct Point { x: i64, y: i64 }
+
+            #[repr(C)]
+            #[derive(Copy)]
+            struct Handle { fd: i32 }
+
+            #[derive(Copy)]
+            enum Tag { A(i64), B }
+
+            #[derive(Copy)]
+            struct Pair[A, B] { first: A, second: B }
+
+            fn take_point(p: Point) -> i64 { return p.x + p.y; }
+            fn dup[T: Copy](x: T) -> T { return x; }
+
+            fn main() {
+                let p = Point { x: 1, y: 2 };
+                let p2 = p;
+                let s1 = take_point(p);
+                let s2 = take_point(p2);
+                let p3 = dup[Point](p);
+                let h = Handle { fd: 3 as i32 };
+                let h2 = h;
+                let t = Tag::A(10);
+                let t2 = t;
+                let pair = Pair[i8, u8] { first: 1 as i8, second: 2 as u8 };
+                let pair2 = pair;
+                let n = dup[i8](1 as i8);
+                print(s1 + s2 + p2.x + (h2.fd as i64) + (n as i64));
+                match t2 { Tag::A(v) => { print(v); } Tag::B => { print(0); } }
+                print(pair2.first);
+            }
+        ";
+        assert!(parse_ok(valid).is_ok(), "{:?}", parse_ok(valid));
+
+        for bad in [
+            "#[derive(Copy)]\nstruct Bad { s: string }\nfn main() {}",
+            "#[derive(Copy)]\nenum Bad { S(string) }\nfn main() {}",
+            "#[derive(Copy)]\nstruct DropCopy { x: i64 }\nimpl DropCopy { fn drop(&mut self) -> i64 { return 0; } }\nfn main() {}",
+            "#[derive(Copy)]\nfn bad() {}\nfn main() {}",
+            "#[derive(Copy)]\nstruct Pair[T] { v: T }\nfn main() { let p = Pair[string] { v: \"a\" }; }",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
+        }
+    }
     #[test] fn rejects_invalid_string_literals() {
         for s in ["fn main() { print(\"bad \\q\"); }", "fn main() { print(\"open }", "fn main() { print(\"\n\"); }"] { assert!(compile(s).is_err(), "{s}"); }
     }
@@ -1566,9 +1655,9 @@ mod tests {
         // something the per-instantiation type checker cannot deliver.
         let ctx = CompileContext::new();
         for &ty in AUDIT_TYPES {
-            if Bound::Add.allows(ty) { assert!(Capability::Add.supports(ty), "Add admits {}", ty.name(&ctx)); }
-            if Bound::Ord.allows(ty) { assert!(Capability::Ord.supports(ty), "Ord admits {}", ty.name(&ctx)); }
-            if Bound::Eq.allows(ty) { assert!(Capability::Eq.supports(ty), "Eq admits {}", ty.name(&ctx)); }
+            if Bound::Add.allows(ty, &[], &[]) { assert!(Capability::Add.supports(ty), "Add admits {}", ty.name(&ctx)); }
+            if Bound::Ord.allows(ty, &[], &[]) { assert!(Capability::Ord.supports(ty), "Ord admits {}", ty.name(&ctx)); }
+            if Bound::Eq.allows(ty, &[], &[]) { assert!(Capability::Eq.supports(ty), "Eq admits {}", ty.name(&ctx)); }
         }
     }
 
@@ -1687,6 +1776,92 @@ mod explain_tests {
         assert!(codes.len() >= 10, "scan found too few codes: {codes:?}");
         for code in codes {
             assert!(explain(&code).is_some(), "no explanation registered for {code}");
+        }
+    }
+
+    #[test]
+    fn p2_2_drop_trait_and_order_frontend() {
+        use super::*;
+        let parse_with_structs = |source: &str| -> Result<(Vec<Function>, Vec<StructDef>), String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            Ok((functions, structs))
+        };
+
+        // 1. `impl Drop for T` with omitted return (`-> ()`) sets `drop_returns_unit = true`.
+        let (_, structs) = parse_with_structs("
+            struct Guard { id: i64 }
+            impl Drop for Guard {
+                fn drop(&mut self) { print(self.id); }
+            }
+            fn main() {
+                let a = Guard { id: 1 };
+                let b = Guard { id: 2 };
+            }
+        ").expect("impl Drop with omitted return");
+        assert!(structs[0].drop_fn.is_some());
+        assert!(structs[0].drop_returns_unit);
+
+        // 2. `impl Drop for T` with explicit `-> ()` sets `drop_returns_unit = true`.
+        let (_, structs) = parse_with_structs("
+            struct Guard { id: i64 }
+            impl Drop for Guard {
+                fn drop(&mut self) -> () { print(self.id); }
+            }
+            fn main() { let g = Guard { id: 1 }; }
+        ").expect("impl Drop with -> ()");
+        assert!(structs[0].drop_fn.is_some());
+        assert!(structs[0].drop_returns_unit);
+
+        // 3. Legacy `fn drop(&mut self) -> i64` keeps `drop_returns_unit = false`.
+        let (_, structs) = parse_with_structs("
+            struct Guard { id: i64 }
+            impl Guard {
+                fn drop(&mut self) -> i64 { print(self.id); return 0; }
+            }
+            fn main() { let g = Guard { id: 1 }; }
+        ").expect("legacy drop -> i64");
+        assert!(structs[0].drop_fn.is_some());
+        assert!(!structs[0].drop_returns_unit);
+
+        // 4. Reverse declaration order in `Statement::Frees` (later `b` freed before earlier `a`).
+        let (functions, _) = parse_with_structs("
+            struct Guard { id: i64 }
+            impl Drop for Guard {
+                fn drop(&mut self) { print(self.id); }
+            }
+            fn main() {
+                let a = Guard { id: 1 };
+                let b = Guard { id: 2 };
+            }
+        ").expect("reverse drop order");
+        let main_fn = functions.iter().find(|f| f.id == 1).expect("main");
+        let frees = main_fn.body.iter().find_map(|s| match s {
+            Statement::Frees(items) => Some(items),
+            _ => None,
+        }).expect("main frees");
+        assert_eq!(frees.len(), 2);
+        assert!(frees[0].0 > frees[1].0, "expected reverse declaration order, got {frees:?}");
+
+        // 5. Rejections.
+        for bad in [
+            "trait Drop { fn drop(&mut self); } fn main() {}",
+            "#[derive(Copy)] struct C { x: i64 } impl Drop for C { fn drop(&mut self) {} } fn main() {}",
+            "struct G { x: i64 } impl G { fn drop(&mut self) {} } impl Drop for G { fn drop(&mut self) {} } fn main() {}",
+            "struct G { x: i64 } impl Drop for G { pub fn drop(&mut self) {} } fn main() {}",
+            "struct G { x: i64 } impl Drop for G { fn drop(&mut self) {} } fn main() { var g = G { x: 1 }; g.drop(); }",
+            "struct G { x: i64 } impl Drop for G { fn drop(&mut self) {} } fn main() { var g = G { x: 1 }; G::drop(&mut g); }",
+        ] {
+            assert!(parse_with_structs(bad).is_err(), "expected error for: {bad}");
         }
     }
 }

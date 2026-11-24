@@ -502,11 +502,15 @@ fn eval_stmts(
                     Err(f) => return f,
                 }
             }
-            Statement::Assign(id, expr, _) => {
-                match eval_expr(env, expr, locals, caller_locals, true) {
-                    Ok(v) => { locals.insert(*id, v); }
+            Statement::Assign(id, expr, release_old) => {
+                let v = match eval_expr(env, expr, locals, caller_locals, true) {
+                    Ok(v) => v,
                     Err(f) => return f,
-                }
+                };
+                let old = locals.insert(*id, v);
+                if *release_old
+                    && let Some(old) = old
+                        && let Err(f) = release_val_inferred(env, old) { return f; }
             }
             Statement::Array(id, exprs) => {
                 let mut items = Vec::with_capacity(exprs.len());
@@ -876,29 +880,28 @@ fn eval_stmts(
                     Ok(v) => v,
                     Err(f) => return f,
                 };
-                for (id, ty) in frees {
-                    if *ty == Type::TaskScope
-                        && let Some(Val::TaskScope(eid)) = locals.get(id).cloned()
-                            && let Err(f) = drain_exec_queue(env, eid) { return f; }
-                }
+                if let Err(f) = release_frees(env, locals, frees) { return f; }
                 return Flow::Return(res);
             }
-            Statement::Exit(expr, _) => {
-                return match eval_expr(env, expr, locals, caller_locals, false) {
-                    Ok(Val::Int(code)) => Flow::Exit((code & 0xFF) as u8),
-                    Ok(_) => Flow::Exit(1),
-                    Err(f) => f,
+            Statement::Exit(expr, frees) => {
+                let code = match eval_expr(env, expr, locals, caller_locals, false) {
+                    Ok(Val::Int(code)) => (code & 0xFF) as u8,
+                    Ok(_) => 1,
+                    Err(f) => return f,
                 };
+                if let Err(f) = release_frees(env, locals, frees) { return f; }
+                return Flow::Exit(code);
             }
             // `?`: the success variant binds its payload and continues; the
             // failure variant propagates out of the function unchanged.
-            Statement::Propagate(expr, _, _, binding, _) => {
+            Statement::Propagate(expr, _, _, binding, frees) => {
                 let value = match eval_expr(env, expr, locals, caller_locals, false) {
                 Ok(v) => v,
                 Err(f) => return f,
             };
                 match value {
                     Val::Enum(eid, vidx, payloads) if vidx != 0 => {
+                        if let Err(f) = release_frees(env, locals, frees) { return f; }
                         return Flow::Return(Val::Enum(eid, vidx, payloads));
                     }
                     Val::Enum(_, _, payloads) => {
@@ -916,11 +919,7 @@ fn eval_stmts(
             // (for, while, for-tokens) catches as its own step.
             Statement::Continue(_) => return Flow::Continue(0),
             Statement::Frees(frees) => {
-                for (id, ty) in frees {
-                    if *ty == Type::TaskScope
-                        && let Some(Val::TaskScope(eid)) = locals.get(id).cloned()
-                            && let Err(f) = drain_exec_queue(env, eid) { return f; }
-                }
+                if let Err(f) = release_frees(env, locals, frees) { return f; }
             }
             // An `unsafe` block is a scoping container (M2.12 slice 1): the
             // inner statements evaluate inline and any control flow — a
@@ -1052,7 +1051,10 @@ fn eval_expr(
         Expr::StrLit(s, _, _) => Ok(Val::Str(unescape_str(s))),
         Expr::Variable(id, ty, line, col) => {
             let val = read_var(locals, caller_locals, *id, *line, *col)?;
-            if moving && ty.owned() && !matches!(locals.get(id), Some(Val::Ref(_))) {
+            if moving
+                && is_owned_type(*ty, &env.program.structs, &env.program.enums)
+                && !matches!(locals.get(id), Some(Val::Ref(_)))
+            {
                 locals.insert(*id, Val::Moved);
             }
             Ok(val)
@@ -2821,4 +2823,75 @@ fn drain_exec_queue(env: &mut Env, eid: usize) -> Result<i64, Flow> {
         }
     }
     Ok(completed)
+}
+
+fn release_frees(
+    env: &mut Env<'_>,
+    locals: &mut HashMap<usize, Val>,
+    frees: &[(usize, Type)],
+) -> Result<(), Flow> {
+    for (id, ty) in frees {
+        if let Some(val) = locals.get(id).cloned() {
+            locals.insert(*id, Val::Moved);
+            release_val(env, val, *ty)?;
+        }
+    }
+    Ok(())
+}
+
+fn release_val_inferred(env: &mut Env<'_>, val: Val) -> Result<(), Flow> {
+    match val {
+        Val::Struct(sid, _) => release_val(env, val, Type::Struct(sid)),
+        Val::Enum(eid, _, _) => release_val(env, val, Type::Enum("", eid)),
+        Val::TaskScope(_) => release_val(env, val, Type::TaskScope),
+        _ => Ok(()),
+    }
+}
+
+fn release_val(env: &mut Env<'_>, val: Val, ty: Type) -> Result<(), Flow> {
+    if matches!(val, Val::Moved) || is_copy_type(ty, &env.program.structs, &env.program.enums) {
+        return Ok(());
+    }
+    match (ty, val) {
+        (Type::TaskScope, Val::TaskScope(eid)) => drain_exec_queue(env, eid).map(|_| ()),
+        (Type::Struct(sid), Val::Struct(_, mut fields)) => {
+            let def = env.program.structs[sid].clone();
+            if let Some(drop_id) = def.drop_fn
+                && let Some(drop_fn) = env.fns.get(&drop_id).copied()
+            {
+                let mut holder: HashMap<usize, Val> = HashMap::from([(0, Val::Struct(sid, fields))]);
+                let mut callee_locals: HashMap<usize, Val> = drop_fn
+                    .params
+                    .first()
+                    .map(|(pid, _)| (*pid, Val::Ref(0)))
+                    .into_iter()
+                    .collect();
+                let mut parent = Some(&mut holder);
+                match eval_stmts(env, &drop_fn.body, &mut callee_locals, &mut parent) {
+                    Flow::Next | Flow::Return(_) => {}
+                    other => return Err(other),
+                }
+                fields = match holder.remove(&0) {
+                    Some(Val::Struct(_, updated)) => updated,
+                    _ => HashMap::new(),
+                };
+            }
+            for (fname, fty) in &def.fields {
+                if let Some(fval) = fields.remove(fname) {
+                    release_val(env, fval, *fty)?;
+                }
+            }
+            Ok(())
+        }
+        (Type::Enum(_, eid), Val::Enum(_, vidx, payloads)) => {
+            let def = env.program.enums[eid].clone();
+            if let Some((_, field_tys)) = def.variants.get(vidx) {
+                for (pval, fty) in payloads.into_iter().zip(field_tys.iter()) {
+                    release_val(env, pval, *fty)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }

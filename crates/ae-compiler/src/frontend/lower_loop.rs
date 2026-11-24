@@ -240,7 +240,7 @@ impl<'a> Parser<'a> {
     // break/continue leave the loop body: only owned values declared inside it die.
     pub(super) fn loop_local_owned(&self) -> Vec<(usize, Type)> {
         let base = *self.loop_scopes.last().unwrap_or(&0);
-        self.scopes[base.min(self.scopes.len())..].iter().flatten().filter(|(_, ty)| ty.owned()).map(|&(id, ty)| (id, ty)).collect()
+        self.scopes[base.min(self.scopes.len())..].iter().rev().flat_map(|s| s.iter().rev()).filter(|(_, ty)| self.is_owned(*ty)).map(|&(id, ty)| (id, ty)).collect()
     }
 
 }

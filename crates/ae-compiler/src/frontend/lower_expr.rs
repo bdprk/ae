@@ -214,7 +214,7 @@ impl<'a> Parser<'a> {
                     // An owned field value moves into the struct: the literal
                     // owns it, so the source slot's Frees is trimmed (the same
                     // rule the typed struct literal applies).
-                    if actual.owned()
+                    if self.is_owned(actual)
                         && let Expr::Variable(slot, ..) = &value {
                             self.seek_scalar_offset(field.value.range.end);
                             self.check_variable_move(*slot)?;
@@ -359,13 +359,19 @@ impl<'a> Parser<'a> {
                 // An associated call (`Point::new(1)`): the typed postfix layer
                 // builds the instance and owns the pinned diagnostics. Bounded
                 // by the following operator, like a chained method receiver.
-                if let ExpressionKind::Qualified { .. } = &callee.kind {
+                if let ExpressionKind::Qualified { name: method_name, .. } = &callee.kind {
+                    if method_name == "drop" {
+                        return Err(self.error_at(callee.range.start, "destructor 'drop' cannot be called directly"));
+                    }
                     self.seek_scalar_offset(expression.range.start);
                     let parsed = self.unsupported_expression()?;
                     self.seek_scalar_offset(expression.range.end);
                     return Ok(parsed);
                 }
                 if let ExpressionKind::Field { base, name: method_name } = &callee.kind {
+                    if method_name == "drop" {
+                        return Err(self.error_at(callee.range.start, "destructor 'drop' cannot be called directly"));
+                    }
                     // A borrow argument (`pair.combine(&mut pair)`): an alias
                     // of the receiver slot with a mutable borrow in the same
                     // statement is the typed route's rejection.
@@ -714,7 +720,7 @@ impl<'a> Parser<'a> {
                                 continue;
                             }
                             self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
-                            if actual.owned()
+                            if self.is_owned(actual)
                                 && let Expr::Variable(source, ..) = &value {
                                     self.moved.insert(*source);
                                 }
@@ -1029,7 +1035,7 @@ impl<'a> Parser<'a> {
                 if value_ty != pointee {
                     return Ok(None);
                 }
-                if value_ty.owned()
+                if self.is_owned(value_ty)
                     && let Expr::Variable(slot, ..) = &value {
                         self.check_variable_move(*slot)?;
                         self.moved.insert(*slot);
@@ -1204,7 +1210,7 @@ let mut args = Vec::with_capacity(arguments.len());
             // An owned aggregate passed by value moves: later uses
             // are rejected (E0102), and the drops pass trims the
             // Frees lists for this slot.
-            if actual.owned()
+            if self.is_owned(actual)
                 && let Expr::Variable(slot, ..) = &value {
                     self.moved.insert(*slot);
                 }
@@ -1499,7 +1505,7 @@ let mut args = Vec::with_capacity(arguments.len());
             }
             // An owned payload value moves into the variant, exactly like an
             // owned struct field: the source slot's Frees is trimmed.
-            if actual.owned()
+            if self.is_owned(actual)
                 && let Expr::Variable(slot, ..) = &value {
                     self.check_variable_move(*slot)?;
                     self.moved.insert(*slot);

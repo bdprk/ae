@@ -25,7 +25,7 @@ pub(super) fn enabled() -> bool {
 
 // Emit one function body as labelled blocks. The caller owns the signature and
 // the trailing backstops; this writes everything between them.
-pub(super) fn emit_function_body(function: &Function, out: &mut String, ctx: &CompileContext) -> Result<(), String> {
+pub(super) fn emit_function_body(function: &Function, out: &mut String, ctx: &codegen::CodegenCtx<'_>) -> Result<(), String> {
     let mut mir = mir::lower_function(function, ctx);
     // The same optimization pipeline the printer uses: constant folding and
     // CFG simplification decide which blocks are live. A pruned block is
@@ -54,7 +54,7 @@ pub(super) fn emit_function_body(function: &Function, out: &mut String, ctx: &Co
     Ok(())
 }
 
-fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: &mut usize, needs_tail: &mut bool, ctx: &CompileContext) {
+fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: &mut usize, needs_tail: &mut bool, ctx: &codegen::CodegenCtx<'_>) {
     let mut statements: &[Statement] = &block.statements;
     // A `return`/`exit` carries the scope's releases as a trailing `Frees`
     // statement (the CFG lowering puts them in the block, before the

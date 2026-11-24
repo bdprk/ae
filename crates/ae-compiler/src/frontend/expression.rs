@@ -142,7 +142,7 @@ impl Parser<'_> {
                     if self.is_borrowed(*outer_id) {
                         return Err(self.fail("cannot spawn while one of the closure's captured variables is borrowed"));
                     }
-                    if ty.owned() { self.moved.insert(*outer_id); }
+                    if self.is_owned(*ty) { self.moved.insert(*outer_id); }
                     slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
                 }
                 let tid = self.intern_thread(def.ret);
@@ -265,7 +265,7 @@ impl Parser<'_> {
         if count >= Self::MAX_GENERIC_CALL_TYPE_ARGUMENTS {
             return Err(self.fail("type argument limit exceeded (8)"));
         }
-        self.named_type()
+        self.parameter_type()
     }
     pub(super) fn variable_move_needs_deferral(&self, id: usize) -> Option<bool> {
         // View conflicts are adjudicated at last use. Other borrows reject immediately.
@@ -321,7 +321,7 @@ impl Parser<'_> {
         }
         // Raw pointer borrows are untracked, so moving an owned pointee
         // would let safe code leave the pointer dangling.
-        if ty.owned() {
+        if self.is_owned(ty) {
             return Err(self.fail("a pointer to an owned value is not supported yet; its borrow is not tracked, so safe code could dangle it by moving the value"));
         }
         let id = self.ctx.intern_pointee(ty);

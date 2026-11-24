@@ -22,7 +22,7 @@ pub(super) fn verify_program_moves(program: &Program) -> Result<(), String> {
     for file in &program.files {
         for function in file {
             let graph = build_cfg(function, &program.ctx);
-            let walk = MoveWalk::run(&graph, &program.ctx);
+            let walk = MoveWalk::run(&graph, &program.ctx, &program.structs, &program.enums);
             if let Some((block, var_id)) = walk {
                 return Err(format!(
                     "internal: fn #{} block {} uses a variable after it was moved on every path (v{}); the parser's move rules and the CFG disagree",
@@ -39,7 +39,7 @@ pub(super) fn verify_program_moves(program: &Program) -> Result<(), String> {
 struct MoveWalk;
 
 impl MoveWalk {
-    fn run(function: &CfgFunction, ctx: &CompileContext) -> Option<(usize, usize)> {
+    fn run(function: &CfgFunction, ctx: &CompileContext, structs: &[StructDef], enums: &[EnumDef]) -> Option<(usize, usize)> {
         let mut state: Vec<std::collections::HashSet<usize>> = vec![std::collections::HashSet::new(); function.blocks.len()];
         let entry = 0;
         // Worklist over blocks in id order; ids are assigned so a block's
@@ -65,7 +65,7 @@ impl MoveWalk {
                 }
                 meet
             };
-            let (end_state, violation) = MoveWalk::walk_block(function, block_id, start_state.clone(), ctx);
+            let (end_state, violation) = MoveWalk::walk_block(function, block_id, start_state.clone(), ctx, structs, enums);
             if let Some(violation) = violation {
                 return Some(violation);
             }
@@ -86,21 +86,21 @@ impl MoveWalk {
 
     // Walk one block's statements with the entry state; returns the exit
     // state and the first use-after-move, if any.
-    fn walk_block(function: &CfgFunction, block_id: usize, mut moved: std::collections::HashSet<usize>, ctx: &CompileContext) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
+    fn walk_block(function: &CfgFunction, block_id: usize, mut moved: std::collections::HashSet<usize>, ctx: &CompileContext, structs: &[StructDef], enums: &[EnumDef]) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
         let block = &function.blocks[block_id];
         for statement in &block.statements {
-            if let Some(violation) = walk_statement(statement, &mut Checked(&mut moved, ctx)) {
+            if let Some(violation) = walk_statement(statement, &mut Checked(&mut moved, ctx, structs, enums)) {
                 return (moved, Some((block_id, violation)));
             }
         }
         match &block.terminator {
             CfgTerminator::Return(expr) => {
-                if let Some(violation) = walk_moving_expr(expr, &mut Checked(&mut moved, ctx)) {
+                if let Some(violation) = walk_moving_expr(expr, &mut Checked(&mut moved, ctx, structs, enums)) {
                     return (moved, Some((block_id, violation)));
                 }
             }
             CfgTerminator::Exit(code) => {
-                if let Some(violation) = walk_moving_expr(code, &mut Checked(&mut moved, ctx)) {
+                if let Some(violation) = walk_moving_expr(code, &mut Checked(&mut moved, ctx, structs, enums)) {
                     return (moved, Some((block_id, violation)));
                 }
             }
@@ -151,10 +151,11 @@ pub(super) trait MoveTracker {
     fn mut_release(&mut self, _sig: usize, _position: usize, _slot: usize) {}
     fn release_borrowed_base(&mut self, _slot: usize) {}
     fn fn_sig(&self, _sig: usize) -> Option<(Vec<Type>, Type)> { None }
+    fn is_owned(&self, ty: Type) -> bool { ty.owned() }
 }
 
 // Checks every read against the moved set; a violation is the id returned.
-struct Checked<'a>(&'a mut std::collections::HashSet<usize>, &'a CompileContext);
+struct Checked<'a>(&'a mut std::collections::HashSet<usize>, &'a CompileContext, &'a [StructDef], &'a [EnumDef]);
 
 impl MoveTracker for Checked<'_> {
     fn read(&mut self, id: usize) -> Option<usize> {
@@ -168,6 +169,7 @@ impl MoveTracker for Checked<'_> {
     fn mark(&mut self, id: usize) { self.0.insert(id); }
     fn revive(&mut self, id: usize) { self.0.remove(&id); }
     fn fn_sig(&self, sig: usize) -> Option<(Vec<Type>, Type)> { self.1.fn_sig_checked(sig) }
+    fn is_owned(&self, ty: Type) -> bool { is_owned_type(ty, self.2, self.3) }
 }
 
 // The moves and re-initializations one statement performs, in the order they
@@ -529,7 +531,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
                     if let Expr::Variable(id, ty, ..) = &**side {
                         // `s + s` consumes one binding written twice; the
                         // reads above already passed, so this only records.
-                        if ty.owned() { moved.mark(*id); }
+                        if moved.is_owned(*ty) { moved.mark(*id); }
                     }
                 }
             }
@@ -616,7 +618,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
 // marked); any other shape is a read.
 fn walk_moving_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usize> {
     if let Expr::Variable(id, ty, ..) = expr {
-        if ty.owned() { return moved.consume(*id); }
+        if moved.is_owned(*ty) { return moved.consume(*id); }
         return moved.read(*id);
     }
     walk_expr(expr, moved)

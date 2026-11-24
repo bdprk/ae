@@ -26,7 +26,17 @@ pub(super) fn c_float_literal(value: f64) -> String {
     if text.contains(['.', 'e', 'E']) { text } else { format!("{text}.0") }
 }
 
-pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving: bool, ctx: &CompileContext) -> Emitted {
+pub(super) struct CodegenCtx<'a> {
+    pub(super) ctx: &'a CompileContext,
+    pub(super) structs: &'a [StructDef],
+    pub(super) enums: &'a [EnumDef],
+}
+impl<'a> std::ops::Deref for CodegenCtx<'a> {
+    type Target = CompileContext;
+    fn deref(&self) -> &CompileContext { self.ctx }
+}
+
+pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving: bool, ctx: &CodegenCtx<'_>) -> Emitted {
     let emitted = match expr {
         // spec/concurrency.md §8: copy-semantics atomics. The handle's C
         // struct copies by value, so every copy reaches the same cell; no
@@ -387,7 +397,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 // unchanged. There is no sentinel to check: the pointer is
                 // never null, because only an address can create the borrow.
                 Emitted { text: format!("(*v{id})"), ty: Type::Struct(sid), owned: false, moves: Vec::new(), materialized: true }
-            } else if ty.owned() {
+            } else if is_owned_type(*ty, ctx.structs, ctx.enums) {
                 // Runtime backstop: a moved value's slot is empty.
                 match ty {
                     // Structs and enums have no runtime sentinel: the compile-time
@@ -452,7 +462,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             out.push_str(&format!("    {}t{t} = {callee}({arguments});\n", ret.c_temp(ctx)));
             for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
             null_moves(out, &moves);
-            Emitted { text: format!("t{t}"), ty: *ret, owned: ret.owned(), moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: *ret, owned: is_owned_type(*ret, ctx.structs, ctx.enums), moves: Vec::new(), materialized: true }
         }
         Expr::VecLit(values, vector_ty, line, column) => {
             let t = *next; *next += 1;
@@ -1096,11 +1106,11 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             out.push_str(&format!("    ae_free(s{t}->ctx);\n"));
             out.push_str(&format!("    ae_free(s{t});\n"));
             null_moves(out, &h.moves);
-            Emitted { text: format!("t{t}"), ty: *ret, owned: ret.owned(), moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: *ret, owned: is_owned_type(*ret, ctx.structs, ctx.enums), moves: Vec::new(), materialized: true }
         }
         Expr::Field(base, fname, fty) => {
             let b = emit_expr(base, out, next, false, ctx);
-            if fty.owned() {
+            if is_owned_type(*fty, ctx.structs, ctx.enums) {
                 // Owned fields are borrows: inline, consumer never releases.
                 Emitted { text: format!("{}.{}", b.text, fname), ty: *fty, owned: false, moves: b.moves, materialized: true }
             } else {
@@ -1269,7 +1279,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
     if emitted.materialized { return emitted; }
     let id = *next; *next += 1;
     out.push_str(&format!("    {}t{id} = {};\n", emitted.ty.c_temp(ctx), emitted.text));
-    Emitted { text: format!("t{id}"), owned: emitted.ty.owned(), ..emitted }
+    Emitted { text: format!("t{id}"), owned: is_owned_type(emitted.ty, ctx.structs, ctx.enums), ..emitted }
 }
 pub(super) fn release_var(out: &mut String, id: usize, ty: Type) {
     match ty {
@@ -1341,7 +1351,7 @@ pub(super) fn null_moves(out: &mut String, moves: &[(usize, Type)]) {
         }
     }
 }
-pub(super) fn emit_print(printed: &Printed, out: &mut String, next: &mut usize, ctx: &CompileContext) {
+pub(super) fn emit_print(printed: &Printed, out: &mut String, next: &mut usize, ctx: &CodegenCtx<'_>) {
     match printed {
         Printed::Expr(e) => {
             let t = emit_expr(e, out, next, false, ctx);
@@ -1368,17 +1378,19 @@ pub(super) fn emit_print(printed: &Printed, out: &mut String, next: &mut usize, 
         }
     }
 }
-fn emit_propagation_payload(out: &mut String, subject: &str, layout: usize, fields: &[Type], binding: Option<(usize, Type)>, ctx: &CompileContext) {
+fn emit_propagation_payload(out: &mut String, subject: &str, layout: usize, fields: &[Type], binding: Option<(usize, Type)>, ctx: &CodegenCtx<'_>) {
     if let Some((id, ty)) = binding {
         out.push_str(&format!("    {}v{id} = {subject}.u.v0.p0;\n", ty.c_temp(ctx)));
     } else {
         for (index, field) in fields.iter().enumerate() {
-            if field.owned() {
+            if is_owned_type(*field, ctx.structs, ctx.enums) {
                 release_member(out, &format!("{subject}.u.v0.p{index}"), *field);
             }
         }
     }
-    out.push_str(&format!("    ae_e{layout}_forfeit(&{subject});\n"));
+    if !ctx.enums[layout].is_copy {
+        out.push_str(&format!("    ae_e{layout}_forfeit(&{subject});\n"));
+    }
 }
 
 pub(super) fn emit_value_before_cleanup(
@@ -1386,7 +1398,7 @@ pub(super) fn emit_value_before_cleanup(
     frees: &[(usize, Type)],
     out: &mut String,
     next: &mut usize,
-    moving: bool, ctx: &CompileContext,
+    moving: bool, ctx: &CodegenCtx<'_>,
 ) -> String {
     let value = emit_expr(expr, out, next, moving, ctx);
     // An inline value can still refer to storage a destructor can modify.
@@ -1409,7 +1421,7 @@ pub(super) fn emit_value_before_cleanup(
     result
 }
 
-pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut usize, ctx: &CompileContext) {
+pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut usize, ctx: &CodegenCtx<'_>) {
     for stmt in stmts {
         match stmt {
             Statement::Return(expr, frees) => {
@@ -1542,8 +1554,8 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                     Type::VecF => format!("    ae_f64vec_release(&v{id}{}{});\n", dot, fname),
                     Type::Map => format!("    ae_map_release(&v{id}{}{});\n", dot, fname),
                     Type::MapF => format!("    ae_mapf_release(&v{id}{}{});\n", dot, fname),
-                    Type::Struct(k) => format!("    ae_t{k}_release(&v{id}{}{});\n", dot, fname),
-                    Type::Enum(_, k) => format!("    ae_e{k}_release(&v{id}{}{});\n", dot, fname),
+                    Type::Struct(k) if !ctx.structs[*k].is_copy => format!("    ae_t{k}_release(&v{id}{}{});\n", dot, fname),
+                    Type::Enum(_, k) if !ctx.enums[*k].is_copy => format!("    ae_e{k}_release(&v{id}{}{});\n", dot, fname),
                     _ => String::new(),
                 };
                 // The value emits in a moving context: an owned variable

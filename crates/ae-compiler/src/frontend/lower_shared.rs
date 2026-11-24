@@ -31,7 +31,7 @@ impl<'a> Parser<'a> {
     ) -> Option<(Expr, Type)> {
         use ae_syntax::expression::ExpressionKind;
 
-        if (expected.owned() || expected == Type::StrView)
+        if (self.is_owned(expected) || expected == Type::StrView)
             && let ExpressionKind::Atom(Kind::Ident(name)) = &argument.kind {
                 remaining.checked_sub(1)?;
                 *nodes_left = nodes_left.checked_sub(1)?;
@@ -40,7 +40,7 @@ impl<'a> Parser<'a> {
                 if effects.moves.contains(&slot) {
                     return None;
                 }
-                if expected == ty && ty.owned() {
+                if expected == ty && self.is_owned(ty) {
                     if self.variable_move_needs_deferral(slot)?
                         || effects.call_borrows.contains(&slot)
                         || effects.mut_borrows.contains(&slot)
@@ -537,7 +537,7 @@ impl<'a> Parser<'a> {
                 // (Exec, Pool, Chan, Atomic, Mutex, Guard, TaskScope) and
                 // views never move, so their reads route the same way the
                 // typed parse reads them.
-                if moving && ty.owned() {
+                if moving && self.is_owned(*ty) {
                     let id = *id;
                     let start = self.pos;
                     self.pos = end;

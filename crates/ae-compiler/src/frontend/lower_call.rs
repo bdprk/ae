@@ -67,7 +67,7 @@ impl<'a> Parser<'a> {
                     if self.is_borrowed(*outer_id) {
                         return Err(self.fail("cannot spawn a task while one of the closure's captured variables is borrowed"));
                     }
-                    if ty.owned() { self.moved.insert(*outer_id); }
+                    if self.is_owned(*ty) { self.moved.insert(*outer_id); }
                     capture_slots.push(Expr::Variable(*outer_id, *ty, 0, 0));
                 }
                 self.ctx.record_spawned(crate::frontend::closures::SpawnedThread::Closure {
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
             };
             let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
             self.check_value_argument_type(method_name, index, expected, actual, Some(&argument.range))?;
-            if actual.owned()
+            if self.is_owned(actual)
                 && let Expr::Variable(source, ..) = &value {
                     self.moved.insert(*source);
                 }

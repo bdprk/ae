@@ -101,8 +101,12 @@ pub(super) fn plain_drop_struct(ty: Type, structs: &[StructDef]) -> bool {
         && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
             // A raw pointer carries no release surface (it is an address, not
             // an owned value): a guard that points at a slot releases cleanly.
-            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
-            || owned_plain_struct(*ty, structs)))
+            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_)
+                | Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex
+                | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF)
+            || owned_plain_struct(*ty, structs)
+            || owned_field_struct(*ty, structs)
+            || plain_drop_struct(*ty, structs)))
 }
 
 pub(super) fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
@@ -117,7 +121,8 @@ pub(super) fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
             // A nested struct carries its own release routine; the generated
             // release recurses into every struct field (c_output).
             || owned_plain_struct(*ty, structs)
-            || owned_field_struct(*ty, structs)))
+            || owned_field_struct(*ty, structs)
+            || plain_drop_struct(*ty, structs)))
 }
 
 /// The registry struct a field expression reads from: a parameter's

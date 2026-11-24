@@ -49,7 +49,7 @@ impl<'a> Parser<'a> {
         if actual != pointee {
             return Err(self.fail(&format!("cannot write a {} value through *mut {}", actual.name(self.ctx), pointee.name(self.ctx))));
         }
-        if pointee.owned() {
+        if self.is_owned(pointee) {
             return Err(self.fail("writing an owned value through a pointer is not supported yet; the pointer would take over its release"));
         }
         Ok(())

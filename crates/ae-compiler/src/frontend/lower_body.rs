@@ -222,6 +222,10 @@ impl<'a> Parser<'a> {
                         | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit)) = self.chain_call_type(initializer, &local_structs)
                     {
                         local_structs.insert(name.clone(), ret);
+                    } else if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(src)) = &initializer.kind
+                        && let Some(&ty) = local_structs.get(src)
+                    {
+                        local_structs.insert(name.clone(), ty);
                     }
                 }
                 for root in statement.expressions() {
@@ -445,7 +449,11 @@ impl<'a> Parser<'a> {
                         // the lowering's FieldStore arm validates the receiver
                         // type, the field, and the binding's mutability.
                         || resolved.scalar_writes.contains_key(&root.range.start),
-                    ae_resolve::Role::Read => resolved.generic_call_bindings.contains(def),
+                    ae_resolve::Role::Read => resolved.generic_call_bindings.contains(def)
+                        || matches!(&root.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                            if local_structs.get(name).is_some_and(|&ty| !field_chain_is_bare(expression)
+                                && receiver_field_type(expression, ty, self.structs)
+                                    .is_some_and(|field| scalar_type(field) || matches!(field, Type::Ptr(_) | Type::PtrMut(_))))),
                     _ => false,
                 };
             };
@@ -477,7 +485,7 @@ impl<'a> Parser<'a> {
         // lowering already accounts for those): `live_owned` releases them at
         // every return unless the body moved one out.
         self.owned_params = self.names.values()
-            .filter(|&&(slot, _, ty)| ty.owned() && !capture_starts.iter().any(|&(capture, _)| capture == slot))
+            .filter(|&&(slot, _, ty)| self.is_owned(ty) && !capture_starts.iter().any(|&(capture, _)| capture == slot))
             .map(|&(slot, _, ty)| (slot, ty))
             .collect();
         if let Some(statement) = body.iter().position(|statement| {
@@ -543,7 +551,7 @@ impl<'a> Parser<'a> {
         self.borrows.retain(|&(_, borrow_depth, _)| borrow_depth <= depth);
         // Owned values declared in this block are released at its end,
         // mirroring the typed route's block exit.
-        let owned: Vec<(usize, Type)> = scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
+        let owned: Vec<(usize, Type)> = scope.iter().rev().filter(|(_, ty)| self.is_owned(*ty)).copied().collect();
         if !owned.is_empty() { statements.push(Statement::Frees(owned)); }
         Ok(statements)
     }

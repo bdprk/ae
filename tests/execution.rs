@@ -9281,3 +9281,114 @@ fn wave3b_int_checked_wrapping_saturating_parity() {
         );
     }
 }
+
+#[test]
+fn p2_2_copy_derive_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/copy_derive.ae");
+    let expected = fs::read_to_string(root.join("tests/run/copy_derive.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+#[test]
+fn p2_2_drop_order_and_trait_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/drop_order_and_trait.ae");
+    let expected = fs::read_to_string(root.join("tests/run/drop_order_and_trait.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+
+    // Inherent unit `fn drop(&mut self)` + multi-field declaration-order drops.
+    let multi_field_src = "struct Leaf { id: i64 }\nimpl Leaf { fn drop(&mut self) { print(\"leaf \" + to_string(self.id)); } }\nstruct Pair { a: Leaf, b: Leaf }\nimpl Drop for Pair { fn drop(&mut self) { print(\"pair\"); } }\nfn main() { let l1 = Leaf { id: 1 }; let l2 = Leaf { id: 2 }; let p = Pair { a: l1, b: l2 }; }\n";
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("ae-p22-drop-fields-{}-{seq}.ae", std::process::id()));
+    fs::write(&path, multi_field_src).unwrap();
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{label} multi-field drop failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            "pair\nleaf 1\nleaf 2\n",
+            "{label} multi-field drop order mismatch"
+        );
+    }
+    let _ = fs::remove_file(&path);
+
+    for (src, needle) in [
+        ("struct G { id: i64 }\nimpl Drop for G { fn drop(&mut self) { print(self.id); } }\nfn main() { var g = G { id: 1 }; let _r = G::drop(&mut g); }", "drop"),
+        ("struct G { id: i64 }\nimpl Drop for G { fn drop(&mut self, extra: i64) { print(self.id); } }\nfn main() {}", "drop"),
+        ("struct G { id: i64 }\nimpl Drop for G { fn drop(&self) { print(self.id); } }\nfn main() {}", "drop"),
+    ] {
+        let msg = check_rejects(src);
+        assert!(msg.contains(needle), "{src}: {msg}");
+    }
+}

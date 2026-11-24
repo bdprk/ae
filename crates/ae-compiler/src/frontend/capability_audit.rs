@@ -110,7 +110,7 @@ pub(super) fn audit_generic_fn(
         let declared = &bounds[index];
         if declared.is_empty() { continue; }
         let effective: Vec<Type> = AUDIT_TYPES.iter().copied()
-            .filter(|ty| declared.iter().all(|b| b.allows(*ty)))
+            .filter(|ty| declared.iter().all(|b| b.allows(*ty, &[], &[])))
             .collect();
         let bad: Vec<String> = effective.iter().copied()
             .filter(|ty| !cap.supports(*ty))

@@ -1,6 +1,6 @@
 //! Function and trait declaration collection and instantiation.
 use super::*;
-use ae_syntax::declaration::{parse_declaration_attribute, parse_extern_function_prefix, Declaration, DeclarationAttribute, DeclarationKind, TypedName, MAX_FUNCTION_PARAMETERS};
+use ae_syntax::declaration::{parse_declaration_attribute, parse_declaration_attributes, parse_extern_function_prefix, Declaration, DeclarationAttribute, DeclarationKind, TypedName, MAX_FUNCTION_PARAMETERS};
 
 /// How a borrowed argument is passed and whether it needs a call-scoped
 /// struct borrow. Classification uses concrete compiler type identities.
@@ -183,22 +183,26 @@ impl Parser<'_> {
             // pins the struct's layout for the C ABI. The bracket shape is
             // parsed literally, and anything but repr(C) is rejected by
             // name so a typo cannot silently mean "no attribute".
-            let (attribute, end) = parse_declaration_attribute(&self.file, self.source, &self.tokens, self.pos)?;
+            let (attributes, end) = parse_declaration_attributes(&self.file, self.source, &self.tokens, self.pos)?;
             self.pos = end;
-            let repr_c = attribute == Some(DeclarationAttribute::ReprC);
-            let no_mangle = attribute == Some(DeclarationAttribute::NoMangle);
+            let repr_c = attributes.contains(&DeclarationAttribute::ReprC);
+            let no_mangle = attributes.contains(&DeclarationAttribute::NoMangle);
+            let derive_copy = attributes.contains(&DeclarationAttribute::DeriveCopy);
             if repr_c && *self.current() != Kind::Struct {
                 return Err(self.fail("'#[repr(C)]' applies to a struct declaration"));
             }
             if no_mangle && *self.current() != Kind::Extern {
                 return Err(self.fail("'#[no_mangle]' applies to an 'extern \"C\" fn' definition"));
             }
+            if derive_copy && !matches!(*self.current(), Kind::Struct | Kind::Enum) {
+                return Err(self.fail("'#[derive(Copy)]' applies to a struct or enum declaration"));
+            }
             if *self.current() == Kind::Struct {
                 let parsed_fields = parsed_declaration.and_then(|item| match &item.kind {
                     DeclarationKind::Struct { fields } => Some(fields.as_slice()),
                     _ => None,
                 });
-                self.parse_struct_def(public, repr_c, parsed_fields)?;
+                self.parse_struct_def(public, repr_c, derive_copy, parsed_fields)?;
                 continue;
             }
             if *self.current() == Kind::Enum {
@@ -206,7 +210,7 @@ impl Parser<'_> {
                     DeclarationKind::Enum { variants } => Some(variants.as_slice()),
                     _ => None,
                 });
-                self.parse_enum_def(public, parsed_variants)?;
+                self.parse_enum_def(public, derive_copy, parsed_variants)?;
                 continue;
             }
             if *self.current() == Kind::Trait { self.skip_trait_def()?; continue; }
@@ -400,6 +404,9 @@ impl Parser<'_> {
         let public = self.pos > 0 && matches!(&self.tokens[self.pos - 1].kind, Kind::Ident(name) if name == "pub");
         self.pos += 1; // trait
         let name = self.identifier()?;
+        if name == "Drop" {
+            return Err(self.fail("'Drop' is a built-in trait and cannot be redeclared"));
+        }
         if self.generics.trait_names.contains_key(&name) {
             return Err(self.fail(&format!("duplicate trait '{name}'")));
         }
@@ -604,7 +611,9 @@ impl Parser<'_> {
             self.take(Kind::RParen)?;
             let ret = if *self.current() == Kind::Arrow {
                 self.pos += 1;
-                self.parameter_type()?
+                self.return_annotation()?
+            } else if method == "drop" {
+                Type::Unit
             } else {
                 Type::Int(IntTy::I64)
             };
@@ -615,15 +624,23 @@ impl Parser<'_> {
                 return Err(self.fail("a method cannot return a borrow; return a value that outlives the borrow instead, or take the borrow again at the call site"));
             }
             if method == "drop"
-                && (!matches!(receiver, Some(Type::StructMut(_))) || types.len() != 1 || ret != Type::Int(IntTy::I64)) {
-                    return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self) -> i64'"));
+                && (!matches!(receiver, Some(Type::StructMut(_))) || types.len() != 1 || (ret != Type::Unit && ret != Type::Int(IntTy::I64))) {
+                    return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self)'"));
                 }
             self.generics.next_fn_id = self.generics.next_fn_id.max(*next_id);
             let id = self.generics.next_fn_id;
             self.generics.next_fn_id += 1;
             *next_id = self.generics.next_fn_id;
             if method == "drop" {
-                self.structs[sid_of(&target)].drop_fn = Some(id);
+                let sid = sid_of(&target);
+                if self.structs[sid].is_copy {
+                    return Err(self.fail(&format!("cannot implement 'drop' for Copy struct '{}'", self.structs[sid].name)));
+                }
+                if self.structs[sid].drop_fn.is_some() {
+                    return Err(self.fail(&format!("duplicate destructor 'drop' for '{}'", self.structs[sid].name)));
+                }
+                self.structs[sid].drop_fn = Some(id);
+                self.structs[sid].drop_returns_unit = ret == Type::Unit;
             }
             self.id_order.push(id);
             self.generics.inherent.insert(key, MethodDef {
@@ -736,6 +753,105 @@ impl Parser<'_> {
         Ok(())
     }
 
+    fn collect_drop_impl(&mut self, next_id: &mut usize) -> Result<(), ae_span::Diagnostic> {
+        self.take(Kind::For)?;
+        if let Kind::Ident(text) = self.current()
+            && text == "T"
+        {
+            return Err(self.fail("an impl names the concrete type, not the trait's parameter T"));
+        }
+        let ty = self.parameter_type()?;
+        let Type::Struct(sid) = ty else {
+            return Err(self.fail("destructor 'drop' is only supported on structs in this version"));
+        };
+        let type_name = self.structs[sid].name.clone();
+        if self.structs[sid].file != self.file {
+            return Err(self.fail(&format!(
+                "impl of 'Drop' for '{}' must be in the file that declares the type ({}); this file may not add it",
+                type_name, self.structs[sid].file
+            )));
+        }
+        if self.structs[sid].is_copy {
+            return Err(self.fail(&format!("cannot implement 'drop' for Copy struct '{type_name}'")));
+        }
+        if self.structs[sid].drop_fn.is_some() {
+            return Err(self.fail(&format!("duplicate destructor 'drop' for '{type_name}'")));
+        }
+        self.impl_self = Some(ty);
+        self.inherent_impl = true;
+        self.take(Kind::LBrace)?;
+        while *self.current() != Kind::RBrace {
+            if *self.current() == Kind::Eof {
+                return Err(self.fail("expected '}' before end of file"));
+            }
+            let public = self.take_pub();
+            self.take(Kind::Fn)?;
+            let method = self.identifier()?;
+            if method != "drop" {
+                return Err(self.fail(&format!("trait 'Drop' has no method '{method}'")));
+            }
+            if public {
+                return Err(self.fail("destructor 'drop' cannot be marked 'pub'; only compiler-generated drop glue may invoke it"));
+            }
+            let key = format!("{type_name}#drop");
+            if self.structs[sid].drop_fn.is_some() || self.generics.inherent.contains_key(&key) {
+                return Err(self.fail(&format!("duplicate destructor 'drop' for '{type_name}'")));
+            }
+            self.take(Kind::LParen)?;
+            if *self.current() != Kind::Amp {
+                return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self)'"));
+            }
+            self.pos += 1;
+            if *self.current() != Kind::Mut {
+                return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self)'"));
+            }
+            self.pos += 1;
+            if !matches!(self.current(), Kind::Ident(text) if text.as_str() == "self") {
+                return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self)'"));
+            }
+            self.pos += 1;
+            if *self.current() != Kind::RParen {
+                return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self)'"));
+            }
+            self.pos += 1;
+            let ret = if *self.current() == Kind::Arrow {
+                self.pos += 1;
+                self.return_annotation()?
+            } else {
+                Type::Unit
+            };
+            if ret != Type::Unit && ret != Type::Int(IntTy::I64) {
+                return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self)'"));
+            }
+            self.generics.next_fn_id = self.generics.next_fn_id.max(*next_id);
+            let id = self.generics.next_fn_id;
+            self.generics.next_fn_id += 1;
+            *next_id = self.generics.next_fn_id;
+            self.structs[sid].drop_fn = Some(id);
+            self.structs[sid].drop_returns_unit = ret == Type::Unit;
+            self.id_order.push(id);
+            self.generics.inherent.insert(
+                key,
+                MethodDef {
+                    signature: Signature {
+                        id,
+                        params: vec![Type::StructMut(sid)],
+                        ret,
+                        file: self.file.clone(),
+                        public: false,
+                        extern_c: false,
+                    },
+                    receiver: Some(Type::StructMut(sid)),
+                },
+            );
+            self.skip_balanced_braces()?;
+        }
+        self.take(Kind::RBrace)?;
+        self.impl_self = None;
+        self.inherent_impl = false;
+        Ok(())
+    }
+
     pub(super) fn collect_impl(&mut self, next_id: &mut usize) -> Result<(), ae_span::Diagnostic> {
         self.pos += 1; // impl
         let first = self.identifier()?;
@@ -747,6 +863,9 @@ impl Parser<'_> {
             return self.collect_generic_impl(first);
         }
         if *self.current() != Kind::For { return self.collect_inherent_impl(first, next_id); }
+        if first == "Drop" {
+            return self.collect_drop_impl(next_id);
+        }
         let trait_name = first;
         let tid = *self.generics.trait_names.get(&trait_name)
             .ok_or_else(|| self.fail(&format!("impl names unknown trait '{trait_name}'")))?;
@@ -854,7 +973,15 @@ impl Parser<'_> {
             self.take(Kind::For)?;
             let ty = self.parameter_type()?;
             self.impl_self = Some(ty);
-            None
+            if first == "Drop" {
+                if let Type::Struct(sid) = ty {
+                    Some(self.structs[sid].name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else if let Some(&sid) = self.struct_names.get(&first) {
             self.impl_self = Some(Type::Struct(sid));
             Some(first.clone())
@@ -1140,7 +1267,7 @@ impl Parser<'_> {
         };
         let params_scope = self.scopes.pop().unwrap();
         let mut body = body?;
-        let param_owned: Vec<(usize, Type)> = params_scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
+        let param_owned: Vec<(usize, Type)> = params_scope.iter().rev().filter(|(_, ty)| is_owned_type(*ty, self.structs, self.enums)).copied().collect();
         if !is_main && !returns(&body) {
             if returns_type == Type::Unit {
                 body.push(Statement::Return(Expr::Unit, param_owned));
@@ -1177,7 +1304,7 @@ impl Parser<'_> {
         self.require_public("function", &def.name, &def.file, def.public)?;
         for (index, bounds) in def.bounds.iter().enumerate() {
             for &bound in bounds {
-                if !bound.allows(args[index]) {
+                if !bound.allows(args[index], self.structs, self.enums) {
                     return Err(self.error_at(offset, &format!(
                         "type argument '{}' for '{}' does not satisfy '{}'; that constraint allows {}",
                         args[index].name(self.ctx), def.name, bound.name(), bound.allowed_types())));

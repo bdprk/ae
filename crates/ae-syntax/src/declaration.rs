@@ -173,6 +173,7 @@ pub enum DeclarationKind {
 pub enum DeclarationAttribute {
     ReprC,
     NoMangle,
+    DeriveCopy,
 }
 
 /// Parse an optional declaration attribute and return the next token index.
@@ -198,10 +199,39 @@ pub fn parse_declaration_attribute(
             DeclarationAttribute::ReprC
         }
         "no_mangle" => DeclarationAttribute::NoMangle,
-        other => return Err(parser.error(&format!("unknown attribute '{other}'; the language has '#[repr(C)]' and '#[no_mangle]' only"))),
+        "derive" => {
+            parser.take(Kind::LParen)?;
+            let inner = parser.identifier()?;
+            if inner != "Copy" {
+                return Err(parser.error(&format!("only '#[derive(Copy)]' is supported, found '#[derive({inner})]'")));
+            }
+            parser.take(Kind::RParen)?;
+            DeclarationAttribute::DeriveCopy
+        }
+        other => return Err(parser.error(&format!("unknown attribute '{other}'; supported attributes are '#[repr(C)]', '#[no_mangle]', and '#[derive(Copy)]'"))),
     };
     parser.take(Kind::RBracket)?;
     Ok((Some(attribute), parser.pos))
+}
+
+/// Parse zero or more stacked declaration attributes and return the next token index.
+pub fn parse_declaration_attributes(
+    file: &str,
+    source: &str,
+    tokens: &[Token],
+    mut start: usize,
+) -> Result<(Vec<DeclarationAttribute>, usize), Diagnostic> {
+    let mut attributes = Vec::new();
+    loop {
+        let (attribute, next) = parse_declaration_attribute(file, source, tokens, start)?;
+        match attribute {
+            Some(attr) => {
+                attributes.push(attr);
+                start = next;
+            }
+            None => return Ok((attributes, start)),
+        }
+    }
 }
 
 /// Parse an extern function prefix and return its ABI and following token index.
@@ -230,6 +260,7 @@ pub fn parse_extern_function_prefix<'a>(
 #[derive(Clone, Debug, PartialEq)]
 pub struct Declaration {
     pub attribute: Option<DeclarationAttribute>,
+    pub attributes: Vec<DeclarationAttribute>,
     pub name: String,
     pub type_parameters: Vec<TypeParameter>,
     pub kind: DeclarationKind,
@@ -600,10 +631,10 @@ impl<'a> DeclarationParser<'a> {
         Ok(variants)
     }
 
-    fn attribute(&mut self) -> Result<Option<DeclarationAttribute>, Diagnostic> {
-        let (attribute, end) = parse_declaration_attribute(self.file, self.source, self.tokens, self.pos)?;
+    fn attributes(&mut self) -> Result<Vec<DeclarationAttribute>, Diagnostic> {
+        let (attributes, end) = parse_declaration_attributes(self.file, self.source, self.tokens, self.pos)?;
         self.pos = end;
-        Ok(attribute)
+        Ok(attributes)
     }
 
     fn opaque_body(&mut self) -> Result<usize, Diagnostic> {
@@ -665,15 +696,21 @@ impl<'a> DeclarationParser<'a> {
         } else {
             false
         };
-        let attribute = self.attribute()?;
-        match attribute {
-            Some(DeclarationAttribute::ReprC) if self.current().kind != Kind::Struct => {
-                return Err(self.error("'#[repr(C)]' applies to a struct declaration"));
+        let attributes = self.attributes()?;
+        let attribute = attributes.first().cloned();
+        for attr in &attributes {
+            match attr {
+                DeclarationAttribute::ReprC if self.current().kind != Kind::Struct => {
+                    return Err(self.error("'#[repr(C)]' applies to a struct declaration"));
+                }
+                DeclarationAttribute::NoMangle if self.current().kind != Kind::Extern => {
+                    return Err(self.error("'#[no_mangle]' applies to an extern function definition"));
+                }
+                DeclarationAttribute::DeriveCopy if !matches!(self.current().kind, Kind::Struct | Kind::Enum) => {
+                    return Err(self.error("'#[derive(Copy)]' applies to a struct or enum declaration"));
+                }
+                _ => {}
             }
-            Some(DeclarationAttribute::NoMangle) if self.current().kind != Kind::Extern => {
-                return Err(self.error("'#[no_mangle]' applies to an extern function definition"));
-            }
-            _ => {}
         }
         let unsafe_fn = self.consume(Kind::Unsafe);
         let abi = if !unsafe_fn && self.current().kind == Kind::Extern {
@@ -765,7 +802,7 @@ impl<'a> DeclarationParser<'a> {
                 }
                 self.pos += 1;
                 let end = self.tokens[self.pos - 1].end;
-                return Ok(Declaration { attribute, public, name, type_parameters, kind: function, range: start..end, body: None });
+                return Ok(Declaration { attribute, attributes: attributes.clone(), public, name, type_parameters, kind: function, range: start..end, body: None });
             }
             let body_start = self.opaque_body()?;
             (function, body_start)
@@ -797,7 +834,7 @@ impl<'a> DeclarationParser<'a> {
             (DeclarationKind::Struct { fields }, body_start)
         };
         let end = self.tokens[self.pos - 1].end;
-        Ok(Declaration { attribute, public, name, type_parameters, kind, range: start..end, body: Some(body_start..end) })
+        Ok(Declaration { attribute, attributes, public, name, type_parameters, kind, range: start..end, body: Some(body_start..end) })
     }
 }
 

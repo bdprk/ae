@@ -120,7 +120,7 @@ impl<'a> Parser<'a> {
                     };
                     // An owned field cannot be moved out of its struct: the
                     // typed route's rule (a struct owns its fields as a whole).
-                    if ty.owned()
+                    if self.is_owned(ty)
                         && matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
                             self.seek_scalar_offset(initializer.range.end);
                             return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
@@ -128,7 +128,7 @@ impl<'a> Parser<'a> {
                     // Binding an owned value moves it: the new slot owns what
                     // the old one did, and later reads of the source fail with
                     // E0102 (the typed route's rule).
-                    if ty.owned()
+                    if self.is_owned(ty)
                         && let Expr::Variable(source, ..) = &value {
                             self.check_variable_move(*source)?;
                             self.moved.insert(*source);
@@ -145,7 +145,7 @@ impl<'a> Parser<'a> {
                 slots.insert(def, (slot, ty));
                 self.names.insert(name.clone(), (slot, *mutable, ty));
                 self.binding_ranges.insert(slot, name_range.clone());
-                if ty.owned() {
+                if self.is_owned(ty) {
                     self.scopes.last_mut().expect("block scope").push((slot, ty));
                 }
                 statement
@@ -205,7 +205,7 @@ impl<'a> Parser<'a> {
                     let (value, actual) = self.lower_scalar_body_expression(value, slots)?;
                     // An owned value moves into the field; the source slot is
                     // forfeited, exactly like a struct literal field.
-                    if actual.owned()
+                    if self.is_owned(actual)
                         && let Expr::Variable(source, ..) = &value {
                             self.check_variable_move(*source)?;
                             self.moved.insert(*source);
@@ -328,7 +328,7 @@ impl<'a> Parser<'a> {
                         }
                         // A value store moves an owned string into the slot;
                         // a view store only borrows it.
-                        if value_ty.owned()
+                        if self.is_owned(value_ty)
                             && let Expr::Variable(source, ..) = &stored {
                                 self.moved.insert(*source);
                             }
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
                 // frees the bytes the view points at. A string's view
                 // conflicts defer to the graph's ordered adjudication (the
                 // typed rule); every other owned type rejects on sight.
-                if ty.owned() && self.is_borrowed(slot) {
+                if self.is_owned(ty) && self.is_borrowed(slot) {
                     if !(matches!(ty, Type::String) && self.all_borrows_are_views(slot)) {
                         self.seek_scalar_offset(target.range.end);
                         return Err(self.fail(&format!("cannot assign to '{name}' while it is borrowed")));
@@ -405,7 +405,7 @@ impl<'a> Parser<'a> {
                 // An owned right-hand side moves into the target: the source
                 // slot's Frees is trimmed, and assigning the target to itself
                 // fails as a same-statement move (the typed rule).
-                if rhs_ty.owned()
+                if self.is_owned(rhs_ty)
                     && let Expr::Variable(source, ..) = &rhs {
                         self.seek_scalar_offset(value.range.end);
                         self.check_variable_move(*source)?;
@@ -426,7 +426,7 @@ impl<'a> Parser<'a> {
                 };
                 // Overwriting an owned value releases the old one first (the
                 // Assign codegen's flag); scalars need no release.
-                Statement::Assign(slot, value, ty.owned())
+                Statement::Assign(slot, value, self.is_owned(ty))
             }
             StatementKind::PointerStore { pointer, pointer_range, value } => {
                 self.seek_scalar_offset(statement.range.start);
@@ -489,13 +489,13 @@ impl<'a> Parser<'a> {
                 // An owned field cannot be moved out of its struct (the
                 // struct owns its fields as a whole), so `return p.text;` is
                 // the typed route's rejection, not a value.
-                if ty.owned()
+                if self.is_owned(ty)
                     && matches!(&value.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
                         self.seek_scalar_offset(value.range.end);
                         return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
                     }
                 if let Expr::Variable(slot, ty, ..) = &lowered
-                    && ty.owned() {
+                    && self.is_owned(*ty) {
                         self.seek_scalar_offset(value.range.end);
                         self.check_variable_move(*slot)?;
                         self.moved.insert(*slot);

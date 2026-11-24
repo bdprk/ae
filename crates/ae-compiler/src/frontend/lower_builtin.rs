@@ -445,7 +445,7 @@ impl<'a> Parser<'a> {
                     // `wait` consumes the handle: the typed reader parsed it
                     // with the moving flag, so the same slot bookkeeping
                     // applies here.
-                    if handle_ty.owned()
+                    if self.is_owned(handle_ty)
                         && let Expr::Variable(slot, ..) = &value {
                             self.check_variable_move(*slot)?;
                             self.moved.insert(*slot);

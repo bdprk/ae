@@ -528,16 +528,19 @@ pub(super) fn emit_enum_layouts(enums: &[EnumDef], from: usize, to: usize, out: 
     for eid in from..to {
         let (typedef, release, forfeit) = prelude_enum_pieces(enums, eid, ctx);
         out.push_str(&typedef);
-        out.push_str(&release);
-        out.push_str(&forfeit);
+        if !enums[eid].is_copy {
+            out.push_str(&release);
+            out.push_str(&forfeit);
+        }
     }
 }
 
-fn emit_body(function: &Function, out: &mut String, ctx: &CompileContext) -> Result<(), String> {
+fn emit_body(function: &Function, out: &mut String, ctx: &CompileContext, structs: &[StructDef], enums: &[EnumDef]) -> Result<(), String> {
+    let cg = codegen::CodegenCtx { ctx, structs, enums };
     if codegen_mir::enabled() {
-        codegen_mir::emit_function_body(function, out, ctx)?;
+        codegen_mir::emit_function_body(function, out, &cg)?;
     } else {
-        emit_statements(&function.body, out, &mut 0, ctx);
+        emit_statements(&function.body, out, &mut 0, &cg);
     }
     Ok(())
 }
@@ -603,7 +606,7 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
                     let _ = writeln!(release, "    ae_vec_release(&v->{n});");
                     let _ = writeln!(forfeit, "    ae_vec_forfeit(&v->{n});");
                 }
-                Type::Struct(k) => {
+                Type::Struct(k) if !structs[*k].is_copy => {
                     let _ = writeln!(release, "    ae_t{k}_release(&v->{n});");
                     let _ = writeln!(forfeit, "    ae_t{k}_forfeit(&v->{n});");
                 }
@@ -623,7 +626,7 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
                     let _ = writeln!(release, "    ae_mapf_release(&v->{n});");
                     let _ = writeln!(forfeit, "    ae_mapf_forfeit(&v->{n});");
                 }
-                Type::Enum(_, k) => {
+                Type::Enum(_, k) if !enums[*k].is_copy => {
                     let _ = writeln!(release, "    ae_e{k}_release(&v->{n});");
                     let _ = writeln!(forfeit, "    ae_e{k}_forfeit(&v->{n});");
                 }
@@ -649,10 +652,13 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
         }
         let _ = writeln!(out, "\ntypedef struct {{\n{layout}}} ae_t{sid};");
         if let Some(drop_id) = def.drop_fn {
-            let _ = writeln!(out, "static int64_t ae_fn_{drop_id}(ae_t{sid} *v);");
+            let ret = if def.drop_returns_unit { "void" } else { "int64_t" };
+            let _ = writeln!(out, "static {ret} ae_fn_{drop_id}(ae_t{sid} *v);");
         }
-        let _ = writeln!(out, "static void ae_t{sid}_release(ae_t{sid} *v) {{\n{release}}}");
-        let _ = writeln!(out, "static void ae_t{sid}_forfeit(ae_t{sid} *v) {{\n{forfeit}}}");
+        if !def.is_copy {
+            let _ = writeln!(out, "static void ae_t{sid}_release(ae_t{sid} *v) {{\n{release}}}");
+            let _ = writeln!(out, "static void ae_t{sid}_forfeit(ae_t{sid} *v) {{\n{forfeit}}}");
+        }
     }
     // The `extern "C"` declarations' prototypes (M2.12 slice 4): the call
     // site emits the C symbol bare, so without a prototype every foreign
@@ -741,14 +747,14 @@ typedef struct {{
             None => format!("static {ret} ae_fn_{}({params})", function.id),
         };
         out.push_str(&format!("\n{signature} {{\n"));
-        emit_body(function, &mut out, &program.ctx)?;
+        emit_body(function, &mut out, &program.ctx, structs, enums)?;
         // Defensive backstop: even a future control-flow analysis bug must not
         // produce a C function that falls through without returning a value.
         out.push_str("    ae_fail(\"function exited without return\", 0, 0);\n}\n");
     }
     let main = all.iter().find(|f| f.is_main).expect("load_program checks exactly one main");
     out.push_str("\nint main(int argc, char **argv) {\n    ae_args_init(argc, argv);\n    ae_argc_g = (int64_t)argc;\n    ae_argv_g = argv;\n");
-    emit_body(main, &mut out, &program.ctx)?;
+    emit_body(main, &mut out, &program.ctx, structs, enums)?;
     out.push_str("    if (fflush(stdout) == EOF) return 1;\n    return 0;\n}\n");
     // The fixed prefix is program-independent; emit only its reachable part.
     // `split_off` avoids copying the 100 KB runtime text.

@@ -278,7 +278,7 @@ impl Parser<'_> {
         };
         let scope = self.scopes.pop().unwrap();
         let mut body = body?;
-        let owned: Vec<(usize, Type)> = scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
+        let owned: Vec<(usize, Type)> = scope.iter().rev().filter(|(_, ty)| self.is_owned(*ty)).copied().collect();
         if !owned.is_empty() { body.push(Statement::Frees(owned)); }
         if !returns(&body) { return Err(self.fail("a closure body must return a value on every path")); }
         // The closure's deferred conflicts belong to the closure's own graph;
@@ -315,7 +315,7 @@ impl Parser<'_> {
             if self.is_borrowed(*outer_id) {
                 return Err(self.fail(&format!("cannot call '{name}' while one of its captured variables is borrowed")));
             }
-            if ty.owned() {
+            if self.is_owned(*ty) {
                 self.moved.insert(*outer_id);
             }
             args.push(Argument::Value(Expr::Variable(*outer_id, *ty, 0, 0)));

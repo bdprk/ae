@@ -1,0 +1,14 @@
+struct Guard {
+    id: i64,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        print(self.id);
+    }
+}
+
+fn main() {
+    var g = Guard { id: 1 };
+    let _d = g.drop();
+}

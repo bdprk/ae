@@ -325,9 +325,9 @@ impl<'a> Parser<'a> {
         // present in both lists (the receiver, which the entry scope already
         // holds) is released once.
         let mut seen = std::collections::HashSet::new();
-        self.scopes.iter().flatten().copied()
-            .chain(self.owned_params.iter().copied())
-            .filter(|(id, ty)| ty.owned() && seen.insert(*id))
+        self.scopes.iter().rev().flat_map(|s| s.iter().rev()).copied()
+            .chain(self.owned_params.iter().rev().copied())
+            .filter(|(id, ty)| self.is_owned(*ty) && seen.insert(*id))
             .collect()
     }
     pub(super) fn expression_index_for(&self, file: &str, tokens: &Rc<Vec<Token>>) -> Rc<OnceCell<ResolvedExpressions>> {
