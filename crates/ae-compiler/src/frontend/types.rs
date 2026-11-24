@@ -17,14 +17,16 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
 /// the `Result[payload, string]` instantiations of the prelude generic.
 /// Seeding the specialization cache makes a program's own `Result[...]`
 /// spelling resolve to the preset layout — one type, one C id — while the
-/// family name stays usable as a pattern alias. Families with no flat payload
-/// (StatusResult), several `Ok` fields (FileResult, CommandResult) or a
-/// duplicated argument list (WriteResult/IntResult) stay on the legacy
-/// ladder until payload structs and deduplication land.
+/// family name stays usable as a pattern alias. `WriteResult` shares the
+/// `IntResult` instantiation (identical payloads) and has no id of its own.
+/// Families with no payload (StatusResult) or several `Ok` fields
+/// (FileResult, CommandResult) stay on the legacy ladder until unit-payload
+/// patterns and payload structs land.
 pub(super) fn seed_preset_result_instantiations(generics: &mut Generics, enum_names: &HashMap<String, usize>, ctx: &CompileContext) {
     let Some(&gid) = generics.names.get("Result") else { return };
-    let families: [(&str, Vec<Type>); 4] = [
+    let families: [(&str, Vec<Type>); 5] = [
         ("ReadResult", vec![Type::String, Type::String]),
+        ("IntResult", vec![Type::Int(IntTy::I64), Type::String]),
         ("DirResult", vec![Type::StrVec, Type::String]),
         ("BoolResult", vec![Type::Bool, Type::String]),
         ("FloatResult", vec![Type::Float(FloatTy::F64), Type::String]),

@@ -338,9 +338,9 @@ pub(super) fn strip_define_lines(text: &str) -> String {
 /// Which prelude enum an `AE_<NAME>_...` macro belongs to. The layout of
 /// that enum must exist whenever a kept function uses any of its macros.
 pub(super) const PRELUDE_MACRO_PREFIXES: &[(&str, usize)] = &[
-    ("AE_READ_", 0), ("AE_WRITE_", 1), ("AE_INT_", 2), ("AE_DIR_", 3),
-    ("AE_FILE_", 4), ("AE_STATUS_", 5), ("AE_BOOL_", 6), ("AE_COMMAND_", 7),
-    ("AE_FLOAT_", 8),
+    ("AE_READ_", 0), ("AE_INT_", 1), ("AE_WRITE_", 1), ("AE_DIR_", 2),
+    ("AE_FILE_", 3), ("AE_STATUS_", 4), ("AE_BOOL_", 5), ("AE_COMMAND_", 6),
+    ("AE_FLOAT_", 7),
 ];
 
 /// Keep only runtime functions reachable from the program. Roots are the
@@ -554,7 +554,7 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
     // rather than trusted; a reordered prelude would silently change payload
     // ids in generated code.
     let names: Vec<&str> = enums.iter().take(6).map(|def| def.name).collect();
-    if names != ["ReadResult", "WriteResult", "IntResult", "DirResult", "FileResult", "StatusResult"] {
+    if names != ["ReadResult", "IntResult", "DirResult", "FileResult", "StatusResult", "BoolResult"] {
         return Err(format!("internal: prelude enums must be registered first and in order, found {names:?}"));
     }
     // The runtime reaches the pruner in three parts (ADR-66): the core, the

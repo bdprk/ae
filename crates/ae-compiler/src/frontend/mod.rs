@@ -307,12 +307,14 @@ const MATH_FNS: &[(&str, &str, usize)] = &[
 #[allow(clippy::type_complexity)]
 fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
     // `aliases` names the generic `Result[...]` spelling once a family is
-    // unified with its instantiation (P2.4). A preset with no alias is still
-    // a legacy monomorphic layout and is next on the migration ladder.
+    // unified with its instantiation (P2.4). `WriteResult` is not a definition
+    // of its own: it shares the `Result[i64, string]` instantiation with
+    // `IntResult`, so it is registered as an alias name below. A preset with
+    // no alias is still a legacy monomorphic layout and is next on the
+    // migration ladder.
     let defs: Vec<(&'static str, Vec<(&'static str, Vec<Type>)>, &'static [&'static str])> = vec![
         ("ReadResult", vec![("Ok", vec![Type::String]), ("Err", vec![Type::String])], &["Result"]),
-        ("WriteResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])], &[]),
-        ("IntResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])], &[]),
+        ("IntResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])], &["Result", "WriteResult"]),
         ("DirResult", vec![("Ok", vec![Type::StrVec]), ("Err", vec![Type::String])], &["Result"]),
         // Metadata: byte size, modification time in seconds since the Unix
         // epoch, and whether the target is a directory.
@@ -325,8 +327,7 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
         // A finished child process: a non-zero status is a result, not an
         // error, so the status travels in Ok next to the output it produced.
         ("CommandResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::String]), ("Err", vec![Type::String])], &[]),
-        // map[string, f64] lookups (ADR-65). Appended last so every existing
-        // prelude enum keeps its id; the runtime names it ae_e8.
+        // map[string, f64] lookups (ADR-65).
         ("FloatResult", vec![("Ok", vec![Type::Float(FloatTy::F64)]), ("Err", vec![Type::String])], &["Result"]),
     ];
     let mut enums = Vec::new();
@@ -335,6 +336,10 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
         names.insert(name.to_owned(), enums.len());
         enums.push(EnumDef { name, variants: variants.into_iter().map(|(v, fields)| (v.to_owned(), fields)).collect(), file: PRELUDE.to_owned(), public: true, pattern: name.to_owned(), aliases: aliases.to_vec(), is_copy: false });
     }
+    // The write family's Ok/Err payloads are identical to the integer family's;
+    // one instantiation serves both names (P2.4 slice 3).
+    let int_eid = names["IntResult"];
+    names.insert("WriteResult".to_owned(), int_eid);
     (enums, names)
 }
 

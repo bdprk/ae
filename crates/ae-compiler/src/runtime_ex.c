@@ -46,33 +46,37 @@ static double ae_f64_max(double a, double b) {
 #include <fcntl.h>
 #endif
 
+// The prelude result families are `Result[Ok, string]` instantiations (P2.4).
+// `WriteResult` and `IntResult` share one `Result[i64, string]` layout, so
+// both macro families name ae_e1. The ids are the prelude registration order
+// in prelude_enums(), kept in lockstep with c_output's order check.
 #define AE_READ_RESULT ae_e0
 #define AE_READ_OK AE_E0_0
 #define AE_READ_ERR AE_E0_1
 #define AE_WRITE_RESULT ae_e1
 #define AE_WRITE_OK AE_E1_0
 #define AE_WRITE_ERR AE_E1_1
-#define AE_FLOAT_RESULT ae_e8
-#define AE_FLOAT_OK AE_E8_0
-#define AE_FLOAT_ERR AE_E8_1
-#define AE_INT_RESULT ae_e2
-#define AE_INT_OK AE_E2_0
-#define AE_INT_ERR AE_E2_1
-#define AE_DIR_RESULT ae_e3
-#define AE_DIR_OK AE_E3_0
-#define AE_DIR_ERR AE_E3_1
-#define AE_FILE_RESULT ae_e4
-#define AE_FILE_OK AE_E4_0
-#define AE_FILE_ERR AE_E4_1
-#define AE_STATUS_RESULT ae_e5
-#define AE_STATUS_OK AE_E5_0
-#define AE_STATUS_ERR AE_E5_1
-#define AE_BOOL_RESULT ae_e6
-#define AE_BOOL_OK AE_E6_0
-#define AE_BOOL_ERR AE_E6_1
-#define AE_COMMAND_RESULT ae_e7
-#define AE_COMMAND_OK AE_E7_0
-#define AE_COMMAND_ERR AE_E7_1
+#define AE_INT_RESULT ae_e1
+#define AE_INT_OK AE_E1_0
+#define AE_INT_ERR AE_E1_1
+#define AE_DIR_RESULT ae_e2
+#define AE_DIR_OK AE_E2_0
+#define AE_DIR_ERR AE_E2_1
+#define AE_FILE_RESULT ae_e3
+#define AE_FILE_OK AE_E3_0
+#define AE_FILE_ERR AE_E3_1
+#define AE_STATUS_RESULT ae_e4
+#define AE_STATUS_OK AE_E4_0
+#define AE_STATUS_ERR AE_E4_1
+#define AE_BOOL_RESULT ae_e5
+#define AE_BOOL_OK AE_E5_0
+#define AE_BOOL_ERR AE_E5_1
+#define AE_COMMAND_RESULT ae_e6
+#define AE_COMMAND_OK AE_E6_0
+#define AE_COMMAND_ERR AE_E6_1
+#define AE_FLOAT_RESULT ae_e7
+#define AE_FLOAT_OK AE_E7_0
+#define AE_FLOAT_ERR AE_E7_1
 
 static AE_STATUS_RESULT ae_status_ok(void) {
     AE_STATUS_RESULT out = { AE_STATUS_OK, { { 0 } } };

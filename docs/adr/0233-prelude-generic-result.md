@@ -71,6 +71,14 @@ Take option A for this slice, and stage the rest of P2.4 behind it.
    (`StatusResult`), or with several `Ok` fields (`FileResult`,
    `CommandResult`) stay legacy until deduplication, unit-payload pattern
    support and payload structs land.
+3b. **Deduplicate the i64 result families (slice 3).** `WriteResult` and
+   `IntResult` carry identical `Ok`/`Err` payloads, so they share one
+   `Result[i64, string]` instantiation: the prelude no longer registers a
+   separate `WriteResult` layout, the name maps to the integer instance, and
+   both names remain pattern aliases. Removing the entry moves the remaining
+   preset ids down by one; the runtime's `AE_*_RESULT` macro block and the
+   prelude order check move in lockstep, so `try_write_file`/`try_append_file`
+   and `parse_int`/`to_i64`/`find` return the same C layout.
 4. **Containers follow the same ladder.** `Vec[T]`, `Map[K, V]`, fixed
    arrays `[T; N]` and slices `&[T]` become prelude generic declarations over
    the raw allocation and pointer primitives (`alloc`, `ptr_write`,
