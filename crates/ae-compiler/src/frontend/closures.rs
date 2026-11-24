@@ -707,8 +707,8 @@ impl Parser<'_> {
                 slot_to_field.insert(orig.params[i].0, (fname.clone(), *fty));
             }
             let mut param_remap: HashMap<usize, usize> = HashMap::new();
-            for i in cap_count..orig.params.len() {
-                param_remap.insert(orig.params[i].0, 1 + (i - cap_count));
+            for (i, &(slot, _)) in orig.params.iter().enumerate().skip(cap_count) {
+                param_remap.insert(slot, 1 + (i - cap_count));
             }
             let mut stmts = orig.body;
             rewrite_mut_closure_stmts(&mut stmts, env_param_ty, &slot_to_field, &param_remap);
