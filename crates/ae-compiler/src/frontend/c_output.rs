@@ -1,6 +1,15 @@
 //! C type mapping, runtime pruning and whole-program C assembly.
 use std::fmt::Write as _;
 use super::*;
+/// ADR-0235 migration: a generic vector's element maps onto the C family that
+/// currently carries it. Later slices extend this to arbitrary element kinds.
+fn vector_family(ctx: &CompileContext, elem: usize) -> &'static str {
+    match ctx.vector_elem(elem) {
+        Type::String => "ae_strvec",
+        Type::Float(FloatTy::F64) => "ae_f64vec",
+        _ => "ae_vec",
+    }
+}
 pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
     match ty {
         Type::Int(width) => width.c_name().to_owned(),
@@ -13,6 +22,7 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::Vec => "ae_vec".to_owned(),
         Type::StrVec => "ae_strvec".to_owned(),
         Type::VecF => "ae_f64vec".to_owned(),
+        Type::Vector(id) => vector_family(ctx, id).to_owned(),
         Type::Map => "ae_map".to_owned(),
         Type::MapF => "ae_mapf".to_owned(),
         Type::Struct(k) => format!("ae_t{k}"),
@@ -24,6 +34,7 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::VecRef => "const ae_vec *".to_owned(),
         Type::StrVecRef => "const ae_strvec *".to_owned(),
         Type::VecFRef => "const ae_f64vec *".to_owned(),
+        Type::VectorRef(id) => format!("const {} *", vector_family(ctx, id)),
         Type::Array(n) => format!("int64_t [{n}]"),
         // Unreachable: there is no syntax for a cursor-typed field.
         Type::Tokens => "ae_tokens".to_owned(),
@@ -64,6 +75,7 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::Vec => format!("ae_vec v{id}"),
         Type::StrVec => format!("ae_strvec v{id}"),
         Type::VecF => format!("ae_f64vec v{id}"),
+        Type::Vector(elem) => format!("{} v{id}", vector_family(ctx, elem)),
         Type::Map => format!("ae_map v{id}"),
         Type::MapF => format!("ae_mapf v{id}"),
         Type::Struct(k) => format!("ae_t{k} v{id}"),
@@ -78,6 +90,8 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::StrVecRef => "const ae_strvec *".to_owned(),
         Type::VecFRef if declaration => format!("const ae_f64vec *v{id}"),
         Type::VecFRef => "const ae_f64vec *".to_owned(),
+        Type::VectorRef(elem) if declaration => format!("const {} *v{id}", vector_family(ctx, elem)),
+        Type::VectorRef(elem) => format!("const {} *", vector_family(ctx, elem)),
         Type::Tokens if declaration => format!("ae_tokens v{id}"),
         Type::Tokens => "ae_tokens".to_owned(),
         // Never declared: a closure has no storage.

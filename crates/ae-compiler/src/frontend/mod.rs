@@ -119,6 +119,17 @@ impl CompileContext {
         self.types.intern_shared(elem)
     }
 
+    /// ADR-0235: the element type of a generic vector. Producers switch to
+    /// the constructor in slice 1b; until then only the tests call it.
+    #[allow(dead_code)]
+    fn intern_vector_elem(&mut self, elem: Type) -> usize {
+        self.types.intern_vector_elem(elem)
+    }
+
+    fn vector_elem(&self, id: usize) -> Type {
+        self.types.vector_elem(id)
+    }
+
     fn shared_types_get(&self, id: usize) -> Type {
         self.types.shared(id)
     }
@@ -188,6 +199,10 @@ impl TypeDisplay for Type {
             Type::VecRef => "&vec".to_owned(),
             Type::StrVecRef => "&vec[string]".to_owned(),
             Type::VecFRef => "&vec[f64]".to_owned(),
+            // Generic containers (ADR-0235): one spelling from the interned
+            // element type, whatever it is.
+            Type::Vector(id) => format!("vec[{}]", ctx.vector_elem(id).name(ctx)),
+            Type::VectorRef(id) => format!("&vec[{}]", ctx.vector_elem(id).name(ctx)),
             // One map shape for now: string keys, i64 values.
             Type::Map => "map[string, i64]".to_owned(),
             Type::MapF => "map[string, f64]".to_owned(),
@@ -1270,6 +1285,27 @@ pub fn compile_path_tracked_with_imports(path: &Path, imports: &PackageImports) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ADR-0235 slice 1: the generic vector constructor names its interned
+    // element type and maps onto the C family that currently carries it.
+    #[test]
+    fn generic_vector_constructor_names_and_c_families() {
+        let mut ctx = CompileContext::new();
+        let int = ctx.intern_vector_elem(Type::Int(IntTy::I64));
+        let number = Type::Vector(int);
+        assert_eq!(number.name(&ctx), "vec[i64]");
+        assert_eq!(c_output::c_type_field(number, &ctx), "ae_vec");
+        assert!(number.owned(), "a vector owns its storage");
+        let text = ctx.intern_vector_elem(Type::String);
+        assert_eq!(Type::Vector(text).name(&ctx), "vec[string]");
+        assert_eq!(c_output::c_type_field(Type::Vector(text), &ctx), "ae_strvec");
+        let float = ctx.intern_vector_elem(Type::Float(FloatTy::F64));
+        assert_eq!(c_output::c_type_field(Type::Vector(float), &ctx), "ae_f64vec");
+        let view = Type::VectorRef(text);
+        assert_eq!(view.name(&ctx), "&vec[string]");
+        assert_eq!(c_output::c_type_field(view, &ctx), "const ae_strvec *");
+        assert!(!view.owned(), "a borrow owns nothing");
+    }
 
     // P2.4: every preset result family derives from the one generic Result
     // declaration, and the two multi-value families name the prelude payload

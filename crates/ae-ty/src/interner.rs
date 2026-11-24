@@ -10,6 +10,7 @@ pub struct TypeInterner {
     ptr_pointees: Vec<TyKind>,
     shared: Vec<TyKind>,
     fn_sigs: Vec<(Vec<TyKind>, TyKind)>,
+    vector_elems: Vec<TyKind>,
 }
 
 impl TypeInterner {
@@ -31,6 +32,19 @@ impl TypeInterner {
 
     pub fn pointee(&self, id: usize) -> TyKind {
         self.ptr_pointees[id]
+    }
+
+    /// ADR-0235: the element type of a generic vector (`Vector(ElemId)`).
+    pub fn intern_vector_elem(&mut self, element: TyKind) -> usize {
+        intern(&mut self.vector_elems, element)
+    }
+
+    pub fn vector_elem(&self, id: usize) -> TyKind {
+        self.vector_elems[id]
+    }
+
+    pub fn vector_elem_count(&self) -> usize {
+        self.vector_elems.len()
     }
 
     pub fn intern_shared(&mut self, element: TyKind) -> usize {
@@ -67,4 +81,24 @@ fn intern(arena: &mut Vec<TyKind>, value: TyKind) -> usize {
     }
     arena.push(value);
     arena.len() - 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_element_ids_are_structural_and_ordered() {
+        let mut interner = TypeInterner::new();
+        let int = TyKind::Int(crate::numeric::IntTy::I64);
+        let first = interner.intern_vector_elem(int);
+        let again = interner.intern_vector_elem(int);
+        let text = interner.intern_vector_elem(TyKind::String);
+        assert_eq!(first, again, "the same element type reuses its id");
+        assert_ne!(first, text, "different element types stay distinct");
+        assert_eq!(first, 0);
+        assert_eq!(text, 1);
+        assert_eq!(interner.vector_elem(first), int);
+        assert_eq!(interner.vector_elem_count(), 2);
+    }
 }

@@ -24,6 +24,11 @@ pub enum TyKind {
     VecRef,
     StrVecRef,
     VecFRef,
+    /// A generic vector whose element type is interned (ADR-0235). The three
+    /// legacy variants above are the pre-generic spellings during migration.
+    Vector(usize),
+    /// A read-only borrow of a generic vector.
+    VectorRef(usize),
     Map,
     MapF,
     Array(usize),
@@ -67,7 +72,7 @@ impl TyKind {
     /// slots, which may hold strings. A raw pointer is a plain value: copying
     /// it moves nothing, so it neither moves nor releases.
     pub fn owned(self) -> bool {
-        matches!(self, TyKind::String | TyKind::Vec | TyKind::StrVec | TyKind::VecF | TyKind::Map | TyKind::MapF | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
+        matches!(self, TyKind::String | TyKind::Vec | TyKind::StrVec | TyKind::VecF | TyKind::Vector(_) | TyKind::Map | TyKind::MapF | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
     }
 }
 
