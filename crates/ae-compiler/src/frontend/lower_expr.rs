@@ -1622,8 +1622,8 @@ let mut args = Vec::with_capacity(arguments.len());
                     // The typed route admits only the flat payload-capable
                     // arguments for a generic enum; a struct or enum argument
                     // is a diagnostic, not an instantiation.
-                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_))) {
-                        return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, string, vec, or vec[string]"));
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::Unit | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_))) {
+                        return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, char, string, vec, vec[string], fn(...), or ()"));
                     }
                     self.instantiate_enum(gid, args, base.range.start)?
                 }
@@ -1642,6 +1642,12 @@ let mut args = Vec::with_capacity(arguments.len());
         let mut values = Vec::with_capacity(fields.len());
         for (index, field) in fields.iter().enumerate() {
             let Some(argument) = arguments.get(index) else {
+                // A unit payload may be omitted: `StatusResult::Ok` and
+                // `Result[(), string]::Ok` both mean `Ok(())` (P2.4).
+                if fields.len() == 1 && *field == Type::Unit {
+                    values.push(Expr::Unit);
+                    continue;
+                }
                 self.seek_scalar_offset(expression.range.end);
                 return Err(self.fail(&format!("variant '{}::{}' needs {} payload value(s)", def.name, vname, fields.len())));
             };

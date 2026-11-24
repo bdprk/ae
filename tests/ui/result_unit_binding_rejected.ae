@@ -1,0 +1,8 @@
+fn load(path: string) -> Result[(), string] {
+    let value = try_remove_dir(path)?;
+    return try_remove_dir(path);
+}
+
+fn main() {
+    print("unused");
+}

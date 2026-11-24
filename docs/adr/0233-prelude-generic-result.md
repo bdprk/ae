@@ -79,6 +79,17 @@ Take option A for this slice, and stage the rest of P2.4 behind it.
    preset ids down by one; the runtime's `AE_*_RESULT` macro block and the
    prelude order check move in lockstep, so `try_write_file`/`try_append_file`
    and `parse_int`/`to_i64`/`find` return the same C layout.
+3c. **Unit payloads: `StatusResult` becomes `Result[(), string]` (slice 4).**
+   A variant whose single payload is `()` carries no value: the arm writes the
+   variant alone (`Result::Ok =>`), a `let` binding on `?` is rejected with a
+   pointed diagnostic, and `()` joins the payload-capable type arguments in
+   both the contract parser and the shared route. The unit payload occupies no
+   storage in the enum layout query; the C field is a placeholder byte the
+   runtime already initialises. `StatusResult` seeds the `Result[(), string]`
+   cache key, and `Result[(), string]::Ok(())` constructs and matches on both
+   backends. In generated C a unit payload or unit struct field emits a `0`
+   placeholder initializer (never empty braces) and a store into a unit field
+   writes nothing, so `-pedantic-errors` builds stay valid.
 4. **Containers follow the same ladder.** `Vec[T]`, `Map[K, V]`, fixed
    arrays `[T; N]` and slices `&[T]` become prelude generic declarations over
    the raw allocation and pointer primitives (`alloc`, `ptr_write`,

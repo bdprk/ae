@@ -31,7 +31,7 @@ Status: describes the implemented language (2026-11-15). Generic monomorphizatio
 
 ## 4. Generic Enums
 
-`enum Either[T, U] { Left(T), Right(U), Both(T, U), Neither }` — same parameter rules as structs; payloads may be type parameters or fixed flat types.
+`enum Either[T, U] { Left(T), Right(U), Both(T, U), Neither }` — same parameter rules as structs; payloads may be type parameters or fixed flat types. `()` is a valid payload and carries no value, so a variant whose only payload is unit is written without bindings (`Result::Ok =>`); `Result[(), string]` is exactly the `StatusResult` family (ADR-0233).
 
 - Construction names the instantiation: `Option[string]::Some("x")`, `Either[string, i64]::Both("n", 3)`.
 - `match` uses the **declaration name** (`Option::Some(v)`); the binding's actual type comes from the matched value (see `spec/patterns.md`).

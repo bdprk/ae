@@ -721,10 +721,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::StructLit(sid, values) => {
             let mut parts = Vec::new();
             let mut moves = Vec::new();
-            for v in values {
+            // A unit field's expression emits no text; the C member still
+            // needs an initializer (an empty slot would be a syntax error).
+            let fields = &ctx.structs[*sid].fields;
+            for (index, v) in values.iter().enumerate() {
                 let e = emit_expr(v, out, next, true, ctx);
                 moves.extend(e.moves);
-                parts.push(e.text);
+                if fields.get(index).is_some_and(|(_, ty)| *ty == Type::Unit) {
+                    parts.push("0".to_owned());
+                } else {
+                    parts.push(e.text);
+                }
             }
             let id = *next; *next += 1;
             let init = if parts.is_empty() { "0".to_owned() } else { parts.join(", ") };
@@ -737,10 +744,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::EnumLit(_name, eid, vidx, values) => {
             let mut parts = Vec::new();
             let mut moves = Vec::new();
-            for value in values.iter() {
+            // A unit payload has no value to emit; its C field still needs an
+            // initializer, and `{  }` is rejected by `-pedantic-errors`.
+            let fields = &ctx.enums[*eid].variants[*vidx].1;
+            for (index, value) in values.iter().enumerate() {
                 let e = emit_expr(value, out, next, true, ctx);
                 moves.extend(e.moves);
-                parts.push(e.text);
+                if fields.get(index).is_some_and(|ty| *ty == Type::Unit) {
+                    parts.push("0".to_owned());
+                } else {
+                    parts.push(e.text);
+                }
             }
             let id = *next; *next += 1;
             let payload = if parts.is_empty() { "{ 0 }".to_owned() } else { format!("{{ .v{vidx} = {{ {} }} }}", parts.join(", ")) };
@@ -1562,6 +1576,12 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 null_moves(out, &value.moves);
             }
             Statement::FieldStore(id, fname, fty, value, base_ty) => {
+                if *fty == Type::Unit {
+                    // A unit field has no storage: run the right side for side
+                    // effects, then write nothing (`t = ;` would be invalid C).
+                    let value = emit_expr(value, out, next, true, ctx);
+                    null_moves(out, &value.moves);
+                } else {
                 // Overwriting an owned field releases the old value first.
                 // A mutable borrow writes through a pointer, so
                 // every access reads `v{id}->field` instead of `v{id}.field`
@@ -1590,6 +1610,7 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 out.push_str(&release_old);
                 out.push_str(&format!("    v{id}{}{} = t{temp};\n", dot, fname));
                 null_moves(out, &value.moves);
+                }
             }
             Statement::Assign(id, e, release_old) => {
                 let t = emit_expr(e, out, next, true, ctx);

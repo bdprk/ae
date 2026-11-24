@@ -319,8 +319,9 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
         // Metadata: byte size, modification time in seconds since the Unix
         // epoch, and whether the target is a directory.
         ("FileResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::Int(IntTy::I64), Type::Bool]), ("Err", vec![Type::String])], &[]),
-        // Operations with no value to report: success carries nothing.
-        ("StatusResult", vec![("Ok", vec![]), ("Err", vec![Type::String])], &[]),
+        // Operations with no value to report: success carries the unit payload, so
+        // `Result[(), string]` is exactly this family.
+        ("StatusResult", vec![("Ok", vec![Type::Unit]), ("Err", vec![Type::String])], &["Result"]),
         // JSON answers: a document field can be a flag, so booleans need their
         // own result shape (there is no "true" placeholder like 0 or "").
         ("BoolResult", vec![("Ok", vec![Type::Bool]), ("Err", vec![Type::String])], &["Result"]),
@@ -599,6 +600,9 @@ impl EnumDef {
             for ty in fields {
                 let (sz, al) = match ty {
                     Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool => ty.scalar_c_layout().unwrap_or((8, 8)),
+                    // The unit payload occupies no storage (the C field is one
+                    // `uint8_t`, but it never participates in a layout query).
+                    Type::Unit => (0, 1),
                     Type::String => (16, 8),
                     Type::Struct(k) => structs[*k].c_layout(structs).map(|(s, a, _)| (s, a)).unwrap_or((8, 8)),
                     _ => (8, 8),

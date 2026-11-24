@@ -13,21 +13,21 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
     format!("{gid}:{}", arguments.iter().map(|ty| ty.name(ctx)).collect::<Vec<_>>().join(","))
 }
 
-/// P2.4: the preset families whose `Ok` payload is one flat type are exactly
-/// the `Result[payload, string]` instantiations of the prelude generic.
-/// Seeding the specialization cache makes a program's own `Result[...]`
-/// spelling resolve to the preset layout — one type, one C id — while the
-/// family name stays usable as a pattern alias. `WriteResult` shares the
-/// `IntResult` instantiation (identical payloads) and has no id of its own.
-/// Families with no payload (StatusResult) or several `Ok` fields
-/// (FileResult, CommandResult) stay on the legacy ladder until unit-payload
-/// patterns and payload structs land.
+/// P2.4: the preset families whose `Ok` payload is a single flat type (unit
+/// included) are exactly the `Result[payload, string]` instantiations of the
+/// prelude generic. Seeding the specialization cache makes a program's own
+/// `Result[...]` spelling resolve to the preset layout — one type, one C id —
+/// while the family name stays usable as a pattern alias. `WriteResult` shares
+/// the `IntResult` instantiation (identical payloads) and has no id of its
+/// own. Families with several `Ok` fields (FileResult, CommandResult) stay on
+/// the legacy ladder until payload structs land.
 pub(super) fn seed_preset_result_instantiations(generics: &mut Generics, enum_names: &HashMap<String, usize>, ctx: &CompileContext) {
     let Some(&gid) = generics.names.get("Result") else { return };
-    let families: [(&str, Vec<Type>); 5] = [
+    let families: [(&str, Vec<Type>); 6] = [
         ("ReadResult", vec![Type::String, Type::String]),
         ("IntResult", vec![Type::Int(IntTy::I64), Type::String]),
         ("DirResult", vec![Type::StrVec, Type::String]),
+        ("StatusResult", vec![Type::Unit, Type::String]),
         ("BoolResult", vec![Type::Bool, Type::String]),
         ("FloatResult", vec![Type::Float(FloatTy::F64), Type::String]),
     ];
@@ -477,6 +477,8 @@ impl Parser<'_> {
                     })?;
                     matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
                 }
+                // `()` as a type argument: the unit payload of `Result[(), string]`.
+                [Token { kind: Kind::LParen, .. }, Token { kind: Kind::RParen, .. }] => Some(Type::Unit),
                 [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
                  Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
                     if name == "vec" && !self.subst.contains_key(name) => match element.as_str() {
@@ -561,8 +563,8 @@ impl Parser<'_> {
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let ty = self.named_type()?;
-        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_)) {
-            return Err(self.fail("type arguments must be i64, bool, f64, string, vec, or vec[string]"));
+        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_)) {
+            return Err(self.fail("type arguments must be i64, bool, f64, char, string, vec, vec[string], fn(...), or ()"));
         }
         Ok(ty)
     }

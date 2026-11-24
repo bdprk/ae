@@ -30,6 +30,9 @@ impl<'a> Parser<'a> {
         let fields = def.variants[0].1.clone();
         let bound = match binding {
             Some(id) => {
+                if fields.len() == 1 && fields[0] == Type::Unit {
+                    return Err(self.fail(&format!("'{}::{}' carries no value; use a bare `?`", def.name, def.variants[0].0)));
+                }
                 if fields.len() != 1 {
                     return Err(self.fail(&format!("'{}::{}' carries {} values; a binding `let` needs exactly one (use a bare statement to discard)", def.name, def.variants[0].0, fields.len())));
                 }
@@ -98,6 +101,9 @@ impl<'a> Parser<'a> {
             }
             seen[vidx] = true;
             let fields = def.variants[vidx].1.clone();
+            // A unit payload carries no value, so the arm writes the variant
+            // alone (`Result::Ok =>`) — the same form an empty payload takes.
+            let unit_payload = fields.len() == 1 && fields[0] == Type::Unit;
             // The declaration decides the payload shape; `()` is a parse-level
             // empty list, so an empty or mismatched list lands here.
             let payloads = match payload {
@@ -105,7 +111,11 @@ impl<'a> Parser<'a> {
                     return Err(self.error_at(variant_range.end,
                         &format!("variant '{}::{}' has no payload", def.name, vname)));
                 }
-                None if !fields.is_empty() => {
+                Some(patterns) if unit_payload => {
+                    return Err(self.error_at(patterns[0].range.start,
+                        &format!("variant '{}::{}' carries no value; write the arm without bindings", def.name, vname)));
+                }
+                None if !fields.is_empty() && !unit_payload => {
                     return Err(self.error_at(variant_range.start,
                         &format!("variant '{}::{}' needs {} binding(s)", def.name, vname, fields.len())));
                 }

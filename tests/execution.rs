@@ -9581,3 +9581,42 @@ fn p2_4_preset_result_int_alias_parity() {
         );
     }
 }
+
+/// P2.4 slice 4 (ADR-0233): `StatusResult` is `Result[(), string]`; the unit
+/// payload takes no bindings, and both the constructor and the pattern form
+/// agree across the C emitters and `--interp`.
+#[test]
+fn p2_4_preset_result_unit_alias_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/preset_result_unit_alias.ae");
+    let expected = fs::read_to_string(root.join("tests/run/preset_result_unit_alias.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}

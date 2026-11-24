@@ -54,7 +54,7 @@ A custom enum participates in the error mechanism when it matches one of two sha
 - `{ Ok(...), Err(string) }` — the shape of all nine preset families, and of the prelude `Result[T, string]` instantiation.
 - `{ Some(T), None }` — the shape of the preset `Option[T]` (also public to all files without import).
 
-The success payload may be any owned type (`string`, `vec`, struct, enum); the failure path releases it per the type's release routine when dropped. `Result[T, E]` itself is predefined (ADR-0233): `Result[i64, string]` propagates like any preset family. `ReadResult`, `IntResult`, `DirResult`, `BoolResult` and `FloatResult` are the `Result[string, string]`, `Result[i64, string]`, `Result[vec[string], string]`, `Result[bool, string]` and `Result[f64, string]` instantiations; `WriteResult` shares the `IntResult` instantiation. Either spelling names the same type, and a pattern may use either declaration name.
+The success payload may be any owned type (`string`, `vec`, struct, enum); the failure path releases it per the type's release routine when dropped. `Result[T, E]` itself is predefined (ADR-0233): `Result[i64, string]` propagates like any preset family. `ReadResult`, `IntResult`, `DirResult`, `StatusResult`, `BoolResult` and `FloatResult` are the `Result[string, string]`, `Result[i64, string]`, `Result[vec[string], string]`, `Result[(), string]`, `Result[bool, string]` and `Result[f64, string]` instantiations; `WriteResult` shares the `IntResult` instantiation. Either spelling names the same type, and a pattern may use either declaration name. A variant whose single payload is `()` writes the arm without bindings (`Result::Ok =>`); a `let` binding on `?` is rejected because there is no value to bind.
 
 ## 5. Boundary Rules
 
