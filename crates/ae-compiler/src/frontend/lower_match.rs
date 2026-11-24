@@ -83,7 +83,9 @@ impl<'a> Parser<'a> {
             };
             // An instantiated enum is matched by its declaration name:
             // `Option::Some(v)` covers Option[string] and Option[i64] alike.
-            if enum_name != def.pattern {
+            // A preset family unified with its `Result[p, string]`
+            // instantiation also answers to that generic name (P2.4).
+            if enum_name != def.pattern && !def.aliases.iter().any(|alias| *alias == enum_name) {
                 return Err(self.error_at(tree.range.start,
                     &format!("pattern must name the matched enum ('{}::Variant')", def.pattern)));
             }

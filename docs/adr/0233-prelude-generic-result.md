@@ -57,6 +57,20 @@ Take option A for this slice, and stage the rest of P2.4 behind it.
    compiler-emitted aliases (`ae_e{eid}` of the instantiation) instead of the
    hard-coded `ae_e0`..`ae_e8`. `prelude_enums()` and the runtime's nine
    macro blocks are deleted in that slice.
+3a. **Unification without user-visible change (slice 2).** The four families
+   whose `Ok` payload is one flat type and whose argument list is unique —
+   `ReadResult`, `DirResult`, `BoolResult`, `FloatResult` — are seeded into
+   the generic-enum specialization cache when the prelude loads:
+   `Result[string, string]`, `Result[vec[string], string]`,
+   `Result[bool, string]` and `Result[f64, string]` resolve to the preset
+   ids, so a program's spelling and the historical family name are one type
+   and one C layout. `EnumDef.aliases` lets a pattern use either declaration
+   name, and `?` sees a single enum type across the two spellings. Ids,
+   layouts, runtime macros and generated C are unchanged. Families with a
+   duplicated argument list (`WriteResult`/`IntResult`), with no payload
+   (`StatusResult`), or with several `Ok` fields (`FileResult`,
+   `CommandResult`) stay legacy until deduplication, unit-payload pattern
+   support and payload structs land.
 4. **Containers follow the same ladder.** `Vec[T]`, `Map[K, V]`, fixed
    arrays `[T; N]` and slices `&[T]` become prelude generic declarations over
    the raw allocation and pointer primitives (`alloc`, `ptr_write`,

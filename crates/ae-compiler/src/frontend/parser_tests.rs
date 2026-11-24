@@ -65,13 +65,13 @@ use super::*;
         struct_names.insert("Guard".into(), 4);
         let mut enums = vec![EnumDef {
             name: "Reading", variants: vec![("Value".into(), vec![Type::Int(IntTy::I64)]), ("Empty".into(), vec![])],
-            file: "case.ae".into(), public: false, pattern: "Reading".into(), is_copy: false,
+            file: "case.ae".into(), public: false, pattern: "Reading".into(), aliases: Vec::new(), is_copy: false,
         }];
         let mut enum_names = HashMap::new();
         enum_names.insert("Reading".into(), 0);
         enums.push(EnumDef {
             name: "Maybe", variants: vec![("Some".into(), vec![Type::Int(IntTy::I64)]), ("None".into(), vec![])],
-            file: "case.ae".into(), public: false, pattern: "Maybe".into(), is_copy: false,
+            file: "case.ae".into(), public: false, pattern: "Maybe".into(), aliases: Vec::new(), is_copy: false,
         });
         enum_names.insert("Maybe".into(), 1);
         functions.insert("step".into(), Signature {

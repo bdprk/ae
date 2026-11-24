@@ -13,6 +13,29 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
     format!("{gid}:{}", arguments.iter().map(|ty| ty.name(ctx)).collect::<Vec<_>>().join(","))
 }
 
+/// P2.4: the preset families whose `Ok` payload is one flat type are exactly
+/// the `Result[payload, string]` instantiations of the prelude generic.
+/// Seeding the specialization cache makes a program's own `Result[...]`
+/// spelling resolve to the preset layout — one type, one C id — while the
+/// family name stays usable as a pattern alias. Families with no flat payload
+/// (StatusResult), several `Ok` fields (FileResult, CommandResult) or a
+/// duplicated argument list (WriteResult/IntResult) stay on the legacy
+/// ladder until payload structs and deduplication land.
+pub(super) fn seed_preset_result_instantiations(generics: &mut Generics, enum_names: &HashMap<String, usize>, ctx: &CompileContext) {
+    let Some(&gid) = generics.names.get("Result") else { return };
+    let families: [(&str, Vec<Type>); 4] = [
+        ("ReadResult", vec![Type::String, Type::String]),
+        ("DirResult", vec![Type::StrVec, Type::String]),
+        ("BoolResult", vec![Type::Bool, Type::String]),
+        ("FloatResult", vec![Type::Float(FloatTy::F64), Type::String]),
+    ];
+    for (alias, args) in families {
+        let Some(&eid) = enum_names.get(alias) else { continue };
+        generics.done.insert(specialization_key(gid, &args, ctx), eid);
+        generics.enum_origin.insert(eid, (gid, args));
+    }
+}
+
 pub(super) fn scalar_type(name: &str) -> Option<Type> {
     ae_ty::Scalar::from_spelling(name).map(|scalar| scalar.ty())
 }
@@ -270,7 +293,7 @@ impl Parser<'_> {
                     }
                 }
             }
-            self.enums.push(EnumDef { name: interned, variants: concrete, file: self.file.clone(), public, pattern: name, is_copy });
+            self.enums.push(EnumDef { name: interned, variants: concrete, file: self.file.clone(), public, pattern: name, aliases: Vec::new(), is_copy });
         } else {
             let gid = self.generics.defs.len();
             self.generics.names.insert(name.clone(), gid);
@@ -417,7 +440,7 @@ impl Parser<'_> {
         let display = format!("{}[{}]", def.name, args.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "));
         let interned: &'static str = Box::leak(display.into_boxed_str());
         let eid = self.enums.len();
-        self.enums.push(EnumDef { name: interned, variants, file: def.file, public: def.public, pattern: def.name, is_copy: def.is_copy });
+        self.enums.push(EnumDef { name: interned, variants, file: def.file, public: def.public, pattern: def.name, aliases: Vec::new(), is_copy: def.is_copy });
         self.generics.done.insert(key, eid);
         // Method calls on the instantiation resolve through its generic impl
         // block (same machinery as generic structs, ADR-0187/0196).

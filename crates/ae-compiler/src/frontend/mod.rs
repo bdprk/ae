@@ -306,31 +306,34 @@ const MATH_FNS: &[(&str, &str, usize)] = &[
 // exist (ADR-11).
 #[allow(clippy::type_complexity)]
 fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
-    let defs: Vec<(&'static str, Vec<(&'static str, Vec<Type>)>)> = vec![
-        ("ReadResult", vec![("Ok", vec![Type::String]), ("Err", vec![Type::String])]),
-        ("WriteResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])]),
-        ("IntResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])]),
-        ("DirResult", vec![("Ok", vec![Type::StrVec]), ("Err", vec![Type::String])]),
+    // `aliases` names the generic `Result[...]` spelling once a family is
+    // unified with its instantiation (P2.4). A preset with no alias is still
+    // a legacy monomorphic layout and is next on the migration ladder.
+    let defs: Vec<(&'static str, Vec<(&'static str, Vec<Type>)>, &'static [&'static str])> = vec![
+        ("ReadResult", vec![("Ok", vec![Type::String]), ("Err", vec![Type::String])], &["Result"]),
+        ("WriteResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])], &[]),
+        ("IntResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])], &[]),
+        ("DirResult", vec![("Ok", vec![Type::StrVec]), ("Err", vec![Type::String])], &["Result"]),
         // Metadata: byte size, modification time in seconds since the Unix
         // epoch, and whether the target is a directory.
-        ("FileResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::Int(IntTy::I64), Type::Bool]), ("Err", vec![Type::String])]),
+        ("FileResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::Int(IntTy::I64), Type::Bool]), ("Err", vec![Type::String])], &[]),
         // Operations with no value to report: success carries nothing.
-        ("StatusResult", vec![("Ok", vec![]), ("Err", vec![Type::String])]),
+        ("StatusResult", vec![("Ok", vec![]), ("Err", vec![Type::String])], &[]),
         // JSON answers: a document field can be a flag, so booleans need their
         // own result shape (there is no "true" placeholder like 0 or "").
-        ("BoolResult", vec![("Ok", vec![Type::Bool]), ("Err", vec![Type::String])]),
+        ("BoolResult", vec![("Ok", vec![Type::Bool]), ("Err", vec![Type::String])], &["Result"]),
         // A finished child process: a non-zero status is a result, not an
         // error, so the status travels in Ok next to the output it produced.
-        ("CommandResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::String]), ("Err", vec![Type::String])]),
+        ("CommandResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::String]), ("Err", vec![Type::String])], &[]),
         // map[string, f64] lookups (ADR-65). Appended last so every existing
         // prelude enum keeps its id; the runtime names it ae_e8.
-        ("FloatResult", vec![("Ok", vec![Type::Float(FloatTy::F64)]), ("Err", vec![Type::String])]),
+        ("FloatResult", vec![("Ok", vec![Type::Float(FloatTy::F64)]), ("Err", vec![Type::String])], &["Result"]),
     ];
     let mut enums = Vec::new();
     let mut names = HashMap::new();
-    for (name, variants) in defs {
+    for (name, variants, aliases) in defs {
         names.insert(name.to_owned(), enums.len());
-        enums.push(EnumDef { name, variants: variants.into_iter().map(|(v, fields)| (v.to_owned(), fields)).collect(), file: PRELUDE.to_owned(), public: true, pattern: name.to_owned(), is_copy: false });
+        enums.push(EnumDef { name, variants: variants.into_iter().map(|(v, fields)| (v.to_owned(), fields)).collect(), file: PRELUDE.to_owned(), public: true, pattern: name.to_owned(), aliases: aliases.to_vec(), is_copy: false });
     }
     (enums, names)
 }
@@ -566,7 +569,19 @@ impl StructDef {
 // version restricts payload fields to i64/bool/string so no enum can contain
 // itself and every payload has a trivial release.
 #[derive(Debug, Clone)]
-pub(super) struct EnumDef { name: &'static str, variants: Vec<(String, Vec<Type>)>, file: String, public: bool, pattern: String, is_copy: bool }
+pub(super) struct EnumDef {
+    name: &'static str,
+    variants: Vec<(String, Vec<Type>)>,
+    file: String,
+    public: bool,
+    pattern: String,
+    /// Alternative declaration names a pattern may use for this type. The
+    /// preset result families become `Result[payload, string]` instantiations
+    /// (P2.4), so `Result::Ok` and the historical family name both match the
+    /// same value; user enums carry no aliases.
+    aliases: Vec<&'static str>,
+    is_copy: bool,
+}
 
 impl EnumDef {
     fn c_layout(&self, structs: &[StructDef]) -> (i64, i64) {

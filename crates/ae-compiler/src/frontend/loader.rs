@@ -314,6 +314,9 @@ fn load_program_full(entry: &Path, recover: bool, imports: &PackageImports) -> R
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
     let mut ctx = CompileContext::with_package_imports(imports.clone());
+    // P2.4: the flat-payload preset families are the `Result[p, string]`
+    // instantiations; seed the cache so both spellings name one type.
+    types::seed_preset_result_instantiations(&mut generics, &enum_names, &ctx);
     let mut next_id = 0usize;
     let mut files = Vec::new();
     let mut mains = 0usize;

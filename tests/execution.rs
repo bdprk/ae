@@ -9503,3 +9503,42 @@ fn p2_4_prelude_result_parity() {
         );
     }
 }
+
+/// P2.4 slice 2 (ADR-0233): the flat-payload preset result families are the
+/// `Result[p, string]` instantiations. Both spellings must name one type and
+/// agree across the C emitters and `--interp`.
+#[test]
+fn p2_4_preset_result_alias_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/preset_result_aliases.ae");
+    let expected = fs::read_to_string(root.join("tests/run/preset_result_aliases.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
