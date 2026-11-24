@@ -1068,18 +1068,22 @@ static ae_string ae_read_file(const char *path, size_t line, size_t column) {
     ae_string out = { buffer, (int64_t)size };
     return out;
 }
-static ae_vec ae_read_file_bytes(ae_strview path, int64_t offset, int64_t limit, size_t line, size_t column) {
-    if (offset < 0) ae_fail("negative file read offset", line, column);
-    if (limit < 0) ae_fail("negative file read limit", line, column);
-    if (path.len > 0 && memchr(path.ptr, '\0', (size_t)path.len)) ae_fail("cannot open file", line, column);
+static const char *ae_read_file_bytes_into(ae_strview path, int64_t offset, int64_t limit, ae_vec *result) {
+    *result = (ae_vec){ NULL, 0, 0 };
+    if (offset < 0) return "negative file read offset";
+    if (limit < 0) return "negative file read limit";
+    if (path.len > 0 && memchr(path.ptr, '\0', (size_t)path.len)) return "cannot open file";
     FILE *f = ae_fopen(path.ptr, "rb");
-    if (!f) ae_fail("cannot open file", line, column);
+    if (!f) return "cannot open file";
 #ifdef _WIN32
     const bool seek_failed = _fseeki64(f, offset, SEEK_SET) != 0;
 #else
     const bool seek_failed = offset > LONG_MAX || fseek(f, (long)offset, SEEK_SET) != 0;
 #endif
-    if (seek_failed) { fclose(f); ae_fail("cannot seek file", line, column); }
+    if (seek_failed) {
+        fclose(f);
+        return "cannot seek file";
+    }
 
     ae_vec out = { NULL, 0, 0 };
     const char *failure = NULL;
@@ -1108,9 +1112,24 @@ static ae_vec ae_read_file_bytes(ae_strview path, int64_t offset, int64_t limit,
         if (read < wanted) break;
     }
     fclose(f);
-    if (failure) { ae_vec_release(&out); ae_fail(failure, line, column); }
-    // The ordinary empty vector remains pushable.
-    return out.data ? out : ae_vec_new(line, column);
+    if (failure) {
+        ae_vec_release(&out);
+        return failure;
+    }
+    if (!out.data) {
+        // Match the capacity of an ordinary empty vector so it remains pushable.
+        out.cap = 4;
+        out.data = ae_alloc_try((size_t)out.cap * sizeof(*out.data));
+        if (!out.data) return "out of memory";
+    }
+    *result = out;
+    return NULL;
+}
+static ae_vec ae_read_file_bytes(ae_strview path, int64_t offset, int64_t limit, size_t line, size_t column) {
+    ae_vec out;
+    const char *failure = ae_read_file_bytes_into(path, offset, limit, &out);
+    if (failure) ae_fail(failure, line, column);
+    return out;
 }
 static int64_t ae_write_file(ae_string path, ae_strview content, size_t line, size_t column) {
     FILE *f = ae_fopen(path.ptr, "wb");

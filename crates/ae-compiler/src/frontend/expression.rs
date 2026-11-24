@@ -1025,24 +1025,43 @@ impl Parser<'_> {
                     self.take(Kind::LParen)?;
                     self.take(Kind::RParen)?;
                     (Expr::Args(line, col), Type::StrVec)
-                } else if name == "read_file_bytes" && *self.current() == Kind::LParen {
+                } else if (name == "read_file_bytes" && *self.current() == Kind::LParen)
+                    || (name == "try_read_file_bytes" && *self.current() == Kind::LBracket)
+                {
+                    let ty = if name == "try_read_file_bytes" {
+                        self.take(Kind::LBracket)?;
+                        let ty = self.named_type()?;
+                        let Type::Enum(_, eid) = ty else {
+                            return Err(self.fail("try_read_file_bytes needs an enum shaped { Ok(vec), Err(string) }"));
+                        };
+                        let valid = matches!(self.enums[eid].variants.as_slice(), [(ok, bytes), (err, message)]
+                            if ok == "Ok" && bytes.as_slice() == [Type::Vec]
+                                && err == "Err" && message.as_slice() == [Type::String]);
+                        if !valid {
+                            return Err(self.fail("try_read_file_bytes needs an enum shaped { Ok(vec), Err(string) }"));
+                        }
+                        self.take(Kind::RBracket)?;
+                        ty
+                    } else {
+                        Type::Vec
+                    };
                     self.take(Kind::LParen)?;
                     let (path, path_ty) = self.expression(0, false)?;
                     if !matches!(path_ty, Type::String | Type::StrView) {
-                        return Err(self.fail("read_file_bytes expects a string path"));
+                        return Err(self.fail(&format!("{name} expects a string path")));
                     }
                     self.take(Kind::Comma)?;
                     let (offset, offset_ty) = self.expression(0, false)?;
                     if offset_ty != Type::Int {
-                        return Err(self.fail("read_file_bytes expects an i64 offset"));
+                        return Err(self.fail(&format!("{name} expects an i64 offset")));
                     }
                     self.take(Kind::Comma)?;
                     let (limit, limit_ty) = self.expression(0, false)?;
                     if limit_ty != Type::Int {
-                        return Err(self.fail("read_file_bytes expects an i64 limit"));
+                        return Err(self.fail(&format!("{name} expects an i64 limit")));
                     }
                     self.take(Kind::RParen)?;
-                    (Expr::ReadFileBytes(Box::new(path), Box::new(offset), Box::new(limit), vline, vcol), Type::Vec)
+                    (Expr::ReadFileBytes(Box::new(path), Box::new(offset), Box::new(limit), ty, vline, vcol), ty)
                 } else if name == "try_read_file" && *self.current() == Kind::LParen {
                     let (line, col) = (vline, vcol);
                     let ty = self.prelude_type("ReadResult");

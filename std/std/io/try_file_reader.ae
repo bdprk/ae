@@ -1,0 +1,14 @@
+use "file_reader.ae";
+
+pub enum FileBytesResult {
+    Ok(vec),
+    Err(string),
+}
+
+// Read and advance the cursor on success, including a short read at EOF.
+// An error leaves the cursor at the previous offset so the call can retry.
+pub fn try_file_reader_read(reader: &mut FileByteReader, max_bytes: i64) -> FileBytesResult {
+    let chunk = try_read_file_bytes[FileBytesResult](reader.path, reader.offset, max_bytes)?;
+    reader.offset = reader.offset + len(chunk);
+    return FileBytesResult::Ok(chunk);
+}

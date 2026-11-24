@@ -512,8 +512,12 @@ impl<'a> TreePrinter<'a> {
                 out.push_str(&format!(") @ {}:{}", line, col));
             }
             Expr::MapKeys(place, line, col) => out.push_str(&format!("keys({}) @ {}:{}", self.map_place_text(place), line, col)),
-            Expr::ReadFileBytes(path, offset, limit, line, col) => {
-                out.push_str("read_file_bytes(");
+            Expr::ReadFileBytes(path, offset, limit, ty, line, col) => {
+                if *ty == Type::Vec {
+                    out.push_str("read_file_bytes(");
+                } else {
+                    out.push_str(&format!("try_read_file_bytes[{}](", ty.name()));
+                }
                 self.expression(path, out);
                 out.push_str(", ");
                 self.expression(offset, out);

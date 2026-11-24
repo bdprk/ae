@@ -396,7 +396,7 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
         Expr::ReadFile(path, ..) => ("read_file", vec![lower_operand(path, bindings, lowering)]),
-        Expr::ReadFileBytes(path, offset, limit, ..) => ("read_file_bytes", vec![
+        Expr::ReadFileBytes(path, offset, limit, ty, ..) => (if *ty == Type::Vec { "read_file_bytes" } else { "try_read_file_bytes" }, vec![
             lower_operand(path, bindings, lowering), lower_operand(offset, bindings, lowering),
             lower_operand(limit, bindings, lowering),
         ]),
@@ -511,7 +511,8 @@ pub(super) fn expr_type(expr: &Expr) -> Type {
         | Expr::Slice(..) | Expr::FloatToString(..) | Expr::ToString(..)
         | Expr::PathJoin(..) | Expr::PathName(..) | Expr::PathParent(..)
         | Expr::Utf8Prefix(..) => Type::String,
-        Expr::Bytes(..) | Expr::ReadFileBytes(..) => Type::Vec,
+        Expr::Bytes(..) => Type::Vec,
+        Expr::ReadFileBytes(_, _, _, ty, ..) => *ty,
         Expr::Neg(value, ..) => expr_type(value),
         Expr::ClosureLit(id) => Type::Closure(*id),
         Expr::MapInc(place, ..) if place.f64_value() => Type::F64,

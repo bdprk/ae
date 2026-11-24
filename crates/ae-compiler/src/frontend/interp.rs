@@ -1392,7 +1392,7 @@ fn eval_expr(
                 Err(_) => Err(trap("cannot read file", *line, *col)),
             }
         }
-        Expr::ReadFileBytes(path, offset, limit, line, col) => {
+        Expr::ReadFileBytes(path, offset, limit, ty, line, col) => {
             use std::io::{Read as _, Seek as _, SeekFrom};
 
             let path = path_operand(eval_expr(env, path, locals, caller_locals, false))?;
@@ -1402,31 +1402,44 @@ fn eval_expr(
             let Val::Int(mut remaining) = eval_expr(env, limit, locals, caller_locals, false)? else {
                 return Err(Flow::Trap("internal: file read limit operand".to_owned()));
             };
-            if offset < 0 {
-                return Err(trap("negative file read offset", *line, *col));
-            }
-            if remaining < 0 {
-                return Err(trap("negative file read limit", *line, *col));
-            }
-            let mut file = std::fs::File::open(path)
-                .map_err(|_| trap("cannot open file", *line, *col))?;
-            file.seek(SeekFrom::Start(offset as u64))
-                .map_err(|_| trap("cannot seek file", *line, *col))?;
-            let mut bytes = Vec::new();
-            let mut buffer = [0u8; 4096];
-            while remaining > 0 {
-                let count = remaining.min(buffer.len() as i64) as usize;
-                match file.read(&mut buffer[..count]) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        bytes.extend(buffer[..read].iter().copied().map(i64::from));
-                        remaining -= read as i64;
+            let read_result: Result<Vec<i64>, &'static str> = (|| {
+                if offset < 0 {
+                    return Err("negative file read offset");
+                }
+                if remaining < 0 {
+                    return Err("negative file read limit");
+                }
+                let mut file = std::fs::File::open(path).map_err(|_| "cannot open file")?;
+                file.seek(SeekFrom::Start(offset as u64)).map_err(|_| "cannot seek file")?;
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let max_len = (isize::MAX as usize) / std::mem::size_of::<i64>();
+                while remaining > 0 {
+                    let count = remaining.min(buffer.len() as i64) as usize;
+                    match file.read(&mut buffer[..count]) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            if read > max_len - bytes.len() {
+                                return Err("vector too large");
+                            }
+                            bytes.try_reserve(read).map_err(|_| "out of memory")?;
+                            bytes.extend(buffer[..read].iter().copied().map(i64::from));
+                            remaining -= read as i64;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => return Err("cannot read file"),
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => return Err(trap("cannot read file", *line, *col)),
+                }
+                Ok(bytes)
+            })();
+            if *ty == Type::Vec {
+                read_result.map(Val::VecI).map_err(|error| trap(error, *line, *col))
+            } else {
+                match read_result {
+                    Ok(bytes) => result_value(env, ty, true, vec![Val::VecI(bytes)]),
+                    Err(error) => result_value(env, ty, false, vec![Val::Str(error.to_owned())]),
                 }
             }
-            Ok(Val::VecI(bytes))
         }
         Expr::TryReadFile(path, ty, ..) => {
             let p = path_operand(eval_expr(env, path, locals, caller_locals, false))?;

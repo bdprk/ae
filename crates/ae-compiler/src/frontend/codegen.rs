@@ -417,7 +417,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             if t.owned { drop_owned_temp(out, &t); }
             Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true }
         }
-        Expr::ReadFileBytes(path, offset, limit, line, col) => {
+        Expr::ReadFileBytes(path, offset, limit, ty, line, col) => {
             let path = emit_expr(path, out, next, false);
             // Later arguments may move the string the path borrowed.
             let path_id = *next; *next += 1;
@@ -428,9 +428,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             out.push_str(&format!("    int64_t t{offset_id} = {};\n", offset.text));
             let limit = emit_expr(limit, out, next, false);
             let id = *next; *next += 1;
-            out.push_str(&format!("    ae_vec t{id} = ae_read_file_bytes(AE_VIEW(t{path_id}), t{offset_id}, {}, {line}, {col});\n", limit.text));
-            out.push_str(&format!("    ae_str_release(&t{path_id});\n"));
-            Emitted { text: format!("t{id}"), ty: Type::Vec, owned: true, moves: Vec::new(), materialized: true }
+            if let Type::Enum(_, eid) = *ty {
+                let chunk_id = *next; *next += 1;
+                let error_id = *next; *next += 1;
+                out.push_str(&format!("    ae_vec t{chunk_id};\n    const char *t{error_id} = ae_read_file_bytes_into(AE_VIEW(t{path_id}), t{offset_id}, {}, &t{chunk_id});\n", limit.text));
+                out.push_str(&format!("    ae_str_release(&t{path_id});\n"));
+                out.push_str(&format!("    ae_e{eid} t{id} = t{error_id} ? (ae_e{eid}) {{ AE_E{eid}_1, {{ .v1 = {{ ae_str_from(t{error_id}, {line}, {col}) }} }} }} : (ae_e{eid}) {{ AE_E{eid}_0, {{ .v0 = {{ t{chunk_id} }} }} }};\n"));
+            } else {
+                out.push_str(&format!("    ae_vec t{id} = ae_read_file_bytes(AE_VIEW(t{path_id}), t{offset_id}, {}, {line}, {col});\n", limit.text));
+                out.push_str(&format!("    ae_str_release(&t{path_id});\n"));
+            }
+            Emitted { text: format!("t{id}"), ty: *ty, owned: true, moves: Vec::new(), materialized: true }
         }
         Expr::WriteFile(path, content, line, col) => {
             let p = emit_expr(path, out, next, false);
