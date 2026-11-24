@@ -78,3 +78,24 @@ Take option A, in this order.
 - Memory growth: the header adds one word per vector value; acceptable against
   the Charter's footprint budget and removed again by monomorphized stdlib
   types in slice 5.
+## Implementation checklist (slice order)
+
+1. **Element interner + type constructor.** `ae-ty` gains an element-type
+   interner (`ElemId`, owned by `TypeInterner` like pointees/signatures) and
+   `TyKind::Vector(ElemId)` / `TyKind::VectorRef(ElemId)`. Adding the variants
+   turns every exhaustive `match Type` into a compile error, which is the
+   migration list; each site maps the three current kinds to interned
+   `i64`/`string`/`f64` elements first. Producers keep emitting the old
+   variants behind one `canonical_vector` helper until their module migrates.
+2. **Module-by-module conversion.** Lowering literals and builtins, MIR,
+   codegen, interpreter, borrow scope, dumps; delete `Vec`/`StrVec`/`VecF`
+   and their refs last with a byte-parity gate against the previous commit.
+3. **Runtime header + typed accessors.** One `ae_vector` header and one map
+   header; the three C families become accessors over it; `MapOf(K, V)`.
+4. **Element kinds.** `Copy` scalars and `Copy` structs first, then owned
+   structs/enums with per-instantiation drop glue.
+5. **Arrays and slices.** `[T; N]` literals/parameters, then `&[T]`/`&mut [T]`
+   fat pointers with borrow tracking.
+6. **Stdlib takeover.** `std/alloc` `RawVec`/`Vec`/`Map` over the allocator
+   trait, `vec[...]`/`map_new` lowering to the stdlib constructors, and the
+   container entries deleted from the intrinsic allowlist.
