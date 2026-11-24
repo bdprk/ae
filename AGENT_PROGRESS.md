@@ -395,3 +395,5 @@
 
 - 2026-11-25 02:30 (+08:00): **P1.4 closes: M0.2.08, R3a and R3c flip.** All P1.4 exit conditions are met: parser.rs 436 lines, typed body/expression parsers deleted, one frontend route, zero typed-expression fallbacks (ladder + ui), dual-platform suite 532/0, dual-platform ab_gate 50 examples + 663 CLI invocations with 0 diffs, WSL sanitize+leak 41/41 and leak 0, and `diff_fuzz.py --seeds 10000` with 0 failures (5.55 seeds/s, 8 jobs). The ledger flips P1.4, M0.2.08, R3a and R3c with the evidence recorded under P1.4's Exit; the width-migration commit's WSL leg is running in the background.
 
+- 2026-11-25 02:50 (+08:00): **Width migration verified on both platforms.** WSL workspace suite 532/0, WSL 50k mutation green, and the WSL A/B gate against 8197dd6 compared 50 example entry points and 663 CLI fixture invocations with zero differences; Windows had the same A/B result. The ledger's slice-3 evidence is updated.
+
