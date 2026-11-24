@@ -399,3 +399,5 @@
 
 - 2026-11-25 04:00 (+08:00): **P2.1 slice 4: scalar `as` casts (i64↔f64).** ScalarCast flows grammar → resolver inference → HIR → gate → lowering → Expr::ScalarCast → MIR name/codegen/interp; int→float rounds, float→int truncates and traps via the new `ae_f64_to_i64_trunc` helper, non-numeric targets are diagnostics. Regression test pins compiled/interp agreement, the trap and the rejection. Evidence: Windows suite 533/0, clippy clean. This is the wrap-up point for the relay handover.
 
+- 2026-11-25 04:25 (+08:00): **Scalar-cast slice verified dual-platform and handed off.** Windows and WSL suites 535/0, both 50k mutation gates, and the A/B gate against 31bd1ae9 (50 examples + 663 CLI invocations, 0 diffs) all pass for 7040504e. The relay handover is in docs/coordination/HANDOVER-zcode.md.
+
