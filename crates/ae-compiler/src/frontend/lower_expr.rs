@@ -95,6 +95,28 @@ impl<'a> Parser<'a> {
                 let ty = if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) };
                 (Expr::PtrCast(Box::new(operand), *mutable, id, token.line, token.column), ty)
             }
+            ExpressionKind::ScalarCast { base, target } => {
+                self.seek_scalar_offset(expression.range.start);
+                let (operand, from) = self.lower_scalar_body_expression(base, slots)?;
+                let name = self.source.get(target.clone())
+                    .ok_or_else(|| self.error_at(target.start, "cannot read the cast's target type"))?;
+                let to = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))
+                    .ok_or_else(|| self.error_at(target.start, &format!("'{name}' is not a scalar type")))?;
+                if !matches!(to, Type::Int(_) | Type::Float(_)) {
+                    self.seek_scalar_offset(target.start);
+                    return Err(self.fail(&format!("'{name}' is not a numeric type; 'as' converts numbers")));
+                }
+                if !matches!((from, to), (Type::Int(IntTy::I64), Type::Float(FloatTy::F64)) | (Type::Float(FloatTy::F64), Type::Int(IntTy::I64)) | (Type::Int(IntTy::I64), Type::Int(IntTy::I64)) | (Type::Float(FloatTy::F64), Type::Float(FloatTy::F64))) {
+                    self.seek_scalar_offset(target.start);
+                    return Err(self.fail(&format!("conversion from {} to {name} is not implemented yet", from.name(self.ctx))));
+                }
+                if from == to {
+                    return Ok((operand, to));
+                }
+                let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
+                let token = self.tokens.get(end).ok_or_else(|| self.fail("expected the end of the cast"))?;
+                (Expr::ScalarCast(Box::new(operand), from, to, token.line, token.column), to)
+            }
             ExpressionKind::Struct { target, fields } => {
                 // Validate in source order and emit in layout order.
                 let sid = match &target.kind {

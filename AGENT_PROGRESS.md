@@ -397,3 +397,5 @@
 
 - 2026-11-25 02:50 (+08:00): **Width migration verified on both platforms.** WSL workspace suite 532/0, WSL 50k mutation green, and the WSL A/B gate against 8197dd6 compared 50 example entry points and 663 CLI fixture invocations with zero differences; Windows had the same A/B result. The ledger's slice-3 evidence is updated.
 
+- 2026-11-25 04:00 (+08:00): **P2.1 slice 4: scalar `as` casts (i64↔f64).** ScalarCast flows grammar → resolver inference → HIR → gate → lowering → Expr::ScalarCast → MIR name/codegen/interp; int→float rounds, float→int truncates and traps via the new `ae_f64_to_i64_trunc` helper, non-numeric targets are diagnostics. Regression test pins compiled/interp agreement, the trap and the rejection. Evidence: Windows suite 533/0, clippy clean. This is the wrap-up point for the relay handover.
+

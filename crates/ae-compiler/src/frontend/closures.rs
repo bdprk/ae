@@ -416,7 +416,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
             walk_expr(count, used, mutated);
         }
         // A retag uses the base without consuming it.
-        Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) => walk_expr(e, used, mutated),
+        Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) | Expr::ScalarCast(e, ..) => walk_expr(e, used, mutated),
         Expr::Index(id, _, index, ..) | Expr::VecIndex(id, index, ..) | Expr::StrVecIndex(id, index, ..) => {
             used.insert(*id);
             walk_expr(index, used, mutated);

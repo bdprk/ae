@@ -1409,6 +1409,13 @@ impl Walker<'_> {
                 let (Some(left), Some(right)) = (checked_child(left), checked_child(right)) else { return Deferred };
                 typecheck::infix(operator, Some(left), Some(right))
             }
+            ExpressionKind::ScalarCast { base, target } => {
+                let Some(target_scalar) = self.module.source.get(target.clone())
+                    .and_then(|name| Scalar::from_spelling(name.trim())) else { return Deferred };
+                if !matches!(target_scalar, Scalar::Int | Scalar::Float) { return Deferred; }
+                if !matches!(checked_child(base), Some(Scalar::Int | Scalar::Float)) { return Deferred; }
+                return Checked(target_scalar);
+            }
             _ => return Deferred,
         };
         result.map_or_else(Rejected, Checked)
@@ -1439,6 +1446,8 @@ impl Walker<'_> {
                 self.pointer_cast_targets.insert(pointee.start, *mutable);
                 self.expr(base, role)
             }
+            // A scalar cast names a type, not a value: only the base is walked.
+            ExpressionKind::ScalarCast { base, .. } => self.expr(base, role),
             ExpressionKind::BorrowArgument { name, name_range, mutable, .. } => {
                 let mutable = *mutable;
                 let target = self.occurrence(name, name_range.clone(), Role::Borrow, Lookup::LocalOnly);

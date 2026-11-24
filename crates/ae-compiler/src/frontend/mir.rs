@@ -373,6 +373,7 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             if *bytewise { "byte_offset" } else { "ptr_offset" },
             vec![lower_operand(e, bindings, lowering), lower_operand(c, bindings, lowering)],
         ),
+        Expr::ScalarCast(e, ..) => ("scalar_cast", vec![lower_operand(e, bindings, lowering)]),
         Expr::PtrCast(e, mutable, _pointee_id, ..) => (
             if *mutable { "ptr_cast_mut" } else { "ptr_cast" },
             vec![lower_operand(e, bindings, lowering)],
@@ -541,6 +542,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => Type::Int(IntTy::I64),
         // A retag's type is the new pointer, taken from the variant's own
         // fields — recursing on the same expression here would not terminate.
+        Expr::ScalarCast(_, _, to, ..) => *to,
         Expr::PtrCast(_, mutable, pointee_id, ..) => {
             if *mutable { Type::PtrMut(*pointee_id) } else { Type::Ptr(*pointee_id) }
         }

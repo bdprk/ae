@@ -152,6 +152,11 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
         ExpressionKind::PointerCast { base, .. } => {
             scalar_body_expression(base, resolved, supports_call, supports_field)
         }
+        // A scalar `as` cast reads its base and names a scalar type; the
+        // lowering owns the conversion rules.
+        ExpressionKind::ScalarCast { base, .. } => {
+            scalar_body_expression(base, resolved, supports_call, supports_field)
+        }
         ExpressionKind::Group(inner) | ExpressionKind::Prefix { operand: inner, .. } => {
             scalar_body_expression(inner, resolved, supports_call, supports_field)
         }

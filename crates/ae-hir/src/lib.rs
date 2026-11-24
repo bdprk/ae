@@ -371,6 +371,10 @@ fn expression_node<'a>(expression: &'a Expression, facts: &HashMap<usize, Expres
             children.push(expression_node(base, facts, ids));
             "pointer-cast"
         }
+        ExpressionKind::ScalarCast { base, .. } => {
+            children.push(expression_node(base, facts, ids));
+            "scalar-cast"
+        }
         ExpressionKind::BorrowArgument { .. } => "borrow-argument",
         ExpressionKind::Array(elements) | ExpressionKind::Vector(elements) => {
             children.extend(elements.iter().map(|element| expression_node(element, facts, ids)));

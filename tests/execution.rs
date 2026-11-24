@@ -8910,3 +8910,39 @@ fn main() {
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("route typed-expression"), "{stderr}");
 }
+
+// P2.1 (ADR-0232): `as` converts between i64 and f64 explicitly. Int->float
+// rounds, float->int truncates and traps outside the i64 range, and the
+// compiled and interpreted runs agree byte for byte; a non-numeric target is
+// a compile-time diagnostic.
+#[test]
+fn scalar_as_casts_match_between_backends_and_trap_alike() {
+    let source = "fn main() {\n    let x = 3;\n    print(x as f64);\n    let z = 2.5 as i64;\n    print(z);\n    print(1 as f64 + 0.5);\n}";
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "3.0\n2\n1.5\n");
+
+    let path = std::env::temp_dir().join(format!("ae-scalar-casts-interp-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let interp = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(interp.status.success(), "{}", String::from_utf8_lossy(&interp.stderr));
+    assert_eq!(String::from_utf8_lossy(&interp.stdout).replace("\r\n", "\n"), "3.0\n2\n1.5\n");
+
+    let trap = "fn main() {\n    let big = 1e300;\n    print(big as i64);\n}";
+    for arguments in [vec![], vec!["--interp"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run");
+        let path = std::env::temp_dir().join(format!("ae-scalar-cast-trap-{}-{}.ae", std::process::id(), arguments.len()));
+        fs::write(&path, trap).unwrap();
+        command.arg(&path);
+        for argument in &arguments { command.arg(argument); }
+        let output = command.output().unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("float-to-integer cast out of range"));
+    }
+
+    let message = check_rejects("fn main() { let b = 3 as bool; print(b); }");
+    assert!(message.contains("'bool' is not a numeric type"), "{message}");
+}

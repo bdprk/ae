@@ -548,6 +548,14 @@ static double ae_f64_from_i64(int64_t value, size_t line, size_t column) {
     return (double)value;
 }
 
+static int64_t ae_f64_to_i64_trunc(double value, size_t line, size_t column) {
+    // `as` truncates toward zero; non-finite and out-of-range values trap.
+    if (!isfinite(value) || value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int64_t)value;
+}
+
 static AE_INT_RESULT ae_f64_to_i64(double value, size_t line, size_t column) {
     if (!isfinite(value)) {
         AE_INT_RESULT bad = { AE_INT_ERR, { .v1 = { ae_str_from("f64 value is not finite", line, column) } } };

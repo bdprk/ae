@@ -220,6 +220,26 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         }
         Expr::Number(n) => Emitted::value(format!("INT64_C({n})"), Type::Int(IntTy::I64)),
         Expr::FloatLit(x) => Emitted::value(c_float_literal(*x), Type::Float(FloatTy::F64)),
+        Expr::ScalarCast(value, from, to, line, column) => {
+            let v = emit_expr(value, out, next, false, ctx);
+            let id = *next; *next += 1;
+            match (from, to) {
+                // Int -> float rounds to nearest (IEEE); no trap.
+                (Type::Int(IntTy::I64), Type::Float(FloatTy::F64)) => {
+                    out.push_str(&format!("    double t{id} = (double)({});
+", v.text));
+                }
+                // Float -> int truncates and traps outside the i64 range or
+                // on non-finite values, identically to the interpreter.
+                (Type::Float(FloatTy::F64), Type::Int(IntTy::I64)) => {
+                    out.push_str(&format!("    int64_t t{id} = ae_f64_to_i64_trunc({}, {line}, {column});
+", v.text));
+                }
+                _ => out.push_str(&format!("    {}t{id} = ({}) ({});
+", to.c_temp(ctx), to.c_temp(ctx).trim_end(), v.text)),
+            }
+            Emitted { text: format!("t{id}"), ty: *to, owned: false, moves: v.moves, materialized: true }
+        }
         Expr::ToF64(value, line, column) => {
             let t = emit_expr(value, out, next, false, ctx);
             let id = *next; *next += 1;

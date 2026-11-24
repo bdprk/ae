@@ -35,6 +35,9 @@ pub enum ExpressionKind {
     Propagate(Box<Expression>),
     AddressCast { binding: String, binding_range: Range<usize>, mutable: bool, pointee: Range<usize> },
     PointerCast { base: Box<Expression>, mutable: bool, pointee: Range<usize> },
+    /// `base as TypeName` for a scalar spelling (`i64`, `f64`, ...). The
+    /// compiler owns the cast semantics; the grammar keeps the target range.
+    ScalarCast { base: Box<Expression>, target: Range<usize> },
     BorrowArgument { mutable: bool, name: String, name_range: Range<usize> },
     Array(Vec<Expression>),
     Vector(Vec<Expression>),
@@ -493,8 +496,17 @@ impl Parser<'_> {
                     ExpressionKind::Struct { target: Box::new(base), fields }
                 }
                 Kind::As => {
-                    let (mutable, pointee) = self.pointer_cast_target()?;
-                    ExpressionKind::PointerCast { base: Box::new(base), mutable, pointee }
+                    if matches!(self.current().kind, Kind::Ident(_)) {
+                        let token = self.current().clone();
+                        self.cursor += 1;
+                        ExpressionKind::ScalarCast {
+                            base: Box::new(base),
+                            target: token.offset..token.end,
+                        }
+                    } else {
+                        let (mutable, pointee) = self.pointer_cast_target()?;
+                        ExpressionKind::PointerCast { base: Box::new(base), mutable, pointee }
+                    }
                 }
                 Kind::Dot => {
                     let name = crate::parse_identifier(self.file, self.source, self.current())?.to_owned();

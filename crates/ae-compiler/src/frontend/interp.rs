@@ -1926,6 +1926,19 @@ fn eval_expr(
             let v = eval_expr(env, inner, locals, caller_locals, false)?;
             Ok(Val::Str(format_val(&v)))
         }
+        Expr::ScalarCast(inner, from, to, line, col) => {
+            let value = eval_expr(env, inner, locals, caller_locals, false)?;
+            match (from, to, value) {
+                (Type::Int(IntTy::I64), Type::Float(FloatTy::F64), Val::Int(n)) => Ok(Val::Float(n as f64)),
+                (Type::Float(FloatTy::F64), Type::Int(IntTy::I64), Val::Float(x)) => {
+                    if !x.is_finite() || x < -9223372036854775808.0 || x >= 9223372036854775808.0 {
+                        return Err(trap("float-to-integer cast out of range", *line, *col));
+                    }
+                    Ok(Val::Int(x as i64))
+                }
+                (_, _, value) => Err(Flow::Trap(format!("internal: scalar cast on {value:?}"))),
+            }
+        }
         Expr::ToF64(inner, line, col) => {
             let Val::Int(n) = eval_expr(env, inner, locals, caller_locals, false)? else { return Err(Flow::Trap("internal: to_f64".to_owned())); };
             if !(-9007199254740992..=9007199254740992).contains(&n) {

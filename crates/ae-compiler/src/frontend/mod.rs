@@ -390,7 +390,7 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // `&mut expr as *mut T` take the address of a local; the bool records
     // mutability. `p.deref()` reads through it, inside `unsafe` only.
     #[allow(dead_code)]
-    BorrowAs(Box<Expr>, bool, usize, usize), #[allow(dead_code)] DerefPtr(Box<Expr>, usize, usize), #[allow(dead_code)] PtrOffset(Box<Expr>, Box<Expr>, bool, usize, usize), #[allow(dead_code)] PtrCast(Box<Expr>, bool, usize, usize, usize), #[allow(dead_code)] PtrDropInPlace(Box<Expr>, Type, usize, usize), #[allow(dead_code)] PtrWrite(Box<Expr>, Box<Expr>, Type, usize, usize) }
+    BorrowAs(Box<Expr>, bool, usize, usize), #[allow(dead_code)] DerefPtr(Box<Expr>, usize, usize), #[allow(dead_code)] PtrOffset(Box<Expr>, Box<Expr>, bool, usize, usize), #[allow(dead_code)] PtrCast(Box<Expr>, bool, usize, usize, usize), #[allow(dead_code)] PtrDropInPlace(Box<Expr>, Type, usize, usize), #[allow(dead_code)] PtrWrite(Box<Expr>, Box<Expr>, Type, usize, usize), ScalarCast(Box<Expr>, Type, Type, usize, usize) }
 // Which value type a map holds: the builtins dispatch on it (ADR-65).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MapKind { Int, Float }
