@@ -110,9 +110,22 @@ impl<'a> Parser<'a> {
                         // body route (it lowers the body through this same
                         // resolved pass).
                         self.seek_scalar_offset(initializer.range.start);
-                        let literal = self.closure_literal()?;
+                        let (expr, cty) = self.closure_literal()?;
                         self.seek_scalar_offset(initializer.range.end);
-                        literal
+                        if *mutable
+                            && let Expr::ClosureLit(cid) = expr
+                            && !self.generics.closures[cid].mut_captures.is_empty()
+                        {
+                            let (struct_lit, env_info) = self.materialize_closure_struct_lit(
+                                cid,
+                                None,
+                                initializer.range.start,
+                            )?;
+                            self.seek_scalar_offset(initializer.range.end);
+                            (struct_lit, Type::Struct(env_info.env_sid))
+                        } else {
+                            (expr, cty)
+                        }
                     } else {
                         let lowered = self.lower_scalar_body_expression(initializer, slots)?;
                         self.seek_scalar_offset(initializer.range.end);
@@ -402,6 +415,7 @@ impl<'a> Parser<'a> {
                 // re-initialization, so the flag clears either way.
                 let moved_before = self.moved.contains(&slot);
                 let (rhs, rhs_ty) = self.lower_scalar_body_expression(value, slots)?;
+                let (rhs, rhs_ty) = self.coerce_to_fn(rhs, rhs_ty, ty, &format!("cannot assign to '{name}'"))?;
                 // An owned right-hand side moves into the target: the source
                 // slot's Frees is trimmed, and assigning the target to itself
                 // fails as a same-statement move (the typed rule).
@@ -476,11 +490,77 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(statement.range.start);
                     return Err(self.fail("return is not supported in main"));
                 }
-                if matches!(&value.kind, ae_syntax::expression::ExpressionKind::Closure { .. }) {
+                if matches!(&value.kind, ae_syntax::expression::ExpressionKind::Closure { .. })
+                    && !matches!(self.return_type, Type::Fn(_))
+                    && self.impl_fn_id.is_none()
+                {
                     self.seek_scalar_offset(statement.range.end);
                     return Err(self.fail("a closure cannot be returned: it has no storage, and its captures live in this frame"));
                 }
                 let (lowered, ty) = self.lower_scalar_body_expression(value, slots)?;
+                if let Some(impl_fn_id) = self.impl_fn_id
+                    && let Some(info) = self.generics.impl_fns.get(&impl_fn_id).cloned()
+                {
+                    if let Some(cid) = match (&lowered, ty) {
+                        (Expr::ClosureLit(cid), _) => Some(*cid),
+                        (_, Type::Closure(cid)) => Some(cid),
+                        _ => None,
+                    } {
+                        let (struct_lit, actual_info) = self.materialize_closure_struct_lit(
+                            cid,
+                            Some((info.env_sid, info.wrapper_fn_id)),
+                            value.range.start,
+                        )?;
+                        if actual_info.sig != info.sig || !actual_info.kind.satisfies(info.kind) {
+                            return Err(self.error_at(
+                                value.range.start,
+                                "returned closure does not match declared 'impl Fn' signature or kind",
+                            ));
+                        }
+                        self.seek_scalar_offset(statement.range.end);
+                        return Ok(Statement::Return(struct_lit, self.live_owned()));
+                    }
+                    if let Type::Fn(actual_sig) = ty {
+                        if actual_sig != info.sig {
+                            return Err(self.error_at(
+                                value.range.start,
+                                "returned function does not match declared 'impl Fn' signature",
+                            ));
+                        }
+                        let fn_ty = Type::Fn(actual_sig);
+                        self.structs[info.env_sid].fields = vec![("f".to_owned(), fn_ty)];
+                        self.structs[info.env_sid].is_copy = true;
+                        let (params_sig, ret_sig) = self.ctx.fn_sig(info.sig);
+                        let env_param_ty = match info.kind {
+                            CallableKind::Fn => Type::StructRef(info.env_sid),
+                            CallableKind::FnMut => Type::StructMut(info.env_sid),
+                            CallableKind::FnOnce => Type::Struct(info.env_sid),
+                        };
+                        let mut wparams = Vec::with_capacity(1 + params_sig.len());
+                        wparams.push((0, env_param_ty));
+                        let mut wargs = Vec::with_capacity(params_sig.len());
+                        for (i, &pty) in params_sig.iter().enumerate() {
+                            wparams.push((1 + i, pty));
+                            wargs.push(Argument::Value(Expr::Variable(1 + i, pty, 0, 0)));
+                        }
+                        let callee_field = Expr::Field(
+                            Box::new(Expr::Variable(0, env_param_ty, 0, 0)),
+                            "f".to_owned(),
+                            fn_ty,
+                        );
+                        let call_expr = Expr::FnExprCall(Box::new(callee_field), wargs, ret_sig, actual_sig);
+                        self.pending.push(Function {
+                            id: info.wrapper_fn_id,
+                            params: wparams,
+                            returns: ret_sig,
+                            body: vec![Statement::Return(call_expr, Vec::new())],
+                            is_main: false,
+                        });
+                        self.seek_scalar_offset(statement.range.end);
+                        return Ok(Statement::Return(Expr::StructLit(info.env_sid, vec![lowered]), self.live_owned()));
+                    }
+                }
+                let (lowered, ty) = self.coerce_to_fn(lowered, ty, self.return_type, "cannot return closure")?;
                 // Returning an owned value moves it out of the body: the
                 // caller owns it, so the drops pass must trim this slot's
                 // Frees and later reads are rejected (E0102). This covers

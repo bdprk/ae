@@ -1,0 +1,1 @@
+ae: $DIR/closure_fnonce_to_fn_rejected.ae:8:19: closure does not satisfy 'Fn(call_fn)' constraint

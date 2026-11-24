@@ -78,12 +78,20 @@ impl Parser<'_> {
             .collect();
         let mut value_captures: Vec<(usize, Type)> = Vec::new();
         let mut borrow_captures: Vec<(usize, Type)> = Vec::new();
+        let mut mut_captures: Vec<(usize, Type)> = Vec::new();
         let mut bindings: Vec<(String, Type)> = Vec::new();
-        for (name, outer_id, _, ty) in &outer {
+        for (name, outer_id, mutable, ty) in &outer {
             if !capture_names.contains(&name) { continue; }
             if mutated_names.contains(&name) {
-                return Err(self.error_at(lit_offset, &format!(
-                    "a closure cannot mutate captured variable '{name}' in this version: captures are by value or read-only, so write the loop or the update in the enclosing scope")));
+                if !*mutable || !is_copy_type(*ty, self.structs, self.enums) {
+                    return Err(self.error_at(lit_offset, &format!(
+                        "a closure cannot mutate captured variable '{name}' in this version: captures are by value or read-only, so write the loop or the update in the enclosing scope")));
+                }
+                if self.moved.contains(outer_id) {
+                    return Err(moved_value_hint(self.binding_label(self.error_at(lit_offset, &format!("cannot capture '{name}' because it was moved")).with_code("E0102"), *outer_id)));
+                }
+                mut_captures.push((*outer_id, *ty));
+                continue;
             }
             if self.moved.contains(outer_id) {
                 return Err(moved_value_hint(self.binding_label(self.error_at(lit_offset, &format!("cannot capture '{name}' because it was moved")).with_code("E0102"), *outer_id)));
@@ -105,6 +113,9 @@ impl Parser<'_> {
         for (outer_id, ty) in &borrow_captures {
             bindings.push((names_by_id[outer_id].clone(), *ty));
         }
+        for (outer_id, ty) in &mut_captures {
+            bindings.push((names_by_id[outer_id].clone(), *ty));
+        }
         // Pass 2 parses the same tokens with the classified capture types, so
         // the emitted body reads borrows as borrows and values as owned slots.
         let id2 = self.generics.next_fn_id;
@@ -114,7 +125,7 @@ impl Parser<'_> {
         self.pos = end_pos;
         // Only the visible parameters are call-checkable; the leading capture
         // slots are the call site's business, not the caller's argument list.
-        let capture_count = value_captures.len() + borrow_captures.len();
+        let capture_count = value_captures.len() + mut_captures.len() + borrow_captures.len();
         let visible: Vec<Type> = function.params[capture_count..].iter().map(|&(_, ty)| ty).collect();
         let ret = function.returns;
         self.pending.push(function);
@@ -126,9 +137,26 @@ impl Parser<'_> {
                 self.borrows.push((*outer_id, self.scopes.len(), BorrowKind::Container));
             }
         }
+        let kind = if !mut_captures.is_empty() {
+            CallableKind::FnMut
+        } else if value_captures.iter().any(|(_, ty)| !is_copy_type(*ty, self.structs, self.enums)) {
+            CallableKind::FnOnce
+        } else {
+            CallableKind::Fn
+        };
         let cid = self.generics.closures.len();
         self.ctx.push_closure(id2, borrow_captures.clone());
-        self.generics.closures.push(ClosureDef { fn_id: id2, params: visible, ret, value_captures, borrow_captures });
+        self.generics.closures.push(ClosureDef {
+            fn_id: id2,
+            params: visible,
+            ret,
+            value_captures,
+            borrow_captures,
+            mut_captures,
+            kind,
+            env: None,
+            file: self.file.clone(),
+        });
         Ok((Expr::ClosureLit(cid), Type::Closure(cid)))
     }
 
@@ -156,7 +184,7 @@ impl Parser<'_> {
             // Shadowing stays allowed in both passes: a body-local may reuse
             // an outer name, and the AST walk (not the name map) decides what
             // was captured.
-            shadow_ok: true, pending: Vec::new(),
+            shadow_ok: true, impl_fn_id: None, fn_once_type_params: std::collections::HashSet::new(), fn_once_slots: std::collections::HashSet::new(), pending: Vec::new(),
         };
         let parsed = sub.closure_body(id, captures, &capture_starts);
         let end_pos = sub.pos;
@@ -441,6 +469,16 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
                 }
             }
         }
+        Expr::FnExprCall(callee, args, ..) => {
+            walk_expr(callee, used, mutated);
+            for arg in args {
+                match arg {
+                    Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
+                    Argument::Borrow(id, _) => { used.insert(*id); }
+                    Argument::FnPtr(_) => {}
+                }
+            }
+        }
         Expr::Call(_, args, _) => {
             for arg in args {
                 match arg {
@@ -485,7 +523,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         Expr::ExecRun(ex) | Expr::PoolNew(ex) | Expr::PoolJoin(ex) => walk_expr(ex, used, mutated),
         Expr::AtomicAdd(handle, value) => { walk_expr(handle, used, mutated); walk_expr(value, used, mutated); }
         Expr::AtomicCas(handle, expect, new) => { walk_expr(handle, used, mutated); walk_expr(expect, used, mutated); walk_expr(new, used, mutated); }
-        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::StrLit(..) | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::NowMs | Expr::NowS | Expr::ClosureLit(_) | Expr::MapNew(..) => {}
+        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::StrLit(..) | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::NowMs | Expr::NowS | Expr::ClosureLit(_) | Expr::FnRef(..) | Expr::MapNew(..) => {}
     }
 }
 
@@ -493,4 +531,311 @@ fn record_place(place: &MapPlace, used: &mut std::collections::HashSet<usize>, m
     let id = place.slot();
     used.insert(id);
     mutated.insert(id);
+}
+
+impl Parser<'_> {
+    pub(super) fn materialize_closure_env(
+        &mut self,
+        cid: usize,
+        at_offset: usize,
+    ) -> Result<ClosureEnvInfo, ae_span::Diagnostic> {
+        if let Some(info) = self.generics.closures[cid].env.clone() {
+            return Ok(info);
+        }
+        let env_sid = self.structs.len();
+        let wrapper_fn_id = self.generics.next_fn_id;
+        self.generics.next_fn_id += 1;
+        self.structs.push(StructDef {
+            name: format!("__ae_closure_env_{cid}"),
+            fields: Vec::new(),
+            file: self.generics.closures[cid].file.clone(),
+            public: false,
+            repr_c: false,
+            is_copy: false,
+            drop_fn: None,
+            drop_returns_unit: false,
+        });
+        let info = self.populate_closure_env(cid, env_sid, wrapper_fn_id, false, at_offset)?;
+        self.generics.closures[cid].env = Some(info.clone());
+        self.generics.closure_envs.insert(env_sid, info.clone());
+        Ok(info)
+    }
+
+    pub(super) fn materialize_closure_struct_lit(
+        &mut self,
+        cid: usize,
+        for_return: Option<(usize, usize)>,
+        at_offset: usize,
+    ) -> Result<(Expr, ClosureEnvInfo), ae_span::Diagnostic> {
+        let info = if let Some((env_sid, wrapper_fn_id)) = for_return {
+            self.populate_closure_env(cid, env_sid, wrapper_fn_id, true, at_offset)?
+        } else {
+            self.materialize_closure_env(cid, at_offset)?
+        };
+        let def = self.generics.closures[cid].clone();
+        self.seek_scalar_offset(at_offset);
+        let (line, column) = self.position();
+        let mut field_exprs = Vec::new();
+        for &(outer_id, ty) in &def.value_captures {
+            self.check_variable_move(outer_id)?;
+            if self.is_owned(ty) {
+                self.moved.insert(outer_id);
+            }
+            field_exprs.push(Expr::Variable(outer_id, ty, line, column));
+        }
+        for &(outer_id, ty) in &def.mut_captures {
+            self.check_variable_move(outer_id)?;
+            if self.is_owned(ty) {
+                self.moved.insert(outer_id);
+            }
+            field_exprs.push(Expr::Variable(outer_id, ty, line, column));
+        }
+        for &(outer_id, hidden_ty) in &def.borrow_captures {
+            if for_return.is_some() {
+                let outer_ty = self.names.values().find(|&&(id, _, _)| id == outer_id).map(|&(_, _, t)| t).unwrap_or(hidden_ty);
+                self.check_variable_move(outer_id)?;
+                if self.is_owned(outer_ty) {
+                    self.moved.insert(outer_id);
+                }
+                field_exprs.push(Expr::Variable(outer_id, outer_ty, line, column));
+            } else {
+                let expr = match hidden_ty {
+                    Type::StrView => Expr::SliceView(
+                        outer_id,
+                        None,
+                        Box::new(Expr::Number(0)),
+                        Box::new(Expr::Len(Box::new(Expr::Variable(outer_id, Type::String, line, column)), line, column)),
+                        line,
+                        column,
+                    ),
+                    _ => Expr::BorrowAs(Box::new(Expr::Variable(outer_id, hidden_ty, line, column)), false, line, column),
+                };
+                field_exprs.push(expr);
+            }
+        }
+        Ok((Expr::StructLit(info.env_sid, field_exprs), info))
+    }
+
+    fn populate_closure_env(
+        &mut self,
+        cid: usize,
+        env_sid: usize,
+        wrapper_fn_id: usize,
+        for_return: bool,
+        at_offset: usize,
+    ) -> Result<ClosureEnvInfo, ae_span::Diagnostic> {
+        let def = self.generics.closures[cid].clone();
+        let mut fields: Vec<(String, Type)> = Vec::new();
+        let mut outer_tys: Vec<Type> = Vec::new();
+        for (i, &(_, ty)) in def.value_captures.iter().enumerate() {
+            if for_return && matches!(ty, Type::StrView | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+                return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
+            }
+            fields.push((format!("c{i}"), ty));
+            outer_tys.push(ty);
+        }
+        for (i, &(_, ty)) in def.mut_captures.iter().enumerate() {
+            if for_return && matches!(ty, Type::StrView | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+                return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
+            }
+            fields.push((format!("m{i}"), ty));
+            outer_tys.push(ty);
+        }
+        for (i, &(outer_id, hidden_ty)) in def.borrow_captures.iter().enumerate() {
+            let stored_ty = if for_return {
+                let outer_ty = self.names.values()
+                    .find(|&&(id, _, _)| id == outer_id)
+                    .map(|&(_, _, t)| t)
+                    .unwrap_or(hidden_ty);
+                if matches!(outer_ty, Type::StrView | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+                    return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
+                }
+                outer_ty
+            } else {
+                hidden_ty
+            };
+            fields.push((format!("b{i}"), stored_ty));
+            outer_tys.push(stored_ty);
+        }
+        let is_copy = (for_return || def.borrow_captures.is_empty())
+            && def.mut_captures.is_empty()
+            && fields.iter().all(|(_, ty)| is_copy_type(*ty, self.structs, self.enums));
+        self.structs[env_sid].fields = fields.clone();
+        self.structs[env_sid].is_copy = is_copy;
+
+        let env_param_ty = match def.kind {
+            CallableKind::Fn => Type::StructRef(env_sid),
+            CallableKind::FnMut => Type::StructMut(env_sid),
+            CallableKind::FnOnce => Type::Struct(env_sid),
+        };
+        let mut params = Vec::with_capacity(1 + def.params.len());
+        params.push((0, env_param_ty));
+        for (i, &pty) in def.params.iter().enumerate() {
+            params.push((1 + i, pty));
+        }
+
+        let body = if def.mut_captures.is_empty() {
+            let mut call_args = Vec::with_capacity(fields.len() + def.params.len());
+            let env_var = Expr::Variable(0, env_param_ty, 0, 0);
+            for (idx, (fname, fty)) in fields.iter().enumerate() {
+                let field_expr = Expr::Field(Box::new(env_var.clone()), fname.clone(), *fty);
+                if idx >= def.value_captures.len() + def.mut_captures.len() {
+                    let hidden_ty = def.borrow_captures[idx - def.value_captures.len() - def.mut_captures.len()].1;
+                    if hidden_ty == Type::StrView && *fty == Type::String {
+                        call_args.push(Argument::View(field_expr));
+                    } else if matches!(hidden_ty, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::StructRef(_)) && !matches!(fty, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::StructRef(_)) {
+                        call_args.push(Argument::Value(Expr::BorrowAs(Box::new(field_expr), false, 0, 0)));
+                    } else {
+                        call_args.push(Argument::Value(field_expr));
+                    }
+                } else {
+                    call_args.push(Argument::Value(field_expr));
+                }
+            }
+            for (i, &pty) in def.params.iter().enumerate() {
+                call_args.push(Argument::Value(Expr::Variable(1 + i, pty, 0, 0)));
+            }
+            let call_expr = Expr::Call(def.fn_id, call_args, def.ret);
+            vec![Statement::Return(call_expr, Vec::new())]
+        } else {
+            let orig = self.pending.iter().find(|f| f.id == def.fn_id)
+                .cloned()
+                .ok_or_else(|| self.error_at(at_offset, "internal: missing closure body"))?;
+            let cap_count = fields.len();
+            let mut slot_to_field: HashMap<usize, (String, Type)> = HashMap::new();
+            for (i, (fname, fty)) in fields.iter().enumerate() {
+                slot_to_field.insert(orig.params[i].0, (fname.clone(), *fty));
+            }
+            let mut param_remap: HashMap<usize, usize> = HashMap::new();
+            for i in cap_count..orig.params.len() {
+                param_remap.insert(orig.params[i].0, 1 + (i - cap_count));
+            }
+            let mut stmts = orig.body;
+            rewrite_mut_closure_stmts(&mut stmts, env_param_ty, &slot_to_field, &param_remap);
+            for p in params.iter_mut().skip(1 + def.params.len()) {
+                p.0 += 1;
+            }
+            stmts
+        };
+
+        self.pending.push(Function {
+            id: wrapper_fn_id,
+            params,
+            returns: def.ret,
+            body,
+            is_main: false,
+        });
+        let sig = self.ctx.intern_fn_sig(def.params, def.ret);
+        Ok(ClosureEnvInfo { env_sid, wrapper_fn_id, kind: def.kind, sig })
+    }
+}
+
+fn rewrite_mut_closure_stmts(
+    stmts: &mut [Statement],
+    env_ty: Type,
+    slot_to_field: &HashMap<usize, (String, Type)>,
+    param_remap: &HashMap<usize, usize>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Declare(slot, expr) => {
+                *slot += 1;
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+            }
+            Statement::Assign(slot, expr, _) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+                if let Some((fname, fty)) = slot_to_field.get(slot) {
+                    *stmt = Statement::FieldStore(0, fname.clone(), *fty, expr.clone(), env_ty);
+                } else if let Some(&new_slot) = param_remap.get(slot) {
+                    *slot = new_slot;
+                } else {
+                    *slot += 1;
+                }
+            }
+            Statement::FieldStore(slot, _, _, expr, _) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+                if let Some(&new_slot) = param_remap.get(slot) {
+                    *slot = new_slot;
+                } else if !slot_to_field.contains_key(slot) {
+                    *slot += 1;
+                }
+            }
+            Statement::Print(Printed::Expr(expr)) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+            }
+            Statement::Assert(expr, ..) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+            }
+            Statement::Return(expr, frees) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+                frees.retain(|(s, _)| !slot_to_field.contains_key(s));
+                for (s, _) in frees.iter_mut() {
+                    if let Some(&new_slot) = param_remap.get(s) { *s = new_slot; } else { *s += 1; }
+                }
+            }
+            Statement::Frees(frees) => {
+                frees.retain(|(s, _)| !slot_to_field.contains_key(s));
+                for (s, _) in frees.iter_mut() {
+                    if let Some(&new_slot) = param_remap.get(s) { *s = new_slot; } else { *s += 1; }
+                }
+            }
+            Statement::If(cond, yes, no) => {
+                rewrite_mut_closure_expr(cond, env_ty, slot_to_field, param_remap);
+                rewrite_mut_closure_stmts(yes, env_ty, slot_to_field, param_remap);
+                rewrite_mut_closure_stmts(no, env_ty, slot_to_field, param_remap);
+            }
+            Statement::While(cond, body) => {
+                rewrite_mut_closure_expr(cond, env_ty, slot_to_field, param_remap);
+                rewrite_mut_closure_stmts(body, env_ty, slot_to_field, param_remap);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_mut_closure_expr(
+    expr: &mut Expr,
+    env_ty: Type,
+    slot_to_field: &HashMap<usize, (String, Type)>,
+    param_remap: &HashMap<usize, usize>,
+) {
+    match expr {
+        Expr::Variable(slot, _ty, line, col) => {
+            if let Some((fname, fty)) = slot_to_field.get(slot) {
+                *expr = Expr::Field(Box::new(Expr::Variable(0, env_ty, *line, *col)), fname.clone(), *fty);
+            } else if let Some(&new_slot) = param_remap.get(slot) {
+                *slot = new_slot;
+            } else {
+                *slot += 1;
+            }
+        }
+        Expr::Binary(a, _, b, ..) => {
+            rewrite_mut_closure_expr(a, env_ty, slot_to_field, param_remap);
+            rewrite_mut_closure_expr(b, env_ty, slot_to_field, param_remap);
+        }
+        Expr::Neg(a, ..) | Expr::Not(a) | Expr::Field(a, ..) | Expr::ScalarCast(a, ..) => {
+            rewrite_mut_closure_expr(a, env_ty, slot_to_field, param_remap);
+        }
+        Expr::Call(_, args, _) | Expr::FnCall(_, args, _, _) => {
+            for arg in args {
+                if let Argument::Value(e) | Argument::View(e) = arg {
+                    rewrite_mut_closure_expr(e, env_ty, slot_to_field, param_remap);
+                }
+            }
+        }
+        Expr::FnExprCall(callee, args, ..) => {
+            rewrite_mut_closure_expr(callee, env_ty, slot_to_field, param_remap);
+            for arg in args {
+                if let Argument::Value(e) | Argument::View(e) = arg {
+                    rewrite_mut_closure_expr(e, env_ty, slot_to_field, param_remap);
+                }
+            }
+        }
+        Expr::StructLit(_, vals) | Expr::EnumLit(_, _, _, vals) | Expr::VecLit(vals, ..) => {
+            for v in vals {
+                rewrite_mut_closure_expr(v, env_ty, slot_to_field, param_remap);
+            }
+        }
+        _ => {}
+    }
 }

@@ -1,0 +1,1 @@
+ae: $DIR/fn_ptr_capturing_closure.ae:7:61: a closure with captures cannot be passed as a function value; make it parameter-only or bind its inputs as arguments

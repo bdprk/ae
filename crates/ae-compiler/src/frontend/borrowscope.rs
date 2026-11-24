@@ -182,6 +182,15 @@ fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
                 }
             }
         }
+        Expr::FnExprCall(callee, args, _, _) => {
+            collect_waits_expr(callee, out);
+            for arg in args {
+                match arg {
+                    Argument::Value(e) | Argument::View(e) => collect_waits_expr(e, out),
+                    Argument::Borrow(..) | Argument::FnPtr(_) => {}
+                }
+            }
+        }
         _ => {}
     }
 }

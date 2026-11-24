@@ -33,26 +33,28 @@ impl<'a> Parser<'a> {
         // body off the route: the guard is the one rejection path with no
         // statement to point at.
         let subst_supported = self.subst.values().copied().all(|ty| {
-            scalar_type(ty) || matches!(ty, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF)
+            scalar_type(ty) || matches!(ty, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_))
                 || owned_plain_struct(ty, self.structs)
                 || owned_field_struct(ty, self.structs)
                 // A drop-carrying struct with plain fields as a substitution:
                 // the instantiated body owns and releases it.
                 || plain_drop_struct(ty, self.structs)
+                || matches!(ty, Type::Struct(sid) if self.generics.closure_envs.contains_key(&sid))
         });
         let receiver_supported = !self.receiver.is_some_and(|ty| !matches!(ty, Type::Struct(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Enum(..)));
         // A receiver-less impl body (an associated function, or a trait impl's
         // concrete method) routes like any function: a body that spells `Self`
         // in a way the marking pass cannot classify falls back at the scan.
         let impl_body_supported = true;
-        let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String)
+        let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String | Type::Fn(_))
             || matches!(self.return_type, Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF)
             || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
             || (matches!(self.return_type, Type::Struct(_))
                 && (self.receiver == Some(self.return_type)
                     || owned_plain_struct(self.return_type, self.structs)
                     || owned_field_struct(self.return_type, self.structs)
-                    || plain_drop_struct(self.return_type, self.structs)));
+                    || plain_drop_struct(self.return_type, self.structs)
+                    || matches!(self.return_type, Type::Struct(sid) if self.generics.closure_envs.contains_key(&sid))));
         let slots_supported = self.names.iter().all(|(name, &(_, _, ty))| {
             // A value capture moves into the closure's slot; the body's
             // own Frees releases it after the call (the FnOnce shape),
@@ -96,6 +98,7 @@ impl<'a> Parser<'a> {
                 // A drop-carrying struct with plain fields: the exit Frees
                 // runs its generated release, which calls the user's drop.
                 || plain_drop_struct(ty, self.structs)
+                || matches!(ty, Type::Struct(sid) if self.generics.closure_envs.contains_key(&sid))
                 || (name == "self" && self.receiver == Some(ty) && matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::Enum(..)));
             if !ok && std::env::var_os("AE_ROUTE_REASONS").is_some() {
                 eprintln!("route reason blocked function: guard slot '{name}' of type {}", ty.name(self.ctx));
@@ -136,11 +139,31 @@ impl<'a> Parser<'a> {
                         // A generic struct literal names its instance's type.
                         if let ae_syntax::expression::ExpressionKind::Specialization { base: inner, arguments } = &target.kind
                             && let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(struct_name)) = &inner.kind
-                                && let Some(&gid) = self.generics.struct_names.get(struct_name)
-                                    && let Some(args) = self.shared_specialization_types(arguments)
+                                && let Some(&gid) = self.generics.struct_names.get(struct_name) {
+                                    let args = self.shared_specialization_types(arguments).or_else(|| {
+                                        let saved = self.pos;
+                                        let mut parsed = Vec::with_capacity(arguments.len());
+                                        for arg in arguments {
+                                            self.seek_scalar_offset(arg.start);
+                                            let Ok(ty) = self.named_type() else {
+                                                self.pos = saved;
+                                                return None;
+                                            };
+                                            parsed.push(ty);
+                                        }
+                                        self.pos = saved;
+                                        Some(parsed)
+                                    });
+                                    if let Some(args) = args
                                         && let Ok(sid) = self.instantiate_struct(gid, args, target.range.start) {
                                             local_structs.insert(name.clone(), Type::Struct(sid));
                                         }
+                                }
+                    }
+                    if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(other)) = &initializer.kind
+                        && let Some(&ty) = local_structs.get(other).or_else(|| self.names.get(other).map(|(_, _, ty)| ty))
+                    {
+                        local_structs.insert(name.clone(), ty);
                     }
                     // A binding from a struct constructor call (`Point::new(..)`,
                     // `Pair[string, i64]::new(..)`): a layout instantiation only
@@ -309,14 +332,16 @@ impl<'a> Parser<'a> {
                     // enforces the `unsafe` block (so the pinned E0701 travels
                     // the same path).
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
-                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF)
+                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Fn(_))
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                         // A scalar-pointee pointer (`extern "C" fn
                         // ae_std_alloc(..) -> *mut i64`): the binding holds a
                         // copy-semantics handle the pointer ops consume, the
                         // same shape the slot guard admits.
                         || matches!(signature.ret, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(self.ctx.ptr_pointee(id)))
-                        || owned_field_struct(signature.ret, self.structs))
+                        || owned_field_struct(signature.ret, self.structs)
+                        || plain_drop_struct(signature.ret, self.structs)
+                        || matches!(signature.ret, Type::Struct(sid) if self.generics.closure_envs.contains_key(&sid)))
                     && signature.params.iter().copied().all(|ty| {
                         // Owned-aggregate parameters join the route: the call
                         // moves the argument, tracked in `moved`, and the
@@ -417,10 +442,11 @@ impl<'a> Parser<'a> {
                 if ty.is_none()
                     && (resolved.scalar_reads.get(&base.range.start)
                             .or_else(|| resolved.call_definitions.get(&base.range.start))
-                            .is_some_and(|id| resolved.generic_call_bindings.contains(id)))
+                            .is_some_and(|id| resolved.generic_call_bindings.contains(id)
+                                || resolved.owned_struct_bindings.contains(id)))
                 {
-                    // A local from an explicit generic call: the lowering has
-                    // its concrete type once the call is instantiated.
+                    // A local from an explicit generic call or inferred generic
+                    // struct: the lowering has its concrete type once instantiated.
                     return true;
                 }
                 let Some(ty) = ty else { return false };
@@ -430,12 +456,13 @@ impl<'a> Parser<'a> {
                 return matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::StructRef(_) | Type::Enum(..));
             }
             let Some(root) = field_chain_root(expression) else { return false };
-            let occurrences = match role {
-                ae_resolve::Role::Read => &resolved.scalar_reads,
-                ae_resolve::Role::Write => &resolved.scalar_writes,
+            let def = match role {
+                ae_resolve::Role::Read => resolved.scalar_reads.get(&root.range.start)
+                    .or_else(|| resolved.call_definitions.get(&root.range.start)),
+                ae_resolve::Role::Write => resolved.scalar_writes.get(&root.range.start),
                 _ => return false,
             };
-            let Some(def) = occurrences.get(&root.range.start) else { return false };
+            let Some(def) = def else { return false };
             let Some(&(_, ty)) = slots.get(def) else {
                 // A body local declared after the entry scope (`var plot = ..;
                 // plot.w = 40;`): the lowering owns its slot and validates the
@@ -453,7 +480,9 @@ impl<'a> Parser<'a> {
                         || matches!(&root.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                             if local_structs.get(name).is_some_and(|&ty| !field_chain_is_bare(expression)
                                 && receiver_field_type(expression, ty, self.structs)
-                                    .is_some_and(|field| scalar_type(field) || matches!(field, Type::Ptr(_) | Type::PtrMut(_))))),
+                                    .is_some_and(|field| scalar_type(field)
+                                        || matches!(field, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_))
+                                        || matches!(field, Type::Struct(env_sid) if self.generics.closure_envs.contains_key(&env_sid))))),
                     _ => false,
                 };
             };

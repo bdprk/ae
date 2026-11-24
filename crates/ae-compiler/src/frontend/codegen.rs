@@ -36,6 +36,43 @@ impl<'a> std::ops::Deref for CodegenCtx<'a> {
     fn deref(&self) -> &CompileContext { self.ctx }
 }
 
+fn emit_call_and_cleanup(callee: &str, args: &[Argument], ret: Type, out: &mut String, next: &mut usize, ctx: &CodegenCtx<'_>) -> Emitted {
+    let mut moves = Vec::new();
+    // A read-only argument only borrows its value, so a temporary
+    // (literal or `+` result) stays owned by this expression and is
+    // released after the call. Without this, `f("a" + b)` leaks.
+    let mut view_temps: Vec<String> = Vec::new();
+    let arguments = args.iter().filter_map(|arg| match arg {
+        Argument::Value(e) => {
+            let t = emit_expr(e, out, next, true, ctx);
+            moves.extend(t.moves);
+            (t.ty != Type::Unit).then_some(t.text)
+        }
+        Argument::Borrow(id, is_vec) => Some(if *is_vec { format!("&v{id}") } else { format!("v{id}") }),
+        Argument::View(e) => {
+            let t = emit_expr(e, out, next, false, ctx);
+            moves.extend(t.moves);
+            if t.owned { view_temps.push(t.text.clone()); }
+            Some(format!("AE_VIEW({})", t.text))
+        }
+        // The function pointer goes into the argument list directly:
+        // a temporary of function type would need C's parenthesized
+        // declarator form, which the temp template cannot print.
+        Argument::FnPtr(id) => Some(ctx.exposure_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))),
+    }).collect::<Vec<_>>().join(", ");
+    if ret == Type::Unit {
+        out.push_str(&format!("    {callee}({arguments});\n"));
+        for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
+        null_moves(out, &moves);
+        return Emitted { text: String::new(), ty: Type::Unit, owned: false, moves: Vec::new(), materialized: true };
+    }
+    let t = *next; *next += 1;
+    out.push_str(&format!("    {}t{t} = {callee}({arguments});\n", ret.c_temp(ctx)));
+    for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
+    null_moves(out, &moves);
+    Emitted { text: format!("t{t}"), ty: ret, owned: is_owned_type(ret, ctx.structs, ctx.enums), moves: Vec::new(), materialized: true }
+}
+
 pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving: bool, ctx: &CodegenCtx<'_>) -> Emitted {
     let emitted = match expr {
         // spec/concurrency.md §8: copy-semantics atomics. The handle's C
@@ -424,45 +461,28 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             }
         }
         Expr::Call(id, args, ret) | Expr::FnCall(id, args, ret, _) => {
-            let mut moves = Vec::new();
-            // A read-only argument only borrows its value, so a temporary
-            // (literal or `+` result) stays owned by this expression and is
-            // released after the call. Without this, `f("a" + b)` leaks.
-            let mut view_temps: Vec<String> = Vec::new();
-            let arguments = args.iter().filter_map(|arg| match arg {
-                Argument::Value(e) => {
-                    let t = emit_expr(e, out, next, true, ctx);
-                    moves.extend(t.moves);
-                    (t.ty != Type::Unit).then_some(t.text)
-                }
-                Argument::Borrow(id, is_vec) => Some(if *is_vec { format!("&v{id}") } else { format!("v{id}") }),
-                Argument::View(e) => {
-                    let t = emit_expr(e, out, next, false, ctx);
-                    moves.extend(t.moves);
-                    if t.owned { view_temps.push(t.text.clone()); }
-                    Some(format!("AE_VIEW({})", t.text))
-                }
-                // The function pointer goes into the argument list directly:
-                // a temporary of function type would need C's parenthesized
-                // declarator form, which the temp template cannot print.
-                Argument::FnPtr(id) => Some(ctx.exposure_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))),
-            }).collect::<Vec<_>>().join(", ");
             let callee = if matches!(expr, Expr::FnCall(..)) {
                 format!("v{id}")
             } else {
                 ctx.extern_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))
             };
-            if *ret == Type::Unit {
-                out.push_str(&format!("    {callee}({arguments});\n"));
-                for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
-                null_moves(out, &moves);
-                return Emitted { text: String::new(), ty: Type::Unit, owned: false, moves: Vec::new(), materialized: true };
-            }
-            let t = *next; *next += 1;
-            out.push_str(&format!("    {}t{t} = {callee}({arguments});\n", ret.c_temp(ctx)));
-            for text in &view_temps { out.push_str(&format!("    ae_str_release(&{text});\n")); }
-            null_moves(out, &moves);
-            Emitted { text: format!("t{t}"), ty: *ret, owned: is_owned_type(*ret, ctx.structs, ctx.enums), moves: Vec::new(), materialized: true }
+            return emit_call_and_cleanup(&callee, args, *ret, out, next, ctx);
+        }
+        Expr::FnRef(fn_id, sig_id) => {
+            let callee = ctx.exposure_name(*fn_id).unwrap_or_else(|| format!("ae_fn_{fn_id}"));
+            Emitted::value(callee, Type::Fn(*sig_id))
+        }
+        Expr::FnExprCall(callee_expr, args, ret, _) => {
+            let c = emit_expr(callee_expr, out, next, false, ctx);
+            let callee = if c.materialized {
+                c.text
+            } else {
+                let cid = *next;
+                *next += 1;
+                out.push_str(&format!("    {}t{cid} = {};\n", c.ty.c_temp(ctx), c.text));
+                format!("t{cid}")
+            };
+            return emit_call_and_cleanup(&callee, args, *ret, out, next, ctx);
         }
         Expr::VecLit(values, vector_ty, line, column) => {
             let t = *next; *next += 1;
@@ -707,12 +727,12 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 parts.push(e.text);
             }
             let id = *next; *next += 1;
+            let init = if parts.is_empty() { "0".to_owned() } else { parts.join(", ") };
             out.push_str(&format!(
-                "    ae_t{sid} t{id} = {{ {} }};\n    AE_T{sid}_ACTIVATE(t{id});\n",
-                parts.join(", ")
+                "    ae_t{sid} t{id} = {{ {init} }};\n    AE_T{sid}_ACTIVATE(t{id});\n",
             ));
             null_moves(out, &moves);
-            Emitted { text: format!("t{id}"), ty: Type::Struct(*sid), owned: true, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Struct(*sid), owned: is_owned_type(Type::Struct(*sid), ctx.structs, ctx.enums), moves: Vec::new(), materialized: true }
         }
         Expr::EnumLit(_name, eid, vidx, values) => {
             let mut parts = Vec::new();
@@ -726,7 +746,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let payload = if parts.is_empty() { "{ 0 }".to_owned() } else { format!("{{ .v{vidx} = {{ {} }} }}", parts.join(", ")) };
             out.push_str(&format!("    ae_e{eid} t{id} = {{ AE_E{eid}_{vidx}, {payload} }};\n"));
             null_moves(out, &moves);
-            Emitted { text: format!("t{id}"), ty: Type::Enum(_name, *eid), owned: true, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Enum(_name, *eid), owned: is_owned_type(Type::Enum(_name, *eid), ctx.structs, ctx.enums), moves: Vec::new(), materialized: true }
         }
         Expr::TryReadFile(path, ty, line, col) => {
             let p = emit_expr(path, out, next, false, ctx);
@@ -1796,6 +1816,7 @@ fn emit_payload_binding(out: &mut String, bid: usize, subject: usize, variant: u
         Type::VecF => out.push_str(&format!("    const ae_f64vec *v{bid} = &{member};\n")),
         Type::StrVec => out.push_str(&format!("    const ae_strvec *v{bid} = &{member};\n")),
         Type::Int(width) => out.push_str(&format!("    {} v{bid} = {member};\n", width.c_name())),
+        Type::Fn(sig) => out.push_str(&format!("    ae_fn_t{sig} v{bid} = {member};\n")),
         _ => out.push_str(&format!("    int64_t v{bid} = {member};\n")),
     }
 }

@@ -1,19 +1,14 @@
 # Closures and Function Types Specification (M1.8, ADR-0188 / ADR-0189)
 
-Status: describes the implemented language (2026-11-15). A closure is behaviour written where its data lives; a function type is behaviour passed as a value. Both compile to ordinary calls — no closure objects, no method tables, no context structs.
+Status: describes the implemented language (2026-11-24, P2.3). Direct local closures compile to ordinary calls; storable `fn(T1, T2) -> R` function pointers, named safe function references, `Fn`/`FnMut`/`FnOnce` trait bounds, anonymous closure environment structs, and `-> impl Fn*` returnable owning closures are supported.
 
 ## 1. Design Rules
 
 ### Hard Rules:
-1. **Zero-Cost Shape**: a closure compiles to an ordinary function whose leading parameters are its captures, spliced in at the call site. A call is a plain call; a non-capturing closure through a `fn(T) -> R` parameter is a call through the pointer the caller passed. No representation exists beyond that.
-2. **Capture Classification Is Inferred, Never Annotated**: the compiler decides borrow-capture versus value-capture from how the body uses each name. The programmer never writes `move`, `Fn`, `FnOnce`, or a capture list.
-3. **No Silent Copies**: a body that would mutate a captured container or field is rejected — the mutation would hit a copy. The diagnostic names the enclosing scope as the place to write the loop.
-4. **Captures Live in This Frame**: a closure has no storage, so it cannot be returned, stored in a struct field, or reassigned; a capturing closure cannot cross a `fn(T) -> R` boundary. The diagnostics say why, not just that it is rejected.
-
-### Non-Goals:
-- No `FnMut`: a body that mutates its environment is rejected in this version.
-- No closure storage: closures are not values with layout; they are names for function ids.
-- No named-function references: `apply(double, 5)` (referencing a function without calling it) is future work; only closure literals are function values.
+1. **Zero-Cost Direct Shape**: a local closure called directly compiles to an ordinary function whose leading parameters are its captures, spliced in at the call site.
+2. **Storable Function Pointers (`fn(T1, ...) -> R`)**: `fn(...) -> R` (with omitted `->` defaulting to `()`) is a `Copy` value type usable in locals, parameters, return types, struct fields, enum payloads, and generic containers (`Option[fn(...)]`). Safe non-generic top-level functions and non-capturing closure literals coerce to `fn(...) -> R`; `unsafe fn` and capturing closures are rejected.
+3. **First-Class Capturing Closures (`Fn` / `FnMut` / `FnOnce`)**: when a closure is passed to a generic `F: Fn(...) -> R` / `FnMut(...) -> R` / `FnOnce(...) -> R` bound, stored in a generic struct (`struct Runner[F] { cb: F }`), or returned via `-> impl Fn(...) -> R` / `impl FnMut(...) -> R` / `impl FnOnce(...) -> R`, it materializes as an anonymous closure environment struct (`__ae_closure_env_<id>`) holding its captured values.
+4. **No Escaping Frame Borrows**: returning a closure via `-> impl Fn*` that borrows a local variable from the returning frame is rejected (`cannot move a value while it is borrowed`); `-> impl Fn*` closures own their captured values.
 
 ## 2. Closure Literals
 

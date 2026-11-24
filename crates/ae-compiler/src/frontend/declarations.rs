@@ -358,7 +358,31 @@ impl Parser<'_> {
             } else {
                 let ret = if *self.current() == Kind::Arrow {
                     self.pos += 1;
-                    self.return_annotation()?
+                    if *self.current() == Kind::Impl {
+                        self.pos += 1;
+                        let (kind, sig) = self.parse_callable_bound()?;
+                        let env_sid = self.structs.len();
+                        self.structs.push(StructDef {
+                            name: format!("__ae_impl_fn_{id}"),
+                            fields: Vec::new(),
+                            file: self.file.clone(),
+                            public: false,
+                            repr_c: false,
+                            is_copy: false,
+                            drop_fn: None,
+                            drop_returns_unit: false,
+                        });
+                        self.generics.next_fn_id = self.generics.next_fn_id.max(*next_id);
+                        let wrapper_fn_id = self.generics.next_fn_id;
+                        self.generics.next_fn_id += 1;
+                        *next_id = self.generics.next_fn_id;
+                        let info = ImplFnInfo { env_sid, wrapper_fn_id, kind, sig };
+                        self.generics.impl_fns.insert(id, info);
+                        self.generics.closure_envs.insert(env_sid, ClosureEnvInfo { env_sid, wrapper_fn_id, kind, sig });
+                        Type::Struct(env_sid)
+                    } else {
+                        self.return_annotation()?
+                    }
                 } else {
                     Type::Unit
                 };
@@ -1168,7 +1192,7 @@ impl Parser<'_> {
     ) -> Result<Function, ae_span::Diagnostic> {
         self.take(Kind::LParen)?;
         // Variable ids restart per function, so move tracking must too.
-        self.names.clear(); self.binding_ranges.clear(); self.next_var = 0; self.moved.clear(); self.scopes.clear(); self.borrows.clear(); self.call_borrows.clear(); self.mut_borrows.clear();
+        self.names.clear(); self.binding_ranges.clear(); self.next_var = 0; self.moved.clear(); self.scopes.clear(); self.borrows.clear(); self.call_borrows.clear(); self.mut_borrows.clear(); self.fn_once_slots.clear();
         let mut params = Vec::new();
         if *self.current() != Kind::RParen {
             loop {
@@ -1213,11 +1237,20 @@ impl Parser<'_> {
                 if RESERVED.contains(&param.as_str()) { return Err(self.fail(&format!("'{param}' is a built-in name and cannot be a parameter"))); }
                 if self.names.contains_key(&param) { return Err(self.fail(&format!("duplicate parameter '{param}'"))); }
                 self.take(Kind::Colon)?;
+                let mut is_fn_once_param = false;
+                if let Some(p) = parsed
+                    && self.fn_once_type_params.contains(self.source[p.ty.clone()].trim())
+                {
+                    is_fn_once_param = true;
+                }
                 let ty = self.parameter_type()?;
                 // A `&mut Type` parameter exists to be written through, so
                 // its slot is mutable without a `var` spelling (ADR-0185).
                 let mutable = mutable || matches!(ty, Type::StructMut(_));
                 let var_id = self.next_var; self.next_var += 1;
+                if is_fn_once_param {
+                    self.fn_once_slots.insert(var_id);
+                }
                 self.names.insert(param, (var_id, mutable, ty));
                 self.binding_ranges.insert(var_id, binding_range);
                 params.push((var_id, ty));
@@ -1227,12 +1260,22 @@ impl Parser<'_> {
         }
         self.take(Kind::RParen)?;
         
+        let mut prev_impl_fn = None;
         let returns_type = if is_main {
             if !params.is_empty() { return Err(self.fail("main cannot have parameters")); }
             Type::Int(IntTy::I64)
         } else if *self.current() == Kind::Arrow {
             self.pos += 1;
-            self.return_annotation()?
+            if *self.current() == Kind::Impl {
+                self.pos += 1;
+                let _ = self.parse_callable_bound()?;
+                let info = self.generics.impl_fns.get(&id).cloned()
+                    .ok_or_else(|| self.fail("'-> impl Fn(...)' is only supported on top-level functions"))?;
+                prev_impl_fn = self.impl_fn_id.replace(id);
+                Type::Struct(info.env_sid)
+            } else {
+                self.return_annotation()?
+            }
         } else {
             Type::Unit
         };
@@ -1266,6 +1309,7 @@ impl Parser<'_> {
             }
         };
         let params_scope = self.scopes.pop().unwrap();
+        self.impl_fn_id = prev_impl_fn;
         let mut body = body?;
         let param_owned: Vec<(usize, Type)> = params_scope.iter().rev().filter(|(_, ty)| is_owned_type(*ty, self.structs, self.enums)).copied().collect();
         if !is_main && !returns(&body) {
@@ -1304,7 +1348,7 @@ impl Parser<'_> {
         self.require_public("function", &def.name, &def.file, def.public)?;
         for (index, bounds) in def.bounds.iter().enumerate() {
             for &bound in bounds {
-                if !bound.allows(args[index], self.structs, self.enums) {
+                if !bound.allows_with_generics(args[index], self.structs, self.enums, self.generics) {
                     return Err(self.error_at(offset, &format!(
                         "type argument '{}' for '{}' does not satisfy '{}'; that constraint allows {}",
                         args[index].name(self.ctx), def.name, bound.name(), bound.allowed_types())));
@@ -1333,9 +1377,15 @@ impl Parser<'_> {
         self.generics.next_fn_id += 1;
         let mut subst = HashMap::new();
         let mut trait_bounds = HashMap::new();
+        let mut fn_once_type_params = std::collections::HashSet::new();
         for (index, param) in def.params.iter().enumerate() {
             subst.insert(param.clone(), args[index]);
             trait_bounds.insert(param.clone(), def.trait_bounds[index].clone());
+            if def.bounds[index].iter().any(|b| matches!(b, Bound::Callable(CallableKind::FnOnce, _)))
+                && !def.bounds[index].iter().any(|b| matches!(b, Bound::Callable(CallableKind::Fn | CallableKind::FnMut, _)))
+            {
+                fn_once_type_params.insert(param.clone());
+            }
         }
         let mut sub = Parser {
             file: def.file.clone(), source: &def.source, tokens: Rc::clone(&def.tokens), shared_source: Rc::clone(&def.source), pos: def.start,
@@ -1344,7 +1394,7 @@ impl Parser<'_> {
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
             id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(),
-            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new(),
+            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, impl_fn_id: None, fn_once_type_params, fn_once_slots: std::collections::HashSet::new(), pending: Vec::new(),
         };
         let parsed = sub.function_rest_with_parameters(false, id, def.bindings.as_deref());
         let mut nested = std::mem::take(&mut sub.pending);
@@ -1418,7 +1468,7 @@ impl Parser<'_> {
             id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(),
             subst, trait_bounds: HashMap::new(), receiver: receiver_ty,
-            impl_self: Some(impl_self_ty), inherent_impl: true, shadow_ok: false, pending: Vec::new(),
+            impl_self: Some(impl_self_ty), inherent_impl: true, shadow_ok: false, impl_fn_id: None, fn_once_type_params: std::collections::HashSet::new(), fn_once_slots: std::collections::HashSet::new(), pending: Vec::new(),
         };
         let parsed = sub.function_rest(false, id);
         let mut nested = std::mem::take(&mut sub.pending);

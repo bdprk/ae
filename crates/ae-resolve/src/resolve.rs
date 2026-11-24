@@ -691,6 +691,24 @@ impl Walker<'_> {
                     return self.defs_local(*def).and_then(|entry| entry.inferred.clone());
                 }
                 if let Some(def) = self.items.get(name) {
+                    if let Some(declaration) = self.module.declarations.iter()
+                        .find(|d| d.name == *name && matches!(d.kind, DeclarationKind::Function { .. }))
+                        && let DeclarationKind::Function { parameters, returns, unsafe_fn, abi } = &declaration.kind
+                    {
+                            if *unsafe_fn || abi.is_some() || !declaration.type_parameters.is_empty() {
+                                return None;
+                            }
+                            let param_shapes: Vec<TypeSpelling> = parameters.iter()
+                                .map(|p| classify(self.tokens, &|n: &str| self.items.get(n).copied(), &[], None, p.ty.clone()).spelling)
+                                .collect();
+                            let ret_shape = match returns.clone() {
+                                Some(range) if range.start != range.end => {
+                                    classify(self.tokens, &|n: &str| self.items.get(n).copied(), &[], None, range).spelling
+                                }
+                                _ => TypeSpelling::Primitive("()"),
+                            };
+                            return Some(TypeSpelling::FnValue { parameters: param_shapes, returns: Box::new(ret_shape) });
+                    }
                     return Some(TypeSpelling::Named { def: *def });
                 }
                 if let Some(prelude) = crate::types::PRELUDE_TYPES.iter().find(|prelude| **prelude == name) {
@@ -1215,7 +1233,9 @@ impl Walker<'_> {
                 self.expr(value, Role::Read);
                 // A returned shape must agree with the declaration when
                 // both are known; a deferred shape stays silent.
-                if let Some(declared) = self.declared_return.clone() {
+                if let Some(declared) = self.declared_return.clone()
+                    && !matches!(declared, TypeSpelling::Unknown(_))
+                {
                     let returned = self.infer_expression(value);
                     if let Some(returned) = returned
                         && returned != declared {
@@ -1618,23 +1638,30 @@ impl Walker<'_> {
         }
         // The closure's return spelling sits between the parameters and the
         // body; an empty range means the spelling carries no return type.
-        if return_type.start != return_type.end {
+        let closure_return = if return_type.start != return_type.end {
+            let spelled = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), return_type.clone());
+            let shape = spelled.spelling.clone();
             self.spellings.push(SpellingEntry {
                 owner: self.function_def,
                 role: SpellingRole::ClosureReturn,
                 name: String::new(),
-                spelled: classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), return_type.clone()),
+                spelled,
             });
-        }
+            Some(shape)
+        } else {
+            None
+        };
         if let Some(open) = self.tokens.iter().position(|token| token.offset == body.start) {
             let occurrences_start = self.occurrences.len();
             let locals_start = self.locals.len();
+            let prev_return = std::mem::replace(&mut self.declared_return, closure_return);
             // The grammar accepted the literal's header; a body that does
             // not parse stays opaque rather than inventing diagnostics.
             if let Ok((statements, _)) = parse_statements_until_close(&self.module.file, &self.module.source, self.tokens, open + 1) {
                 for statement in &statements {
                     self.statement(statement);
                 }
+                self.declared_return = prev_return;
                 let has_binding_conflict = self.diagnostics[diagnostics_start..].iter()
                     .any(|diagnostic| diagnostic.code.as_deref() == Some("E0104"));
                 // Captures: reads inside the body whose target is an

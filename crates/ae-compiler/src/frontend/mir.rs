@@ -85,6 +85,7 @@ pub(super) enum MirRvalue {
     ShortCircuit(MirOperand, Kind, Expr),
     Call(usize, Vec<MirOperand>, Type),
     FnCall(usize, Vec<MirOperand>, Type),
+    FnExprCall(MirOperand, Vec<MirOperand>, Type),
     ClosureLit(usize),
     Intrinsic(&'static str, Vec<MirOperand>, Type),
     Aggregate(usize, Vec<MirRvalue>),
@@ -210,6 +211,8 @@ fn lower_expr(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut MirLow
         }
         Expr::Call(id, args, ret) => MirRvalue::Call(*id, lower_args(args, bindings, lowering), *ret),
         Expr::FnCall(id, args, ret, _) => MirRvalue::FnCall(*id, lower_args(args, bindings, lowering), *ret),
+        Expr::FnExprCall(callee, args, ret, _) => MirRvalue::FnExprCall(lower_operand(callee, bindings, lowering), lower_args(args, bindings, lowering), *ret),
+        Expr::FnRef(id, _) => MirRvalue::Use(MirOperand::FnPtr(*id)),
         Expr::ClosureLit(cid) => MirRvalue::ClosureLit(*cid),
         // The decomposed view records the spawn as a named side effect over
         // its capture slots and callable; the C emission goes through the
@@ -520,7 +523,8 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::Variable(_, ty, ..) | Expr::Field(_, _, ty) | Expr::VecLit(_, ty, ..) => *ty,
         Expr::StructLit(sid, _) => Type::Struct(*sid),
         Expr::EnumLit(name, layout, ..) => Type::Enum(name, *layout),
-        Expr::Call(_, _, ty) | Expr::FnCall(_, _, ty, _) => *ty,
+        Expr::Call(_, _, ty) | Expr::FnCall(_, _, ty, _) | Expr::FnExprCall(_, _, ty, _) => *ty,
+        Expr::FnRef(_, sig) => Type::Fn(*sig),
         // The printed place types are evidence, so the string-shaped
         // expressions name their real types instead of the integer
         // catch-all (a string literal bound to `v0 (i64)` misleads).
@@ -545,8 +549,16 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         // M2.12 slice 2: the address takes the pointee's pointer shape; a
         // deref yields the pointee.
         Expr::BorrowAs(e, mutable, ..) => {
-            let pid = ctx.find_pointee(expr_type(e, ctx)).unwrap_or(0);
-            if *mutable { Type::PtrMut(pid) } else { Type::Ptr(pid) }
+            let pointee = expr_type(e, ctx);
+            if let Some(pid) = ctx.find_pointee(pointee) {
+                if *mutable { Type::PtrMut(pid) } else { Type::Ptr(pid) }
+            } else if let Type::Struct(sid) = pointee {
+                if *mutable { Type::StructMut(sid) } else { Type::StructRef(sid) }
+            } else if *mutable {
+                Type::PtrMut(0)
+            } else {
+                Type::Ptr(0)
+            }
         }
         // Both pointer forms deref to their pointee — PtrMut was missing
         // here, so a *mut f64 deref printed through the i64 printer (the
@@ -915,6 +927,7 @@ fn fold_rvalue(rvalue: &MirRvalue, locals: &HashMap<usize, MirOperand>, temps: &
         }
         MirRvalue::Call(id, args, ret) => MirRvalue::Call(*id, args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
         MirRvalue::FnCall(id, args, ret) => MirRvalue::FnCall(*id, args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
+        MirRvalue::FnExprCall(callee, args, ret) => MirRvalue::FnExprCall(subst_operand(callee, locals, temps), args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
         MirRvalue::ClosureLit(id) => MirRvalue::ClosureLit(*id),
         MirRvalue::Intrinsic(name, args, ret) => MirRvalue::Intrinsic(name, args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
         MirRvalue::Aggregate(sid, vals) => MirRvalue::Aggregate(*sid, vals.iter().map(|v| fold_rvalue(v, locals, temps)).collect()),
@@ -963,6 +976,10 @@ fn collect_rvalue_temps(rvalue: &MirRvalue, used: &mut HashSet<usize>) {
         MirRvalue::ShortCircuit(lhs, ..) => collect_operand_temps(lhs, used),
         MirRvalue::Binary(a, _, b, _) => { collect_operand_temps(a, used); collect_operand_temps(b, used); }
         MirRvalue::Call(_, args, _) | MirRvalue::FnCall(_, args, _) | MirRvalue::Intrinsic(_, args, _) => {
+            for a in args { collect_operand_temps(a, used); }
+        }
+        MirRvalue::FnExprCall(callee, args, _) => {
+            collect_operand_temps(callee, used);
             for a in args { collect_operand_temps(a, used); }
         }
         MirRvalue::Aggregate(_, vals) | MirRvalue::AdtAggregate(_, _, _, vals) | MirRvalue::VecNew(vals, _) => {
@@ -1142,6 +1159,12 @@ fn print_rvalue(rvalue: &MirRvalue, out: &mut String, ctx: &CompileContext) {
         }
         MirRvalue::FnCall(id, args, ret) => {
             out.push_str(&format!("v{}(", id));
+            print_operands(args, out, ctx);
+            out.push_str(&format!(") -> {}", ret.name(ctx)));
+        }
+        MirRvalue::FnExprCall(callee, args, ret) => {
+            print_operand(callee, out, ctx);
+            out.push('(');
             print_operands(args, out, ctx);
             out.push_str(&format!(") -> {}", ret.name(ctx)));
         }

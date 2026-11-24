@@ -37,8 +37,13 @@ pub(super) fn bare_call_statement(statement: &ae_syntax::statement::Statement) -
     // other bare call — a function, a builtin value call (`find(..);`) or an
     // unknown name — is evaluated (borrow and move diagnostics included) and
     // then rejected with the typed route's "must end with '?'" rule.
-    let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
-    (!statement_builtin_name(name)).then_some(value)
+    match &callee.kind {
+        ExpressionKind::Atom(Kind::Ident(name)) => (!statement_builtin_name(name)).then_some(value),
+        ExpressionKind::Field { .. }
+        | ExpressionKind::Qualified { .. }
+        | ExpressionKind::BracketedCallTarget { .. } => None,
+        _ => Some(value),
+    }
 }
 
 /// A name whose bare-call statement form has a dedicated arm in the body

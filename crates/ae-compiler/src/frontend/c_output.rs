@@ -29,8 +29,7 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::Tokens => "ae_tokens".to_owned(),
         // Unreachable: no syntax for a closure-typed field.
         Type::Closure(_) => "void".to_owned(),
-        // Unreachable: no syntax for a function-typed field.
-        Type::Fn(_) => "void".to_owned(),
+        Type::Fn(sig) => format!("ae_fn_t{sig}"),
         // Unreachable: thread handles bind as locals only (spec/concurrency.md
         // §2, like pointers); the pointer shape keeps a future slip valid C.
         Type::Thread(_) => "void *".to_owned(),
@@ -110,10 +109,11 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
                 Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_) => c_type(*t, 0, false, ctx),
                 _ => t.c_temp(ctx).trim_end().to_owned(),
             }).collect::<Vec<_>>().join(", ") };
+            let c_ret = c_return(ret, ctx);
             if declaration {
-                format!("{} (*v{id})({})", ret.c_temp(ctx).trim_end(), c_params)
+                format!("{c_ret} (*v{id})({c_params})")
             } else {
-                format!("{} (*)({})", ret.c_temp(ctx).trim_end(), c_params)
+                format!("{c_ret} (*)({c_params})")
             }
         }
         Type::Array(_) if declaration => format!("const int64_t *v{id}"),
@@ -130,8 +130,7 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
 // temporaries use, without the variable name.
 pub(super) fn c_return(ty: Type, ctx: &CompileContext) -> String {
     match ty {
-        // Never returned: a function value cannot be a return type yet.
-        Type::Fn(_) => "void".to_owned(),
+        Type::Fn(sig) => format!("ae_fn_t{sig}"),
         Type::Bool => "bool".to_owned(),
         Type::Int(width) => width.c_name().to_owned(),
         Type::Float(width) => width.c_name().to_owned(),
@@ -578,6 +577,9 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
         for (n, ty) in &def.fields {
             let _ = writeln!(layout, "    {} {n};", c_type_field(*ty, &program.ctx));
         }
+        if layout.is_empty() {
+            layout.push_str("    char ae_empty;\n");
+        }
         let mut release = String::new();
         let mut forfeit = String::new();
         let mut activate = "((void)0)".to_owned();
@@ -756,9 +758,57 @@ typedef struct {{
     out.push_str("\nint main(int argc, char **argv) {\n    ae_args_init(argc, argv);\n    ae_argc_g = (int64_t)argc;\n    ae_argv_g = argv;\n");
     emit_body(main, &mut out, &program.ctx, structs, enums)?;
     out.push_str("    if (fflush(stdout) == EOF) return 1;\n    return 0;\n}\n");
+    let mut fn_typedefs = String::new();
+    if out.contains("ae_fn_t") {
+        let mut roots = Vec::new();
+        let bytes = out.as_bytes();
+        let mut i = 0usize;
+        while i + 7 <= bytes.len() {
+            if &bytes[i..i + 7] == b"ae_fn_t"
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+            {
+                let mut end = i + 7;
+                while end < bytes.len() && bytes[end].is_ascii_digit() { end += 1; }
+                if end > i + 7 && (end == bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_'))
+                    && let Ok(sig) = out[i + 7..end].parse::<usize>()
+                    && !roots.contains(&sig)
+                {
+                    roots.push(sig);
+                }
+                i = end;
+                continue;
+            }
+            i += 1;
+        }
+        fn visit_sig(sig: usize, ctx: &CompileContext, seen: &mut HashSet<usize>, order: &mut Vec<usize>) {
+            if !seen.insert(sig) { return; }
+            let (params, ret) = ctx.fn_sig(sig);
+            for p in params {
+                if let Type::Fn(inner) = p { visit_sig(inner, ctx, seen, order); }
+            }
+            if let Type::Fn(inner) = ret { visit_sig(inner, ctx, seen, order); }
+            order.push(sig);
+        }
+        let mut seen = HashSet::new();
+        let mut order = Vec::new();
+        for sig in roots { visit_sig(sig, &program.ctx, &mut seen, &mut order); }
+        for sig in order {
+            let (params, ret) = program.ctx.fn_sig(sig);
+            let c_params = if params.is_empty() {
+                "void".to_owned()
+            } else {
+                params.iter().map(|t| match t {
+                    Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_) => c_type(*t, 0, false, &program.ctx),
+                    _ => t.c_temp(&program.ctx).trim_end().to_owned(),
+                }).collect::<Vec<_>>().join(", ")
+            };
+            let c_ret = c_return(ret, &program.ctx);
+            let _ = writeln!(fn_typedefs, "typedef {c_ret} (*ae_fn_t{sig})({c_params});");
+        }
+    }
     // The fixed prefix is program-independent; emit only its reachable part.
     // `split_off` avoids copying the 100 KB runtime text.
-    let user = out;
+    let user = if fn_typedefs.is_empty() { out } else { format!("{fn_typedefs}{out}") };
     let (full, pruned_len) = prune_runtime(core, ex, &prelude, &user);
     Ok(GeneratedC { full, runtime_len: pruned_len })
 }

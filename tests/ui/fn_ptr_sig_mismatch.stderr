@@ -1,0 +1,1 @@
+ae: $DIR/fn_ptr_sig_mismatch.ae:10:34: field 'cb' must be fn(i64) -> i64

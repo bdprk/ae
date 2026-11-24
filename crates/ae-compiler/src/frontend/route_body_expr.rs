@@ -44,6 +44,8 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 && fields.iter().all(|field| {
                     scalar_body_expression(&field.value, resolved, supports_call, supports_field)
                         || matches!(field.value.kind, ExpressionKind::Atom(Kind::Text(_)))
+                        || matches!(&field.value.kind, ExpressionKind::Closure { body, .. }
+                            if resolved.scalar_bodies.contains_key(&body.start))
                         || matches!(&field.value.kind, ExpressionKind::Atom(Kind::Ident(name))
                             if name != "self" && resolved.scalar_reads.get(&field.value.range.start)
                                 .is_some_and(|id| resolved.owned_text_bindings.contains(id)
@@ -245,7 +247,7 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 // admissible arguments); the lowering's re-check resolves the
                 // method and rejects the rest, which falls the body back to
                 // the typed route.
-                return supports_field(callee, ae_resolve::Role::Call)
+                return (supports_field(callee, ae_resolve::Role::Call) || supports_field(callee, ae_resolve::Role::Read))
                     && arguments.iter().all(|argument| {
                         scalar_body_expression(argument, resolved, supports_call, supports_field)
                             || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
@@ -278,7 +280,10 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
             // pointer the caller passed (`Expr::FnCall` on its slot).
             if matches!(callee.kind, ExpressionKind::Atom(Kind::Ident(_)))
                 && resolved.call_definitions.get(&callee.range.start)
-                    .is_some_and(|id| resolved.fn_value_bindings.contains(id))
+                    .is_some_and(|id| resolved.fn_value_bindings.contains(id)
+                        || (!resolved.direct_calls.contains(&callee.range.start)
+                            && !resolved.unknown_calls.contains(&callee.range.start)
+                            && !resolved.unresolved_calls.contains(&callee.range.start)))
             {
                 return arguments.iter().all(|argument| {
                     scalar_body_expression(argument, resolved, supports_call, supports_field)
@@ -333,6 +338,25 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                                     || resolved.map_definitions.contains(id)
                                     || resolved.owned_struct_bindings.contains(id)))
                         || matches!(argument.kind, ExpressionKind::BorrowArgument { .. }));
+            }
+            // A call on an arbitrary expression yielding `fn(...) -> R`, such
+            // as `(h.cb)(x)` or `pick(true)(x)`.
+            if !matches!(
+                callee.kind,
+                ExpressionKind::Atom(Kind::Ident(_))
+                    | ExpressionKind::Qualified { .. }
+                    | ExpressionKind::Field { .. }
+                    | ExpressionKind::BracketedCallTarget { .. }
+            ) && scalar_body_expression(callee, resolved, supports_call, supports_field)
+                && arguments.iter().all(|argument| {
+                    scalar_body_expression(argument, resolved, supports_call, supports_field)
+                        || matches!(argument.kind, ExpressionKind::Atom(Kind::Text(_)))
+                        || resolved.struct_field_views.contains(&argument.range.start)
+                        || resolved.struct_field_handles.contains(&argument.range.start)
+                        || matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
+                })
+            {
+                return true;
             }
             // The argument list below needs the callee's identity; a `matches!`
             // guard's bindings do not escape the macro, so the builtin answer is
@@ -389,6 +413,7 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                     || matches!(&argument.kind, ExpressionKind::Closure { body, .. }
                         if resolved.scalar_bodies.contains_key(&body.start)))
         }
+        ExpressionKind::Closure { body, .. } if resolved.scalar_bodies.contains_key(&body.start) => true,
         _ => false,
     }
 }

@@ -42,6 +42,13 @@ impl Parser<'_> {
             self.take(Kind::RParen)?;
             return Ok(Type::Unit);
         }
+        // `fn(T, U) -> R` (or `fn(T, U)` defaulting to `()`): a storable
+        // function pointer value.
+        if *self.current() == Kind::Fn {
+            self.pos += 1;
+            let sig = self.parse_callable_sig()?;
+            return Ok(Type::Fn(sig));
+        }
         let name = self.identifier()?;
         // Inside a generic instantiation a type parameter stands for the
         // argument the call site supplied; nothing must reach code generation
@@ -299,6 +306,15 @@ impl Parser<'_> {
                     let bound = match label.as_str() {
                         "Add" => Some(Bound::Add), "Eq" => Some(Bound::Eq),
                         "Ord" => Some(Bound::Ord), "Copy" => Some(Bound::Copy),
+                        "Fn" | "FnMut" | "FnOnce" if *self.current() == Kind::LParen => {
+                            let kind = match label.as_str() {
+                                "Fn" => CallableKind::Fn,
+                                "FnMut" => CallableKind::FnMut,
+                                _ => CallableKind::FnOnce,
+                            };
+                            let sig = self.parse_callable_sig()?;
+                            Some(Bound::Callable(kind, sig))
+                        }
                         _ => None,
                     };
                     match bound {
@@ -348,7 +364,7 @@ impl Parser<'_> {
         let fty = self.named_type()?;
         // Payloads stay flat: a variant may carry scalars, strings or a vector,
         // but not a struct or another enum (no layout recursion).
-        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
+        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_)) {
             return Err(self.fail("enum variant payloads must be i64, bool, f64, string, vec, vec[string], or a type parameter"));
         }
         Ok(Payload::Concrete(fty))
@@ -520,7 +536,7 @@ impl Parser<'_> {
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let ty = self.named_type()?;
-        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
+        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_)) {
             return Err(self.fail("type arguments must be i64, bool, f64, string, vec, or vec[string]"));
         }
         Ok(ty)
@@ -800,30 +816,6 @@ impl Parser<'_> {
         if *self.current() == Kind::Star {
             return self.pointer_type();
         }
-        // `fn(T, U) -> R` (ADR-0189): a function value. Only non-capturing
-        // closures can be passed as one; the signature is interned so two
-        // closures of the same shape share the type.
-        if *self.current() == Kind::Fn {
-            self.pos += 1;
-            self.take(Kind::LParen)?;
-            let mut params = Vec::new();
-            if *self.current() != Kind::RParen {
-                loop {
-                    if params.len() >= 8 { return Err(self.fail("function type parameter limit exceeded (8)")); }
-                    params.push(self.callable_parameter_type()?);
-                    if *self.current() != Kind::Comma { break; }
-                    self.pos += 1;
-                }
-            }
-            self.take(Kind::RParen)?;
-            self.take(Kind::Arrow)?;
-            let ret = self.return_annotation()?;
-            if matches!(ret, Type::StructRef(_) | Type::StructMut(_) | Type::Fn(_)) {
-                return Err(self.fail("a function type cannot return a borrow or another function type"));
-            }
-            let sig = self.ctx.intern_fn_sig(params, ret);
-            return Ok(Type::Fn(sig));
-        }
         if *self.current() == Kind::Amp {
             let amp_offset = self.tokens[self.pos].offset;
             self.pos += 1;
@@ -842,6 +834,7 @@ impl Parser<'_> {
                     Type::Vec => Ok(Type::VecRef),
                     Type::StrVec => Ok(Type::StrVecRef),
                     Type::VecF => Ok(Type::VecFRef),
+                    Type::Struct(sid) => Ok(Type::StructRef(sid)),
                     _ => Err(self.error_at(amp_offset, &format!(
                         "'&{name}' is '{}' here, which has no read-only borrow; only string, vec, vec[string] and vec[f64] can be borrowed",
                         concrete.name(self.ctx)))),
@@ -879,6 +872,15 @@ impl Parser<'_> {
                     Kind::Ident(text) => text.clone(),
                     _ => return Err(self.fail("'&mut' must be followed by a struct type")),
                 };
+                if let Some(&concrete) = self.subst.get(borrowed.as_str()) {
+                    if let Type::Struct(sid) = concrete {
+                        self.pos += 1;
+                        return Ok(Type::StructMut(sid));
+                    }
+                    return Err(self.error_at(amp_offset, &format!(
+                        "'&mut {borrowed}' borrows a struct mutably, but '{borrowed}' is '{}' here; only user structs can be borrowed mutably",
+                        concrete.name(self.ctx))));
+                }
                 if let Some(&sid) = self.struct_names.get(borrowed.as_str()) {
                     let def = &self.structs[sid];
                     self.require_public("struct", &def.name.clone(), &def.file.clone(), def.public)?;
@@ -953,6 +955,42 @@ impl Parser<'_> {
             self.named_type()
         }
     }
+    pub(super) fn parse_callable_sig(&mut self) -> Result<usize, ae_span::Diagnostic> {
+        self.take(Kind::LParen)?;
+        let mut params = Vec::new();
+        if *self.current() != Kind::RParen {
+            loop {
+                if params.len() >= 8 { return Err(self.fail("function type parameter limit exceeded (8)")); }
+                params.push(self.callable_parameter_type()?);
+                if *self.current() != Kind::Comma { break; }
+                self.pos += 1;
+            }
+        }
+        self.take(Kind::RParen)?;
+        let ret = if *self.current() == Kind::Arrow {
+            self.pos += 1;
+            self.return_annotation()?
+        } else {
+            Type::Unit
+        };
+        if matches!(ret, Type::StructRef(_) | Type::StructMut(_)) {
+            return Err(self.fail("a function type cannot return a borrow"));
+        }
+        Ok(self.ctx.intern_fn_sig(params, ret))
+    }
+
+    pub(super) fn parse_callable_bound(&mut self) -> Result<(CallableKind, usize), ae_span::Diagnostic> {
+        let label = self.identifier()?;
+        let kind = match label.as_str() {
+            "Fn" => CallableKind::Fn,
+            "FnMut" => CallableKind::FnMut,
+            "FnOnce" => CallableKind::FnOnce,
+            _ => return Err(self.fail("expected 'Fn', 'FnMut', or 'FnOnce' after 'impl'")),
+        };
+        let sig = self.parse_callable_sig()?;
+        Ok((kind, sig))
+    }
+
     pub(super) fn return_annotation(&mut self) -> Result<Type, ae_span::Diagnostic> {
         // No borrow can be returned: a borrow of a parameter would outlive the
         // callee's frame, and a borrow of a local would outlive the local.

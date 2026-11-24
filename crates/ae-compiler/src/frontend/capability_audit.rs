@@ -108,7 +108,7 @@ pub(super) fn audit_generic_fn(
 
     for (index, cap) in demands {
         let declared = &bounds[index];
-        if declared.is_empty() { continue; }
+        if declared.is_empty() || declared.iter().any(|b| matches!(b, Bound::Callable(..))) { continue; }
         let effective: Vec<Type> = AUDIT_TYPES.iter().copied()
             .filter(|ty| declared.iter().all(|b| b.allows(*ty, &[], &[])))
             .collect();

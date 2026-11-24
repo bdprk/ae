@@ -2068,8 +2068,9 @@ fn eval_expr(
         // `&v as *const T` (M2.12 slice 2): the operand is a bare variable,
         // so the pointer carries its slot; a deref reads the slot's current
         // value, exactly what the compiled backends read through the address.
-        Expr::BorrowAs(operand, ..) => match &**operand {
+        Expr::BorrowAs(operand, mutable, ..) => match &**operand {
             Expr::Variable(id, ..) => Ok(Val::Ptr(*id)),
+            _ if !*mutable => eval_expr(env, operand, locals, caller_locals, false),
             _ => Err(Flow::Trap("internal: pointer operand is not a variable".to_owned())),
         },
         // ADR-0209 step A: a retag keeps the address and only changes the
@@ -2100,13 +2101,14 @@ fn eval_expr(
             _ => Err(Flow::Trap("internal: deref of a non-pointer".to_owned())),
         },
         Expr::Call(fn_id, args, _) => invoke_call(env, *fn_id, args, locals, caller_locals),
+        Expr::FnRef(fid, _) => Ok(Val::FnPtr(*fid)),
         Expr::FnCall(var_id, args, ..) => {
-            let target_fn = match read_var(locals, caller_locals, *var_id, 0, 0)? {
-                Val::FnPtr(fid) => fid,
-                Val::Closure(cid) => env.program.ctx.closure_fn_id(cid),
-                _ => return Err(Flow::Trap("internal: FnCall on non-function".to_owned())),
-            };
-            invoke_call(env, target_fn, args, locals, caller_locals)
+            let val = read_var(locals, caller_locals, *var_id, 0, 0)?;
+            invoke_fn_val(env, val, args, locals, caller_locals)
+        }
+        Expr::FnExprCall(callee, args, ..) => {
+            let val = eval_expr(env, callee, locals, caller_locals, false)?;
+            invoke_fn_val(env, val, args, locals, caller_locals)
         }
         // ADR-0214: the spawned callable runs to completion here (its capture
         // slots evaluate as by-value arguments, so the interpreter's move
@@ -2322,6 +2324,21 @@ fn eval_expr(
         }
         other => Err(Flow::Trap(format!("unsupported expression in MIR interpreter: {}", format!("{other:?}").chars().take(60).collect::<String>()))),
     }
+}
+
+fn invoke_fn_val(
+    env: &mut Env<'_>,
+    val: Val,
+    args: &[Argument],
+    locals: &mut HashMap<usize, Val>,
+    caller_locals: &mut Option<&mut HashMap<usize, Val>>,
+) -> Result<Val, Flow> {
+    let target_fn = match val {
+        Val::FnPtr(fid) => fid,
+        Val::Closure(cid) => env.program.ctx.closure_fn_id(cid),
+        _ => return Err(Flow::Trap("internal: indirect call on non-function".to_owned())),
+    };
+    invoke_call(env, target_fn, args, locals, caller_locals)
 }
 
 fn invoke_call(

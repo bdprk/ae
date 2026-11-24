@@ -135,6 +135,35 @@ impl SpellingParser<'_> {
                 let inner = Box::new(self.spelling());
                 TypeSpelling::Borrow { mutable, inner }
             }
+            Kind::Impl => {
+                self.cursor += 1;
+                if let Some(Kind::Ident(trait_name)) = self.current().map(|t| &t.kind)
+                    && matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce")
+                {
+                    self.cursor += 1;
+                    let mut parameters = Vec::new();
+                    if self.take(Kind::LParen) {
+                        while !self.take(Kind::RParen) {
+                            if self.current().is_none() {
+                                break;
+                            }
+                            parameters.push(self.spelling());
+                            if !self.take(Kind::Comma) {
+                                self.take(Kind::RParen);
+                                break;
+                            }
+                        }
+                    }
+                    let returns = if self.take(Kind::Arrow) {
+                        Box::new(self.spelling())
+                    } else {
+                        Box::new(TypeSpelling::Primitive("()"))
+                    };
+                    TypeSpelling::FnValue { parameters, returns }
+                } else {
+                    TypeSpelling::Unknown("impl".to_owned())
+                }
+            }
             Kind::Fn => {
                 self.cursor += 1;
                 let mut parameters = Vec::new();
@@ -153,7 +182,7 @@ impl SpellingParser<'_> {
                 let returns = if self.take(Kind::Arrow) {
                     Box::new(self.spelling())
                 } else {
-                    Box::new(TypeSpelling::Unknown(String::new()))
+                    Box::new(TypeSpelling::Primitive("()"))
                 };
                 TypeSpelling::FnValue { parameters, returns }
             }

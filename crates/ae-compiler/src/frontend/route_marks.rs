@@ -84,7 +84,7 @@ pub(super) fn owned_plain_struct(ty: Type, structs: &[StructDef]) -> bool {
         && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
             // A raw pointer is an address, not an owned value: it carries no
             // release surface, so a plain struct may hold one.
-            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
+            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_))
             || owned_plain_struct(*ty, structs)))
 }
 
@@ -101,7 +101,7 @@ pub(super) fn plain_drop_struct(ty: Type, structs: &[StructDef]) -> bool {
         && defn.fields.iter().all(|(_, ty)| scalar_type(*ty)
             // A raw pointer carries no release surface (it is an address, not
             // an owned value): a guard that points at a slot releases cleanly.
-            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_)
+            || matches!(ty, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_)
                 | Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex
                 | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF)
             || owned_plain_struct(*ty, structs)
@@ -117,7 +117,7 @@ pub(super) fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
             // vec/strvec/f64vec/map field in place, `release_member`): the
             // construction moves the value in and the exit free releases it.
             || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex
-                | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF)
+                | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF | Type::Fn(_))
             // A nested struct carries its own release routine; the generated
             // release recurses into every struct field (c_output).
             || owned_plain_struct(*ty, structs)
@@ -390,6 +390,13 @@ impl<'a> Parser<'a> {
                     Argument::Value(e) | Argument::View(e) => self.expr_has_unchecked_operation(e),
                     _ => false,
                 })
+            }
+            Expr::FnExprCall(callee, args, ..) => {
+                self.expr_has_unchecked_operation(callee)
+                    || args.iter().any(|arg| match arg {
+                        Argument::Value(e) | Argument::View(e) => self.expr_has_unchecked_operation(e),
+                        _ => false,
+                    })
             }
             Expr::Binary(a, _, b, ..) => self.expr_has_unchecked_operation(a) || self.expr_has_unchecked_operation(b),
             Expr::Field(base, ..) => self.expr_has_unchecked_operation(base),

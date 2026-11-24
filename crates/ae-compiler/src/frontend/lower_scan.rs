@@ -256,20 +256,33 @@ impl<'a> Parser<'a> {
                                         && let Some(args) = self.loose_shape_arguments(arguments) {
                                             expressions.generic_struct_bindings.insert(id, (gid, args));
                                         }
+                            if let ExpressionKind::Atom(Kind::Ident(_)) = &initializer.kind
+                                && let Some(other) = expressions.scalar_reads.get(&initializer.range.start).copied()
+                                && let Some(struct_name) = expressions.struct_definition_names.get(&other).cloned()
+                            {
+                                expressions.struct_definition_names.entry(id).or_insert(struct_name);
+                                if expressions.owned_struct_bindings.contains(&other) {
+                                    expressions.owned_struct_bindings.insert(id);
+                                }
+                            }
                             // A plain struct literal types its binding from the
                             // target name: the resolver may leave the spelling
                             // open, and field reads/writes answer by this entry.
                             if let ExpressionKind::Struct { target, .. } = &initializer.kind
                                 && let ExpressionKind::Atom(Kind::Ident(struct_name)) = &target.kind
-                                    && let Some(&sid) = self.struct_names.get(struct_name) {
-                                        expressions.struct_definition_names.entry(id).or_insert_with(|| struct_name.clone());
-                                        let constructed = Type::Struct(sid);
-                                        if owned_plain_struct(constructed, self.structs)
-                                            || owned_field_struct(constructed, self.structs)
-                                        {
-                                            expressions.owned_struct_bindings.insert(id);
-                                        }
+                            {
+                                if let Some(&sid) = self.struct_names.get(struct_name) {
+                                    expressions.struct_definition_names.entry(id).or_insert_with(|| struct_name.clone());
+                                    let constructed = Type::Struct(sid);
+                                    if owned_plain_struct(constructed, self.structs)
+                                        || owned_field_struct(constructed, self.structs)
+                                    {
+                                        expressions.owned_struct_bindings.insert(id);
                                     }
+                                } else if self.generics.struct_names.contains_key(struct_name) {
+                                    expressions.owned_struct_bindings.insert(id);
+                                }
+                            }
                             // A binding from an explicit generic call (`let x = f[T](..)`)
                             // or a method call (`let x = r.shifted(..)`): the
                             // instantiated return type exists only at lowering
@@ -296,6 +309,33 @@ impl<'a> Parser<'a> {
                                 }
                                 ExpressionKind::Closure { .. } => {
                                     expressions.closure_bindings.insert(id);
+                                }
+                                ExpressionKind::Atom(Kind::Ident(name))
+                                    if self.functions.contains_key(name)
+                                        || expressions.scalar_reads.get(&initializer.range.start)
+                                            .is_some_and(|other| expressions.fn_value_bindings.contains(other)) =>
+                                {
+                                    expressions.fn_value_bindings.insert(id);
+                                }
+                                ExpressionKind::Field { base, name: field_name }
+                                    if field_owner_struct(base, &expressions, self.struct_names, self.structs)
+                                        .and_then(|sid| field_ty_in(sid, field_name, self.structs))
+                                        .is_some_and(|ty| matches!(ty, Type::Fn(_))) =>
+                                {
+                                    expressions.fn_value_bindings.insert(id);
+                                }
+                                ExpressionKind::Call { callee, .. }
+                                    if matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(fn_name))
+                                        if self.functions.get(fn_name).is_some_and(|sig| matches!(sig.ret, Type::Fn(_))
+                                            || matches!(sig.ret, Type::Struct(sid) if self.generics.closure_envs.contains_key(&sid)))) =>
+                                {
+                                    expressions.fn_value_bindings.insert(id);
+                                    if let ExpressionKind::Atom(Kind::Ident(fn_name)) = &callee.kind
+                                        && let Some(Type::Struct(sid)) = self.functions.get(fn_name).map(|s| s.ret)
+                                    {
+                                        expressions.owned_struct_bindings.insert(id);
+                                        expressions.struct_definition_names.entry(id).or_insert_with(|| self.structs[sid].name.clone());
+                                    }
                                 }
                                 _ => match iterator_constructor(initializer) {
                                     Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
@@ -501,7 +541,7 @@ impl<'a> Parser<'a> {
                                 let has_shape = field_shape.is_some();
                                 if let Some(field_shape) = field_shape {
                                     match field_shape {
-                                        ShapeArg::Value(field_ty) if scalar_type(field_ty) => {
+                                        ShapeArg::Value(field_ty) if scalar_type(field_ty) || matches!(field_ty, Type::Fn(_)) => {
                                             expressions.struct_field_reads.insert(expression.range.start);
                                         }
                                         // A struct-typed field (or a nested generic
@@ -567,6 +607,8 @@ impl<'a> Parser<'a> {
                                                 expressions.drop_constructions.insert(expression.range.start);
                                             }
                                         }
+                                    } else if resolved_name.as_ref().is_some_and(|n| self.generics.struct_names.contains_key(n)) {
+                                        expressions.owned_constructions.insert(expression.range.start);
                                     }
                                 }
                         });

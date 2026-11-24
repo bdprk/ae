@@ -110,6 +110,41 @@ pub fn validate_type_parameter<'a>(
     Ok(())
 }
 
+fn skip_single_bound(tokens: &[Token], start: usize) -> usize {
+    let Some(token) = tokens.get(start) else { return start };
+    if matches!(&token.kind, Kind::Ident(name) if matches!(name.as_str(), "Fn" | "FnMut" | "FnOnce"))
+        && tokens.get(start + 1).is_some_and(|next| next.kind == Kind::LParen)
+    {
+        let mut pos = delimited_body_end(tokens, start + 2, Kind::LParen, Kind::RParen)
+            .unwrap_or_else(|end| end);
+        if tokens.get(pos).is_some_and(|next| next.kind == Kind::Arrow) {
+            pos += 1;
+            let mut paren = 0usize;
+            let mut bracket = 0usize;
+            while let Some(tok) = tokens.get(pos) {
+                match tok.kind {
+                    Kind::LParen => paren += 1,
+                    Kind::RParen => {
+                        if paren == 0 { break; }
+                        paren -= 1;
+                    }
+                    Kind::LBracket => bracket += 1,
+                    Kind::RBracket => {
+                        if bracket == 0 && paren == 0 { break; }
+                        bracket = bracket.saturating_sub(1);
+                    }
+                    Kind::Plus | Kind::Comma if paren == 0 && bracket == 0 => break,
+                    Kind::Eof => break,
+                    _ => {}
+                }
+                pos += 1;
+            }
+        }
+        return pos;
+    }
+    start + 1
+}
+
 /// Read the bounds following a colon in source order. Each item includes the
 /// token index of the bound; an invalid name ends the sequence.
 pub fn type_bound_tokens(tokens: &[Token], mut index: usize) -> impl Iterator<Item = (usize, &Token)> {
@@ -120,10 +155,11 @@ pub fn type_bound_tokens(tokens: &[Token], mut index: usize) -> impl Iterator<It
         }
         let token = tokens.get(index)?;
         let bound = (index, token);
+        let next = skip_single_bound(tokens, index);
         if matches!(token.kind, Kind::Ident(_))
-            && tokens.get(index + 1).is_some_and(|next| next.kind == Kind::Plus)
+            && tokens.get(next).is_some_and(|next| next.kind == Kind::Plus)
         {
-            index += 2;
+            index = next + 1;
         } else {
             finished = true;
         }
@@ -467,6 +503,7 @@ impl<'a> DeclarationParser<'a> {
                     closing.pop();
                 }
                 Kind::Fn if matches!(self.tokens.get(self.pos + 1).map(|token| &token.kind), Some(Kind::LParen)) => {}
+                Kind::Impl if self.pos == start => {}
                 Kind::Semi if closing.last() == Some(&Kind::RBracket) => {}
                 Kind::Star => {
                     self.pos += 1;
@@ -754,8 +791,14 @@ impl<'a> DeclarationParser<'a> {
                         let Kind::Ident(bound) = &token.kind else {
                             return Err(self.error("expected identifier").with_code("E0010"));
                         };
-                        bounds.push(bound.clone());
-                        self.pos += 1;
+                        let next = skip_single_bound(self.tokens, index);
+                        if next > index + 1 {
+                            let end_offset = self.tokens[next - 1].end;
+                            bounds.push(self.source[token.offset..end_offset].to_owned());
+                        } else {
+                            bounds.push(bound.clone());
+                        }
+                        self.pos = next;
                     }
                 }
                 type_parameters.push(TypeParameter { name, bounds });

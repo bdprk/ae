@@ -40,33 +40,57 @@ impl<'a> Parser<'a> {
                 // gets its construction remedy (the cursor sits after the
                 // name, where the typed arm's `fail` lands), everything else is
                 // an unknown variable at the name itself.
-                let Some(def) = self.resolved_expressions().scalar_reads.get(&expression.range.start).copied() else {
-                    // A generic enum template in value position has the typed
-                    // route's own reminder; a plain enum name has none (the
-                    // typed arm reports it as an unknown variable).
-                    if self.generics.names.contains_key(name) {
-                        return Err(self.error_at(expression.range.start, &format!("'{name}' is a generic enum; write '{name}[string]::Variant'")));
+                let def = self.resolved_expressions().scalar_reads.get(&expression.range.start).copied();
+                if let Some(def) = def
+                    && let Some(&(slot, ty)) = slots.get(&def)
+                {
+                    self.seek_scalar_offset(expression.range.start);
+                    if self.moved.contains(&slot) {
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"),
+                            slot,
+                        )));
                     }
-                    if self.struct_names.contains_key(name) {
-                        self.seek_scalar_offset(expression.range.end);
-                        return Err(self.fail(&format!("'{name}' is a struct name; construct it with '{name} {{ ... }}'")));
+                    let (line, column) = self.position();
+                    (Expr::Variable(slot, ty, line, column), ty)
+                } else {
+                    if !self.names.contains_key(name) {
+                        if self.generics.fn_names.contains_key(name) {
+                            return Err(self.error_at(expression.range.start, &format!("generic function '{name}' cannot be used as a function value")));
+                        }
+                        if let Some(function) = self.functions.get(name).cloned() {
+                            if !function.public && function.file != self.file {
+                                return Err(self.error_at(expression.range.start, &format!("function '{name}' is private to {}", function.file)));
+                            }
+                            if function.extern_c || self.ctx.is_unsafe_fn(function.id) {
+                                return Err(self.error_at(expression.range.start, &format!("function '{name}' cannot be passed as a safe function value")));
+                            }
+                            if matches!(function.ret, Type::StructRef(_) | Type::StructMut(_)) {
+                                return Err(self.error_at(expression.range.start, "a function value cannot return a borrow"));
+                            }
+                            let sig = self.ctx.intern_fn_sig(function.params, function.ret);
+                            return Ok((Expr::FnRef(function.id, sig), Type::Fn(sig)));
+                        }
+                    }
+                    if def.is_none() {
+                        if self.generics.names.contains_key(name) {
+                            return Err(self.error_at(expression.range.start, &format!("'{name}' is a generic enum; write '{name}[string]::Variant'")));
+                        }
+                        if self.struct_names.contains_key(name) {
+                            self.seek_scalar_offset(expression.range.end);
+                            return Err(self.fail(&format!("'{name}' is a struct name; construct it with '{name} {{ ... }}'")));
+                        }
                     }
                     return Err(self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101"));
-                };
-                let &(slot, ty) = slots.get(&def).ok_or_else(|| {
-                    self.error_at(expression.range.start, &format!("unknown variable '{name}'")).with_code("E0101")
-                })?;
-                self.seek_scalar_offset(expression.range.start);
-                if self.moved.contains(&slot) {
-                    return Err(moved_value_hint(self.binding_label(
-                        self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"),
-                        slot,
-                    )));
                 }
-                let (line, column) = self.position();
-                (Expr::Variable(slot, ty, line, column), ty)
             }
             ExpressionKind::Group(inner) => self.lower_scalar_body_expression(inner, slots)?,
+            ExpressionKind::Closure { .. } => {
+                self.seek_scalar_offset(expression.range.start);
+                let lowered = self.closure_literal()?;
+                self.seek_scalar_offset(expression.range.end);
+                lowered
+            }
             ExpressionKind::AddressCast { binding, binding_range, mutable, .. } => {
                 self.seek_scalar_offset(expression.range.start);
                 let position = self.position();
@@ -170,6 +194,61 @@ impl<'a> Parser<'a> {
                             // reads it as a variable, so report the same.
                             match self.struct_names.get(name) {
                                 Some(&sid) => sid,
+                                None if self.generics.struct_names.contains_key(name) => {
+                                    let gid = self.generics.struct_names[name];
+                                    let gdef = self.generics.struct_defs[gid].clone();
+                                    let mut field_vals: Vec<Option<(Expr, Type)>> = vec![None; gdef.fields.len()];
+                                    let mut inferred: Vec<Option<Type>> = vec![None; gdef.params.len()];
+                                    let mut has_closure = false;
+                                    for field in fields {
+                                        let Some(pos) = gdef.fields.iter().position(|(fnm, _)| fnm == &field.name) else {
+                                            return Err(self.error_at(field.name_range.start, &format!("struct '{}' has no field '{}'", gdef.name, field.name)));
+                                        };
+                                        if field_vals[pos].is_some() {
+                                            return Err(self.error_at(field.name_range.start, &format!("duplicate field '{}' in '{}'", field.name, gdef.name)));
+                                        }
+                                        let (mut val, mut actual) = self.lower_scalar_body_expression(&field.value, slots)?;
+                                        if let Some(cid) = match (&val, actual) {
+                                            (Expr::ClosureLit(cid), _) => Some(*cid),
+                                            (_, Type::Closure(cid)) => Some(cid),
+                                            _ => None,
+                                        } {
+                                            has_closure = true;
+                                            let (slit, env_info) = self.materialize_closure_struct_lit(cid, None, field.value.range.start)?;
+                                            val = slit;
+                                            actual = Type::Struct(env_info.env_sid);
+                                        } else if matches!(actual, Type::Struct(env_sid) if self.generics.closure_envs.contains_key(&env_sid)) {
+                                            has_closure = true;
+                                        }
+                                        if let Payload::Param(tp_idx) = gdef.fields[pos].1
+                                            && inferred[tp_idx].is_none()
+                                        {
+                                            inferred[tp_idx] = Some(actual);
+                                        }
+                                        field_vals[pos] = Some((val, actual));
+                                    }
+                                    if !has_closure {
+                                        return Err(self.error_at(target.range.start, &format!("'{name}' is a generic struct; write its type arguments, e.g. {name}[i64] {{ ... }}")));
+                                    }
+                                    let args: Vec<Type> = inferred.into_iter().collect::<Option<Vec<_>>>()
+                                        .ok_or_else(|| self.error_at(target.range.start, &format!("cannot infer type arguments for generic struct '{name}'")))?;
+                                    let sid = self.instantiate_struct(gid, args, target.range.start)?;
+                                    let mut values: Vec<Option<Expr>> = vec![None; self.structs[sid].fields.len()];
+                                    for (pos, entry) in field_vals.into_iter().enumerate() {
+                                        if let Some((val, actual)) = entry {
+                                            let expected = self.structs[sid].fields[pos].1;
+                                            self.check_field_value_type(&self.structs[sid].fields[pos].0.clone(), expected, actual, None)?;
+                                            if self.is_owned(actual)
+                                                && let Expr::Variable(slot, ..) = &val
+                                            {
+                                                self.check_variable_move(*slot)?;
+                                                self.moved.insert(*slot);
+                                            }
+                                            values[pos] = Some(val);
+                                        }
+                                    }
+                                    return self.finish_struct_literal(sid, target.range.start, values);
+                                }
                                 None => return Err(self.error_at(target.range.start, &format!("unknown variable '{name}'")).with_code("E0101")),
                             }
                         }
@@ -191,11 +270,18 @@ impl<'a> Parser<'a> {
                             // A struct literal may name structs (even nested
                             // generic instances) as type arguments, which the
                             // strict call-site reader rejects by design.
-                            let shapes = self.loose_shape_arguments(arguments)
-                                .ok_or_else(|| self.error_at(target.range.start, &format!("cannot read the type arguments of '{name}'")))?;
-                            let args = shapes.iter().map(|shape| self.shape_type(shape, target.range.start))
-                                .collect::<Option<Vec<_>>>()
-                                .ok_or_else(|| self.error_at(target.range.start, &format!("cannot read the type arguments of '{name}'")))?;
+                            let args = if let Some(shapes) = self.loose_shape_arguments(arguments) {
+                                shapes.iter().map(|shape| self.shape_type(shape, target.range.start))
+                                    .collect::<Option<Vec<_>>>()
+                                    .ok_or_else(|| self.error_at(target.range.start, &format!("cannot read the type arguments of '{name}'")))?
+                            } else {
+                                let mut parsed = Vec::with_capacity(arguments.len());
+                                for arg in arguments {
+                                    self.seek_scalar_offset(arg.start);
+                                    parsed.push(self.named_type()?);
+                                }
+                                parsed
+                            };
                             self.instantiate_struct(gid, args, target.range.start)?
                         }
                     }
@@ -210,6 +296,7 @@ impl<'a> Parser<'a> {
                     let next = self.tokens.partition_point(|token| token.offset < field.name_range.end);
                     let (slot, expected) = self.constructor_field(sid, &field.name, &values, Some(self.tokens[next].offset))?;
                     let (value, actual) = self.lower_scalar_body_expression(&field.value, slots)?;
+                    let (value, actual) = self.coerce_to_fn(value, actual, expected, &format!("field '{}'", field.name))?;
                     self.check_field_value_type(&field.name, expected, actual, Some(&field.value.range))?;
                     // An owned field value moves into the struct: the literal
                     // owns it, so the source slot's Frees is trimmed (the same
@@ -232,7 +319,8 @@ impl<'a> Parser<'a> {
                     // permissive scan can hand the lowering a chain the
                     // resolver never marked (a mutant, or a name the body
                     // never bound): that is a diagnostic, never a panic.
-                    let Some(&def) = self.resolved_expressions().scalar_reads.get(&base.range.start) else {
+                    let Some(&def) = self.resolved_expressions().scalar_reads.get(&base.range.start)
+                        .or_else(|| self.resolved_expressions().call_definitions.get(&base.range.start)) else {
                         return Err(self.error_at(expression.range.start, &format!("unknown variable '{base_name}'")).with_code("E0101"));
                     };
                     let Some(&(slot, struct_ty)) = slots.get(&def) else {
@@ -487,6 +575,33 @@ impl<'a> Parser<'a> {
                                 if let Some((signature, _, _)) = self.resolve_inherent_method(method_name, ty) {
                                     return self.lower_method_call(method_name, slot, ty, signature, expression, arguments, slots);
                                 }
+                                if let Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) = ty
+                                    && let Some((_, fty)) = self.structs[sid].fields.iter().find(|(f, _)| f == method_name).cloned()
+                                {
+                                    if matches!(fty, Type::Fn(_)) {
+                                        let (callee_expr, callee_ty) = self.lower_scalar_body_expression(callee, slots)?;
+                                        if let Type::Fn(sig) = callee_ty {
+                                            let (args, ret) = self.lower_fn_sig_call_args(method_name, sig, expression, arguments, slots)?;
+                                            self.seek_scalar_offset(expression.range.end);
+                                            return Ok((Expr::FnExprCall(Box::new(callee_expr), args, ret, sig), ret));
+                                        }
+                                    } else if let Type::Struct(env_sid) = fty
+                                        && let Some(env) = self.generics.closure_envs.get(&env_sid).cloned()
+                                    {
+                                        let (callee_expr, _) = self.lower_scalar_body_expression(callee, slots)?;
+                                        let (mut args, ret) = self.lower_fn_sig_call_args(method_name, env.sig, expression, arguments, slots)?;
+                                        self.seek_scalar_offset(callee.range.start);
+                                        let (line, column) = self.position();
+                                        let env_arg = match env.kind {
+                                            CallableKind::Fn => Argument::Value(Expr::BorrowAs(Box::new(callee_expr), false, line, column)),
+                                            CallableKind::FnMut => Argument::Value(Expr::BorrowAs(Box::new(callee_expr), true, line, column)),
+                                            CallableKind::FnOnce => Argument::Value(callee_expr),
+                                        };
+                                        args.insert(0, env_arg);
+                                        self.seek_scalar_offset(expression.range.end);
+                                        return Ok((Expr::Call(env.wrapper_fn_id, args, ret), ret));
+                                    }
+                                }
                                 // A generic-instance receiver resolves lazily
                                 // here (the gate is permissive and stateless);
                                 // a missing method reproduces the typed route's
@@ -648,9 +763,52 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(expression.range.end);
                         return Ok((value, ty));
                     }
+                    if let Some(&(slot, mutable, ty)) = self.names.get(name)
+                        && let Type::Struct(env_sid) | Type::StructRef(env_sid) | Type::StructMut(env_sid) = ty
+                        && let Some(env) = self.generics.closure_envs.get(&env_sid).cloned()
+                    {
+                        self.seek_scalar_offset(callee.range.start);
+                        if self.moved.contains(&slot) {
+                            return Err(moved_value_hint(self.binding_label(
+                                self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"),
+                                slot,
+                            )));
+                        }
+                        let (line, column) = self.position();
+                        let (mut args, ret) = self.lower_fn_sig_call_args(name, env.sig, expression, arguments, slots)?;
+                        let consume_once = env.kind == CallableKind::FnOnce || self.fn_once_slots.contains(&slot);
+                        if consume_once {
+                            self.moved.insert(slot);
+                        }
+                        let env_arg = match env.kind {
+                            CallableKind::Fn => Argument::Borrow(slot, matches!(ty, Type::Struct(_))),
+                            CallableKind::FnMut => {
+                                if !mutable && matches!(ty, Type::Struct(_)) {
+                                    return Err(self.error_at(callee.range.start, &format!("cannot call FnMut closure '{name}' because it is not declared 'var'")));
+                                }
+                                Argument::Borrow(slot, matches!(ty, Type::Struct(_)))
+                            }
+                            CallableKind::FnOnce => {
+                                self.check_variable_move(slot)?;
+                                Argument::Value(Expr::Variable(slot, ty, line, column))
+                            }
+                        };
+                        args.insert(0, env_arg);
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::Call(env.wrapper_fn_id, args, ret), ret));
+                    }
                     // A call through a function-typed value: the binding's
                     // slot names the pointer the caller passed (ADR-0189).
                     if let Some(&(slot, _, Type::Fn(sig))) = self.names.get(name) {
+                        if self.moved.contains(&slot) {
+                            return Err(moved_value_hint(self.binding_label(
+                                self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"),
+                                slot,
+                            )));
+                        }
+                        if self.fn_once_slots.contains(&slot) {
+                            self.moved.insert(slot);
+                        }
                         let (params, ret) = self.ctx.fn_sig(sig);
                         // Borrow arguments forwarded through a function value:
                         // the shared argument lowering already applies the
@@ -701,42 +859,19 @@ impl<'a> Parser<'a> {
                             self.seek_scalar_offset(expression.range.end);
                             return Ok(parsed);
                         }
-                        let mut args = Vec::with_capacity(arguments.len());
-                        for (index, argument) in arguments.iter().enumerate() {
-                            self.seek_scalar_offset(argument.range.start);
-                            let Some(expected) = params.get(index).copied() else {
-                                return Err(self.fail(&format!("too many arguments to '{name}'")));
-                            };
-                            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
-                            // A `&string` parameter takes a view (the typed
-                            // `typed_call_argument` rule); everything else is
-                            // a value, and an owned one moves.
-                            if matches!(expected, Type::StrView) {
-                                if !matches!(actual, Type::String | Type::StrView) {
-                                    self.seek_scalar_offset(argument.range.end);
-                                    return Err(self.fail(&format!("argument must be a string or string view, found {}", actual.name(self.ctx))));
-                                }
-                                args.push(Argument::View(value));
-                                continue;
-                            }
-                            self.check_value_argument_type(name, index, expected, actual, Some(&argument.range))?;
-                            if self.is_owned(actual)
-                                && let Expr::Variable(source, ..) = &value {
-                                    self.moved.insert(*source);
-                                }
-                            args.push(Argument::Value(value));
-                        }
-                        if args.len() != params.len() {
-                            return Err(self.fail(&format!("function '{name}' expects {} arguments, got {}", params.len(), args.len())));
-                        }
+                        let (args, ret) = self.lower_fn_sig_call_args(name, sig, expression, arguments, slots)?;
                         self.seek_scalar_offset(expression.range.end);
                         return Ok((Expr::FnCall(slot, args, ret, sig), ret));
                     }
                 }
                 let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else {
-                    // Only a bare name or a field receiver reaches this arm;
-                    // anything else is a call form the route does not take.
-                    return Err(self.fail("this call form is not supported by the body route"));
+                    let (callee_expr, callee_ty) = self.lower_scalar_body_expression(callee, slots)?;
+                    if let Type::Fn(sig) = callee_ty {
+                        let (args, ret) = self.lower_fn_sig_call_args("<fn>", sig, expression, arguments, slots)?;
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::FnExprCall(Box::new(callee_expr), args, ret, sig), ret));
+                    }
+                    return Err(self.error_at(callee.range.start, &format!("cannot call a value of type {}", callee_ty.name(self.ctx))));
                 };
                 let signature = match self.functions.get(name).cloned() {
                     Some(signature) => signature,
@@ -744,6 +879,11 @@ impl<'a> Parser<'a> {
                     // mandatory (there is no inference), the typed route's
                     // message.
                     None if self.generics.fn_names.contains_key(name) => {
+                        let gid = self.generics.fn_names[name];
+                        if let Some((call_expr, call_ret)) = self.try_lower_inferred_generic_call(name, gid, callee.range.start, arguments, slots)? {
+                            self.seek_scalar_offset(expression.range.end);
+                            return Ok((call_expr, call_ret));
+                        }
                         return Err(self.error_at(callee.range.start, &format!("'{name}' is a generic function; write its type arguments, e.g. {name}[i64](...)")));
                     }
                     // Not a plain function: a trait method of one of this
@@ -1466,16 +1606,23 @@ let mut args = Vec::with_capacity(arguments.len());
                     let Some(&gid) = self.generics.names.get(name) else {
                         return Ok(None);
                     };
-                    let Some(shapes) = self.loose_shape_arguments(arguments) else {
-                        return Ok(None);
-                    };
-                    let Some(args) = shapes.iter().map(|shape| self.shape_type(shape, base.range.start)).collect::<Option<Vec<_>>>() else {
-                        return Ok(None);
+                    let args = if let Some(shapes) = self.loose_shape_arguments(arguments) {
+                        let Some(args) = shapes.iter().map(|shape| self.shape_type(shape, base.range.start)).collect::<Option<Vec<_>>>() else {
+                            return Ok(None);
+                        };
+                        args
+                    } else {
+                        let mut parsed = Vec::with_capacity(arguments.len());
+                        for arg in arguments {
+                            self.seek_scalar_offset(arg.start);
+                            parsed.push(self.named_type()?);
+                        }
+                        parsed
                     };
                     // The typed route admits only the flat payload-capable
                     // arguments for a generic enum; a struct or enum argument
                     // is a diagnostic, not an instantiation.
-                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_))) {
                         return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, string, vec, or vec[string]"));
                     }
                     self.instantiate_enum(gid, args, base.range.start)?
@@ -1499,6 +1646,7 @@ let mut args = Vec::with_capacity(arguments.len());
                 return Err(self.fail(&format!("variant '{}::{}' needs {} payload value(s)", def.name, vname, fields.len())));
             };
             let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+            let (value, actual) = self.coerce_to_fn(value, actual, *field, &format!("payload {} of '{}::{}'", index + 1, def.name, vname))?;
             if !self.matches_value_type(*field, actual, Some(&argument.range)) {
                 self.seek_scalar_offset(argument.range.end);
                 return Err(self.fail(&format!("payload {} of '{}::{}' must be {}", index + 1, def.name, vname, field.name(self.ctx))));
@@ -1514,5 +1662,211 @@ let mut args = Vec::with_capacity(arguments.len());
         }
         self.seek_scalar_offset(expression.range.end);
         Ok(Some((Expr::EnumLit(def.name, eid, vidx, values), Type::Enum(def.name, eid))))
+    }
+
+    pub(super) fn coerce_to_fn(
+        &self,
+        expr: Expr,
+        actual: Type,
+        expected: Type,
+        context: &str,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        if actual == expected {
+            return Ok((expr, actual));
+        }
+        let Type::Fn(sig) = expected else {
+            return Ok((expr, actual));
+        };
+        let cid = match (&expr, actual) {
+            (Expr::ClosureLit(cid), _) => *cid,
+            (_, Type::Closure(cid)) => cid,
+            _ => return Ok((expr, actual)),
+        };
+        let def = &self.generics.closures[cid];
+        if !def.value_captures.is_empty() || !def.borrow_captures.is_empty() {
+            return Err(self.fail("a closure with captures cannot be passed as a function value; make it parameter-only or bind its inputs as arguments"));
+        }
+        let (params, returns) = self.ctx.fn_sig(sig);
+        if def.params != params || def.ret != returns {
+            let got = format!(
+                "fn({}) -> {}",
+                def.params.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "),
+                def.ret.name(self.ctx),
+            );
+            return Err(self.fail(&format!("{context}: expected {}, found {got}", expected.name(self.ctx))));
+        }
+        Ok((Expr::FnRef(def.fn_id, sig), expected))
+    }
+
+    fn lower_fn_sig_call_args(
+        &mut self,
+        callee_name: &str,
+        sig: usize,
+        _expression: &ae_syntax::expression::Expression,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Vec<Argument>, Type), ae_span::Diagnostic> {
+        let (params, ret) = self.ctx.fn_sig(sig);
+        let mut args = Vec::with_capacity(arguments.len());
+        for (index, argument) in arguments.iter().enumerate() {
+            self.seek_scalar_offset(argument.range.start);
+            let Some(expected) = params.get(index).copied() else {
+                return Err(self.fail(&format!("too many arguments to '{callee_name}'")));
+            };
+            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+            let (value, actual) = self.coerce_to_fn(
+                value,
+                actual,
+                expected,
+                &format!("argument {} to '{callee_name}'", index + 1),
+            )?;
+            if matches!(expected, Type::StrView) {
+                if !matches!(actual, Type::String | Type::StrView) {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail(&format!(
+                        "argument must be a string or string view, found {}",
+                        actual.name(self.ctx)
+                    )));
+                }
+                args.push(Argument::View(value));
+                continue;
+            }
+            self.check_value_argument_type(callee_name, index, expected, actual, Some(&argument.range))?;
+            if self.is_owned(actual)
+                && let Expr::Variable(source, ..) = &value
+            {
+                self.moved.insert(*source);
+            }
+            args.push(Argument::Value(value));
+        }
+        if args.len() != params.len() {
+            return Err(self.fail(&format!(
+                "function '{callee_name}' expects {} arguments, got {}",
+                params.len(),
+                args.len()
+            )));
+        }
+        Ok((args, ret))
+    }
+
+    fn try_lower_inferred_generic_call(
+        &mut self,
+        name: &str,
+        gid: usize,
+        call_offset: usize,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
+        let def = self.generics.fn_defs[gid].clone();
+        if !def.bounds.iter().flatten().any(|b| matches!(b, Bound::Callable(..))) {
+            return Ok(None);
+        }
+        let Some(bindings) = def.bindings.as_ref() else {
+            return Ok(None);
+        };
+        if arguments.len() != bindings.len() {
+            return Err(self.error_at(call_offset, &format!(
+                "function '{name}' expects {} arguments, got {}",
+                bindings.len(),
+                arguments.len()
+            )));
+        }
+        let mut lowered_args: Vec<(Option<Argument>, Expr, Type)> = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            self.seek_scalar_offset(argument.range.start);
+            if let ae_syntax::expression::ExpressionKind::BorrowArgument { name: arg_name, name_range, mutable, .. } = &argument.kind {
+                let &(slot, var_mut, ty) = self.names.get(arg_name).ok_or_else(|| {
+                    self.error_at(name_range.start, &format!("unknown variable '{arg_name}'")).with_code("E0101")
+                })?;
+                if *mutable && !var_mut {
+                    let diagnostic = self.error_at(name_range.start, &format!("cannot mutably borrow immutable variable '{arg_name}'")).with_code("E0103");
+                    return Err(self.immutable_binding_error(diagnostic, slot));
+                }
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.error_at(name_range.start, &format!("cannot borrow '{arg_name}' because it was moved")).with_code("E0102"),
+                        slot,
+                    )));
+                }
+                let borrow_ty = match ty {
+                    Type::Struct(sid) => if *mutable { Type::StructMut(sid) } else { Type::StructRef(sid) },
+                    _ => ty,
+                };
+                lowered_args.push((Some(Argument::Borrow(slot, matches!(ty, Type::Struct(_)))), Expr::Unit, borrow_ty));
+            } else {
+                let (expr, ty) = self.lower_scalar_body_expression(argument, slots)?;
+                lowered_args.push((None, expr, ty));
+            }
+        }
+        let mut inferred: Vec<Option<Type>> = vec![None; def.params.len()];
+        for (param_idx, binding) in bindings.iter().enumerate() {
+            let raw_text = def.source[binding.ty.clone()].trim();
+            let type_text = raw_text.strip_prefix("&mut ")
+                .or_else(|| raw_text.strip_prefix('&'))
+                .unwrap_or(raw_text)
+                .trim();
+            if let Some(tp_idx) = def.params.iter().position(|p| p == type_text) {
+                let callable_req = def.bounds[tp_idx].iter().find_map(|b| match b {
+                    Bound::Callable(kind, sig) => Some((*kind, *sig)),
+                    _ => None,
+                });
+                if let Some((req_kind, req_sig)) = callable_req {
+                    let cid = match (&lowered_args[param_idx].1, lowered_args[param_idx].2) {
+                        (Expr::ClosureLit(cid), _) => Some(*cid),
+                        (_, Type::Closure(cid)) => Some(cid),
+                        _ => None,
+                    };
+                    if let Some(cid) = cid {
+                        let (struct_lit, env_info) = self.materialize_closure_struct_lit(
+                            cid,
+                            None,
+                            arguments[param_idx].range.start,
+                        )?;
+                        if env_info.sig != req_sig || !env_info.kind.satisfies(req_kind) {
+                            return Err(self.error_at(
+                                arguments[param_idx].range.start,
+                                &format!("closure does not satisfy '{}({})' constraint", req_kind.name(), name),
+                            ));
+                        }
+                        lowered_args[param_idx] = (None, struct_lit, Type::Struct(env_info.env_sid));
+                    }
+                }
+                if inferred[tp_idx].is_none() {
+                    let arg_ty = match lowered_args[param_idx].2 {
+                        Type::StructRef(sid) | Type::StructMut(sid) if raw_text != type_text => Type::Struct(sid),
+                        other => other,
+                    };
+                    inferred[tp_idx] = Some(arg_ty);
+                }
+            }
+        }
+        if inferred.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let type_args: Vec<Type> = inferred.into_iter().map(Option::unwrap).collect();
+        let (inst_id, inst_params, inst_ret) = self.instantiate_fn(gid, type_args, call_offset)?;
+        let mut final_args = Vec::with_capacity(lowered_args.len());
+        for (index, (borrow_arg, value, actual)) in lowered_args.into_iter().enumerate() {
+            let expected = inst_params[index];
+            if let Some(arg) = borrow_arg {
+                if expected != actual {
+                    return Err(self.error_at(arguments[index].range.start, &format!(
+                        "argument {} to '{name}' must be {}, found {}",
+                        index + 1, expected.name(self.ctx), actual.name(self.ctx)
+                    )));
+                }
+                final_args.push(arg);
+                continue;
+            }
+            self.check_value_argument_type(name, index, expected, actual, Some(&arguments[index].range))?;
+            if self.is_owned(actual)
+                && let Expr::Variable(source, ..) = &value
+            {
+                self.check_variable_move(*source)?;
+                self.moved.insert(*source);
+            }
+            final_args.push(Argument::Value(value));
+        }
+        Ok(Some((Expr::Call(inst_id, final_args, inst_ret), inst_ret)))
     }
 }

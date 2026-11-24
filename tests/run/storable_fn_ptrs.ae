@@ -1,0 +1,69 @@
+fn inc(x: i64) -> i64 {
+    return x + 1;
+}
+
+fn dbl(x: i64) -> i64 {
+    return x * 2;
+}
+
+fn say_hi() {
+    print("hi");
+}
+
+fn log_num(x: i64) {
+    print("num " + to_string(x));
+}
+
+#[derive(Copy)]
+struct Handler {
+    cb: fn(i64) -> i64,
+}
+
+#[derive(Copy)]
+enum Action {
+    Idle,
+    Run(fn(i64) -> i64),
+}
+
+fn pick(use_dbl: bool) -> fn(i64) -> i64 {
+    if use_dbl {
+        return dbl;
+    }
+    return inc;
+}
+
+fn run_unit(f: fn()) {
+    f();
+}
+
+fn run_unit_arg(f: fn(i64), v: i64) {
+    f(v);
+}
+
+fn main() {
+    let h1 = Handler { cb: inc };
+    let h2 = Handler { cb: |x: i64| -> i64 { return x + 10; } };
+    print(h1.cb(5));
+    print((h1.cb)(6));
+    print(h2.cb(5));
+
+    let f = pick(true);
+    print(f(7));
+    print((pick(false))(7));
+
+    let act = Action::Run(dbl);
+    match act {
+        Action::Idle => { print(0); }
+        Action::Run(g) => { print(g(9)); }
+    }
+
+    let opt = Option[fn(i64) -> i64]::Some(inc);
+    match opt {
+        Option::Some(g) => { print(g(20)); }
+        Option::None => { print(0); }
+    }
+
+    run_unit(say_hi);
+    run_unit_arg(log_num, 42);
+    run_unit(|| -> () { print("closure hi"); return; });
+}

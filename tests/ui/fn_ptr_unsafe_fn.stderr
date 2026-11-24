@@ -1,0 +1,1 @@
+ae: $DIR/fn_ptr_unsafe_fn.ae:11:27: function 'raw_inc' cannot be passed as a safe function value

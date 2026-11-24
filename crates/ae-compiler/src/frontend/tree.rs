@@ -345,6 +345,11 @@ impl<'a> TreePrinter<'a> {
                 self.arguments(args, out);
                 out.push_str(&format!(") -> {}", ret.name(self.ctx)));
             }
+            Expr::FnExprCall(callee, args, ret, _) => {
+                out.push_str(&format!("({})(", self.expression_text(callee)));
+                self.arguments(args, out);
+                out.push_str(&format!(") -> {}", ret.name(self.ctx)));
+            }
             // M2.12 slice 2: the raw-pointer shapes.
             Expr::BorrowAs(operand, ..) => {
                 out.push('&');
@@ -384,6 +389,7 @@ impl<'a> TreePrinter<'a> {
                 out.push(')');
             }
             Expr::ClosureLit(cid) => out.push_str(&format!("closure#{}", cid)),
+            Expr::FnRef(fn_id, _) => out.push_str(&format!("fn#{}", fn_id)),
             Expr::AtomicNew(value) => out.push_str(&format!("cell_new({})", self.expression_text(value))),
             Expr::AtomicLoad(handle) => out.push_str(&format!("cell_load({})", self.expression_text(handle))),
             Expr::SharedNew(value, _) => out.push_str(&format!("shared_new({})", self.expression_text(value))),

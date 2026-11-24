@@ -9392,3 +9392,75 @@ fn p2_2_drop_order_and_trait_parity() {
         assert!(msg.contains(needle), "{src}: {msg}");
     }
 }
+
+#[test]
+fn p2_3_storable_fn_ptrs_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/storable_fn_ptrs.ae");
+    let expected = fs::read_to_string(root.join("tests/run/storable_fn_ptrs.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+#[test]
+fn p2_3_first_class_closures_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/first_class_closures.ae");
+    let expected = fs::read_to_string(root.join("tests/run/first_class_closures.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}

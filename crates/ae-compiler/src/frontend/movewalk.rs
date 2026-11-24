@@ -517,6 +517,26 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             }
             None
         }
+        Expr::FnExprCall(callee, args, _, sig) => {
+            if let Some(violation) = walk_expr(callee, moved) { return Some(violation); }
+            for (position, arg) in args.iter().enumerate() {
+                match arg {
+                    Argument::Value(e) => {
+                        if let Some(violation) = walk_moving_expr(e, moved) { return Some(violation); }
+                    }
+                    Argument::View(e) => { if let Some(violation) = walk_expr(e, moved) { return Some(violation); } }
+                    Argument::Borrow(id, _) => {
+                        if let Some((params, _)) = moved.fn_sig(*sig)
+                            && matches!(params.get(position), Some(Type::StructMut(_))) {
+                                moved.release_borrowed_base(*id);
+                            }
+                        if let Some(violation) = moved.read(*id) { return Some(violation); }
+                    }
+                    Argument::FnPtr(_) => {}
+                }
+            }
+            None
+        }
         Expr::Binary(a, op, b, ..) => {
             // Both operands walk even after a violation: a plain read
             // returns None, and `?` here would abandon the walk before the
@@ -608,7 +628,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             let args_result = moved.read(*vid);
             program_result.or(args_result)
         }
-        Expr::ClosureLit(_) | Expr::NowMs | Expr::NowS | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::MapNew(..) | Expr::JsonHas(..) => None,
+        Expr::ClosureLit(_) | Expr::FnRef(..) | Expr::NowMs | Expr::NowS | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::MapNew(..) | Expr::JsonHas(..) => None,
         // Literals and constants own nothing and reference nothing.
         Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::StrLit(..) => None,
     }

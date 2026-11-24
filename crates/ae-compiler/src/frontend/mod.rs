@@ -255,7 +255,7 @@ impl TypeDisplay for Type {
             // Never declared: a closure has no storage, and this arm exists
             // so a stray use fails the build instead of printing a bad type.
             Type::Closure(_) => "void ".to_owned(),
-            Type::Fn(_) => "void ".to_owned(),
+            Type::Fn(sig) => format!("ae_fn_t{sig} "),
             Type::Ptr(id) => format!("const {}* ", ctx.ptr_pointee(id).c_temp(ctx).trim_end()),
             Type::PtrMut(id) => format!("{}* ", ctx.ptr_pointee(id).c_temp(ctx).trim_end()),
             Type::Thread(_) => "void *".to_owned(),
@@ -393,7 +393,7 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // `&mut expr as *mut T` take the address of a local; the bool records
     // mutability. `p.deref()` reads through it, inside `unsafe` only.
     #[allow(dead_code)]
-    BorrowAs(Box<Expr>, bool, usize, usize), #[allow(dead_code)] DerefPtr(Box<Expr>, usize, usize), #[allow(dead_code)] PtrOffset(Box<Expr>, Box<Expr>, bool, usize, usize), #[allow(dead_code)] PtrCast(Box<Expr>, bool, usize, usize, usize), #[allow(dead_code)] PtrDropInPlace(Box<Expr>, Type, usize, usize), #[allow(dead_code)] PtrWrite(Box<Expr>, Box<Expr>, Type, usize, usize), ScalarCast(Box<Expr>, Type, Type, usize, usize), CharLit(char), Unit, IntMethod(IntMethodKind, Box<Expr>, Option<Box<Expr>>, Type, usize, usize) }
+    BorrowAs(Box<Expr>, bool, usize, usize), #[allow(dead_code)] DerefPtr(Box<Expr>, usize, usize), #[allow(dead_code)] PtrOffset(Box<Expr>, Box<Expr>, bool, usize, usize), #[allow(dead_code)] PtrCast(Box<Expr>, bool, usize, usize, usize), #[allow(dead_code)] PtrDropInPlace(Box<Expr>, Type, usize, usize), #[allow(dead_code)] PtrWrite(Box<Expr>, Box<Expr>, Type, usize, usize), ScalarCast(Box<Expr>, Type, Type, usize, usize), CharLit(char), Unit, IntMethod(IntMethodKind, Box<Expr>, Option<Box<Expr>>, Type, usize, usize), FnRef(usize, usize), FnExprCall(Box<Expr>, Vec<Argument>, Type, usize) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IntMethodKind {
@@ -501,6 +501,7 @@ enum Printed { Expr(Expr), Text(String) }
 // bindings on the `MatchArm`.
 enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize), VecPush(usize, Expr, usize, usize), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), VecPop(usize, usize, usize), VecStore(usize, Expr, Expr, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), VecFPush(usize, Expr, usize, usize), VecFPop(usize, usize, usize), VecFStore(usize, Expr, Expr, usize, usize), FieldStore(usize, String, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize) }
 #[derive(Debug)]
+#[derive(Clone)]
 struct Function { id: usize, params: Vec<(usize, Type)>, body: Vec<Statement>, is_main: bool, returns: Type }
 fn returns(stmts: &[Statement]) -> bool {
     stmts.iter().any(|s| match s {
@@ -635,10 +636,29 @@ pub(super) fn is_owned_type(ty: Type, structs: &[StructDef], enums: &[EnumDef]) 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Bound { Add, Eq, Ord, Copy }
+pub(super) enum CallableKind { Fn, FnMut, FnOnce }
+impl CallableKind {
+    fn name(self) -> &'static str {
+        match self { CallableKind::Fn => "Fn", CallableKind::FnMut => "FnMut", CallableKind::FnOnce => "FnOnce" }
+    }
+    fn satisfies(self, required: CallableKind) -> bool {
+        matches!(
+            (self, required),
+            (CallableKind::Fn, _)
+                | (CallableKind::FnMut, CallableKind::FnMut | CallableKind::FnOnce)
+                | (CallableKind::FnOnce, CallableKind::FnOnce)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound { Add, Eq, Ord, Copy, Callable(CallableKind, usize) }
 impl Bound {
     fn name(self) -> &'static str {
-        match self { Bound::Add => "Add", Bound::Eq => "Eq", Bound::Ord => "Ord", Bound::Copy => "Copy" }
+        match self {
+            Bound::Add => "Add", Bound::Eq => "Eq", Bound::Ord => "Ord", Bound::Copy => "Copy",
+            Bound::Callable(kind, _) => kind.name(),
+        }
     }
     fn allows(self, ty: Type, structs: &[StructDef], enums: &[EnumDef]) -> bool {
         match self {
@@ -646,6 +666,21 @@ impl Bound {
             Bound::Eq => matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::String | Type::Float(FloatTy::F64)),
             Bound::Ord => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)),
             Bound::Add => matches!(ty, Type::Int(IntTy::I64) | Type::String | Type::Float(FloatTy::F64)),
+            Bound::Callable(kind, sig) => matches!(kind, CallableKind::Fn | CallableKind::FnMut | CallableKind::FnOnce) && match ty {
+                Type::Fn(ty_sig) => ty_sig == sig,
+                _ => false,
+            },
+        }
+    }
+    fn allows_with_generics(self, ty: Type, structs: &[StructDef], enums: &[EnumDef], generics: &Generics) -> bool {
+        match self {
+            Bound::Callable(kind, sig) => match ty {
+                Type::Fn(ty_sig) => ty_sig == sig,
+                Type::Struct(sid) => generics.closure_envs.get(&sid)
+                    .is_some_and(|env| env.sig == sig && env.kind.satisfies(kind)),
+                _ => false,
+            },
+            other => other.allows(ty, structs, enums),
         }
     }
     fn allowed_types(self) -> &'static str {
@@ -654,6 +689,9 @@ impl Bound {
             Bound::Eq => "i64, bool, string, f64",
             Bound::Ord => "i64, f64",
             Bound::Add => "i64, string, f64",
+            Bound::Callable(CallableKind::Fn, _) => "a function pointer or non-mutating, non-consuming closure",
+            Bound::Callable(CallableKind::FnMut, _) => "a function pointer or non-consuming closure",
+            Bound::Callable(CallableKind::FnOnce, _) => "a function pointer or closure with matching signature",
         }
     }
 }
@@ -726,7 +764,7 @@ type Instance = (usize, Vec<Type>, Type);
 // arguments (ADR-21, ADR-30, ADR-31). `next_fn_id` is the one id space shared
 // by ordinary and instantiated functions, so C names never collide.
 #[derive(Default, Clone)]
-struct Generics { defs: Vec<GenericEnum>, names: HashMap<String, usize>, done: HashMap<String, usize>, struct_defs: Vec<GenericStruct>, struct_names: HashMap<String, usize>, struct_done: HashMap<String, usize>, struct_origin: HashMap<usize, (usize, Vec<Type>)>, enum_origin: HashMap<usize, (usize, Vec<Type>)>, fn_defs: Vec<GenericFn>, fn_names: HashMap<String, usize>, fn_done: HashMap<String, Instance>, fn_in_progress: std::collections::HashSet<String>, next_fn_id: usize, traits: Vec<TraitDef>, trait_names: HashMap<String, usize>, impls: std::collections::HashSet<(usize, String)>, inherent: HashMap<String, MethodDef>, generic_impls: HashMap<String, GenericImplDef>, generic_impl_done: HashMap<String, Instance>, impl_in_progress: std::collections::HashSet<String>, closures: Vec<ClosureDef>, threads: Vec<Type>, nested_shapes: Vec<NestedShape>, instantiation_trace: Vec<(&'static str, String, String)> }
+struct Generics { defs: Vec<GenericEnum>, names: HashMap<String, usize>, done: HashMap<String, usize>, struct_defs: Vec<GenericStruct>, struct_names: HashMap<String, usize>, struct_done: HashMap<String, usize>, struct_origin: HashMap<usize, (usize, Vec<Type>)>, enum_origin: HashMap<usize, (usize, Vec<Type>)>, fn_defs: Vec<GenericFn>, fn_names: HashMap<String, usize>, fn_done: HashMap<String, Instance>, fn_in_progress: std::collections::HashSet<String>, next_fn_id: usize, traits: Vec<TraitDef>, trait_names: HashMap<String, usize>, impls: std::collections::HashSet<(usize, String)>, inherent: HashMap<String, MethodDef>, generic_impls: HashMap<String, GenericImplDef>, generic_impl_done: HashMap<String, Instance>, impl_in_progress: std::collections::HashSet<String>, closures: Vec<ClosureDef>, closure_envs: HashMap<usize, ClosureEnvInfo>, impl_fns: HashMap<usize, ImplFnInfo>, threads: Vec<Type>, nested_shapes: Vec<NestedShape>, instantiation_trace: Vec<(&'static str, String, String)> }
 #[derive(Debug, Clone)]
 struct MatchArm { variant: usize, bindings: Vec<(usize, Type, usize)>, body: Vec<Statement> }
 
@@ -768,7 +806,33 @@ struct GenericImplDef { params: Vec<String>, methods: Vec<GenericImplMethod>, fi
 // with the enclosing scope. A closure value itself has no storage — it is a
 // name for the function id — so it cannot be stored, returned, or moved.
 #[derive(Debug, Clone)]
-struct ClosureDef { fn_id: usize, params: Vec<Type>, ret: Type, value_captures: Vec<(usize, Type)>, borrow_captures: Vec<(usize, Type)> }
+pub(super) struct ClosureEnvInfo {
+    pub(super) env_sid: usize,
+    pub(super) wrapper_fn_id: usize,
+    pub(super) kind: CallableKind,
+    pub(super) sig: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ImplFnInfo {
+    pub(super) env_sid: usize,
+    pub(super) wrapper_fn_id: usize,
+    pub(super) kind: CallableKind,
+    pub(super) sig: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ClosureDef {
+    fn_id: usize,
+    params: Vec<Type>,
+    ret: Type,
+    value_captures: Vec<(usize, Type)>,
+    borrow_captures: Vec<(usize, Type)>,
+    mut_captures: Vec<(usize, Type)>,
+    kind: CallableKind,
+    env: Option<ClosureEnvInfo>,
+    file: String,
+}
 
 // One entry of an inherent `impl` block. `receiver` records the type the first
 // parameter was bound to — the struct by value for `self`, a read-only borrow
@@ -904,7 +968,7 @@ struct ResolvedExpressions {
     owned_field_writes: HashSet<usize>,
 }
 
-struct Parser<'a> { file: String, source: &'a str, tokens: Rc<Vec<Token>>, shared_source: Rc<str>, pos: usize, names: HashMap<String, (usize, bool, Type)>, binding_ranges: HashMap<usize, std::ops::Range<usize>>, capture_origins: HashMap<usize, usize>, resolved_expressions: Rc<OnceCell<ResolvedExpressions>>, next_var: usize, expression_depth: usize, expression_nodes: usize, block_depth: usize, loop_depth: usize, loop_scopes: Vec<usize>, loop_labels: Vec<Option<usize>>, next_label: usize, unsafe_depth: usize, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext, id_order: Vec<usize>, in_main: bool, return_type: Type, moved: std::collections::HashSet<usize>, borrows: Vec<(usize, usize, BorrowKind)>, deferred_write_conflicts: Vec<(usize, usize, String, &'static str, Option<String>)>, deferred_borrow_spawns: Vec<(usize, Vec<usize>, usize)>, call_borrows: Vec<(usize, usize)>, mut_borrows: Vec<(usize, usize)>, scopes: Vec<Vec<(usize, Type)>>, owned_params: Vec<(usize, Type)>, subst: HashMap<String, Type>, trait_bounds: HashMap<String, Vec<usize>>, receiver: Option<Type>, impl_self: Option<Type>, inherent_impl: bool, shadow_ok: bool, pending: Vec<Function> }
+struct Parser<'a> { file: String, source: &'a str, tokens: Rc<Vec<Token>>, shared_source: Rc<str>, pos: usize, names: HashMap<String, (usize, bool, Type)>, binding_ranges: HashMap<usize, std::ops::Range<usize>>, capture_origins: HashMap<usize, usize>, resolved_expressions: Rc<OnceCell<ResolvedExpressions>>, next_var: usize, expression_depth: usize, expression_nodes: usize, block_depth: usize, loop_depth: usize, loop_scopes: Vec<usize>, loop_labels: Vec<Option<usize>>, next_label: usize, unsafe_depth: usize, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext, id_order: Vec<usize>, in_main: bool, return_type: Type, moved: std::collections::HashSet<usize>, borrows: Vec<(usize, usize, BorrowKind)>, deferred_write_conflicts: Vec<(usize, usize, String, &'static str, Option<String>)>, deferred_borrow_spawns: Vec<(usize, Vec<usize>, usize)>, call_borrows: Vec<(usize, usize)>, mut_borrows: Vec<(usize, usize)>, scopes: Vec<Vec<(usize, Type)>>, owned_params: Vec<(usize, Type)>, subst: HashMap<String, Type>, trait_bounds: HashMap<String, Vec<usize>>, receiver: Option<Type>, impl_self: Option<Type>, inherent_impl: bool, shadow_ok: bool, impl_fn_id: Option<usize>, fn_once_type_params: std::collections::HashSet<String>, fn_once_slots: std::collections::HashSet<usize>, pending: Vec<Function> }
 impl Parser<'_> {
     pub(super) fn is_owned(&self, ty: Type) -> bool {
         is_owned_type(ty, self.structs, self.enums)
@@ -915,7 +979,7 @@ struct Program { files: Vec<Vec<Function>>, structs: Vec<StructDef>, enums: Vec<
 
 #[allow(clippy::too_many_arguments)]
 fn make_parser<'a>(file: &str, source: &'a str, tokens: Rc<Vec<Token>>, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext) -> Parser<'a> {
-    Parser { file: file.to_owned(), source, tokens, shared_source: Rc::from(source), pos: 0, names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::default(), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0, loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0, functions, structs, struct_names, enums, enum_names, generics, ctx, id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(), borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new() }
+    Parser { file: file.to_owned(), source, tokens, shared_source: Rc::from(source), pos: 0, names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::default(), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0, loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0, functions, structs, struct_names, enums, enum_names, generics, ctx, id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(), borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, impl_fn_id: None, fn_once_type_params: std::collections::HashSet::new(), fn_once_slots: std::collections::HashSet::new(), pending: Vec::new() }
 }
 
 #[allow(dead_code)] // exercised by in-memory unit tests
@@ -1862,6 +1926,151 @@ mod explain_tests {
             "struct G { x: i64 } impl Drop for G { fn drop(&mut self) {} } fn main() { var g = G { x: 1 }; G::drop(&mut g); }",
         ] {
             assert!(parse_with_structs(bad).is_err(), "expected error for: {bad}");
+        }
+    }
+
+    #[test]
+    fn p2_3_fn_ptrs_frontend() {
+        use super::*;
+        let parse_ok = |source: &str| -> Result<Vec<Function>, String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(functions)
+        };
+
+        let valid = "
+            fn double(x: i64) -> i64 { return x * 2; }
+            fn noop(x: i64) { print(x); }
+            #[derive(Copy)]
+            struct Holder { cb: fn(i64) -> i64, side: fn(i64) }
+            struct Wrapper[T] { val: T }
+            enum Action { Run(fn(i64) -> i64), None }
+            fn pick(flag: bool) -> fn(i64) -> i64 {
+                if flag { return double; }
+                return |x: i64| -> i64 { return x + 10; };
+            }
+            fn higher() -> fn(i64) -> fn(i64) -> i64 {
+                return pick_wrap;
+            }
+            fn pick_wrap(x: i64) -> fn(i64) -> i64 {
+                return pick(x > 0);
+            }
+            fn main() {
+                var f = double;
+                let a = f(3);
+                f = |x: i64| -> i64 { return x + 1; };
+                let b = f(3);
+                let h = Holder { cb: double, side: noop };
+                let h2 = h;
+                let c = h.cb(4);
+                let d = (h2.cb)(5);
+                (h.side)(a + b + c + d);
+                let e = pick(false)(7);
+                let w = Wrapper[fn(i64) -> i64] { val: double };
+                let opt = Option[fn(i64) -> i64]::Some(double);
+                let act = Action::Run(|x: i64| -> i64 { return x * 3; });
+                print(e + w.val(2));
+                match opt {
+                    Option::Some(g) => { print(g(1)); }
+                    Option::None => { print(0); }
+                }
+                match act {
+                    Action::Run(g) => { print(g(2)); }
+                    Action::None => { print(0); }
+                }
+            }
+        ";
+        parse_ok(valid).expect("valid fn ptr program");
+
+        for bad in [
+            "fn main() { let k = 1; let h = Holder { cb: |x: i64| -> i64 { return x + k; } }; } struct Holder { cb: fn(i64) -> i64 }",
+            "unsafe fn risky(x: i64) -> i64 { return x; } fn main() { let f = risky; }",
+            "fn takes_bool(b: bool) -> i64 { return 0; } struct Holder { cb: fn(i64) -> i64 } fn main() { let h = Holder { cb: takes_bool }; }",
+            "fn bad(cb: fn(&string) -> &string) -> i64 { return 0; } fn main() {}",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
+        }
+    }
+
+    #[test]
+    fn p2_3_first_class_closures_frontend() {
+        use super::*;
+        let parse_ok = |source: &str| -> Result<Vec<Function>, String> {
+            let mut shared: SharedFunctions = HashMap::new();
+            let mut structs: Vec<StructDef> = Vec::new();
+            let mut struct_names: HashMap<String, usize> = HashMap::new();
+            let (mut enums, mut enum_names) = prelude_enums();
+            let mut generics = prelude_generics();
+            let mut ctx = CompileContext::new();
+            let mut next_id = 0usize;
+            let functions = parse_source(
+                "", source, &mut shared, &mut structs, &mut struct_names,
+                &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id,
+            ).map_err(|d| d.to_string())?;
+            for function in &functions {
+                let mut mir_fn = mir::lower_function(function, &ctx);
+                mir::optimize_function(&mut mir_fn);
+                mir::elaborate_drops(&mut mir_fn);
+                mir::validate(&mir_fn, &ctx)?;
+            }
+            Ok(functions)
+        };
+
+        let valid = "
+            fn double(x: i64) -> i64 { return x * 2; }
+            fn apply[F: Fn(i64) -> i64](f: F, x: i64) -> i64 { return f(x); }
+            fn apply_copy[F: Fn(i64) -> i64 + Copy](f: F, x: i64) -> i64 { return f(x) + f(x); }
+            fn run_mut[F: FnMut(i64) -> i64](var f: F, x: i64) -> i64 { return f(x); }
+            fn run_once[F: FnOnce() -> string](f: F) -> string { return f(); }
+            fn make_adder(base: i64) -> impl Fn(i64) -> i64 {
+                return |x: i64| -> i64 { return x + base; };
+            }
+            fn main() {
+                let offset = 10;
+                let add_off = |x: i64| -> i64 { return x + offset; };
+                print(apply(add_off, 5));
+                print(apply(|x: i64| -> i64 { return x + offset; }, 7));
+                print(apply(double, 3));
+                print(apply_copy(add_off, 2));
+                var total = 1;
+                let inc = |x: i64| -> i64 { total = total + x; return total; };
+                print(run_mut(inc, 4));
+                let s = \"owned\";
+                let take = || -> string { return s; };
+                print(run_once(take));
+                let s2 = \"borrowed\";
+                print(apply(|x: i64| -> i64 { return len(s2) + x; }, 3));
+                let adder = make_adder(20);
+                print(adder(5));
+                print(apply(adder, 6));
+            }
+        ";
+        parse_ok(valid).expect("valid first-class closure program");
+
+        for bad in [
+            // Calling FnOnce parameter twice -> E0102
+            "fn bad_once[F: FnOnce() -> i64](f: F) -> i64 { return f() + f(); } fn main() { let s = \"hi\"; print(bad_once(|| -> i64 { let t = s; return len(t); })); }",
+            // Returning closure that borrows a &string parameter -> escaping borrow
+            "fn bad_ret(s: &string) -> impl Fn() -> i64 { return || -> i64 { return len(s); }; } fn main() {}",
+            // Mutating an immutable `let` capture -> rejected
+            "fn main() { let x = 0; let f = || -> i64 { x = 1; return x; }; }",
+        ] {
+            assert!(parse_ok(bad).is_err(), "expected error for: {bad}");
         }
     }
 }
