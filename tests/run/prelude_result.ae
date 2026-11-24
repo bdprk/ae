@@ -1,0 +1,77 @@
+fn parse_number(flag: bool) -> Result[i64, string] {
+    if flag {
+        return Result[i64, string]::Ok(42);
+    }
+    return Result[i64, string]::Err("not a number");
+}
+
+fn add_one(flag: bool) -> Result[i64, string] {
+    let value = parse_number(flag)?;
+    return Result[i64, string]::Ok(value + 1);
+}
+
+fn load_name(flag: bool) -> Result[string, string] {
+    if flag {
+        return Result[string, string]::Ok("ae");
+    }
+    return Result[string, string]::Err("missing");
+}
+
+fn exact_value(flag: bool) -> Result[f64, string] {
+    if flag {
+        return Result[f64, string]::Ok(2.5);
+    }
+    return Result[f64, string]::Err("bad");
+}
+
+fn flag_value(flag: bool) -> Result[bool, string] {
+    if flag {
+        return Result[bool, string]::Ok(true);
+    }
+    return Result[bool, string]::Err("false result");
+}
+
+fn numbers(flag: bool) -> Result[vec, string] {
+    if flag {
+        return Result[vec, string]::Ok(vec[1, 2, 3]);
+    }
+    return Result[vec, string]::Err("no numbers");
+}
+
+fn main() {
+    let ok = add_one(true);
+    match ok {
+        Result::Ok(value) => { print(value); }
+        Result::Err(message) => { print(message); }
+    }
+    let failed = add_one(false);
+    match failed {
+        Result::Ok(value) => { print(value); }
+        Result::Err(message) => { print(message); }
+    }
+    let named = load_name(true);
+    match named {
+        Result::Ok(name) => { print(name); }
+        Result::Err(message) => { print(message); }
+    }
+    let missing = load_name(false);
+    match missing {
+        Result::Ok(name) => { print(name); }
+        Result::Err(message) => { print(message); }
+    }
+    let exact = exact_value(true);
+    match exact {
+        Result::Ok(number) => { print(number); }
+        Result::Err(message) => { print(message); }
+    }
+    let yes = flag_value(true);
+    match yes {
+        Result::Ok(bit) => { print(bit); }
+        Result::Err(message) => { print(message); }
+    }
+    let list = numbers(true);
+    match list {
+        Result::Ok(values) => { print(len(values)); }
+        Result::Err(message) => { print(message); }
+    }
+}

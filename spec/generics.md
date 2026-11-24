@@ -35,7 +35,10 @@ Status: describes the implemented language (2026-11-15). Generic monomorphizatio
 
 - Construction names the instantiation: `Option[string]::Some("x")`, `Either[string, i64]::Both("n", 3)`.
 - `match` uses the **declaration name** (`Option::Some(v)`); the binding's actual type comes from the matched value (see `spec/patterns.md`).
-- The predefined `Option[T] { Some(T), None }` is public to all files. At most 256 enum types per program (built-in + fully instantiated), reported at the instantiation site.
+- The predefined `Option[T] { Some(T), None }` and
+  `Result[T, E] { Ok(T), Err(E) }` are public to all files. At most 256 enum
+  types per program (built-in + fully instantiated), reported at the
+  instantiation site.
 
 ## 5. Generic Functions
 

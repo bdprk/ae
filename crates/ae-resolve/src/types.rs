@@ -19,6 +19,7 @@ use crate::{DefId, DefKind};
 pub const PRELUDE_TYPES: &[&str] = &[
     "ReadResult", "WriteResult", "IntResult", "DirResult", "FileResult",
     "StatusResult", "BoolResult", "CommandResult", "FloatResult", "Option",
+    "Result",
 ];
 
 pub use ae_ty::TypeSpelling;

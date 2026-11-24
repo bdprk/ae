@@ -335,9 +335,10 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
     (enums, names)
 }
 
-// `Option[T]` ships with the prelude: "a value that may be absent" is the one
-// generic shape every program needs, and building it in keeps programs from
-// each declaring a slightly different `Maybe`.
+// `Option[T]` and `Result[T, E]` ship with the prelude: "a value that may be
+// absent" and "fallibility as a value" are the two generic shapes every
+// program needs, and building them in keeps programs from each declaring a
+// slightly different `Maybe` or `Outcome` (Hard Rule 1; P2.4 slice 1).
 fn prelude_generics() -> Generics {
     let mut generics = Generics::default();
     generics.names.insert("Option".to_owned(), 0);
@@ -345,6 +346,15 @@ fn prelude_generics() -> Generics {
         name: "Option".to_owned(),
         params: vec!["T".to_owned()],
         variants: vec![("Some".to_owned(), vec![Payload::Param(0)]), ("None".to_owned(), Vec::new())],
+        file: PRELUDE.to_owned(),
+        public: true,
+        is_copy: false,
+    });
+    generics.names.insert("Result".to_owned(), 1);
+    generics.defs.push(GenericEnum {
+        name: "Result".to_owned(),
+        params: vec!["T".to_owned(), "E".to_owned()],
+        variants: vec![("Ok".to_owned(), vec![Payload::Param(0)]), ("Err".to_owned(), vec![Payload::Param(1)])],
         file: PRELUDE.to_owned(),
         public: true,
         is_copy: false,

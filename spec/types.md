@@ -82,6 +82,11 @@ enum Result[T, E] {
 }
 ```
 
+Both `Option[T]` and `Result[T, E]` are predefined: a program may name and
+instantiate them without declaring or importing anything (ADR-0233). The
+compiler's payload-specific preset result enums (`ReadResult` …) predate this
+and are being migrated onto `Result[payload, string]` instantiations.
+
 ## 4. Methods and `impl` Blocks
 
 ### 4.1 Inherent Implementations

@@ -51,10 +51,10 @@ Specifics pinned elsewhere in the docs: `env` distinguishes "exists but empty" (
 
 A custom enum participates in the error mechanism when it matches one of two shapes, with fixed variant names and order:
 
-- `{ Ok(...), Err(string) }` — the shape of all nine preset families.
+- `{ Ok(...), Err(string) }` — the shape of all nine preset families, and of the prelude `Result[T, string]` instantiation.
 - `{ Some(T), None }` — the shape of the preset `Option[T]` (also public to all files without import).
 
-The success payload may be any owned type (`string`, `vec`, struct, enum); the failure path releases it per the type's release routine when dropped.
+The success payload may be any owned type (`string`, `vec`, struct, enum); the failure path releases it per the type's release routine when dropped. `Result[T, E]` itself is predefined (ADR-0233): `Result[i64, string]` propagates like any preset family.
 
 ## 5. Boundary Rules
 

@@ -9464,3 +9464,42 @@ fn p2_3_first_class_closures_parity() {
         );
     }
 }
+
+/// P2.4 slice 1 (ADR-0233): the prelude's generic `Result[T, E]` is usable
+/// without a declaration or import, and every payload family the
+/// generic-enum rule admits agrees across the C emitters and `--interp`.
+#[test]
+fn p2_4_prelude_result_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/prelude_result.ae");
+    let expected = fs::read_to_string(root.join("tests/run/prelude_result.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
