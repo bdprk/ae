@@ -393,3 +393,5 @@
 
 - 2026-11-25 01:30 (+08:00): **P2.1 slice 3: TyKind carries widths.** The concrete type is `Int(IntTy)`/`Float(FloatTy)`; every compiler match and constructor migrated to the I64/F64 tags mechanically, the scalar/layout bridges and C names are width-aware, and the ae-ty/unifier tests use the tagged forms. Behaviour is unchanged (all tags constructed are the defaults). Evidence: Windows suite 532/0, clippy, deny 176/176, route 0/0, Windows 50k mutation; WSL verification and ab_gate wait on the running 10k-seed fuzz (7611/10000 at the time of writing).
 
+- 2026-11-25 02:30 (+08:00): **P1.4 closes: M0.2.08, R3a and R3c flip.** All P1.4 exit conditions are met: parser.rs 436 lines, typed body/expression parsers deleted, one frontend route, zero typed-expression fallbacks (ladder + ui), dual-platform suite 532/0, dual-platform ab_gate 50 examples + 663 CLI invocations with 0 diffs, WSL sanitize+leak 41/41 and leak 0, and `diff_fuzz.py --seeds 10000` with 0 failures (5.55 seeds/s, 8 jobs). The ledger flips P1.4, M0.2.08, R3a and R3c with the evidence recorded under P1.4's Exit; the width-migration commit's WSL leg is running in the background.
+
