@@ -6,12 +6,14 @@
 //! predicates so both the resolver and later crates can name a concrete
 //! type without depending on the compiler crate.
 
+use crate::numeric::{FloatTy, IntTy};
+
 /// The canonical concrete type. `Type` is the spelling the compiler uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TyKind {
-    Int,
+    Int(IntTy),
     Bool,
-    F64,
+    Float(FloatTy),
     String,
     StrView,
     Vec,
@@ -49,7 +51,9 @@ impl TyKind {
     /// The C layout of a machine scalar, when this type is one.
     pub fn scalar_c_layout(self) -> Option<(i64, i64)> {
         match self {
-            TyKind::Int | TyKind::F64 => Some((8, 8)),
+            TyKind::Int(width) => Some(((width.bits() / 8) as i64, (width.bits() / 8) as i64)),
+            TyKind::Float(FloatTy::F64) => Some((8, 8)),
+            TyKind::Float(FloatTy::F32) => Some((4, 4)),
             TyKind::Bool => Some((1, 1)),
             _ => None,
         }
@@ -70,8 +74,11 @@ impl TyKind {
     pub fn scalar(self) -> Option<crate::op::Scalar> {
         use crate::op::Scalar;
         match self {
-            TyKind::Int => Some(Scalar::Int),
-            TyKind::F64 => Some(Scalar::Float),
+            // Stage 1 accepts only the default width; the operator rules stay
+            // width-blind until the width families land, so f32 and the other
+            // integer widths must not enter the three-scalar domain yet.
+            TyKind::Int(IntTy::I64) => Some(Scalar::Int),
+            TyKind::Float(FloatTy::F64) => Some(Scalar::Float),
             TyKind::Bool => Some(Scalar::Bool),
             _ => None,
         }
@@ -96,22 +103,22 @@ mod tests {
 
     #[test]
     fn scalar_bridge_names_the_three_scalars_and_nothing_else() {
-        assert_eq!(TyKind::Int.scalar(), Some(Scalar::Int));
-        assert_eq!(TyKind::F64.scalar(), Some(Scalar::Float));
+        assert_eq!(TyKind::Int(IntTy::I64).scalar(), Some(Scalar::Int));
+        assert_eq!(TyKind::Float(FloatTy::F64).scalar(), Some(Scalar::Float));
         assert_eq!(TyKind::Bool.scalar(), Some(Scalar::Bool));
         assert_eq!(TyKind::String.scalar(), None);
         assert_eq!(TyKind::Ptr(3).scalar(), None);
-        assert_eq!(Scalar::Int.ty(), TyKind::Int);
-        assert_eq!(Scalar::Float.ty(), TyKind::F64);
+        assert_eq!(Scalar::Int.ty(), TyKind::Int(IntTy::I64));
+        assert_eq!(Scalar::Float.ty(), TyKind::Float(FloatTy::F64));
         assert_eq!(Scalar::Bool.ty(), TyKind::Bool);
     }
 
     #[test]
     fn value_acceptance_prefers_the_checked_fact_and_never_coerces() {
-        assert!(accepts_value(TyKind::Int, TyKind::Bool, Some(Scalar::Int)));
-        assert!(!accepts_value(TyKind::Int, TyKind::Int, Some(Scalar::Bool)));
-        assert!(accepts_value(TyKind::Int, TyKind::Int, None));
-        assert!(!accepts_value(TyKind::Int, TyKind::Bool, None));
+        assert!(accepts_value(TyKind::Int(IntTy::I64), TyKind::Bool, Some(Scalar::Int)));
+        assert!(!accepts_value(TyKind::Int(IntTy::I64), TyKind::Int(IntTy::I64), Some(Scalar::Bool)));
+        assert!(accepts_value(TyKind::Int(IntTy::I64), TyKind::Int(IntTy::I64), None));
+        assert!(!accepts_value(TyKind::Int(IntTy::I64), TyKind::Bool, None));
         assert!(accepts_value(TyKind::String, TyKind::String, None));
         assert!(!accepts_value(TyKind::String, TyKind::StrView, None));
         assert!(!accepts_value(TyKind::Vec, TyKind::StrVec, None));

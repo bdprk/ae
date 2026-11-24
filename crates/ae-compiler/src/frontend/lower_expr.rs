@@ -11,8 +11,8 @@ impl<'a> Parser<'a> {
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
         use ae_syntax::expression::ExpressionKind;
         Ok(match &expression.kind {
-            ExpressionKind::Atom(Kind::Number(value)) => (Expr::Number(*value), Type::Int),
-            ExpressionKind::Atom(Kind::Float(value)) => (Expr::FloatLit(*value), Type::F64),
+            ExpressionKind::Atom(Kind::Number(value)) => (Expr::Number(*value), Type::Int(IntTy::I64)),
+            ExpressionKind::Atom(Kind::Float(value)) => (Expr::FloatLit(*value), Type::Float(FloatTy::F64)),
             ExpressionKind::Atom(Kind::True) => (Expr::BoolLit(true), Type::Bool),
             ExpressionKind::Atom(Kind::False) => (Expr::BoolLit(false), Type::Bool),
             ExpressionKind::Atom(Kind::Text(value)) => {
@@ -467,7 +467,7 @@ impl<'a> Parser<'a> {
                             return Err(self.fail(&format!("{method_name} takes an i64 count")));
                         };
                         let (count_value, count_ty) = self.lower_scalar_body_expression(count, slots)?;
-                        if count_ty != Type::Int {
+                        if count_ty != Type::Int(IntTy::I64) {
                             self.seek_scalar_offset(count.range.end);
                             return Err(self.fail(&format!("{method_name} takes an i64 count")));
                         }
@@ -689,16 +689,16 @@ impl<'a> Parser<'a> {
                         let index_position = self.position();
                         let index_value = match &index.kind {
                             ExpressionKind::Atom(Kind::Ident(bound)) => self.names.get(bound).map(|&(id, _, ity)| (Expr::Variable(id, ity, index_position.0, index_position.1), ity)),
-                            ExpressionKind::Atom(Kind::Number(value)) => Some((Expr::Number(*value), Type::Int)),
+                            ExpressionKind::Atom(Kind::Number(value)) => Some((Expr::Number(*value), Type::Int(IntTy::I64))),
                             _ => None,
                         };
-                        if let Some((index_value, Type::Int)) = index_value {
+                        if let Some((index_value, Type::Int(IntTy::I64))) = index_value {
                             self.seek_scalar_offset(base.range.end);
                             let (line, column) = self.position();
                             lowered = Some(match ty {
-                                Type::Array(len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int),
+                                Type::Array(len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int(IntTy::I64)),
                                 Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef => {
-                                    let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::F64 } else { Type::Int };
+                                    let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) };
                                     let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
                                     (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), element)
                                 }
@@ -731,15 +731,15 @@ impl<'a> Parser<'a> {
                 match ty {
                     Type::Array(len) => {
                         let value = self.lower_scalar_array_index(index, slots)?;
-                        (Expr::Index(slot, len, Box::new(value), line, column), Type::Int)
+                        (Expr::Index(slot, len, Box::new(value), line, column), Type::Int(IntTy::I64))
                     }
                     Type::VecRef | Type::VecFRef | Type::Vec | Type::VecF => {
                         let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
-                        if index_ty != Type::Int {
+                        if index_ty != Type::Int(IntTy::I64) {
                             self.seek_scalar_offset(index.range.end);
                             return Err(self.fail("vector index must be an integer"));
                         }
-                        let element = if matches!(ty, Type::VecFRef | Type::VecF) { Type::F64 } else { Type::Int };
+                        let element = if matches!(ty, Type::VecFRef | Type::VecF) { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) };
                         let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
                         (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
                     }
@@ -747,7 +747,7 @@ impl<'a> Parser<'a> {
                         // A borrowed string vector's element is a view; an
                         // owned one hands the element's view too.
                         let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
-                        if index_ty != Type::Int {
+                        if index_ty != Type::Int(IntTy::I64) {
                             self.seek_scalar_offset(index.range.end);
                             return Err(self.fail("vector index must be an integer"));
                         }
@@ -774,7 +774,7 @@ impl<'a> Parser<'a> {
                     element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
                     values.push(value);
                 }
-                let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
+                let ty = if element_type == Some(Type::Float(FloatTy::F64)) { Type::VecF } else { Type::Vec };
                 (Expr::VecLit(values, ty, line, column), ty)
             }
             _ => return Err(self.error_at(expression.range.start, "this expression is not supported by the body route")),
@@ -928,7 +928,7 @@ impl<'a> Parser<'a> {
                     }
                 self.seek_scalar_offset(expression.range.end);
                 let (line, column) = self.position();
-                Ok(Some((Expr::PtrWrite(Box::new(pointer), Box::new(value), pointee, line, column), Type::Int)))
+                Ok(Some((Expr::PtrWrite(Box::new(pointer), Box::new(value), pointee, line, column), Type::Int(IntTy::I64))))
             }
             "ptr_drop_in_place" => {
                 if arguments.len() != 1 || self.unsafe_depth == 0 {
@@ -941,7 +941,7 @@ impl<'a> Parser<'a> {
                 let pointee = self.ctx.ptr_pointee(pointee_id);
                 self.seek_scalar_offset(expression.range.end);
                 let (line, column) = self.position();
-                Ok(Some((Expr::PtrDropInPlace(Box::new(pointer), pointee, line, column), Type::Int)))
+                Ok(Some((Expr::PtrDropInPlace(Box::new(pointer), pointee, line, column), Type::Int(IntTy::I64))))
             }
             "bytes" => {
                 if arguments.len() != 1 {
@@ -1361,7 +1361,7 @@ let mut args = Vec::with_capacity(arguments.len());
                     // The typed route admits only the flat payload-capable
                     // arguments for a generic enum; a struct or enum argument
                     // is a diagnostic, not an instantiation.
-                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF)) {
                         return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, string, vec, or vec[string]"));
                     }
                     self.instantiate_enum(gid, args, base.range.start)?

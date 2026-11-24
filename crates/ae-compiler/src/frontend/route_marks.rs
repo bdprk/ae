@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn scalar_type(ty: Type) -> bool {
-    matches!(ty, Type::Int | Type::F64 | Type::Bool)
+    matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool)
 }
 
 /// A builtin call that builds a fresh `string`: assigning its result to an

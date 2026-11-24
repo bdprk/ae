@@ -15,8 +15,8 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
 
 pub(super) fn scalar_type(name: &str) -> Option<Type> {
     match name {
-        "i64" => Some(Type::Int),
-        "f64" => Some(Type::F64),
+        "i64" => Some(Type::Int(IntTy::I64)),
+        "f64" => Some(Type::Float(FloatTy::F64)),
         "bool" => Some(Type::Bool),
         _ => None,
     }
@@ -76,7 +76,7 @@ impl Parser<'_> {
                 if matches!(elem, Type::Shared(_)) {
                     return Err(self.fail("cannot nest a shared handle inside shared[...] (no handle towers)"));
                 }
-                if !matches!(elem, Type::Int | Type::Bool | Type::F64 | Type::Atomic) {
+                if !matches!(elem, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::Atomic) {
                     return Err(self.fail("shared[T] in v1 requires a copy-semantics element type (i64, bool, f64, or atomic)"));
                 }
                 Ok(Type::Shared(self.ctx.intern_shared(elem)))
@@ -335,7 +335,7 @@ impl Parser<'_> {
         let fty = self.named_type()?;
         // Payloads stay flat: a variant may carry scalars, strings or a vector,
         // but not a struct or another enum (no layout recursion).
-        if !matches!(fty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
+        if !matches!(fty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
             return Err(self.fail("enum variant payloads must be i64, bool, f64, string, vec, vec[string], or a type parameter"));
         }
         Ok(Payload::Concrete(fty))
@@ -409,7 +409,7 @@ impl Parser<'_> {
                         "vec" => Some(Type::Vec),
                         _ => scalar_type(name),
                     })?;
-                    matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
+                    matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
                 }
                 [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
                  Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
@@ -465,8 +465,8 @@ impl Parser<'_> {
                 if name == "vec" && arguments.len() == 1 {
                     return match arguments.as_slice() {
                         [ShapeArg::Value(Type::String)] => Some(ShapeArg::Value(Type::StrVec)),
-                        [ShapeArg::Value(Type::F64)] => Some(ShapeArg::Value(Type::VecF)),
-                        [ShapeArg::Value(Type::Int)] => Some(ShapeArg::Value(Type::Vec)),
+                        [ShapeArg::Value(Type::Float(FloatTy::F64))] => Some(ShapeArg::Value(Type::VecF)),
+                        [ShapeArg::Value(Type::Int(IntTy::I64))] => Some(ShapeArg::Value(Type::Vec)),
                         _ => None,
                     };
                 }
@@ -495,7 +495,7 @@ impl Parser<'_> {
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let ty = self.named_type()?;
-        if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
+        if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF) {
             return Err(self.fail("type arguments must be i64, bool, f64, string, vec, or vec[string]"));
         }
         Ok(ty)

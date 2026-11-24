@@ -3,7 +3,7 @@ use super::*;
 
 impl<'a> Parser<'a> {
     pub(super) fn finish_exit(&mut self, code: Expr, ty: Type) -> Result<Statement, ae_span::Diagnostic> {
-        if ty != Type::Int {
+        if ty != Type::Int(IntTy::I64) {
             return Err(self.fail("exit expects an i64 status code"));
         }
         self.take(Kind::RParen)?;

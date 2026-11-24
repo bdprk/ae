@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 pub(crate) use ae_ty::Type;
+pub(crate) use ae_ty::{FloatTy, IntTy};
 mod parser;
 mod route_marks;
 mod route_body_expr;
@@ -174,9 +175,9 @@ pub(crate) trait TypeDisplay {
 impl TypeDisplay for Type {
     fn name(self, ctx: &CompileContext) -> String {
         match self {
-            Type::Int => "i64".to_owned(),
+            Type::Int(width) => width.name().to_owned(),
             Type::Bool => "bool".to_owned(),
-            Type::F64 => "f64".to_owned(),
+            Type::Float(width) => width.name().to_owned(),
             Type::String => "string".to_owned(),
             Type::StrView => "string view".to_owned(),
             Type::Vec => "vec".to_owned(),
@@ -233,7 +234,7 @@ impl TypeDisplay for Type {
     fn c_temp(self, ctx: &CompileContext) -> String {
         match self {
             Type::Bool => "bool ".to_owned(),
-            Type::F64 => "double ".to_owned(),
+            Type::Float(FloatTy::F64) => "double ".to_owned(),
             Type::String => "ae_string ".to_owned(),
             Type::StrView => "ae_strview ".to_owned(),
             Type::Vec => "ae_vec ".to_owned(),
@@ -264,6 +265,8 @@ impl TypeDisplay for Type {
             Type::Exec => "ae_exec ".to_owned(),
             Type::TaskScope => "ae_task_scope ".to_owned(),
             Type::Pool => "ae_pool ".to_owned(),
+            Type::Int(width) => format!("{} ", width.c_name()),
+            Type::Float(width) => format!("{} ", width.c_name()),
             _ => "int64_t ".to_owned(),
         }
     }
@@ -303,12 +306,12 @@ const MATH_FNS: &[(&str, &str, usize)] = &[
 fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
     let defs: Vec<(&'static str, Vec<(&'static str, Vec<Type>)>)> = vec![
         ("ReadResult", vec![("Ok", vec![Type::String]), ("Err", vec![Type::String])]),
-        ("WriteResult", vec![("Ok", vec![Type::Int]), ("Err", vec![Type::String])]),
-        ("IntResult", vec![("Ok", vec![Type::Int]), ("Err", vec![Type::String])]),
+        ("WriteResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])]),
+        ("IntResult", vec![("Ok", vec![Type::Int(IntTy::I64)]), ("Err", vec![Type::String])]),
         ("DirResult", vec![("Ok", vec![Type::StrVec]), ("Err", vec![Type::String])]),
         // Metadata: byte size, modification time in seconds since the Unix
         // epoch, and whether the target is a directory.
-        ("FileResult", vec![("Ok", vec![Type::Int, Type::Int, Type::Bool]), ("Err", vec![Type::String])]),
+        ("FileResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::Int(IntTy::I64), Type::Bool]), ("Err", vec![Type::String])]),
         // Operations with no value to report: success carries nothing.
         ("StatusResult", vec![("Ok", vec![]), ("Err", vec![Type::String])]),
         // JSON answers: a document field can be a flag, so booleans need their
@@ -316,10 +319,10 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
         ("BoolResult", vec![("Ok", vec![Type::Bool]), ("Err", vec![Type::String])]),
         // A finished child process: a non-zero status is a result, not an
         // error, so the status travels in Ok next to the output it produced.
-        ("CommandResult", vec![("Ok", vec![Type::Int, Type::String]), ("Err", vec![Type::String])]),
+        ("CommandResult", vec![("Ok", vec![Type::Int(IntTy::I64), Type::String]), ("Err", vec![Type::String])]),
         // map[string, f64] lookups (ADR-65). Appended last so every existing
         // prelude enum keeps its id; the runtime names it ae_e8.
-        ("FloatResult", vec![("Ok", vec![Type::F64]), ("Err", vec![Type::String])]),
+        ("FloatResult", vec![("Ok", vec![Type::Float(FloatTy::F64)]), ("Err", vec![Type::String])]),
     ];
     let mut enums = Vec::new();
     let mut names = HashMap::new();
@@ -414,7 +417,7 @@ fn map_kind_of(ty: Type) -> MapKind {
     if ty == Type::MapF { MapKind::Float } else { MapKind::Int }
 }
 fn map_element_ty(kind: MapKind) -> Type {
-    if kind == MapKind::Float { Type::F64 } else { Type::Int }
+    if kind == MapKind::Float { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) }
 }
 #[derive(Debug, Clone)]
 enum Argument { Value(Expr), Borrow(usize, bool), View(Expr), FnPtr(usize) } // Borrow bool: pass &slot vs array (decays); View: read-only string borrow; FnPtr: an internal function ID (ADR-0189)
@@ -462,7 +465,7 @@ impl StructDef {
         let mut offsets = Vec::with_capacity(self.fields.len());
         for (_, ty) in &self.fields {
             let (size, align) = match ty {
-                Type::Int | Type::F64 | Type::Bool => ty.scalar_c_layout()?,
+                Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool => ty.scalar_c_layout()?,
                 Type::Struct(k) => {
                     let (inner_size, inner_align, _) = structs[*k].c_layout(structs)?;
                     (inner_size, inner_align)
@@ -494,7 +497,7 @@ impl EnumDef {
             let (mut v_offset, mut v_max_align) = (0i64, 1i64);
             for ty in fields {
                 let (sz, al) = match ty {
-                    Type::Int | Type::F64 | Type::Bool => ty.scalar_c_layout().unwrap_or((8, 8)),
+                    Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool => ty.scalar_c_layout().unwrap_or((8, 8)),
                     Type::String => (16, 8),
                     Type::Struct(k) => structs[*k].c_layout(structs).map(|(s, a, _)| (s, a)).unwrap_or((8, 8)),
                     _ => (8, 8),
@@ -555,10 +558,10 @@ impl Bound {
     }
     fn allows(self, ty: Type) -> bool {
         match self {
-            Bound::Copy => matches!(ty, Type::Int | Type::Bool | Type::F64),
-            Bound::Eq => matches!(ty, Type::Int | Type::Bool | Type::String | Type::F64),
-            Bound::Ord => matches!(ty, Type::Int | Type::F64),
-            Bound::Add => matches!(ty, Type::Int | Type::String | Type::F64),
+            Bound::Copy => matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64)),
+            Bound::Eq => matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::String | Type::Float(FloatTy::F64)),
+            Bound::Ord => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)),
+            Bound::Add => matches!(ty, Type::Int(IntTy::I64) | Type::String | Type::Float(FloatTy::F64)),
         }
     }
     fn allowed_types(self) -> &'static str {
@@ -576,7 +579,7 @@ impl Bound {
 // instantiation is still parsed and fully type-checked (ADR-33). The audit can
 // only reject a declaration; it never lets unchecked code through.
 const AUDIT_TYPES: &[Type] = &[
-    Type::Int, Type::Bool, Type::F64, Type::String, Type::StrView,
+    Type::Int(IntTy::I64), Type::Bool, Type::Float(FloatTy::F64), Type::String, Type::StrView,
     Type::Vec, Type::StrVec, Type::VecF, Type::VecRef, Type::StrVecRef, Type::VecFRef, Type::Map, Type::MapF,
     Type::Array(0), Type::Struct(0), Type::StructRef(0), Type::StructMut(0), Type::Enum("audit", 0),
 ];
@@ -607,11 +610,11 @@ impl Capability {
     }
     fn supports(self, ty: Type) -> bool {
         match self {
-            Capability::Add => matches!(ty, Type::Int | Type::F64 | Type::String | Type::StrView),
-            Capability::Arith => matches!(ty, Type::Int | Type::F64),
-            Capability::Modulo => matches!(ty, Type::Int),
-            Capability::Ord => matches!(ty, Type::Int | Type::F64),
-            Capability::Eq => matches!(ty, Type::Int | Type::F64 | Type::Bool | Type::String | Type::StrView),
+            Capability::Add => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::String | Type::StrView),
+            Capability::Arith => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)),
+            Capability::Modulo => matches!(ty, Type::Int(IntTy::I64)),
+            Capability::Ord => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)),
+            Capability::Eq => matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool | Type::String | Type::StrView),
             Capability::Logic => matches!(ty, Type::Bool),
         }
     }
@@ -823,7 +826,7 @@ struct Program { files: Vec<Vec<Function>>, structs: Vec<StructDef>, enums: Vec<
 
 #[allow(clippy::too_many_arguments)]
 fn make_parser<'a>(file: &str, source: &'a str, tokens: Rc<Vec<Token>>, functions: &'a mut SharedFunctions, structs: &'a mut Vec<StructDef>, struct_names: &'a mut HashMap<String, usize>, enums: &'a mut Vec<EnumDef>, enum_names: &'a mut HashMap<String, usize>, generics: &'a mut Generics, ctx: &'a mut CompileContext) -> Parser<'a> {
-    Parser { file: file.to_owned(), source, tokens, shared_source: Rc::from(source), pos: 0, names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::default(), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0, loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0, functions, structs, struct_names, enums, enum_names, generics, ctx, id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(), borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new() }
+    Parser { file: file.to_owned(), source, tokens, shared_source: Rc::from(source), pos: 0, names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::default(), next_var: 0, expression_depth: 0, expression_nodes: 0, block_depth: 0, loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0, functions, structs, struct_names, enums, enum_names, generics, ctx, id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(), borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new() }
 }
 
 #[allow(dead_code)] // exercised by in-memory unit tests

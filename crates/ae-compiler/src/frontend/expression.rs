@@ -8,7 +8,7 @@ impl Parser<'_> {
     // A compile-time integer constant as an expression: the layout queries
     // evaluate in the parser and reach every later stage as plain numbers.
     fn value_number(&self, n: i64) -> (Expr, Type) {
-        (Expr::Number(n), Type::Int)
+        (Expr::Number(n), Type::Int(IntTy::I64))
     }
 
 
@@ -28,8 +28,8 @@ impl Parser<'_> {
         let scalar = match self.subst.get(&type_name) {
             Some(ty) => ty.scalar_c_layout(),
             None => match type_name.as_str() {
-                "i64" => Type::Int.scalar_c_layout(),
-                "f64" => Type::F64.scalar_c_layout(),
+                "i64" => Type::Int(IntTy::I64).scalar_c_layout(),
+                "f64" => Type::Float(FloatTy::F64).scalar_c_layout(),
                 "bool" => Type::Bool.scalar_c_layout(),
                 _ => None,
             },
@@ -133,7 +133,7 @@ impl Parser<'_> {
                     // how the capture is classified, and closure/pointer
                     // values have no byte layout to package; owned scalars,
                     // strings, vectors, maps, structs, and enums move.
-                    if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
+                    if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
                         return Err(self.fail("spawn moves its captures into the thread; this capture's storage cannot cross"));
                     }
                     if self.moved.contains(outer_id) {
@@ -297,7 +297,7 @@ impl Parser<'_> {
         match previous {
             Some(expected) if expected == actual => Ok(actual),
             Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(self.ctx), actual.name(self.ctx)))),
-            None if matches!(actual, Type::Int | Type::F64) => Ok(actual),
+            None if matches!(actual, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)) => Ok(actual),
             None => Err(self.fail(&format!("vector elements must be i64 or f64, found {}", actual.name(self.ctx)))),
         }
     }

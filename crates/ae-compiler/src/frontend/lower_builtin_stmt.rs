@@ -46,7 +46,7 @@ impl<'a> Parser<'a> {
                 return Err(self.fail("cell_store expects an atomic handle"));
             }
             let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-            if value_ty != Type::Int {
+            if value_ty != Type::Int(IntTy::I64) {
                 self.seek_scalar_offset(arguments[1].range.end);
                 return Err(self.fail("cell_store expects an i64 value"));
             }
@@ -136,8 +136,8 @@ impl<'a> Parser<'a> {
             }
             let (lowered, value_ty) = self.lower_scalar_body_expression(value, slots)?;
             let ok = match ty {
-                Type::Vec => value_ty == Type::Int,
-                Type::VecF => value_ty == Type::F64,
+                Type::Vec => value_ty == Type::Int(IntTy::I64),
+                Type::VecF => value_ty == Type::Float(FloatTy::F64),
                 _ => matches!(value_ty, Type::String | Type::StrView),
             };
             if !ok {

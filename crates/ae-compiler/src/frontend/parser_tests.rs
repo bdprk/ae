@@ -35,27 +35,27 @@ use super::*;
         let binding = source.find("flag").unwrap();
         let mut functions = SharedFunctions::default();
         functions.insert("compute".into(), Signature {
-            id: 9, params: vec![Type::Int], ret: Type::Int, file: "case.ae".into(),
+            id: 9, params: vec![Type::Int(IntTy::I64)], ret: Type::Int(IntTy::I64), file: "case.ae".into(),
             public: false, extern_c: false,
         });
         functions.insert("consume_point".into(), Signature {
-            id: 12, params: vec![Type::Struct(0)], ret: Type::Int, file: "case.ae".into(),
+            id: 12, params: vec![Type::Struct(0)], ret: Type::Int(IntTy::I64), file: "case.ae".into(),
             public: false, extern_c: false,
         });
         functions.insert("imported_scalar".into(), Signature {
-            id: 10, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
+            id: 10, params: vec![Type::Int(IntTy::I64)], ret: Type::Int(IntTy::I64), file: "imported.ae".into(),
             public: true, extern_c: false,
         });
         functions.insert("imported_private".into(), Signature {
-            id: 11, params: vec![Type::Int], ret: Type::Int, file: "imported.ae".into(),
+            id: 11, params: vec![Type::Int(IntTy::I64)], ret: Type::Int(IntTy::I64), file: "imported.ae".into(),
             public: false, extern_c: false,
         });
         let mut structs = vec![
-            StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Outer".into(), fields: vec![("inner".into(), Type::Struct(1)), ("tag".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
+            StructDef { name: "Point".into(), fields: vec![("x".into(), Type::Int(IntTy::I64)), ("y".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
+            StructDef { name: "Inner".into(), fields: vec![("x".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
+            StructDef { name: "Outer".into(), fields: vec![("inner".into(), Type::Struct(1)), ("tag".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
             StructDef { name: "Holder".into(), fields: vec![("ready".into(), Type::Bool), ("text".into(), Type::String)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: None },
-            StructDef { name: "Guard".into(), fields: vec![("id".into(), Type::Int)], file: "case.ae".into(), public: false, repr_c: false, drop_fn: Some(0) },
+            StructDef { name: "Guard".into(), fields: vec![("id".into(), Type::Int(IntTy::I64))], file: "case.ae".into(), public: false, repr_c: false, drop_fn: Some(0) },
         ];
         let mut struct_names = HashMap::new();
         struct_names.insert("Point".into(), 0);
@@ -64,13 +64,13 @@ use super::*;
         struct_names.insert("Outer".into(), 2);
         struct_names.insert("Guard".into(), 4);
         let mut enums = vec![EnumDef {
-            name: "Reading", variants: vec![("Value".into(), vec![Type::Int]), ("Empty".into(), vec![])],
+            name: "Reading", variants: vec![("Value".into(), vec![Type::Int(IntTy::I64)]), ("Empty".into(), vec![])],
             file: "case.ae".into(), public: false, pattern: "Reading".into(),
         }];
         let mut enum_names = HashMap::new();
         enum_names.insert("Reading".into(), 0);
         enums.push(EnumDef {
-            name: "Maybe", variants: vec![("Some".into(), vec![Type::Int]), ("None".into(), vec![])],
+            name: "Maybe", variants: vec![("Some".into(), vec![Type::Int(IntTy::I64)]), ("None".into(), vec![])],
             file: "case.ae".into(), public: false, pattern: "Maybe".into(),
         });
         enum_names.insert("Maybe".into(), 1);
@@ -91,7 +91,7 @@ use super::*;
         parser.seek_scalar_offset(source.find("{ match input").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved enum match").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Match(89, Type::Enum(_, 0), arms)]
-            if matches!(arms[0].body.as_slice(), [Statement::Return(Expr::Variable(slot, Type::Int, ..), _)]
+            if matches!(arms[0].body.as_slice(), [Statement::Return(Expr::Variable(slot, Type::Int(IntTy::I64), ..), _)]
                 if *slot == arms[0].bindings[0].0)));
         parser.names.remove("input");
         parser.binding_ranges.remove(&89);
@@ -114,21 +114,21 @@ use super::*;
         };
         assert!(matches!(prop_value, Expr::Call(19, args, Type::Enum(_, 1)) if args.is_empty()), "{prop_value:?}");
         assert_eq!(prop_ty, &Type::Enum("Maybe", 1));
-        assert_eq!(prop_fields, &[Type::Int]);
+        assert_eq!(prop_fields, &[Type::Int(IntTy::I64)]);
         let Some((payload_slot, payload_ty)) = prop_bound else {
             panic!("payload binding missing: {prop_bound:?}");
         };
-        assert_eq!(payload_ty, &Type::Int);
+        assert_eq!(payload_ty, &Type::Int(IntTy::I64));
         assert!(matches!(ret_expr, Expr::EnumLit(_, _, 0, vals)
-            if matches!(&**vals, [Expr::Variable(vs, Type::Int, ..)] if vs == payload_slot)), "{ret_expr:?}");
-        parser.return_type = Type::Int;
+            if matches!(&**vals, [Expr::Variable(vs, Type::Int(IntTy::I64), ..)] if vs == payload_slot)), "{ret_expr:?}");
+        parser.return_type = Type::Int(IntTy::I64);
         parser.seek_scalar_offset(source.find("{ let reading =").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local enum match").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(slot, Expr::EnumLit(_, 0, 0, _)),
             Statement::Match(subject, Type::Enum(_, 0), arms), ..] if slot == subject && arms.len() == 2));
         parser.next_var = next_var;
         let start = source.find("raw_param:").unwrap();
-        parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(parser.ctx.intern_pointee(Type::Int))));
+        parser.names.insert("raw_param".into(), (85, false, Type::PtrMut(parser.ctx.intern_pointee(Type::Int(IntTy::I64)))));
         parser.binding_ranges.insert(85, start..start + "raw_param".len());
         parser.seek_scalar_offset(source.find("{ unsafe { *raw_param").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved pointer store").unwrap();
@@ -137,7 +137,7 @@ use super::*;
         parser.names.remove("raw_param");
         parser.binding_ranges.remove(&85);
         let start = source.find("read_param:").unwrap();
-        parser.names.insert("read_param".into(), (86, false, Type::Ptr(parser.ctx.intern_pointee(Type::Int))));
+        parser.names.insert("read_param".into(), (86, false, Type::Ptr(parser.ctx.intern_pointee(Type::Int(IntTy::I64)))));
         parser.binding_ranges.insert(86, start..start + "read_param".len());
         parser.seek_scalar_offset(source.find("{ unsafe { return read_param").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved pointer read").unwrap();
@@ -154,19 +154,19 @@ use super::*;
         let start = source.find("vector_arg:").unwrap();
         parser.names.insert("vector_arg".into(), (87, false, Type::VecFRef));
         parser.binding_ranges.insert(87, start..start + "vector_arg".len());
-        parser.return_type = Type::F64;
+        parser.return_type = Type::Float(FloatTy::F64);
         parser.seek_scalar_offset(source.find("{ var total = 0.0").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved vector loop").unwrap();
         assert!(matches!(body.as_slice(), [_, _, _, Statement::For(_, _, inner, ..), Statement::Return(..)]
-            if matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(87, _, _, _, true, Type::F64))))));
-        parser.return_type = Type::Int;
+            if matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(87, _, _, _, true, Type::Float(FloatTy::F64)))))));
+        parser.return_type = Type::Int(IntTy::I64);
         parser.names.remove("vector_arg");
         parser.binding_ranges.remove(&87);
         parser.seek_scalar_offset(source.find("{ let empty_vec =").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved owning vector loop").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::VecLit(values, Type::Vec, ..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
             if values.is_empty() && owned.contains(&(*vector, Type::Vec))
-                && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int))) if source == vector)));
+                && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int(IntTy::I64)))) if source == vector)));
         parser.seek_scalar_offset(source.find("{ spawn(").unwrap());
         // A spawn statement still keeps the body on the typed route; the
         // A bare `spawn(..)` statement is evaluated (the spawn machinery) and
@@ -225,7 +225,7 @@ use super::*;
         parser.generics.struct_names.insert("CachedRecord".into(), 0);
         parser.generics.struct_defs.push(GenericStruct {
             name: "CachedRecord".into(), params: vec!["T".into()],
-            fields: vec![("value".into(), Payload::Param(0)), ("count".into(), Payload::Concrete(Type::Int))],
+            fields: vec![("value".into(), Payload::Param(0)), ("count".into(), Payload::Concrete(Type::Int(IntTy::I64)))],
             file: "case.ae".into(), public: false,
         });
         let payload = source.find("record_text:").unwrap();
@@ -284,11 +284,11 @@ use super::*;
         parser.generics.fn_names.insert(imported.name.clone(), 1);
         parser.generics.fn_defs.push(imported);
         let offset = source.find("imported_generic[i64](7)").unwrap();
-        let (id, _, _) = parser.instantiate_fn(1, vec![Type::Int], offset).unwrap();
+        let (id, _, _) = parser.instantiate_fn(1, vec![Type::Int(IntTy::I64)], offset).unwrap();
         parser.seek_scalar_offset(offset);
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), false),
-            Some((Expr::Call(actual, _, Type::Int), Type::Int)) if actual == id
+            Some((Expr::Call(actual, _, Type::Int(IntTy::I64)), Type::Int(IntTy::I64))) if actual == id
         ));
         parser.generics.fn_defs[1].public = false;
         parser.seek_scalar_offset(offset);
@@ -296,11 +296,11 @@ use super::*;
         assert!(parser.lower_shared_value(Some(Kind::Semi), false).is_none());
         assert_eq!(parser.pos, start);
         let capture_start = source.find("captured_scalar:").unwrap();
-        parser.names.insert("captured_scalar".into(), (80, true, Type::Int));
+        parser.names.insert("captured_scalar".into(), (80, true, Type::Int(IntTy::I64)));
         parser.seek_scalar_offset(source.find("{ return captured_scalar;").unwrap());
         let closure = parser.lower_resolved_body_with_captures(&[(80, capture_start)])
             .expect("resolved emitted closure body").unwrap();
-        assert!(matches!(closure.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
+        assert!(matches!(closure.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int(IntTy::I64), ..), _)]));
         parser.names.remove("captured_scalar");
         // A captured owned string flows through the capture slot: the
         // resolver records the capture and the route re-admits its read.
@@ -322,7 +322,7 @@ use super::*;
         parser.names.remove("keep");
         let numbers_start = source.find("let numbers = vec[10, 20]").unwrap() + 4;
         let vector_body = source.find("{ print(numbers[1])").unwrap();
-        for (capture_type, element) in [(Type::VecRef, Type::Int), (Type::VecFRef, Type::F64)] {
+        for (capture_type, element) in [(Type::VecRef, Type::Int(IntTy::I64)), (Type::VecFRef, Type::Float(FloatTy::F64))] {
             parser.names.insert("numbers".into(), (82, false, capture_type));
             parser.seek_scalar_offset(vector_body);
             let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
@@ -339,7 +339,7 @@ use super::*;
         let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
             .expect("resolved owning numeric vector-capture closure body").unwrap();
         assert!(matches!(closure.as_slice(),
-            [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, false, Type::Int))),
+            [Statement::Print(Printed::Expr(Expr::VecIndex(82, _, _, _, false, Type::Int(IntTy::I64)))),
              Statement::Return(Expr::Number(0), _)]), "{closure:?}");
         parser.names.remove("numbers");
         // A borrowed string-vector capture: its element read is a view.
@@ -366,7 +366,7 @@ use super::*;
         parser.names.remove("labels");
         let generic_binding = source.find("generic_value:").unwrap();
         let body = source.find("{ return generic_value;").unwrap();
-        for ty in [Type::Int, Type::Bool] {
+        for ty in [Type::Int(IntTy::I64), Type::Bool] {
             parser.subst.insert("T".into(), ty);
             parser.return_type = ty;
             parser.names.insert("generic_value".into(), (80, false, ty));
@@ -377,19 +377,19 @@ use super::*;
         }
         parser.names.remove("generic_value");
         let method_binding = source.find("method_value:").unwrap();
-        parser.return_type = Type::Int;
-        parser.subst.insert("T".into(), Type::Int);
+        parser.return_type = Type::Int(IntTy::I64);
+        parser.subst.insert("T".into(), Type::Int(IntTy::I64));
         parser.impl_self = Some(Type::Struct(0));
-        parser.names.insert("method_value".into(), (80, false, Type::Int));
+        parser.names.insert("method_value".into(), (80, false, Type::Int(IntTy::I64)));
         parser.binding_ranges.insert(80, method_binding..method_binding + "method_value".len());
         parser.seek_scalar_offset(source.find("{ return method_value;").unwrap());
         let lowered = parser.lower_resolved_scalar_body().expect("resolved generic associated body").unwrap();
-        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int, ..), _)]));
+        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Variable(80, Type::Int(IntTy::I64), ..), _)]));
         parser.names.remove("method_value");
         let receiver_binding = source.find("get(&self)").unwrap() + "get(&".len();
         let instance = parser.structs.len();
         parser.structs.push(StructDef {
-            name: "ScalarBox[i64]".into(), fields: vec![("item".into(), Type::Int)],
+            name: "ScalarBox[i64]".into(), fields: vec![("item".into(), Type::Int(IntTy::I64))],
             file: "case.ae".into(), public: false, repr_c: false, drop_fn: None,
         });
         let receiver = Type::StructRef(instance);
@@ -399,7 +399,7 @@ use super::*;
         let receiver_body = source.find("{ return self.item;").unwrap();
         parser.seek_scalar_offset(receiver_body);
         let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver body").unwrap();
-        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(base, name, Type::Int), _)]
+        assert!(matches!(lowered.as_slice(), [Statement::Return(Expr::Field(base, name, Type::Int(IntTy::I64)), _)]
             if name == "item" && matches!(**base, Expr::Variable(80, actual, ..) if actual == receiver)));
         let setter_binding = source.find("set(&mut self").unwrap() + "set(&mut ".len();
         let value_binding = source.find("new_value:").unwrap();
@@ -407,12 +407,12 @@ use super::*;
         let mutable_receiver = Type::StructMut(instance);
         parser.receiver = Some(mutable_receiver);
         parser.names.insert("self".into(), (80, true, mutable_receiver));
-        parser.names.insert("new_value".into(), (81, false, Type::Int));
+        parser.names.insert("new_value".into(), (81, false, Type::Int(IntTy::I64)));
         parser.binding_ranges.insert(80, setter_binding..setter_binding + "self".len());
         parser.binding_ranges.insert(81, value_binding..value_binding + "new_value".len());
         parser.seek_scalar_offset(setter_body);
         let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver store").unwrap();
-        assert!(matches!(lowered.as_slice(), [Statement::FieldStore(80, name, Type::Int, Expr::Variable(81, Type::Int, ..), actual), Statement::Return(Expr::Field(..), _)]
+        assert!(matches!(lowered.as_slice(), [Statement::FieldStore(80, name, Type::Int(IntTy::I64), Expr::Variable(81, Type::Int(IntTy::I64), ..), actual), Statement::Return(Expr::Field(..), _)]
             if name == "item" && *actual == mutable_receiver));
         parser.names.insert("new_value".into(), (81, false, Type::Bool));
         parser.seek_scalar_offset(setter_body);
@@ -451,16 +451,16 @@ use super::*;
         parser.scopes.pop();
         parser.names.remove("route");
         parser.binding_ranges.remove(&81);
-        parser.return_type = Type::Int;
+        parser.return_type = Type::Int(IntTy::I64);
         parser.functions.insert("take_box".into(), Signature {
-            id: 13, params: vec![owned_receiver], ret: Type::Int, file: "case.ae".into(),
+            id: 13, params: vec![owned_receiver], ret: Type::Int(IntTy::I64), file: "case.ae".into(),
             public: false, extern_c: false,
         });
         let send_binding = source.find("send(self)").unwrap() + "send(".len();
         parser.binding_ranges.insert(80, send_binding..send_binding + "self".len());
         parser.seek_scalar_offset(source.find("{ return take_box((self));").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved receiver argument").unwrap();
-        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(13, args, Type::Int), _)]
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(13, args, Type::Int(IntTy::I64)), _)]
             if matches!(args.as_slice(), [Argument::Value(Expr::Variable(80, ty, ..))] if *ty == owned_receiver)));
         assert!(parser.moved.remove(&80));
         let twice_binding = source.find("send_twice(self)").unwrap() + "send_twice(".len();
@@ -498,7 +498,7 @@ use super::*;
         parser.seek_scalar_offset(source.find("{ let local").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved scalar route").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Declare(0, _), Statement::Return(Expr::Binary(_, Kind::EqEq, _, _, _, Type::Bool), _)]));
-        parser.return_type = Type::Int;
+        parser.return_type = Type::Int(IntTy::I64);
         parser.seek_scalar_offset(source.find("{ return true").unwrap());
         let mismatch = parser.lower_resolved_scalar_body().expect("resolved error route").err().unwrap();
         assert_eq!(mismatch.message, "return type must be i64");
@@ -509,7 +509,7 @@ use super::*;
         let [Statement::If(_, yes, otherwise)] = branches.as_slice() else { panic!("expected if") };
         let [Statement::If(_, other_yes, other_no)] = otherwise.as_slice() else { panic!("expected else if") };
         for (index, body) in [yes, other_yes, other_no].into_iter().enumerate() {
-            assert!(matches!(body.as_slice(), [Statement::Declare(slot, _), Statement::Return(Expr::Variable(read, Type::Int, ..), _)] if *slot == index + 1 && slot == read));
+            assert!(matches!(body.as_slice(), [Statement::Declare(slot, _), Statement::Return(Expr::Variable(read, Type::Int(IntTy::I64), ..), _)] if *slot == index + 1 && slot == read));
         }
 
         parser.seek_scalar_offset(source.find("{ while true").unwrap());
@@ -528,7 +528,7 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ for i in 2").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved range").unwrap();
-        let [Statement::Declare(start, Expr::Number(2)), Statement::Declare(end, Expr::Number(5)), Statement::For(counter, limit, loop_body, label, ..), Statement::Declare(reused, Expr::Number(7)), Statement::Return(Expr::Variable(read, Type::Int, ..), _)] = body.as_slice() else {
+        let [Statement::Declare(start, Expr::Number(2)), Statement::Declare(end, Expr::Number(5)), Statement::For(counter, limit, loop_body, label, ..), Statement::Declare(reused, Expr::Number(7)), Statement::Return(Expr::Variable(read, Type::Int(IntTy::I64), ..), _)] = body.as_slice() else {
             panic!("expected range bounds and loop");
         };
         assert_eq!((start, end), (counter, limit));
@@ -547,12 +547,12 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ var n = 4").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved assignments").unwrap();
-        let [Statement::Declare(slot, _), Statement::Assign(plain, Expr::Number(2), false), Statement::While(_, loop_body), Statement::Return(Expr::Variable(read, Type::Int, ..), _)] = body.as_slice() else {
+        let [Statement::Declare(slot, _), Statement::Assign(plain, Expr::Number(2), false), Statement::While(_, loop_body), Statement::Return(Expr::Variable(read, Type::Int(IntTy::I64), ..), _)] = body.as_slice() else {
             panic!("expected scalar assignments");
         };
         assert_eq!(slot, plain);
         assert_eq!(slot, read);
-        assert!(matches!(loop_body.as_slice(), [Statement::Assign(compound, Expr::Binary(_, Kind::Minus, _, _, _, Type::Int), false)] if compound == slot));
+        assert!(matches!(loop_body.as_slice(), [Statement::Assign(compound, Expr::Binary(_, Kind::Minus, _, _, _, Type::Int(IntTy::I64)), false)] if compound == slot));
 
         parser.seek_scalar_offset(source.find("{ let n = 1").unwrap());
         let error = parser.lower_resolved_scalar_body().expect("resolved immutable assignment").err().unwrap();
@@ -583,10 +583,10 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ return compute(compute").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved direct calls").unwrap();
-        let [Statement::Return(Expr::Call(9, args, Type::Int), _)] = body.as_slice() else {
+        let [Statement::Return(Expr::Call(9, args, Type::Int(IntTy::I64)), _)] = body.as_slice() else {
             panic!("expected direct call");
         };
-        assert!(matches!(args.as_slice(), [Argument::Value(Expr::Call(9, _, Type::Int))]));
+        assert!(matches!(args.as_slice(), [Argument::Value(Expr::Call(9, _, Type::Int(IntTy::I64)))]));
         parser.seek_scalar_offset(source.find("{ return compute(false)").unwrap());
         let error = parser.lower_resolved_scalar_body().expect("resolved call error").err().unwrap();
         assert_eq!(error.message, "argument 1 to 'compute' must be i64");
@@ -594,7 +594,7 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ return imported_scalar").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved cross-module call").unwrap();
-        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(10, _, Type::Int), _)]));
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Call(10, _, Type::Int(IntTy::I64)), _)]));
         parser.seek_scalar_offset(source.find("{ return imported_private").unwrap());
         // A private import is admitted by the scan; the lowering reports the
         // typed route's visibility rule.
@@ -661,8 +661,8 @@ use super::*;
         let body = parser.lower_resolved_scalar_body().expect("resolved field reads").unwrap();
         assert!(matches!(body.as_slice(), [Statement::Return(Expr::Binary(lhs, Kind::Plus, rhs, ..), _)]
             if matches!(&**lhs, Expr::Field(base, fname, fty)
-                if matches!(&**base, Expr::Variable(0, Type::StructRef(0), ..)) && fname == "x" && *fty == Type::Int)
-                && matches!(&**rhs, Expr::Field(_, fname, fty) if fname == "y" && *fty == Type::Int)));
+                if matches!(&**base, Expr::Variable(0, Type::StructRef(0), ..)) && fname == "x" && *fty == Type::Int(IntTy::I64))
+                && matches!(&**rhs, Expr::Field(_, fname, fty) if fname == "y" && *fty == Type::Int(IntTy::I64))));
         parser.names.remove("p");
 
         let h_offset = source.find("(h: &Holder)").unwrap() + 1;
@@ -683,7 +683,7 @@ use super::*;
         assert!(matches!(body.as_slice(), [Statement::Return(Expr::Field(outer, fname, fty), _)]
             if matches!(&**outer, Expr::Field(inner, iname, ifty)
                 if matches!(&**inner, Expr::Variable(0, Type::StructRef(2), ..)) && iname == "inner" && *ifty == Type::Struct(1))
-                && fname == "x" && *fty == Type::Int));
+                && fname == "x" && *fty == Type::Int(IntTy::I64)));
         parser.names.remove("o");
 
         parser.seek_scalar_offset(source.find("{ let p = Point { x: 1").unwrap());
@@ -694,9 +694,9 @@ use super::*;
              Statement::Frees(scope_frees)]
             if *sid == 0 && values.len() == 2
                 && matches!(&**l, Expr::Field(b, f, t)
-                    if f == "x" && *t == Type::Int
+                    if f == "x" && *t == Type::Int(IntTy::I64)
                         && matches!(&**b, Expr::Variable(ps, Type::Struct(0), ..) if *ps == *slot))
-                && matches!(&**r, Expr::Field(_, f2, t2) if f2 == "y" && *t2 == Type::Int)
+                && matches!(&**r, Expr::Field(_, f2, t2) if f2 == "y" && *t2 == Type::Int(IntTy::I64))
                 && *frees == vec![(*slot, Type::Struct(0))]
                 && *scope_frees == vec![(*slot, Type::Struct(0))]));
         parser.names.remove("p");
@@ -707,7 +707,7 @@ use super::*;
             [Statement::Declare(slot, Expr::StructLit(sid, _)),
              Statement::Return(Expr::Field(_, fname, fty), frees),
              Statement::Frees(scope_frees)]
-            if *sid == 4 && fname == "id" && *fty == Type::Int
+            if *sid == 4 && fname == "id" && *fty == Type::Int(IntTy::I64)
                 && *frees == vec![(*slot, Type::Struct(4))]
                 && *scope_frees == vec![(*slot, Type::Struct(4))]),
             "a drop-carrying construction is owned and released on every exit path");
@@ -731,7 +731,7 @@ use super::*;
         let body = parser.lower_resolved_scalar_body().expect("resolved owned-aggregate call").unwrap();
         assert!(matches!(body.as_slice(),
             [Statement::Declare(q, Expr::StructLit(0, values)),
-             Statement::Declare(r, Expr::Call(12, args, Type::Int)),
+             Statement::Declare(r, Expr::Call(12, args, Type::Int(IntTy::I64))),
              Statement::Return(.., frees),
              Statement::Frees(scope_frees)]
             if values.len() == 2
@@ -780,7 +780,7 @@ use super::*;
         let target = source.find("*const shared").unwrap();
         parser.pos = parser.tokens.partition_point(|token| token.offset < target);
         assert_eq!(parser.shared_pointer_cast_qualifier(), Some(false));
-        assert_eq!(parser.pointer_cast_pointee(None).unwrap(), (false, Type::Shared(parser.ctx.intern_shared(Type::Int))));
+        assert_eq!(parser.pointer_cast_pointee(None).unwrap(), (false, Type::Shared(parser.ctx.intern_shared(Type::Int(IntTy::I64)))));
         assert_eq!(*parser.current(), Kind::Semi);
 
         for (prefix, expected) in [("|| -> i64", "i64"), ("|x: i64|", "bool")] {
@@ -857,7 +857,7 @@ use super::*;
             parser.lower_shared_value(Some(Kind::Semi), false),
             Some((Expr::PtrCast(operand, true, id, _, column), Type::PtrMut(pointee)))
                 if matches!(*operand, Expr::Variable(13, ty, _, _) if ty == raw)
-                    && id == pointee && parser.ctx.ptr_pointee(id) == Type::F64
+                    && id == pointee && parser.ctx.ptr_pointee(id) == Type::Float(FloatTy::F64)
                     && column == cast + "raw as *mut f64;".len()
         ));
         assert_eq!(*parser.current(), Kind::Semi);

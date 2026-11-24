@@ -242,9 +242,9 @@ fn lower_statement(statement: &Statement, current: usize, lowering: &mut Lowerin
             let step = lowering.new_block();
             let exit = lowering.new_block();
             let condition = Expr::Binary(
-                Box::new(Expr::Variable(*var, Type::Int, *line, *col)),
+                Box::new(Expr::Variable(*var, Type::Int(IntTy::I64), *line, *col)),
                 Kind::Less,
-                Box::new(Expr::Variable(*end_var, Type::Int, *line, *col)),
+                Box::new(Expr::Variable(*end_var, Type::Int(IntTy::I64), *line, *col)),
                 *line,
                 *col,
                 Type::Bool,
@@ -260,12 +260,12 @@ fn lower_statement(statement: &Statement, current: usize, lowering: &mut Lowerin
             // `counter + 1` at the For's position, so the checked-add
             // diagnostic points at the loop header like the tree backend's.
             let increment = Expr::Binary(
-                Box::new(Expr::Variable(*var, Type::Int, *line, *col)),
+                Box::new(Expr::Variable(*var, Type::Int(IntTy::I64), *line, *col)),
                 Kind::Plus,
                 Box::new(Expr::Number(1)),
                 *line,
                 *col,
-                Type::Int,
+                Type::Int(IntTy::I64),
             );
             lowering.block(step).statements.push(Statement::Assign(*var, increment, false));
             lowering.block(step).terminator = CfgTerminator::Goto(head);

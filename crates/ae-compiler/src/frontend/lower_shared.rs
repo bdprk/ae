@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
 
         if matches!(expression.kind, ExpressionKind::Field { .. }) {
             let (value, ty) = self.lower_shared_field(expression, remaining, nodes_left, effects)?;
-            return matches!(ty, Type::Int | Type::F64 | Type::Bool | Type::String | Type::StrView)
+            return matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool | Type::String | Type::StrView)
                 .then_some((value, ty));
         }
         self.lower_shared_expression(expression, remaining, nodes_left, effects)
@@ -183,7 +183,7 @@ impl<'a> Parser<'a> {
         if matches!(expression.kind, ExpressionKind::Field { .. }) {
             let (value, ty) = self.lower_shared_field(expression, remaining, nodes_left, effects)?;
             // Owned fields need the typed parser's context-sensitive move checks.
-            return matches!(ty, Type::Int | Type::F64 | Type::Bool).then_some((value, ty));
+            return matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool).then_some((value, ty));
         }
         let remaining = remaining.checked_sub(1)?;
         // The typed Pratt parser charges operands, groups and prefixes.
@@ -192,8 +192,8 @@ impl<'a> Parser<'a> {
             *nodes_left = nodes_left.checked_sub(1)?;
         }
         match &expression.kind {
-            ExpressionKind::Atom(Kind::Number(value)) => Some((Expr::Number(*value), Type::Int)),
-            ExpressionKind::Atom(Kind::Float(value)) => Some((Expr::FloatLit(*value), Type::F64)),
+            ExpressionKind::Atom(Kind::Number(value)) => Some((Expr::Number(*value), Type::Int(IntTy::I64))),
+            ExpressionKind::Atom(Kind::Float(value)) => Some((Expr::FloatLit(*value), Type::Float(FloatTy::F64))),
             ExpressionKind::Atom(Kind::True) => Some((Expr::BoolLit(true), Type::Bool)),
             ExpressionKind::Atom(Kind::False) => Some((Expr::BoolLit(false), Type::Bool)),
             ExpressionKind::Atom(Kind::Text(value)) => {
@@ -203,7 +203,7 @@ impl<'a> Parser<'a> {
             }
             ExpressionKind::Atom(Kind::Ident(name)) => {
                 let (_, _, ty) = self.names.get(name)?;
-                if !matches!(ty, Type::Int | Type::F64 | Type::Bool | Type::Closure(_) | Type::Ptr(_) | Type::PtrMut(_)) {
+                if !matches!(ty, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool | Type::Closure(_) | Type::Ptr(_) | Type::PtrMut(_)) {
                     return None;
                 }
                 self.lower_resolved_local(name, expression.range.start)
@@ -223,15 +223,15 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let (line, column) = (bracket.line, bracket.column);
-                let (index, Type::Int) = self.lower_shared_expression(index, remaining, nodes_left, effects)? else {
+                let (index, Type::Int(IntTy::I64)) = self.lower_shared_expression(index, remaining, nodes_left, effects)? else {
                     return None;
                 };
                 let index = Box::new(index);
                 match ty {
-                    Type::Array(len) => Some((Expr::Index(slot, len, index, line, column), Type::Int)),
+                    Type::Array(len) => Some((Expr::Index(slot, len, index, line, column), Type::Int(IntTy::I64))),
                     Type::Vec | Type::VecRef | Type::VecF | Type::VecFRef => {
                         let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
-                        let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::F64 } else { Type::Int };
+                        let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) };
                         Some((Expr::VecIndex(slot, index, line, column, borrowed, element), element))
                     }
                     _ => None,
@@ -261,8 +261,8 @@ impl<'a> Parser<'a> {
                 for element in elements {
                     let (value, element_type) = self.lower_shared_expression(element, remaining, nodes_left, effects)?;
                     let ty = match element_type {
-                        Type::Int => Type::Vec,
-                        Type::F64 => Type::VecF,
+                        Type::Int(IntTy::I64) => Type::Vec,
+                        Type::Float(FloatTy::F64) => Type::VecF,
                         _ => return None,
                     };
                     if vector_type.is_some_and(|previous| previous != ty) {
@@ -347,10 +347,10 @@ impl<'a> Parser<'a> {
                 };
                 if self.ctx.is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
                     || !params.iter().all(|ty| {
-                        matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView
+                        matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::StrView
                             | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
                     })
-                    || !matches!(ret, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
+                    || !matches!(ret, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
                 {
                     return None;
                 }

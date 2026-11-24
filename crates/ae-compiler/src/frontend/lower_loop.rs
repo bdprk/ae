@@ -32,8 +32,8 @@ impl<'a> Parser<'a> {
         let def = self.resolved_definition(
             self.resolved_expressions().scalar_definitions.get(&binding_range.start),
             binding_range.start, binding)?;
-        slots.insert(def, (slot, Type::Int));
-        self.names.insert(binding.clone(), (slot, false, Type::Int));
+        slots.insert(def, (slot, Type::Int(IntTy::I64)));
+        self.names.insert(binding.clone(), (slot, false, Type::Int(IntTy::I64)));
         let base = self.scopes.len();
         let moved_before = self.moved.clone();
         let body = self.lower_scalar_loop_body(body, slots, Some(label));
@@ -131,12 +131,12 @@ impl<'a> Parser<'a> {
         // Borrowed string vectors iterate the same way, with
         // element access going through the pointer.
         let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
-            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int, false),
+            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int(IntTy::I64), false),
             (Expr::Variable(id, Type::StrVec, _, _), Type::StrVec) => (*id, Type::StrView, false),
             (Expr::Variable(id, Type::StrVecRef, _, _), Type::StrVecRef) => (*id, Type::StrView, true),
-            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int, false),
-            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::F64, false),
-            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::F64, false),
+            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int(IntTy::I64), false),
+            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::Float(FloatTy::F64), false),
+            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::Float(FloatTy::F64), false),
             _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
         };
         if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
@@ -148,7 +148,7 @@ impl<'a> Parser<'a> {
         self.loop_depth += 1;
         let base = self.scopes.len();
         let moved_before = self.moved.clone();
-        self.scopes.push(vec![(var, elem_ty), (counter, Type::Int), (end_var, Type::Int)]);
+        self.scopes.push(vec![(var, elem_ty), (counter, Type::Int(IntTy::I64)), (end_var, Type::Int(IntTy::I64))]);
         self.loop_scopes.push(self.scopes.len());
         self.loop_labels.push(Some(label));
         self.names.insert(var_name.to_owned(), (var, false, elem_ty));
@@ -167,8 +167,8 @@ impl<'a> Parser<'a> {
         self.close_loop_moves(base, moved_before, loop_offset)?;
         // Per-iteration element binding, then the user's body.
         let element = match elem_ty {
-            Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, by_ref),
-            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int, line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
+            Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, by_ref),
+            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
         };
         body.insert(0, Statement::Declare(var, element));
         result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));
@@ -201,7 +201,7 @@ impl<'a> Parser<'a> {
     ) -> Result<Expr, ae_span::Diagnostic> {
         let (value, ty) = self.lower_scalar_body_expression(expression, slots)?;
         self.seek_scalar_offset(expression.range.end);
-        if ty != Type::Int {
+        if ty != Type::Int(IntTy::I64) {
             return Err(self.fail("range bounds must be i64"));
         }
         Ok(value)

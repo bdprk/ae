@@ -34,8 +34,8 @@ impl Scalar {
     /// The concrete type a checked scalar names.
     pub fn ty(self) -> TyKind {
         match self {
-            Self::Int => TyKind::Int,
-            Self::Float => TyKind::F64,
+            Self::Int => TyKind::Int(crate::numeric::IntTy::I64),
+            Self::Float => TyKind::Float(crate::numeric::FloatTy::F64),
             Self::Bool => TyKind::Bool,
         }
     }

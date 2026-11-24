@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
                             return Err(self.fail("array element limit exceeded (4096)"));
                         }
                         let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
-                        if ty != Type::Int {
+                        if ty != Type::Int(IntTy::I64) {
                             self.seek_scalar_offset(element.range.end);
                             return Err(self.fail("array elements must be i64"));
                         }
@@ -99,7 +99,7 @@ impl<'a> Parser<'a> {
                         element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
                         values.push(value);
                     }
-                    let ty = if element_type == Some(Type::F64) { Type::VecF } else { Type::Vec };
+                    let ty = if element_type == Some(Type::Float(FloatTy::F64)) { Type::VecF } else { Type::Vec };
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
                     let (value, ty) = if let ae_syntax::expression::ExpressionKind::Closure { .. } = &initializer.kind {
@@ -305,7 +305,7 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(base.range.end);
                         let (line, column) = self.position();
                         let (element_index, index_ty) = self.lower_scalar_body_expression(index, slots)?;
-                        if index_ty != Type::Int {
+                        if index_ty != Type::Int(IntTy::I64) {
                             self.seek_scalar_offset(index.range.end);
                             return Err(self.fail("vector index must be an integer"));
                         }
@@ -317,8 +317,8 @@ impl<'a> Parser<'a> {
                         };
                         let matches_element = match ty {
                             Type::StrVec => matches!(value_ty, Type::String | Type::StrView),
-                            Type::VecF => value_ty == Type::F64,
-                            _ => value_ty == Type::Int,
+                            Type::VecF => value_ty == Type::Float(FloatTy::F64),
+                            _ => value_ty == Type::Int(IntTy::I64),
                         };
                         if !matches_element {
                             self.seek_scalar_offset(value.range.end);
@@ -351,7 +351,7 @@ impl<'a> Parser<'a> {
                     let element_index = self.lower_scalar_array_index(index, slots)?;
                     self.seek_scalar_offset(value.range.start);
                     let (element, element_ty) = self.lower_scalar_body_expression(value, slots)?;
-                    if element_ty != Type::Int {
+                    if element_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(value.range.end);
                         return Err(self.fail("array elements must be i64"));
                     }
@@ -448,7 +448,7 @@ impl<'a> Parser<'a> {
                     return Ok(Statement::Print(Printed::Text(text.clone())));
                 }
                 let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
-                if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::StrView) {
+                if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::StrView) {
                     self.seek_scalar_offset(argument.range.end);
                     return Err(self.fail(&format!("cannot print a value of type {}", ty.name(self.ctx))).with_code("E0206"));
                 }

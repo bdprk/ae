@@ -739,7 +739,7 @@ mod tests {
     use super::cfg::{CfgBlock, CfgFunction, CfgTerminator};
 
     fn function_of(blocks: Vec<CfgBlock>) -> CfgFunction {
-        CfgFunction { id: 0, is_main: true, params: Vec::new(), returns: Type::Int, blocks }
+        CfgFunction { id: 0, is_main: true, params: Vec::new(), returns: Type::Int(IntTy::I64), blocks }
     }
 
     fn block(id: usize, statements: Vec<Statement>, terminator: CfgTerminator) -> CfgBlock {
@@ -802,7 +802,7 @@ mod tests {
     // The mut lending call faces (M2.5): signature #7's parameter 0 is
     // `&mut Struct`, the receiver slot is 5, and view 10 hangs off slot 5.
     fn mut_call() -> Expr {
-        Expr::Call(7, vec![Argument::Borrow(5, true)], Type::Int)
+        Expr::Call(7, vec![Argument::Borrow(5, true)], Type::Int(IntTy::I64))
     }
 
     fn mut_sigs() -> MutSigs {
@@ -860,7 +860,7 @@ mod tests {
                 Box::new(mut_call()),
                 Kind::Plus,
                 Box::new(Expr::Variable(10, Type::StrView, 2, 8)),
-                2, 4, Type::Int,
+                2, 4, Type::Int(IntTy::I64),
             ), false),
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
@@ -879,7 +879,7 @@ mod tests {
                 Box::new(Expr::Variable(10, Type::StrView, 2, 8)),
                 Kind::Plus,
                 Box::new(mut_call()),
-                2, 4, Type::Int,
+                2, 4, Type::Int(IntTy::I64),
             ), false),
         ];
         let function = function_of(vec![block(0, statements, CfgTerminator::Unreachable)]);
@@ -909,7 +909,7 @@ mod tests {
     // nothing — even though the same borrow at position 1 would.
     #[test]
     fn a_borrow_at_a_read_only_position_releases_nothing() {
-        let call = Expr::Call(7, vec![Argument::Borrow(5, true), Argument::Value(Expr::Number(1))], Type::Int);
+        let call = Expr::Call(7, vec![Argument::Borrow(5, true), Argument::Value(Expr::Number(1))], Type::Int(IntTy::I64));
         let statements = vec![
             view_declaration(),
             Statement::Print(Printed::Expr(Expr::Variable(10, Type::StrView, 2, 6))),

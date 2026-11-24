@@ -51,14 +51,14 @@ impl<'a> Parser<'a> {
                 if !def.params.is_empty() {
                     return Err(self.fail("the spawned task closure must take no parameters"));
                 }
-                if def.ret != Type::Int {
+                if def.ret != Type::Int(IntTy::I64) {
                     return Err(self.fail("the spawned task closure must return i64"));
                 }
                 if !def.borrow_captures.is_empty() {
                     return Err(self.fail("task_spawn moves its captures into the task; borrow captures are not allowed"));
                 }
                 for (outer_id, ty) in &def.value_captures {
-                    if !matches!(ty, Type::Int | Type::Bool | Type::F64 | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
+                    if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
                         return Err(self.fail("task_spawn moves its captures into the task; this capture's storage cannot cross"));
                     }
                     if self.moved.contains(outer_id) {
@@ -110,8 +110,8 @@ impl<'a> Parser<'a> {
                 .or_else(|| local_structs.get(name).copied()),
             // A literal initializer types its binding (the precompute records
             // it, so an address cast can check its pointee against it).
-            ExpressionKind::Atom(Kind::Number(_)) => Some(Type::Int),
-            ExpressionKind::Atom(Kind::Float(_)) => Some(Type::F64),
+            ExpressionKind::Atom(Kind::Number(_)) => Some(Type::Int(IntTy::I64)),
+            ExpressionKind::Atom(Kind::Float(_)) => Some(Type::Float(FloatTy::F64)),
             ExpressionKind::Atom(Kind::True) | ExpressionKind::Atom(Kind::False) => Some(Type::Bool),
             ExpressionKind::Group(inner) => self.chain_call_type(inner, local_structs),
             ExpressionKind::Field { base, name } => {

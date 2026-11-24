@@ -391,3 +391,5 @@
 
 - 2026-11-25 00:20 (+08:00): **P2.1 slice 2: numeric vocabulary in ae-ty.** `IntTy` (ten widths, signedness, bits, Rust/C names, inclusive range) and `FloatTy` (f32/f64) are exported with defaults I64/F64; two unit tests pin the tables. The TyKind migration is next. The 10k-seed fuzz continues to run (P1.4 gate).
 
+- 2026-11-25 01:30 (+08:00): **P2.1 slice 3: TyKind carries widths.** The concrete type is `Int(IntTy)`/`Float(FloatTy)`; every compiler match and constructor migrated to the I64/F64 tags mechanically, the scalar/layout bridges and C names are width-aware, and the ae-ty/unifier tests use the tagged forms. Behaviour is unchanged (all tags constructed are the defaults). Evidence: Windows suite 532/0, clippy, deny 176/176, route 0/0, Windows 50k mutation; WSL verification and ab_gate wait on the running 10k-seed fuzz (7611/10000 at the time of writing).
+

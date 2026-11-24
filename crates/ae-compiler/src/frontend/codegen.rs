@@ -41,14 +41,14 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let a = emit_expr(handle, out, next, false, ctx);
             let t = *next; *next += 1;
             out.push_str(&format!("    int64_t t{t} = ae_cell_load({});\n", a.text));
-            Emitted { text: format!("t{t}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::AtomicAdd(handle, value) => {
             let a = emit_expr(handle, out, next, false, ctx);
             let v = emit_expr(value, out, next, false, ctx);
             let t = *next; *next += 1;
             out.push_str(&format!("    int64_t t{t} = ae_cell_add({}, {});\n", a.text, v.text));
-            Emitted { text: format!("t{t}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::AtomicCas(handle, expect, new) => {
             let a = emit_expr(handle, out, next, false, ctx);
@@ -111,14 +111,14 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let c = emit_expr(ch, out, next, false, ctx);
             let t = *next; *next += 1;
             out.push_str(&format!("    int64_t t{t} = ae_chan_recv({});\n", c.text));
-            Emitted { text: format!("t{t}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::ChanSelect(c1, c2) => {
             let a = emit_expr(c1, out, next, false, ctx);
             let b = emit_expr(c2, out, next, false, ctx);
             let t = *next; *next += 1;
             out.push_str(&format!("    int64_t t{t} = ae_chan_select({}, {});\n", a.text, b.text));
-            Emitted { text: format!("t{t}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::ExecNew => {
             let t = *next; *next += 1;
@@ -129,7 +129,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let e = emit_expr(ex, out, next, false, ctx);
             let t = *next; *next += 1;
             out.push_str(&format!("    int64_t t{t} = ae_exec_run({});\n", e.text));
-            Emitted { text: format!("t{t}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::ScopeNew => {
             let t = *next; *next += 1;
@@ -146,7 +146,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let p = emit_expr(p, out, next, false, ctx);
             let t = *next; *next += 1;
             out.push_str(&format!("    int64_t t{t} = ae_pool_join({});\n", p.text));
-            Emitted { text: format!("t{t}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{t}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         // M2.12 slice 2: the address of addressable storage. The operand is a
         // variable or a field of one, so the C is an address-of; the pointer
@@ -176,7 +176,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let value = emit_expr(value, out, next, true, ctx);
             out.push_str(&format!("    AE_PTR_WRITE(t{address}, {});\n", value.text));
             null_moves(out, &value.moves);
-            Emitted::value("(int64_t)0".to_owned(), Type::Int)
+            Emitted::value("(int64_t)0".to_owned(), Type::Int(IntTy::I64))
         }
         Expr::PtrDropInPlace(pointer, pointee, ..) => {
             let p = emit_expr(pointer, out, next, false, ctx);
@@ -193,7 +193,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             let result = *next; *next += 1;
             out.push_str(&format!("    int64_t t{result} = {call};\n"));
-            Emitted::value(format!("t{result}"), Type::Int)
+            Emitted::value(format!("t{result}"), Type::Int(IntTy::I64))
         }
         Expr::PtrOffset(pointer, count, bytewise, ..) => {
             // ADR-0209 step A: pointer arithmetic. The element form rides C's
@@ -218,13 +218,13 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let t = emit_expr(pointer, out, next, false, ctx);
             Emitted::value(format!("AE_PTR_READ({})", t.text), crate::frontend::mir::expr_type(expr, ctx))
         }
-        Expr::Number(n) => Emitted::value(format!("INT64_C({n})"), Type::Int),
-        Expr::FloatLit(x) => Emitted::value(c_float_literal(*x), Type::F64),
+        Expr::Number(n) => Emitted::value(format!("INT64_C({n})"), Type::Int(IntTy::I64)),
+        Expr::FloatLit(x) => Emitted::value(c_float_literal(*x), Type::Float(FloatTy::F64)),
         Expr::ToF64(value, line, column) => {
             let t = emit_expr(value, out, next, false, ctx);
             let id = *next; *next += 1;
             out.push_str(&format!("    double t{id} = ae_f64_from_i64({}, {line}, {column});\n", t.text));
-            Emitted { text: format!("t{id}"), ty: Type::F64, owned: false, moves: t.moves, materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Float(FloatTy::F64), owned: false, moves: t.moves, materialized: true }
         }
         Expr::ToI64(value, ty, line, column) => {
             let t = emit_expr(value, out, next, false, ctx);
@@ -244,7 +244,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             }
             let id = *next; *next += 1;
             out.push_str(&format!("    double t{id} = {c_symbol}({});\n", parts.join(", ")));
-            Emitted { text: format!("t{id}"), ty: Type::F64, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Float(FloatTy::F64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::FloatToString(value, line, column) => {
             let t = emit_expr(value, out, next, false, ctx);
@@ -357,7 +357,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             out.push_str(&format!("    {check}\n"));
             let i = emit_expr(index, out, next, false, ctx);
-            let get = if *elem_ty == Type::F64 {
+            let get = if *elem_ty == Type::Float(FloatTy::F64) {
                 format!("ae_f64vec_get({receiver}, {}, {line}, {col})", i.text)
             } else {
                 format!("ae_vec_get({receiver}, {}, {line}, {col})", i.text)
@@ -370,14 +370,14 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // constant keeps the runtime check and its trap.
             if let Expr::Number(n) = &**index {
                 if *n >= 0 && (*n as usize) < *len {
-                    Emitted { text: format!("v{id}[{n}]"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: false }
+                    Emitted { text: format!("v{id}[{n}]"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: false }
                 } else {
                     let i = emit_expr(index, out, next, false, ctx);
-                    Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: Type::Int, owned: false, moves: i.moves, materialized: false }
+                    Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: Type::Int(IntTy::I64), owned: false, moves: i.moves, materialized: false }
                 }
             } else {
                 let i = emit_expr(index, out, next, false, ctx);
-                Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: Type::Int, owned: false, moves: i.moves, materialized: false }
+                Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: Type::Int(IntTy::I64), owned: false, moves: i.moves, materialized: false }
             }
         }
         Expr::Len(e, line, col) => {
@@ -393,14 +393,14 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             out.push_str(&format!("    int64_t t{id} = {call};\n"));
             if t.owned { drop_owned_temp(out, &t); }
-            Emitted { text: format!("t{id}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::Neg(a, line, column) => {
             let t = emit_expr(a, out, next, false, ctx);
-            if t.ty == Type::F64 {
-                Emitted { text: format!("-({})", t.text), ty: Type::F64, owned: false, moves: t.moves, materialized: false }
+            if t.ty == Type::Float(FloatTy::F64) {
+                Emitted { text: format!("-({})", t.text), ty: Type::Float(FloatTy::F64), owned: false, moves: t.moves, materialized: false }
             } else {
-                Emitted { text: format!("ae_neg({}, {line}, {column})", t.text), ty: Type::Int, owned: false, moves: t.moves, materialized: false }
+                Emitted { text: format!("ae_neg({}, {line}, {column})", t.text), ty: Type::Int(IntTy::I64), owned: false, moves: t.moves, materialized: false }
             }
         }
         Expr::Not(a) => {
@@ -426,7 +426,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // Both operands are read, never consumed by the call.
             if p.owned { drop_owned_temp(out, &p); }
             if c.owned { drop_owned_temp(out, &c); }
-            Emitted { text: format!("t{id}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::Bytes(e, line, col) => {
             let t = emit_expr(e, out, next, false, ctx);
@@ -563,7 +563,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             out.push_str(&format!("    int64_t t{id} = ae_count_lines_with(AE_VIEW({}), AE_VIEW({}), {line}, {col});\n", t.text, pt.text));
             if t.owned { drop_owned_temp(out, &t); }
             if pt.owned { drop_owned_temp(out, &pt); }
-            Emitted { text: format!("t{id}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::StructLit(sid, values) => {
             let mut parts = Vec::new();
@@ -703,12 +703,12 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::NowMs => {
             let id = *next; *next += 1;
             out.push_str(&format!("    int64_t t{id} = ae_now_ms();\n"));
-            Emitted { text: format!("t{id}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::NowS => {
             let id = *next; *next += 1;
             out.push_str(&format!("    int64_t t{id} = ae_now_s();\n"));
-            Emitted { text: format!("t{id}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::TryListDir(path, ty, line, col) => {
             let p = emit_expr(path, out, next, false, ctx);
@@ -803,9 +803,9 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let d = emit_expr(delta, out, next, false, ctx);
             let id = *next; *next += 1;
             let (inc_fn, c_ty, ty) = if place.f64_value() {
-                ("ae_mapf_inc", "double", Type::F64)
+                ("ae_mapf_inc", "double", Type::Float(FloatTy::F64))
             } else {
-                ("ae_map_inc", "int64_t", Type::Int)
+                ("ae_map_inc", "int64_t", Type::Int(IntTy::I64))
             };
             out.push_str(&format!("    {c_ty} t{id} = {inc_fn}(&{}, AE_VIEW({}), {}, {line}, {col});\n", place.text(), k.text, d.text));
             if d.owned { drop_owned_temp(out, &d); }
@@ -852,7 +852,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let id = *next; *next += 1;
             out.push_str(&format!("    int64_t t{id} = ae_utf8_len(AE_VIEW({}), {line}, {col});\n", t.text));
             if t.owned { drop_owned_temp(out, &t); }
-            Emitted { text: format!("t{id}"), ty: Type::Int, owned: false, moves: Vec::new(), materialized: true }
+            Emitted { text: format!("t{id}"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: true }
         }
         Expr::Utf8Prefix(e, count, line, col) => {
             let t = emit_expr(e, out, next, false, ctx);
@@ -1025,7 +1025,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let digits_of = |part: &Expr, out: &mut String, next: &mut usize| -> Option<String> {
                 if let Expr::ToString(inner, _, _) = part {
                     let v = emit_expr(inner, out, next, false, ctx);
-                    debug_assert_eq!(v.ty, Type::Int);
+                    debug_assert_eq!(v.ty, Type::Int(IntTy::I64));
                     return Some(v.text);
                 }
                 None
@@ -1071,7 +1071,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // f64 arithmetic maps to the C operators: no overflow trapping, no
             // fast-math, and division goes through a checked helper so `x / 0.0`
             // is a reported failure instead of a silent infinity (ADR-37).
-            let floating = l.ty == Type::F64;
+            let floating = l.ty == Type::Float(FloatTy::F64);
             let text = match op {
                 Kind::EqEq => format!("{} == {}", l.text, r.text),
                 Kind::NotEq => format!("{} != {}", l.text, r.text),
@@ -1098,9 +1098,9 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let ty = if matches!(op, Kind::EqEq | Kind::NotEq | Kind::Less | Kind::LessEq | Kind::Greater | Kind::GreaterEq) {
                 Type::Bool
             } else if floating {
-                Type::F64
+                Type::Float(FloatTy::F64)
             } else {
-                Type::Int
+                Type::Int(IntTy::I64)
             };
             Emitted { text, ty, owned: false, moves: Vec::new(), materialized: false }
         }
@@ -1192,7 +1192,7 @@ pub(super) fn emit_print(printed: &Printed, out: &mut String, next: &mut usize, 
                     if t.owned { drop_owned_temp(out, &t); }
                 }
                 Type::Bool => out.push_str(&format!("    ae_print_bool({});\n", t.text)),
-                Type::F64 => out.push_str(&format!("    ae_f64_print({});\n", t.text)),
+                Type::Float(FloatTy::F64) => out.push_str(&format!("    ae_f64_print({});\n", t.text)),
                 _ => out.push_str(&format!("    ae_print_i64({});\n", t.text)),
             }
         }
@@ -1604,7 +1604,7 @@ fn emit_payload_binding(out: &mut String, bid: usize, subject: usize, variant: u
     match pty {
         Type::String => out.push_str(&format!("    ae_strview v{bid} = AE_VIEW({member});\n")),
         Type::Bool => out.push_str(&format!("    bool v{bid} = {member};\n")),
-        Type::F64 => out.push_str(&format!("    double v{bid} = {member};\n")),
+        Type::Float(FloatTy::F64) => out.push_str(&format!("    double v{bid} = {member};\n")),
         Type::Vec => out.push_str(&format!("    const ae_vec *v{bid} = &{member};\n")),
         Type::VecF => out.push_str(&format!("    const ae_f64vec *v{bid} = &{member};\n")),
         Type::StrVec => out.push_str(&format!("    const ae_strvec *v{bid} = &{member};\n")),

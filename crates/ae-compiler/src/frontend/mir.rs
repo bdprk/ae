@@ -168,8 +168,8 @@ fn lower_statement(statement: &Statement, bindings: &mut Vec<MirBinding>, loweri
             // survived drop elaboration (M2.4) — the same lists the C
             // backend emits — instead of a bare stmt() placeholder.
             let operands = list.iter().map(|(id, ty)| MirOperand::Place(MirPlace::Local(*id, *ty))).collect();
-            let temp = lowering.fresh(Type::Int);
-            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic("releases", operands, Type::Int) });
+            let temp = lowering.fresh(Type::Int(IntTy::I64));
+            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic("releases", operands, Type::Int(IntTy::I64)) });
         }
         other => {
             // Container updates, asserts, and the remaining statement shapes
@@ -179,8 +179,8 @@ fn lower_statement(statement: &Statement, bindings: &mut Vec<MirBinding>, loweri
             // them into blocks and edges) keep the bare placeholder as a
             // tripwire: one should never reach a MIR block.
             let (name, operands) = statement_intrinsic(other, bindings, lowering);
-            let temp = lowering.fresh(Type::Int);
-            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic(name, operands, Type::Int) });
+            let temp = lowering.fresh(Type::Int(IntTy::I64));
+            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic(name, operands, Type::Int(IntTy::I64)) });
         }
     }
 }
@@ -386,8 +386,8 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         ]),
         Expr::VecIndex(id, index, _, _, borrowed, element) => {
             let vector = match (*element, *borrowed) {
-                (Type::F64, false) => Type::VecF,
-                (Type::F64, true) => Type::VecFRef,
+                (Type::Float(FloatTy::F64), false) => Type::VecF,
+                (Type::Float(FloatTy::F64), true) => Type::VecFRef,
                 (_, false) => Type::Vec,
                 (_, true) => Type::VecRef,
             };
@@ -483,7 +483,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::Spawn(_, _, tid, ..) => Type::Thread(*tid),
         Expr::Wait(_, ret, ..) => *ret,
         Expr::AtomicNew(..) => Type::Atomic,
-        Expr::AtomicLoad(..) | Expr::AtomicAdd(..) => Type::Int,
+        Expr::AtomicLoad(..) | Expr::AtomicAdd(..) => Type::Int(IntTy::I64),
         Expr::AtomicCas(..) => Type::Bool,
         Expr::SharedNew(_, sid) => Type::Shared(*sid),
         Expr::SharedGet(_, sid) => ctx.shared_types_get(*sid),
@@ -491,15 +491,15 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::MutexLock(..) => Type::Guard,
         Expr::ChanNew(..) => Type::Chan,
         Expr::ChanSend(..) | Expr::ChanTrySend(..) => Type::Bool,
-        Expr::ChanRecv(..) | Expr::ChanSelect(..) | Expr::ExecRun(..) | Expr::PoolJoin(..) => Type::Int,
+        Expr::ChanRecv(..) | Expr::ChanSelect(..) | Expr::ExecRun(..) | Expr::PoolJoin(..) => Type::Int(IntTy::I64),
         Expr::ExecNew => Type::Exec,
         Expr::ScopeNew => Type::TaskScope,
         Expr::PoolNew(..) => Type::Pool,
-        Expr::Number(..) | Expr::Index(..) | Expr::Len(..) => Type::Int,
+        Expr::Number(..) | Expr::Index(..) | Expr::Len(..) => Type::Int(IntTy::I64),
         Expr::VecIndex(_, _, _, _, _, ty) => *ty,
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,
-        Expr::FloatLit(..) | Expr::ToF64(..) => Type::F64,
+        Expr::FloatLit(..) | Expr::ToF64(..) => Type::Float(FloatTy::F64),
         Expr::BoolLit(..) | Expr::StrEq(..) | Expr::Contains(..) => Type::Bool,
         Expr::Variable(_, ty, ..) | Expr::Field(_, _, ty) | Expr::VecLit(_, ty, ..) => *ty,
         Expr::StructLit(sid, _) => Type::Struct(*sid),
@@ -515,7 +515,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::Bytes(..) => Type::Vec,
         Expr::Neg(value, ..) => expr_type(value, ctx),
         Expr::ClosureLit(id) => Type::Closure(*id),
-        Expr::MapInc(place, ..) if place.f64_value() => Type::F64,
+        Expr::MapInc(place, ..) if place.f64_value() => Type::Float(FloatTy::F64),
         Expr::MapHas(..) | Expr::MapRemove(..) => Type::Bool,
         Expr::SliceView(..) => Type::StrView,
         Expr::Tokens(..) => Type::Tokens,
@@ -524,7 +524,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::MapNew(_, _, MapKind::Float) => Type::MapF,
         Expr::MapNew(..) => Type::Map,
         // Math calls return f64 by definition (ADR-60).
-        Expr::MathCall(..) => Type::F64,
+        Expr::MathCall(..) => Type::Float(FloatTy::F64),
         Expr::Not(..) | Expr::PathExists(..) | Expr::PathIsDir(..) | Expr::StartsWith(..) | Expr::EndsWith(..) | Expr::JsonHas(..) => Type::Bool,
         // M2.12 slice 2: the address takes the pointee's pointer shape; a
         // deref yields the pointee.
@@ -538,7 +538,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::DerefPtr(p, ..) => match expr_type(p, ctx) { Type::Ptr(id) | Type::PtrMut(id) => ctx.ptr_pointee(id), other => other },
         // Offsetting keeps the base's pointer type.
         Expr::PtrOffset(p, ..) => expr_type(p, ctx),
-        Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => Type::Int,
+        Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => Type::Int(IntTy::I64),
         // A retag's type is the new pointer, taken from the variant's own
         // fields — recursing on the same expression here would not terminate.
         Expr::PtrCast(_, mutable, pointee_id, ..) => {
@@ -555,7 +555,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         | Expr::TryAppendFile(_, _, ty, ..) | Expr::JsonGet(_, _, ty, ..) | Expr::JsonInt(_, _, ty, ..)
         | Expr::JsonBool(_, _, ty, ..) | Expr::JsonLen(_, _, ty, ..) | Expr::Find(_, _, ty, ..) => *ty,
         Expr::ToI64(..) | Expr::WriteFile(..) | Expr::CountLinesWith(..) | Expr::Utf8Len(..)
-        | Expr::MapInc(..) | Expr::NowMs | Expr::NowS => Type::Int,
+        | Expr::MapInc(..) | Expr::NowMs | Expr::NowS => Type::Int(IntTy::I64),
     }
 }
 
@@ -688,7 +688,7 @@ fn thread_edges(blocks: &mut [MirBlock]) -> bool {
 fn condition_is_pure(expr: &Expr) -> bool {
     match expr {
         Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) => true,
-        Expr::Variable(_, Type::Int | Type::Bool | Type::F64, ..) => true,
+        Expr::Variable(_, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64), ..) => true,
         Expr::Not(value) => condition_is_pure(value),
         Expr::Binary(left, op, right, ..) => {
             // Arithmetic can trap on overflow or division by zero.
@@ -1033,7 +1033,7 @@ pub(super) fn validate(function: &MirFunction, ctx: &CompileContext) -> Result<(
                     function.id, block.id, expr_type(value, ctx).name(ctx), function.returns.name(ctx),
                 ));
             }
-            CfgTerminator::Exit(code) if expr_type(code, ctx) != Type::Int => {
+            CfgTerminator::Exit(code) if expr_type(code, ctx) != Type::Int(IntTy::I64) => {
                 return Err(format!("internal: fn #{} block {} exits with a non-i64 value", function.id, block.id));
             }
             CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => {}
@@ -1177,12 +1177,12 @@ mod validation_tests {
             id: 0,
             is_main: false,
             params: vec![],
-            returns: Type::Int,
+            returns: Type::Int(IntTy::I64),
             blocks: vec![MirBlock {
                 id: 0,
                 statements: vec![],
                 bindings: vec![MirBinding {
-                    target: MirPlace::Temp(0, Type::Int),
+                    target: MirPlace::Temp(0, Type::Int(IntTy::I64)),
                     rvalue: MirRvalue::Call(1, vec![], Type::Bool),
                 }],
                 terminator: CfgTerminator::Return(Expr::Number(0)),
@@ -1200,17 +1200,17 @@ mod validation_tests {
             id: 0,
             is_main: false,
             params: vec![],
-            returns: Type::Int,
+            returns: Type::Int(IntTy::I64),
             blocks: vec![MirBlock {
                 id: 0,
                 statements: vec![],
                 bindings: vec![
                     MirBinding {
-                        target: MirPlace::Temp(1, Type::Int),
-                        rvalue: MirRvalue::Use(MirOperand::Place(MirPlace::Temp(0, Type::Int))),
+                        target: MirPlace::Temp(1, Type::Int(IntTy::I64)),
+                        rvalue: MirRvalue::Use(MirOperand::Place(MirPlace::Temp(0, Type::Int(IntTy::I64)))),
                     },
                     MirBinding {
-                        target: MirPlace::Temp(0, Type::Int),
+                        target: MirPlace::Temp(0, Type::Int(IntTy::I64)),
                         rvalue: MirRvalue::Use(MirOperand::Int(42)),
                     },
                 ],
@@ -1229,7 +1229,7 @@ mod validation_tests {
             id: 0,
             is_main: false,
             params: vec![],
-            returns: Type::Int,
+            returns: Type::Int(IntTy::I64),
             blocks: vec![MirBlock {
                 id: 0,
                 statements: vec![],

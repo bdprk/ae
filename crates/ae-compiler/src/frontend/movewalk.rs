@@ -623,10 +623,10 @@ mod tests {
 
     #[test]
     fn indexed_access_reads_container_and_index() {
-        let index = || Box::new(Expr::Variable(2, Type::Int, 0, 0));
+        let index = || Box::new(Expr::Variable(2, Type::Int(IntTy::I64), 0, 0));
         let expressions = [
             Expr::Index(1, 3, index(), 0, 0),
-            Expr::VecIndex(1, index(), 0, 0, false, Type::Int),
+            Expr::VecIndex(1, index(), 0, 0, false, Type::Int(IntTy::I64)),
             Expr::StrVecIndex(1, index(), 0, 0, false),
         ];
         for expr in expressions { assert_eq!(expr_reads(&expr), vec![1, 2]); }
@@ -634,13 +634,13 @@ mod tests {
 
     #[test]
     fn compound_expressions_read_all_source_slots() {
-        let var = |id| Box::new(Expr::Variable(id, Type::Int, 0, 0));
+        let var = |id| Box::new(Expr::Variable(id, Type::Int(IntTy::I64), 0, 0));
         let expressions = [
-            (Expr::FnCall(1, vec![Argument::Value(*var(2))], Type::Int, 0), vec![1, 2]),
+            (Expr::FnCall(1, vec![Argument::Value(*var(2))], Type::Int(IntTy::I64), 0), vec![1, 2]),
             (Expr::Tokens(1, None, var(2), 0, 0), vec![1, 2]),
             (Expr::SliceView(1, None, var(2), var(3), 0, 0), vec![1, 2, 3]),
             (Expr::Join(1, var(2), 0, 0), vec![1, 2]),
-            (Expr::RunCommand(var(1), 2, Type::Int, 0, 0), vec![1, 2]),
+            (Expr::RunCommand(var(1), 2, Type::Int(IntTy::I64), 0, 0), vec![1, 2]),
         ];
         for (expr, expected) in expressions { assert_eq!(expr_reads(&expr), expected); }
     }
@@ -649,9 +649,9 @@ mod tests {
     fn map_expressions_read_map_slot_and_arguments() {
         let place = || MapPlace::Var(1, MapKind::Int);
         let key = || Box::new(Expr::Variable(2, Type::String, 0, 0));
-        let delta = || Box::new(Expr::Variable(3, Type::Int, 0, 0));
+        let delta = || Box::new(Expr::Variable(3, Type::Int(IntTy::I64), 0, 0));
         let expressions = [
-            (Expr::MapGet(place(), key(), Type::Int, 0, 0), vec![1, 2]),
+            (Expr::MapGet(place(), key(), Type::Int(IntTy::I64), 0, 0), vec![1, 2]),
             (Expr::MapHas(place(), key(), 0, 0), vec![1, 2]),
             (Expr::MapRemove(place(), key(), 0, 0), vec![1, 2]),
             (Expr::MapInc(place(), key(), delta(), 0, 0), vec![1, 2, 3]),
@@ -669,8 +669,8 @@ mod tests {
     #[test]
     fn pointer_offset_walks_base_and_count_in_order() {
         let expr = Expr::PtrOffset(
-            Box::new(Expr::Variable(1, Type::Int, 0, 0)),
-            Box::new(Expr::Call(0, vec![Argument::Value(Expr::Variable(2, Type::String, 0, 0))], Type::Int)),
+            Box::new(Expr::Variable(1, Type::Int(IntTy::I64), 0, 0)),
+            Box::new(Expr::Call(0, vec![Argument::Value(Expr::Variable(2, Type::String, 0, 0))], Type::Int(IntTy::I64))),
             false, 0, 0,
         );
         assert_eq!(expr_reads(&expr), vec![1, 2]);

@@ -46,7 +46,7 @@ impl Parser<'_> {
     #[allow(clippy::only_used_in_recursion)]
     pub(super) fn c_abi_shape(&self, ty: &Type, offset: usize) -> bool {
         match ty {
-            Type::Int | Type::Bool | Type::F64 => true,
+            Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) => true,
             Type::Ptr(_) | Type::PtrMut(_) => true,
             Type::Struct(sid) => {
                 let def = &self.structs[*sid];
@@ -602,7 +602,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 self.parameter_type()?
             } else {
-                Type::Int
+                Type::Int(IntTy::I64)
             };
             // A borrow may not be returned: the receiver's borrow ends with the
             // call, so anything it points at would be owned by the caller's
@@ -611,7 +611,7 @@ impl Parser<'_> {
                 return Err(self.fail("a method cannot return a borrow; return a value that outlives the borrow instead, or take the borrow again at the call site"));
             }
             if method == "drop"
-                && (!matches!(receiver, Some(Type::StructMut(_))) || types.len() != 1 || ret != Type::Int) {
+                && (!matches!(receiver, Some(Type::StructMut(_))) || types.len() != 1 || ret != Type::Int(IntTy::I64)) {
                     return Err(self.fail("destructor 'drop' must have signature 'fn drop(&mut self) -> i64'"));
                 }
             self.generics.next_fn_id = self.generics.next_fn_id.max(*next_id);
@@ -1098,7 +1098,7 @@ impl Parser<'_> {
         
         let returns_type = if is_main {
             if !params.is_empty() { return Err(self.fail("main cannot have parameters")); }
-            Type::Int
+            Type::Int(IntTy::I64)
         } else {
             self.take(Kind::Arrow)?;
             self.return_annotation()?
@@ -1202,7 +1202,7 @@ impl Parser<'_> {
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
-            id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
+            id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(), subst, trait_bounds, receiver: None, impl_self: None, inherent_impl: false, shadow_ok: false, pending: Vec::new(),
         };
         let parsed = sub.function_rest_with_parameters(false, id, def.bindings.as_deref());
@@ -1274,7 +1274,7 @@ impl Parser<'_> {
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
             enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
-            id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
+            id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(),
             borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(),
             subst, trait_bounds: HashMap::new(), receiver: receiver_ty,
             impl_self: Some(impl_self_ty), inherent_impl: true, shadow_ok: false, pending: Vec::new(),

@@ -46,14 +46,14 @@ impl<'a> Parser<'a> {
                                 }
                                 if let Type::Array(n) = ty {
                                     self.seek_scalar_offset(expression.range.end);
-                                    return Ok((Expr::Number(n as i64), Type::Int));
+                                    return Ok((Expr::Number(n as i64), Type::Int(IntTy::I64)));
                                 }
                                 if matches!(ty, Type::Vec | Type::StrVec | Type::VecRef | Type::StrVecRef | Type::Map) {
                                     // The typed fast path stamps the operand with
                                     // the `len` call's position, not the variable's.
                                     let value = Expr::Variable(slot, ty, line, column);
                                     self.seek_scalar_offset(expression.range.end);
-                                    return Ok((Expr::Len(Box::new(value), line, column), Type::Int));
+                                    return Ok((Expr::Len(Box::new(value), line, column), Type::Int(IntTy::I64)));
                                 }
                     }
                     let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
@@ -68,15 +68,15 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("len expects a string, vec, map, or array variable"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::Len(Box::new(value), line, column), Type::Int))
+                    Ok((Expr::Len(Box::new(value), line, column), Type::Int(IntTy::I64)))
                 }
                 "to_string" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
                     let argument = &arguments[0];
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
                     let value = match actual {
-                        Type::Int => Expr::ToString(Box::new(value), line, column),
-                        Type::F64 => Expr::FloatToString(Box::new(value), line, column),
+                        Type::Int(IntTy::I64) => Expr::ToString(Box::new(value), line, column),
+                        Type::Float(FloatTy::F64) => Expr::FloatToString(Box::new(value), line, column),
                         _ => {
                             self.seek_scalar_offset(argument.range.end);
                             return Err(self.fail("to_string expects an i64 or f64"));
@@ -89,12 +89,12 @@ impl<'a> Parser<'a> {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
                     let argument = &arguments[0];
                     let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
-                    if actual != Type::Int {
+                    if actual != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(argument.range.end);
                         return Err(self.fail("to_f64 expects an i64"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::ToF64(Box::new(value), line, column), Type::F64))
+                    Ok((Expr::ToF64(Box::new(value), line, column), Type::Float(FloatTy::F64)))
                 }
                 "trim" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
@@ -117,13 +117,13 @@ impl<'a> Parser<'a> {
                     }
                     self.seek_scalar_offset(start.range.start);
                     let (from, from_ty) = self.lower_scalar_body_expression(start, slots)?;
-                    if from_ty != Type::Int {
+                    if from_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(start.range.end);
                         return Err(self.fail("slice start must be i64"));
                     }
                     self.seek_scalar_offset(end.range.start);
                     let (to, to_ty) = self.lower_scalar_body_expression(end, slots)?;
-                    if to_ty != Type::Int {
+                    if to_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(end.range.end);
                         return Err(self.fail("slice end must be i64"));
                     }
@@ -233,7 +233,7 @@ impl<'a> Parser<'a> {
                 "cell_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
                     let (seed, seed_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
-                    if seed_ty != Type::Int {
+                    if seed_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[0].range.end);
                         return Err(self.fail("cell_new expects an i64 seed"));
                     }
@@ -248,7 +248,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("cell_load expects an atomic handle"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::AtomicLoad(Box::new(handle)), Type::Int))
+                    Ok((Expr::AtomicLoad(Box::new(handle)), Type::Int(IntTy::I64)))
                 }
                 "cell_add" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
@@ -258,12 +258,12 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("cell_add expects an atomic handle"));
                     }
                     let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-                    if value_ty != Type::Int {
+                    if value_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[1].range.end);
                         return Err(self.fail("cell_add expects an i64 delta"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::AtomicAdd(Box::new(handle), Box::new(value)), Type::Int))
+                    Ok((Expr::AtomicAdd(Box::new(handle), Box::new(value)), Type::Int(IntTy::I64)))
                 }
                 "cell_cas" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 3)?;
@@ -273,12 +273,12 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("cell_cas expects an atomic handle"));
                     }
                     let (expect, expect_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-                    if expect_ty != Type::Int {
+                    if expect_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[1].range.end);
                         return Err(self.fail("cell_cas expects an i64 expected value"));
                     }
                     let (new, new_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
-                    if new_ty != Type::Int {
+                    if new_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[2].range.end);
                         return Err(self.fail("cell_cas expects an i64 new value"));
                     }
@@ -292,7 +292,7 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(arguments[0].range.end);
                         return Err(self.fail("shared_new cannot wrap another shared handle (no handle towers)"));
                     }
-                    if !matches!(value_ty, Type::Int | Type::Bool | Type::F64 | Type::Atomic) {
+                    if !matches!(value_ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::Atomic) {
                         self.seek_scalar_offset(arguments[0].range.end);
                         return Err(self.fail("shared_new in v1 expects a copy-semantics value (i64, bool, f64, or atomic)"));
                     }
@@ -331,7 +331,7 @@ impl<'a> Parser<'a> {
                 "chan_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
                     let (capacity, capacity_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
-                    if capacity_ty != Type::Int {
+                    if capacity_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[0].range.end);
                         return Err(self.fail("chan_new expects an i64 capacity"));
                     }
@@ -346,7 +346,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail(&format!("{name} expects a chan handle")));
                     }
                     let (value, value_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-                    if value_ty != Type::Int {
+                    if value_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[1].range.end);
                         return Err(self.fail(&format!("{name} expects an i64 value")));
                     }
@@ -365,7 +365,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("chan_recv expects a chan handle"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::ChanRecv(Box::new(channel)), Type::Int))
+                    Ok((Expr::ChanRecv(Box::new(channel)), Type::Int(IntTy::I64)))
                 }
                 "chan_select" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
@@ -380,7 +380,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("chan_select expects chan handles"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::ChanSelect(Box::new(first), Box::new(second)), Type::Int))
+                    Ok((Expr::ChanSelect(Box::new(first), Box::new(second)), Type::Int(IntTy::I64)))
                 }
                 "exec_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
@@ -395,7 +395,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("exec_run expects an exec handle"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::ExecRun(Box::new(handle)), Type::Int))
+                    Ok((Expr::ExecRun(Box::new(handle)), Type::Int(IntTy::I64)))
                 }
                 "scope_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
@@ -405,7 +405,7 @@ impl<'a> Parser<'a> {
                 "pool_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
                     let (workers, workers_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
-                    if workers_ty != Type::Int {
+                    if workers_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[0].range.end);
                         return Err(self.fail("pool_new expects an i64 worker count"));
                     }
@@ -420,7 +420,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("pool_join expects a pool handle"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::PoolJoin(Box::new(handle)), Type::Int))
+                    Ok((Expr::PoolJoin(Box::new(handle)), Type::Int(IntTy::I64)))
                 }
                 "c_size_of" | "c_align_of" | "c_offset_of" => {
                     // Only the bracketed form exists; the bracket path is
@@ -460,7 +460,7 @@ impl<'a> Parser<'a> {
                 "now_ms" | "now_s" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((if name == "now_ms" { Expr::NowMs } else { Expr::NowS }, Type::Int))
+                    Ok((if name == "now_ms" { Expr::NowMs } else { Expr::NowS }, Type::Int(IntTy::I64)))
                 }
                 "args" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
@@ -496,7 +496,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("write_file expects a string or string view content"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::WriteFile(Box::new(path), Box::new(content), line, column), Type::Int))
+                    Ok((Expr::WriteFile(Box::new(path), Box::new(content), line, column), Type::Int(IntTy::I64)))
                 }
                 "path_exists" | "path_is_dir" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;

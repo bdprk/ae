@@ -3,9 +3,9 @@ use std::fmt::Write as _;
 use super::*;
 pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
     match ty {
-        Type::Int => "int64_t".to_owned(),
+        Type::Int(width) => width.c_name().to_owned(),
         Type::Bool => "bool".to_owned(),
-        Type::F64 => "double".to_owned(),
+        Type::Float(width) => width.c_name().to_owned(),
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
         Type::Vec => "ae_vec".to_owned(),
@@ -53,9 +53,9 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
 }
 pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContext) -> String {
     match ty {
-        Type::Int => format!("int64_t v{id}"),
+        Type::Int(width) => format!("{} v{id}", width.c_name()),
         Type::Bool => format!("bool v{id}"),
-        Type::F64 => format!("double v{id}"),
+        Type::Float(width) => format!("{} v{id}", width.c_name()),
         Type::String => format!("ae_string v{id}"),
         Type::StrView => format!("ae_strview v{id}"),
         Type::Vec => format!("ae_vec v{id}"),
@@ -129,7 +129,7 @@ pub(super) fn c_return(ty: Type, ctx: &CompileContext) -> String {
         // Never returned: a function value cannot be a return type yet.
         Type::Fn(_) => "void".to_owned(),
         Type::Bool => "bool".to_owned(),
-        Type::F64 => "double".to_owned(),
+        Type::Float(FloatTy::F64) => "double".to_owned(),
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
         Type::Vec | Type::StrVec | Type::VecF => c_type_field(ty, ctx),
@@ -631,7 +631,7 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
                             let _ = writeln!(release, "    v->{n} = false;");
                             let _ = writeln!(forfeit, "    v->{n} = false;");
                         }
-                        Type::Int | Type::F64 => {
+                        Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) => {
                             let _ = writeln!(release, "    v->{n} = 0;");
                             let _ = writeln!(forfeit, "    v->{n} = 0;");
                         }

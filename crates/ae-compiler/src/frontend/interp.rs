@@ -983,7 +983,7 @@ fn eval_stmts(
             }
             Statement::TaskYield => {}
             Statement::PtrStore(id, value, ..) => {
-                let pointer = match eval_expr(env, &Expr::Variable(*id, Type::Int, 0, 0), locals, caller_locals, false) {
+                let pointer = match eval_expr(env, &Expr::Variable(*id, Type::Int(IntTy::I64), 0, 0), locals, caller_locals, false) {
                     Ok(val) => val,
                     Err(flow) => return flow,
                 };

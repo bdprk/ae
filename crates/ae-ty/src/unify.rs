@@ -125,6 +125,7 @@ fn occurs(var: TypeVar, term: &Term) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric::{FloatTy, IntTy};
 
     fn var(id: u32) -> Term {
         Term::Variable(TypeVar(id))
@@ -133,17 +134,17 @@ mod tests {
     #[test]
     fn concrete_terms_unify_only_when_identical() {
         let mut subst = Substitution::new();
-        assert_eq!(unify(&Term::Concrete(TyKind::Int), &Term::Concrete(TyKind::Int), &mut subst), Ok(()));
-        assert_eq!(unify(&Term::Concrete(TyKind::Int), &Term::Concrete(TyKind::F64), &mut subst), Err(UnifyError::Mismatch));
+        assert_eq!(unify(&Term::Concrete(TyKind::Int(IntTy::I64)), &Term::Concrete(TyKind::Int(IntTy::I64)), &mut subst), Ok(()));
+        assert_eq!(unify(&Term::Concrete(TyKind::Int(IntTy::I64)), &Term::Concrete(TyKind::Float(FloatTy::F64)), &mut subst), Err(UnifyError::Mismatch));
     }
 
     #[test]
     fn a_variable_takes_the_concrete_shape_and_composites_descend() {
-        let vector_i64 = Term::Composite { family: "vec", arguments: vec![Term::Concrete(TyKind::Int)] };
+        let vector_i64 = Term::Composite { family: "vec", arguments: vec![Term::Concrete(TyKind::Int(IntTy::I64))] };
         let vector_t = Term::Composite { family: "vec", arguments: vec![var(0)] };
         let mut subst = Substitution::new();
         assert_eq!(unify(&vector_t, &vector_i64, &mut subst), Ok(()));
-        assert_eq!(subst.resolved(&var(0)), Term::Concrete(TyKind::Int));
+        assert_eq!(subst.resolved(&var(0)), Term::Concrete(TyKind::Int(IntTy::I64)));
         assert_eq!(subst.resolved(&vector_t), vector_i64);
     }
 

@@ -28,10 +28,10 @@ impl<'a> Parser<'a> {
                     }
                     if name == "utf8_len" {
                         self.seek_scalar_offset(expression.range.end);
-                        return Ok((Expr::Utf8Len(Box::new(text), line, column), Type::Int));
+                        return Ok((Expr::Utf8Len(Box::new(text), line, column), Type::Int(IntTy::I64)));
                     }
                     let (count, count_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-                    if count_ty != Type::Int {
+                    if count_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[1].range.end);
                         return Err(self.fail("utf8_prefix expects an i64 character count"));
                     }
@@ -51,7 +51,7 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("count_lines_with expects a string or string view pattern"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::CountLinesWith(Box::new(text), Box::new(pattern), line, column), Type::Int))
+                    Ok((Expr::CountLinesWith(Box::new(text), Box::new(pattern), line, column), Type::Int(IntTy::I64)))
                 }
                 "run_command" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
@@ -141,12 +141,12 @@ impl<'a> Parser<'a> {
                         return Err(self.binding_label(self.fail("cannot use a moved string in slice_view").with_code("E0102"), vid));
                     }
                     let (start, start_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
-                    if start_ty != Type::Int {
+                    if start_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[1].range.end);
                         return Err(self.fail("slice_view start must be i64"));
                     }
                     let (end, end_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
-                    if end_ty != Type::Int {
+                    if end_ty != Type::Int(IntTy::I64) {
                         self.seek_scalar_offset(arguments[2].range.end);
                         return Err(self.fail("slice_view end must be i64"));
                     }
@@ -160,7 +160,7 @@ impl<'a> Parser<'a> {
                 "to_i64" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 1)?;
                     let (value, actual) = self.lower_scalar_body_expression(&arguments[0], slots)?;
-                    if actual != Type::F64 {
+                    if actual != Type::Float(FloatTy::F64) {
                         self.seek_scalar_offset(arguments[0].range.end);
                         return Err(self.fail("to_i64 expects an f64"));
                     }
@@ -241,14 +241,14 @@ impl<'a> Parser<'a> {
                     for argument in arguments {
                         self.seek_scalar_offset(argument.range.start);
                         let (value, ty) = self.lower_scalar_body_expression(argument, slots)?;
-                        if ty != Type::F64 {
+                        if ty != Type::Float(FloatTy::F64) {
                             self.seek_scalar_offset(argument.range.end);
                             return Err(self.fail(&format!("{name} expects an f64 argument; convert integers explicitly with to_f64")));
                         }
                         values.push(Box::new(value));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::MathCall(index as u8, values, line, column), Type::F64))
+                    Ok((Expr::MathCall(index as u8, values, line, column), Type::Float(FloatTy::F64)))
                 }
             }
         })()

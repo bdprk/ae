@@ -219,7 +219,7 @@ impl<'a> Parser<'a> {
                     // link's declared type answers statelessly and the gate can
                     // ask before the lowering declares the binding.
                     if let Some(ret @ (Type::Enum(..) | Type::Struct(_) | Type::Ptr(_) | Type::PtrMut(_)
-                        | Type::Int | Type::F64 | Type::Bool)) = self.chain_call_type(initializer, &local_structs)
+                        | Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) | Type::Bool)) = self.chain_call_type(initializer, &local_structs)
                     {
                         local_structs.insert(name.clone(), ret);
                     }
