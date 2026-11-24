@@ -19,8 +19,8 @@ pub(super) fn specialization_key(gid: usize, arguments: &[Type], ctx: &CompileCo
 /// `Result[...]` spelling resolve to the preset layout — one type, one C id —
 /// while the family name stays usable as a pattern alias. `WriteResult` shares
 /// the `IntResult` instantiation (identical payloads) and has no id of its
-/// own. Families with several `Ok` fields (FileResult, CommandResult) stay on
-/// the legacy ladder until payload structs land.
+/// own. The two multi-value families get their payload structs attached after
+/// loading (ADR-0234).
 pub(super) fn seed_preset_result_instantiations(generics: &mut Generics, enum_names: &HashMap<String, usize>, ctx: &CompileContext) {
     let Some(&gid) = generics.names.get("Result") else { return };
     let families: [(&str, Vec<Type>); 6] = [
@@ -33,6 +33,28 @@ pub(super) fn seed_preset_result_instantiations(generics: &mut Generics, enum_na
     ];
     for (alias, args) in families {
         let Some(&eid) = enum_names.get(alias) else { continue };
+        generics.done.insert(specialization_key(gid, &args, ctx), eid);
+        generics.enum_origin.insert(eid, (gid, args));
+    }
+}
+
+/// ADR-0234: the two result families whose `Ok` carries several values point
+/// at the prelude payload structs (`FileInfo` id 0, `CommandOutput` id 1) and
+/// join the `Result[Struct, string]` instantiation cache. Called right after
+/// the prelude is built, before any source is parsed, so the route scan reads
+/// the one-payload variant shape.
+pub(super) fn wire_prelude_result_payloads(
+    enums: &mut [EnumDef],
+    generics: &mut Generics,
+    enum_names: &HashMap<String, usize>,
+    ctx: &CompileContext,
+) {
+    let Some(&gid) = generics.names.get("Result") else { return };
+    for (alias, sid) in [("FileResult", 0usize), ("CommandResult", 1usize)] {
+        let Some(&eid) = enum_names.get(alias) else { continue };
+        enums[eid].variants[0].1 = vec![Type::Struct(sid)];
+        enums[eid].aliases = vec!["Result"];
+        let args = vec![Type::Struct(sid), Type::String];
         generics.done.insert(specialization_key(gid, &args, ctx), eid);
         generics.enum_origin.insert(eid, (gid, args));
     }
@@ -659,7 +681,8 @@ impl Parser<'_> {
                 def.name, self.instantiation_trace(&display))));
         }
         let active_layouts = self.generics.instantiation_trace.iter().filter(|(kind, _, _)| *kind == "struct").count();
-        if self.structs.len() + active_layouts >= MAX_STRUCT_TYPES {
+        let user_structs = self.structs.len().saturating_sub(PRELUDE_STRUCT_COUNT);
+        if user_structs + active_layouts >= MAX_STRUCT_TYPES {
             return Err(self.error_at(offset, &format!("generic instantiation budget exceeded ({MAX_STRUCT_TYPES} struct types) at '{}' (instantiated: {})",
                 def.name, self.instantiation_trace(&display))));
         }

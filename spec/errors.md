@@ -56,6 +56,8 @@ A custom enum participates in the error mechanism when it matches one of two sha
 
 The success payload may be any owned type (`string`, `vec`, struct, enum); the failure path releases it per the type's release routine when dropped. `Result[T, E]` itself is predefined (ADR-0233): `Result[i64, string]` propagates like any preset family. `ReadResult`, `IntResult`, `DirResult`, `StatusResult`, `BoolResult` and `FloatResult` are the `Result[string, string]`, `Result[i64, string]`, `Result[vec[string], string]`, `Result[(), string]`, `Result[bool, string]` and `Result[f64, string]` instantiations; `WriteResult` shares the `IntResult` instantiation. Either spelling names the same type, and a pattern may use either declaration name. A variant whose single payload is `()` writes the arm without bindings (`Result::Ok =>`); a `let` binding on `?` is rejected because there is no value to bind.
 
+The two families whose success carries several values bind one read-only payload struct (ADR-0234): `FileResult::Ok(info)` exposes `info.size`, `info.mtime` and `info.is_dir`; `CommandResult::Ok(result)` exposes `result.status` and `result.output`. The enum keeps ownership of the payload for the duration of the match arm, so the fields are read, never moved out.
+
 ## 5. Boundary Rules
 
 - One function propagates **one family**: `?` requires the enclosing function to return the **same** enum type it propagates; crossing families (e.g. `DirResult` from `try_list_dir` and `StatusResult` from `try_copy_file`) needs a `match` at the boundary.

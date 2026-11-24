@@ -276,6 +276,9 @@ impl TypeDisplay for Type {
 
 // Names owned by the prelude rather than by any file on disk.
 const PRELUDE: &str = "<prelude>";
+// The prelude payload structs (FileInfo, CommandOutput) occupy the first
+// struct ids and do not count against the generic-instantiation budget.
+pub(super) const PRELUDE_STRUCT_COUNT: usize = 2;
 // Cap on enum layouts per program, prelude and instantiations included. Each
 // layout is a tag enum plus one struct per payload variant, so an unbounded
 // instantiation count is a real code-size hazard (ADR-21).
@@ -342,6 +345,42 @@ fn prelude_enums() -> (Vec<EnumDef>, HashMap<String, usize>) {
     let int_eid = names["IntResult"];
     names.insert("WriteResult".to_owned(), int_eid);
     (enums, names)
+}
+
+// ADR-0234: the payload structs of the two multi-value result families are
+// prelude types, registered before any user struct so their ids (0 and 1) are
+// fixed for every compilation and the route scan can read the variants'
+// shapes while it parses. User struct ids therefore start at 2.
+pub(super) fn prelude_payload_structs() -> Vec<StructDef> {
+    vec![
+        StructDef {
+            name: "FileInfo".to_owned(),
+            fields: vec![
+                ("size".to_owned(), Type::Int(IntTy::I64)),
+                ("mtime".to_owned(), Type::Int(IntTy::I64)),
+                ("is_dir".to_owned(), Type::Bool),
+            ],
+            file: PRELUDE.to_owned(),
+            public: false,
+            repr_c: false,
+            is_copy: true,
+            drop_fn: None,
+            drop_returns_unit: false,
+        },
+        StructDef {
+            name: "CommandOutput".to_owned(),
+            fields: vec![
+                ("status".to_owned(), Type::Int(IntTy::I64)),
+                ("output".to_owned(), Type::String),
+            ],
+            file: PRELUDE.to_owned(),
+            public: false,
+            repr_c: false,
+            is_copy: false,
+            drop_fn: None,
+            drop_returns_unit: false,
+        },
+    ]
 }
 
 // `Option[T]` and `Result[T, E]` ship with the prelude: "a value that may be
@@ -1043,12 +1082,14 @@ pub(crate) fn check_source_diagnostic(source: &str) -> Result<(), FrontendDiagno
 
 fn check_source_here(source: &str) -> Result<(), FrontendDiagnostic> {
     let mut shared: SharedFunctions = HashMap::new();
-    let mut structs: Vec<StructDef> = Vec::new();
+    let mut structs: Vec<StructDef> = prelude_payload_structs();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
     // Prelude result types are registered first, so their ids are stable.
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
     let mut ctx = CompileContext::new();
+    types::wire_prelude_result_payloads(&mut enums, &mut generics, &enum_names, &ctx);
+    types::seed_preset_result_instantiations(&mut generics, &enum_names, &ctx);
     let mut next_id = 0usize;
     parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).map(|_| ())
 }
@@ -1059,12 +1100,14 @@ pub fn compile(source: &str) -> Result<String, String> {
 
 pub fn compile_with_context(source: &str) -> Result<(String, CompileContext), String> {
     let mut shared: SharedFunctions = HashMap::new();
-    let mut structs: Vec<StructDef> = Vec::new();
+    let mut structs: Vec<StructDef> = prelude_payload_structs();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
     // Prelude result types are registered first, so their ids are stable.
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
     let mut ctx = CompileContext::new();
+    types::wire_prelude_result_payloads(&mut enums, &mut generics, &enum_names, &ctx);
+    types::seed_preset_result_instantiations(&mut generics, &enum_names, &ctx);
     let mut next_id = 0usize;
     let functions = parse_source("", source, &mut shared, &mut structs, &mut struct_names, &mut enums, &mut enum_names, &mut generics, &mut ctx, &mut next_id).map_err(|diagnostic| diagnostic.to_string())?;
     let mut program = Program { files: vec![functions], structs, enums, ctx };

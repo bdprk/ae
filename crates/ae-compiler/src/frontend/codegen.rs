@@ -1838,6 +1838,9 @@ fn emit_payload_binding(out: &mut String, bid: usize, subject: usize, variant: u
         Type::StrVec => out.push_str(&format!("    const ae_strvec *v{bid} = &{member};\n")),
         Type::Int(width) => out.push_str(&format!("    {} v{bid} = {member};\n", width.c_name())),
         Type::Fn(sig) => out.push_str(&format!("    ae_fn_t{sig} v{bid} = {member};\n")),
+        // A struct payload binds as a read-only view, like a string payload:
+        // the origin enum keeps ownership and releases at scope end.
+        Type::Struct(k) => out.push_str(&format!("    const ae_t{k} *v{bid} = &{member};\n")),
         _ => out.push_str(&format!("    int64_t v{bid} = {member};\n")),
     }
 }

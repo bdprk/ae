@@ -1336,11 +1336,11 @@ fn hosted_files_preserve_bytes_and_processes_recover_status() {
         "    }}\n",
         "{}",
         "    match first {{\n",
-        "        CommandResult::Ok(status, out) => {{ print(status); print(contains(out, \"two words\")); }}\n",
+        "        CommandResult::Ok(finished) => {{ print(finished.status); print(contains(finished.output, \"two words\")); }}\n",
         "        CommandResult::Err(reason) => {{ print(\"spawn \" + reason); }}\n",
         "    }}\n",
         "    match second {{\n",
-        "        CommandResult::Ok(status, out) => {{ print(status); }}\n",
+        "        CommandResult::Ok(finished) => {{ print(finished.status); }}\n",
         "        CommandResult::Err(reason) => {{ print(\"spawn \" + reason); }}\n",
         "    }}\n",
         "}}\n"
@@ -2932,21 +2932,21 @@ fn file_metadata_reports_size_and_missing_paths() {
     let source = format!(r#"fn main() {{
     let found = try_file_info("{data}");
     match found {{
-        FileResult::Ok(size, modified, is_dir) => {{
-            print(size);
-            print(is_dir);
-            print(modified > 0);
+        FileResult::Ok(meta) => {{
+            print(meta.size);
+            print(meta.is_dir);
+            print(meta.mtime > 0);
         }}
         FileResult::Err(reason) => {{ print("unexpected failure"); }}
     }}
     let folder = try_file_info("{dir}");
     match folder {{
-        FileResult::Ok(size, modified, is_dir) => {{ print(is_dir); }}
+        FileResult::Ok(meta) => {{ print(meta.is_dir); }}
         FileResult::Err(reason) => {{ print("unexpected failure"); }}
     }}
     let absent = try_file_info("{missing}");
     match absent {{
-        FileResult::Ok(size, modified, is_dir) => {{ print("unexpected success"); }}
+        FileResult::Ok(meta) => {{ print("unexpected success"); }}
         FileResult::Err(reason) => {{ print(len(reason) > 0); }}
     }}
 }}"#, data = literal(&data), dir = literal(&dir), missing = literal(&missing));
@@ -3155,8 +3155,6 @@ fn invalid_error_propagation_is_rejected() {
         "fn f() -> ReadResult { let x = 1?; return ReadResult::Ok(\"a\"); } fn main() { print(1); }",
         // only the prelude-shaped Ok/Err pairs can be propagated
         "enum Pair { Ok(string), Bad(string) } fn f() -> Pair { let x = try_read_file(\"a\")?; return Pair::Ok(x); } fn main() { print(1); }",
-        // a three-value Ok needs an explicit match, a binding cannot pick one
-        "fn f(p: &string) -> FileResult { let size = try_file_info(p)?; return FileResult::Ok(size, 0, false); } fn main() { print(1); }",
         // a bare call statement must state what happens to the result
         "fn f(p: &string) -> StatusResult { try_remove_file(p); return StatusResult::Ok; } fn main() { print(1); }",
     ] {
@@ -4058,13 +4056,13 @@ fn run_command_reports_status_and_output() {
     var argv = strvec_new();
 {pushes}    let result = run_command("{program}", argv);
     match result {{
-        CommandResult::Ok(code, out) => {{ print(code); print(contains(out, "child-ok")); }}
+        CommandResult::Ok(finished) => {{ print(finished.status); print(contains(finished.output, "child-ok")); }}
         CommandResult::Err(reason) => {{ print("failed: " + reason); }}
     }}
     var empty = strvec_new();
     let missing = run_command("ae-no-such-program-on-path", empty);
     match missing {{
-        CommandResult::Ok(code, out) => {{ print("unexpected " + to_string(code)); }}
+        CommandResult::Ok(finished) => {{ print("unexpected " + to_string(finished.status)); }}
         CommandResult::Err(reason) => {{ print(contains(reason, "cannot start")); }}
     }}
 }}"#);
@@ -4490,8 +4488,8 @@ fn main() { let p = P { x: 1 }; print(p.x); }
     let tree = String::from_utf8_lossy(&output.stdout);
     assert!(tree.contains("struct #"), "struct declarations print: {tree}");
     assert!(tree.contains("fn main() -> i64 {"), "main prints: {tree}");
-    assert!(tree.contains("v0: owned = struct #0 {"), "literal prints: {tree}");
-    assert!(tree.contains("print v0 (struct #0) @ 2:39.x"), "field read prints: {tree}");
+    assert!(tree.contains("v0: owned = struct #2 {"), "literal prints: {tree}");
+    assert!(tree.contains("print v0 (struct #2) @ 2:39.x"), "field read prints: {tree}");
 }
 
 #[test]
@@ -4638,7 +4636,7 @@ fn mir_interpreter_agrees_on_file_builtins_with_the_compiled_backends() {
     // exact. The probe files live in the process CWD and are cleaned
     // up afterwards.
     let source = "probe_files.ae";
-    fs::write(source, "fn main() {\n    let _c = try_create_dir(\"./probe_dir\");\n    let w = try_write_file(\"./probe_dir/probe.txt\", \"hello file\");\n    match w { WriteResult::Ok(n) => { print(n); } WriteResult::Err(_) => { print(0 - 1); } }\n    let text = read_file(\"./probe_dir/probe.txt\");\n    print(text);\n    let st = try_file_info(\"./probe_dir/probe.txt\");\n    match st {\n        FileResult::Ok(size, modified, is_dir) => { print(size); }\n        FileResult::Err(_) => { print(0 - 1); }\n    }\n    let _c2 = try_create_dir(\"./probe_dir/sub\");\n    let _w2 = try_write_file(\"./probe_dir/sub/inner.txt\", \"inner\");\n    let listed = try_list_dir(\"./probe_dir/sub\");\n    match listed {\n        DirResult::Ok(names) => { print(len(names)); print(names[0]); }\n        DirResult::Err(e) => { print(e); }\n    }\n    print(path_exists(\"./probe_dir/sub\"));\n    print(path_is_dir(\"./probe_dir/sub\"));\n    print(path_join(\"dir\", \"name\"));\n    print(path_name(\"dir/sub/name.txt\"));\n    print(path_parent(\"dir/sub/name.txt\"));\n    let _r1 = try_remove_file(\"./probe_dir/probe.txt\");\n    let _r2 = try_remove_file(\"./probe_dir/sub/inner.txt\");\n    let _r3 = try_remove_dir(\"./probe_dir/sub\");\n    print(path_exists(\"./probe_dir/probe.txt\"));\n}").unwrap();
+    fs::write(source, "fn main() {\n    let _c = try_create_dir(\"./probe_dir\");\n    let w = try_write_file(\"./probe_dir/probe.txt\", \"hello file\");\n    match w { WriteResult::Ok(n) => { print(n); } WriteResult::Err(_) => { print(0 - 1); } }\n    let text = read_file(\"./probe_dir/probe.txt\");\n    print(text);\n    let st = try_file_info(\"./probe_dir/probe.txt\");\n    match st {\n        FileResult::Ok(meta) => { print(meta.size); }\n        FileResult::Err(_) => { print(0 - 1); }\n    }\n    let _c2 = try_create_dir(\"./probe_dir/sub\");\n    let _w2 = try_write_file(\"./probe_dir/sub/inner.txt\", \"inner\");\n    let listed = try_list_dir(\"./probe_dir/sub\");\n    match listed {\n        DirResult::Ok(names) => { print(len(names)); print(names[0]); }\n        DirResult::Err(e) => { print(e); }\n    }\n    print(path_exists(\"./probe_dir/sub\"));\n    print(path_is_dir(\"./probe_dir/sub\"));\n    print(path_join(\"dir\", \"name\"));\n    print(path_name(\"dir/sub/name.txt\"));\n    print(path_parent(\"dir/sub/name.txt\"));\n    let _r1 = try_remove_file(\"./probe_dir/probe.txt\");\n    let _r2 = try_remove_file(\"./probe_dir/sub/inner.txt\");\n    let _r3 = try_remove_dir(\"./probe_dir/sub\");\n    print(path_exists(\"./probe_dir/probe.txt\"));\n}").unwrap();
     let interp = Command::new(env!("CARGO_BIN_EXE_ae")).args(["run", source, "--interp"]).output().unwrap();
     assert!(interp.status.success(), "interp failed: {}", String::from_utf8_lossy(&interp.stderr));
     let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(source).output().unwrap();
@@ -5077,7 +5075,7 @@ fn repr_c_layout_queries_and_extern_prototypes() {
     let emitted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("emit-c").arg(&source).output().unwrap();
     assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
     let c = String::from_utf8_lossy(&emitted.stdout).replace("\r\n", "\n");
-    assert!(c.contains("int64_t pair_sum(ae_t0 v0);"), "the by-value prototype: {c}");
+    assert!(c.contains("int64_t pair_sum(ae_t2 v0);"), "the by-value prototype: {c}");
     assert!(!c.contains("ae_index"), "no runtime layout checks: {c}");
     fs::remove_dir_all(dir).unwrap();
 }
@@ -5277,7 +5275,7 @@ fn emit_mir_lowers_closures_and_aggregates() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let mir = String::from_utf8_lossy(&output.stdout);
     assert!(mir.contains("closure#0"), "closure literal lowers to ClosureLit: {mir}");
-    assert!(mir.contains("struct #0 {"), "struct aggregate lowers: {mir}");
+    assert!(mir.contains("struct #2 {"), "struct aggregate lowers: {mir}");
     assert!(mir.contains("-> i64"), "binary rvalue includes result type: {mir}");
 }
 

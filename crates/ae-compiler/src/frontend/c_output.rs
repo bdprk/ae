@@ -415,6 +415,19 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
         queue.push("ae_set_allocator".to_owned());
         drain(&mut queue, &mut keep);
     }
+    // A kept prelude layout's typedef piece may define payload-struct helpers
+    // (ADR-0234). The piece is not a named function unit, so its own
+    // dependencies (the string release/forfeit primitives, for instance) must
+    // join the kept set explicitly; otherwise the helper calls an implicit,
+    // pruned declaration.
+    for (eid, (typedef, _, _)) in prelude.iter().enumerate() {
+        if keep.contains(&format!("ae_e{eid}")) {
+            for symbol in ae_symbols(typedef) {
+                if !keep.contains(&symbol) { queue.push(symbol); }
+            }
+        }
+    }
+    drain(&mut queue, &mut keep);
     let mut out = String::new();
     for (name, body) in &core_units {
         if name.is_none() || name.as_ref().is_some_and(|n| keep.contains(n)) { out.push_str(body); }
@@ -446,9 +459,20 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
 
 /// One prelude enum's C layout, in three independently-emittable pieces
 /// (ADR-66): the typedef/tags, the release function, the forfeit function.
-pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, ctx: &CompileContext) -> (String, String, String) {
+/// A struct-typed payload (ADR-0234) drags the payload struct's definition and
+/// its ownership helpers into the typedef piece, because C needs the complete
+/// type before the enum that stores it by value.
+pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, structs: &[StructDef], ctx: &CompileContext) -> (String, String, String) {
     let def = &enums[eid];
     let mut typedef = String::new();
+    let mut emitted_structs = std::collections::HashSet::new();
+    for (_, fields) in &def.variants {
+        for ty in fields {
+            if let Type::Struct(k) = ty && emitted_structs.insert(*k) {
+                    emit_payload_struct(&mut typedef, *k, structs, ctx);
+                }
+        }
+    }
     let _ = writeln!(typedef, "\ntypedef enum {{");
     for v in 0..def.variants.len() {
         if v > 0 { typedef.push_str(",\n"); }
@@ -507,6 +531,16 @@ pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, ctx: &CompileCo
                     let _ = writeln!(release, "        v->u.v{vidx}.p{index} = false;");
                     let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = false;");
                 }
+                // A payload struct (ADR-0234): a copy struct just zeroes;
+                // an owning struct runs the helpers emitted with its typedef.
+                Type::Struct(k) if structs[*k].is_copy => {
+                    let _ = writeln!(release, "        v->u.v{vidx}.p{index} = (ae_t{k}){{0}};");
+                    let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = (ae_t{k}){{0}};");
+                }
+                Type::Struct(k) => {
+                    let _ = writeln!(release, "        ae_t{k}_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_t{k}_forfeit(&v->u.v{vidx}.p{index});");
+                }
                 _ => {
                     let _ = writeln!(release, "        v->u.v{vidx}.p{index} = 0;");
                     let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = 0;");
@@ -521,11 +555,34 @@ pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, ctx: &CompileCo
     (typedef, release, forfeit)
 }
 
-pub(super) fn emit_enum_layouts(enums: &[EnumDef], from: usize, to: usize, out: &mut String, ctx: &CompileContext) {
+/// ADR-0234: one prelude payload struct, its field layout, and (for an owning
+/// struct) the release/forfeit helpers the enum's own helpers call.
+fn emit_payload_struct(out: &mut String, k: usize, structs: &[StructDef], ctx: &CompileContext) {
+    let def = &structs[k];
+    let _ = writeln!(out, "\ntypedef struct {{");
+    for (name, ty) in &def.fields {
+        let _ = writeln!(out, "    {} {name};", c_type_field(*ty, ctx));
+    }
+    if def.fields.is_empty() { out.push_str("    char ae_empty;\n"); }
+    let _ = writeln!(out, "}} ae_t{k};");
+    if def.is_copy { return; }
+    let mut release = String::new();
+    let mut forfeit = String::new();
+    for (name, ty) in &def.fields {
+        if *ty == Type::String {
+            let _ = writeln!(release, "    ae_str_release(&v->{name});");
+            let _ = writeln!(forfeit, "    ae_str_forfeit(&v->{name});");
+        }
+    }
+    let _ = writeln!(out, "static void ae_t{k}_release(ae_t{k} *v) {{\n{release}}}");
+    let _ = writeln!(out, "static void ae_t{k}_forfeit(ae_t{k} *v) {{\n{forfeit}}}");
+}
+
+pub(super) fn emit_enum_layouts(enums: &[EnumDef], from: usize, to: usize, structs: &[StructDef], out: &mut String, ctx: &CompileContext) {
     // User enums (and any caller that wants a contiguous block) emit all three
     // pieces; the prelude path hands them to the pruner instead (ADR-66).
     for eid in from..to {
-        let (typedef, release, forfeit) = prelude_enum_pieces(enums, eid, ctx);
+        let (typedef, release, forfeit) = prelude_enum_pieces(enums, eid, structs, ctx);
         out.push_str(&typedef);
         if !enums[eid].is_copy {
             out.push_str(&release);
@@ -564,15 +621,18 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
     let core = include_str!("../runtime.c");
     let ex = include_str!("../runtime_ex.c");
     let prelude: Vec<(String, String, String)> = (0..prelude_count)
-        .map(|eid| prelude_enum_pieces(enums, eid, &program.ctx))
+        .map(|eid| prelude_enum_pieces(enums, eid, structs, &program.ctx))
         .collect();
     let mut out = String::new();
     // User enums are emitted after the runtime prefix. runtime_ex.c only names
     // prelude ids, so this does not change any type it can reference.
-    emit_enum_layouts(enums, prelude_count, enums.len(), &mut out, &program.ctx);
+    emit_enum_layouts(enums, prelude_count, enums.len(), structs, &mut out, &program.ctx);
     // Struct layouts and their ownership helpers. Release zeroes every field
     // and frees owned ones; forfeit only zeroes (the value moved elsewhere).
-    for (sid, def) in structs.iter().enumerate() {
+    // The prelude payload structs (ADR-0234) ride with the prelude enum layout
+    // that stores them, so they are emitted there and skipped here.
+    let prelude_payloads = structs.iter().take_while(|def| def.file == PRELUDE).count();
+    for (sid, def) in structs.iter().enumerate().skip(prelude_payloads) {
         let mut layout = String::new();
         for (n, ty) in &def.fields {
             let _ = writeln!(layout, "    {} {n};", c_type_field(*ty, &program.ctx));

@@ -251,6 +251,23 @@ impl<'a> Parser<'a> {
                         local_structs.insert(name.clone(), ty);
                     }
                 }
+                // A match payload binding of struct type (ADR-0234): the arm
+                // reads fields through the binding before the lowering
+                // declares it, so the prepass types it from the variant's
+                // payload shape.
+                if let ae_syntax::statement::StatementKind::Match { arms, .. } = &statement.kind {
+                    for arm in arms {
+                        let ae_syntax::pattern::PatternKind::Variant { enum_name, variant, payload: Some(bindings), .. } = &arm.pattern.kind else { continue };
+                        let Some(&eid) = self.enum_names.get(enum_name.as_str()) else { continue };
+                        let Some((_, types)) = self.enums[eid].variants.iter().find(|(name, _)| name == variant) else { continue };
+                        for (binding, ty) in bindings.iter().zip(types.iter()) {
+                            if let ae_syntax::pattern::PatternKind::Binding(name) = &binding.kind
+                                && matches!(ty, Type::Struct(_) | Type::Enum(..)) {
+                                local_structs.insert(name.clone(), *ty);
+                            }
+                        }
+                    }
+                }
                 for root in statement.expressions() {
                     visit_expression_tree(root, &mut |expression| {
                         let ae_syntax::expression::ExpressionKind::Call { callee, arguments } = &expression.kind else { return };
@@ -481,7 +498,11 @@ impl<'a> Parser<'a> {
                             if local_structs.get(name).is_some_and(|&ty| !field_chain_is_bare(expression)
                                 && receiver_field_type(expression, ty, self.structs)
                                     .is_some_and(|field| scalar_type(field)
-                                        || matches!(field, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_))
+                                        // A string field reads as a borrowed
+                                        // view (print, a borrow argument, a
+                                        // comparison); binding it as a value
+                                        // is the binding arm's own move check.
+                                        || matches!(field, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_) | Type::String)
                                         || matches!(field, Type::Struct(env_sid) if self.generics.closure_envs.contains_key(&env_sid))))),
                     _ => false,
                 };

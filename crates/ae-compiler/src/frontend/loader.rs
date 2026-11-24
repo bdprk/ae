@@ -308,12 +308,16 @@ fn load_program_full(entry: &Path, recover: bool, imports: &PackageImports) -> R
     let root = entry.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut visited = HashMap::new();
     let mut shared: SharedFunctions = HashMap::new();
-    let mut structs: Vec<StructDef> = Vec::new();
+    let mut structs: Vec<StructDef> = prelude_payload_structs();
     let mut struct_names: HashMap<String, usize> = HashMap::new();
     // Prelude result types are registered first, so their ids are stable.
     let (mut enums, mut enum_names) = prelude_enums();
     let mut generics = prelude_generics();
     let mut ctx = CompileContext::with_package_imports(imports.clone());
+    // ADR-0234: the two multi-value families point at the prelude payload
+    // structs before any source is parsed, so the route scan reads their
+    // one-payload shape.
+    types::wire_prelude_result_payloads(&mut enums, &mut generics, &enum_names, &ctx);
     // P2.4: the flat-payload preset families are the `Result[p, string]`
     // instantiations; seed the cache so both spellings name one type.
     types::seed_preset_result_instantiations(&mut generics, &enum_names, &ctx);

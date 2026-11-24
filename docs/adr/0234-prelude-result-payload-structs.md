@@ -1,6 +1,6 @@
 # ADR-0234: Struct payloads for prelude result families and layout ordering
 
-- Status: Proposed
+- Status: Accepted (implemented in P2.4 slice 5)
 - Date: 2026-11-24
 - Associated Milestone: P2.4 (Hard Rule 1; audit §7.4 F1)
 
@@ -34,9 +34,13 @@ Take option A for the remaining two families.
 
 1. **Prelude payload structs.** `FileInfo { size: i64, mtime: i64, is_dir:
    bool }` and `CommandOutput { status: i64, output: string }` are registered
-   after the user's structs when a compilation loads, so existing user struct
-   ids (`ae_t0..`) do not shift. Their layouts are emitted in the pre-runtime
-   block, immediately before the prelude enum layouts that reference them.
+   before any source is parsed, so their ids are the fixed `0` and `1` and
+   user structs start at `2`. (The first draft appended them after the user
+   structs to avoid an id shift, but the route scan reads a variant's payload
+   shape while it parses; a post-load rewrite left the scan seeing the old
+   multi-field shape. The two-id shift is accepted and the id-pinned dumps
+   moved with it.) Their layouts are emitted in the pre-runtime block, inside
+   the typedef piece of the prelude enum that stores them.
 2. **Seeded instantiations.** At program assembly the prelude `Result`
    generic is instantiated with `[FileInfo, string]` and `[CommandOutput,
    string]`; the `done`/`enum_origin` entries point at the existing
@@ -67,3 +71,22 @@ Take option A for the remaining two families.
   names are registered after parsing). Naming them, and generic struct
   arguments for user enums, is a later slice; the compiler-internal
   instantiation is enough for the builtin migration.
+## Implementation notes (P2.4 slice 5)
+
+- The route's field gate types a match payload binding from the variant's
+  payload shape in its prepass (`lower_body`), and the permissive subset for
+  a slot-less binding includes `string` fields (read as views), so
+  `print(info.size)` / `print(result.output)` route like a parameter's field.
+- The pruner scans a kept prelude typedef piece for symbols: the payload
+  struct's release/forfeit helpers call the string primitives, which must
+  survive the reachability walk even though the piece is not a named function
+  unit.
+- The generic-struct budget subtracts the two prelude structs, so a program's
+  instantiation capacity is unchanged.
+- The enum release/forfeit inlines the struct field releases (a copy struct
+  zeroes; an owning struct calls its emitted helpers).
+- Corpus updates: `examples/file_tidy.ae`, `examples/dir_report.ae`,
+  `examples/run_tool.ae`, and the file/command execution tests bind the
+  product payload (`Ok(info)`, `Ok(finished)`). `tests/ui/copy_derive_non_copy_field.stderr`
+  and the MIR/tree/repr-C dump pins moved from `#0`/`ae_t0` to `#2`/`ae_t2`
+  with the two-id shift.

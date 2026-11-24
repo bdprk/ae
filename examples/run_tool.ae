@@ -15,9 +15,9 @@ fn main() {
     }
     let result = run_command(argv[1], command);
     match result {
-        CommandResult::Ok(code, out) => {
-            print("status " + to_string(code));
-            print(out);
+        CommandResult::Ok(finished) => {
+            print("status " + to_string(finished.status));
+            print(finished.output);
         }
         CommandResult::Err(reason) => {
             print("cannot run " + argv[1] + ": " + reason);

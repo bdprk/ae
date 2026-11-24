@@ -142,6 +142,12 @@ pub fn interpret_path_with_imports(path: &Path, imports: &PackageImports) -> Res
     }
 }
 
+// A prelude payload struct (ADR-0234), resolved by name like a preset result
+// enum: the struct id is fixed after loading.
+fn payload_struct_of(env: &Env, name: &str) -> Option<usize> {
+    env.program.structs.iter().position(|def| def.name == name)
+}
+
 // A prelude result enum (IntResult, FloatResult, ...), resolved by name:
 // its enum id and the Ok/Err variant indices in declaration order.
 fn result_enum_of(env: &Env, name: &str) -> Option<(usize, usize, usize)> {
@@ -1469,7 +1475,13 @@ fn eval_expr(
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     let is_dir = meta.is_dir();
-                    result_value(env, ty, true, vec![Val::Int(size), Val::Int(modified), Val::Bool(is_dir)])
+                    let sid = payload_struct_of(env, "FileInfo").ok_or_else(|| Flow::Trap("internal: FileInfo payload struct missing".to_owned()))?;
+                    let info = Val::Struct(sid, HashMap::from([
+                        ("size".to_owned(), Val::Int(size)),
+                        ("mtime".to_owned(), Val::Int(modified)),
+                        ("is_dir".to_owned(), Val::Bool(is_dir)),
+                    ]));
+                    result_value(env, ty, true, vec![info])
                 }
                 Err(error) => result_value(env, ty, false, vec![Val::Str(format!("cannot read file metadata: {error}"))]),
             }
@@ -1567,7 +1579,12 @@ fn eval_expr(
             match output {
                 Ok(out) => {
                     if out.status.success() {
-                        Ok(Val::Enum(eid, ok, vec![Val::Int(out.status.code().unwrap_or(0) as i64), Val::Str(String::from_utf8_lossy(&out.stdout).to_string())]))
+                        let sid = payload_struct_of(env, "CommandOutput").ok_or_else(|| Flow::Trap("internal: CommandOutput payload struct missing".to_owned()))?;
+                        let result = Val::Struct(sid, HashMap::from([
+                            ("status".to_owned(), Val::Int(out.status.code().unwrap_or(0) as i64)),
+                            ("output".to_owned(), Val::Str(String::from_utf8_lossy(&out.stdout).to_string())),
+                        ]));
+                        Ok(Val::Enum(eid, ok, vec![result]))
                     } else {
                         Ok(Val::Enum(eid, err, vec![Val::Str(String::from_utf8_lossy(&out.stdout).to_string())]))
                     }

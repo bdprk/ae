@@ -20,15 +20,15 @@ fn report(dir: &string) -> i64 {
             for name in names {
                 let info = try_file_info(path_join(dir, name));
                 match info {
-                    FileResult::Ok(size, mtime, is_dir) => {
-                        if is_dir {
+                    FileResult::Ok(meta) => {
+                        if meta.is_dir {
                             print(name + "/");
                         } else {
-                            print(name + " " + to_string(size) + " bytes");
-                            push(sizes, size);
+                            print(name + " " + to_string(meta.size) + " bytes");
+                            push(sizes, meta.size);
                             // A file written before this run is always older
                             // than the moment we read the clock.
-                            print(mtime <= now);
+                            print(meta.mtime <= now);
                         }
                     }
                     FileResult::Err(reason) => { print(name + ": " + reason); }

@@ -152,12 +152,14 @@ impl<'a> Parser<'a> {
                 let id = self.next_var; self.next_var += 1;
                 // String payloads bind as read-only views and vec payloads
                 // as read-only borrows: nothing can be moved out of the
-                // matched enum.
+                // matched enum. A struct payload (ADR-0234) binds the same
+                // way — the enum keeps ownership for its release.
                 let bty = match field {
                     Type::String => Type::StrView,
                     Type::Vec => Type::VecRef,
                     Type::StrVec => Type::StrVecRef,
                     Type::VecF => Type::VecFRef,
+                    Type::Struct(k) => Type::StructRef(k),
                     other => other,
                 };
                 self.names.insert(bname.clone(), (id, false, bty));

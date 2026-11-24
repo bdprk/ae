@@ -896,7 +896,7 @@ static AE_FILE_RESULT ae_try_file_info(const char *path, size_t line, size_t col
     const int64_t ticks = (int64_t)(((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32) | (uint64_t)data.ftLastWriteTime.dwLowDateTime);
     const int64_t modified = ticks / 10000000 - 11644473600LL;
     const bool is_dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { size, modified, is_dir } } };
+    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { { size, modified, is_dir } } } };
     return out;
 #else
     errno = 0;
@@ -905,7 +905,7 @@ static AE_FILE_RESULT ae_try_file_info(const char *path, size_t line, size_t col
         AE_FILE_RESULT out = { AE_FILE_ERR, { .v1 = { ae_io_message(errno, line, column) } } };
         return out;
     }
-    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { (int64_t)info.st_size, (int64_t)info.st_mtime, S_ISDIR(info.st_mode) } } };
+    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { { (int64_t)info.st_size, (int64_t)info.st_mtime, S_ISDIR(info.st_mode) } } } };
     return out;
 #endif
 }
@@ -1868,7 +1868,7 @@ static AE_COMMAND_RESULT ae_run_command(const char *program, const ae_strvec *ar
     const int64_t code = WIFEXITED(status) ? (int64_t)WEXITSTATUS(status)
                                            : (int64_t)(128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0));
     ae_string output = { buffer, length };
-    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { code, output } } };
+    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { { code, output } } } };
     return out;
 }
 #else
@@ -1978,7 +1978,7 @@ static AE_COMMAND_RESULT ae_run_command(const char *program, const ae_strvec *ar
     GetExitCodeProcess(pi.hProcess, &status);
     CloseHandle(pi.hProcess);
     ae_string output = { buffer, length };
-    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { (int64_t)status, output } } };
+    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { { (int64_t)status, output } } } };
     return out;
 }
 #endif
