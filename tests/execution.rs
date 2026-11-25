@@ -10877,3 +10877,60 @@ fn slice_ranges_match_across_backends() {
         );
     }
 }
+
+
+/// ADR-0236 composes with generics: `&[T]` parameters instantiate per
+/// element type (`size[i64]`, `size[string]`), and len / for / sub-windows
+/// work on each instantiation. Calls spell their type arguments until
+/// P2.5.2 inference lands.
+#[test]
+fn generic_slices_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("generic_slices.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+    // A generic slice call needs its type arguments spelled (P2.5.2).
+    let path = std::env::temp_dir().join(format!(
+        "ae-generic-slices-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1, 2]; print(size(&a)); }",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!result.status.success(), "the call must be rejected");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("write its type arguments"),
+        "expected the type-argument remedy, got {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

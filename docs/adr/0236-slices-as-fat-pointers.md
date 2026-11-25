@@ -98,6 +98,12 @@ interpreted paths trap with the identical message and position. A field
 receiver (`&r.cells[0..1]`), a mutable range and an element slice remain
 rejected with pointed diagnostics.
 
+Generic slices compose with monomorphization: `fn size[T](v: &[T])` is a
+valid parameter shape, and when the call spells its type arguments
+(`size[i64](&v)`; inference is P2.5.2) `len`, `for` and sub-windows work on
+each instantiation. `tests/run/generic_slices.ae` pins i64 and string
+instantiations.
+
 ## Consequences
 
 - One slice type serves arrays and vectors; helper duplication ends for reads.
