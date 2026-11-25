@@ -11136,6 +11136,16 @@ fn slice_mut_match_across_backends() {
             r#"fn f(m: &mut [i64]) { m[0] = "x"; } fn main() {}"#,
             "slice elements must be i64",
         ),
+        (
+            "mutable borrow inside a loop over the owner",
+            r#"fn touch(m: &mut [i64]) { m[0] = 0; } fn main() { var v = vec[1, 2]; for x in v { print(x); touch(&mut v); } }"#,
+            "cannot borrow 'v' mutably while it is borrowed in this statement",
+        ),
+        (
+            "two mutable borrows in one statement",
+            r#"fn pa(a: &mut [i64], b: &mut [i64]) -> i64 { a[0] = 1; b[0] = 2; return a[0]; } fn main() { var v = vec[1]; print(pa(&mut v, &mut v)); }"#,
+            "cannot borrow 'v' mutably while it is borrowed in this statement",
+        ),
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-slice-mut-bad-{}-{}.ae",
