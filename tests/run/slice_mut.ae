@@ -46,6 +46,10 @@ fn fill_middle(items: &mut [i64]) {
     items[1] = 200;
 }
 
+fn set_front(items: &mut [i64]) {
+    items[0] = 9;
+}
+
 fn main() {
     var v = vec[1, 2, 3];
     double_all(&mut v);
@@ -78,4 +82,17 @@ fn main() {
     print(windowed[1]);
     print(windowed[2]);
     print(windowed[3]);
+    // Computed window bounds: a scalar local and the owner's own length,
+    // then one window per loop iteration.
+    var dynamic = vec[1, 2, 3];
+    let start = 1;
+    set_front(&mut dynamic[start..len(dynamic)]);
+    print(dynamic[1]);
+    var i = 0;
+    while i < len(dynamic) - 1 {
+        set_front(&mut dynamic[i..i + 1]);
+        i += 1;
+    }
+    print(dynamic[0]);
+    print(dynamic[1]);
 }
