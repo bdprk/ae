@@ -1264,6 +1264,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Lower one bound of a `&name[start..end]` slice argument (ADR-0236
+    /// rung 3): the bracket range is parsed back into a scalar expression,
+    /// which must be i64.
+    fn lower_slice_bound(
+        &mut self,
+        range: std::ops::Range<usize>,
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Expr, ae_span::Diagnostic> {
+        let start = self.tokens.partition_point(|token| token.offset < range.start);
+        let Ok((expression, _)) = ae_syntax::expression::parse_expression_tokens(&self.file, self.source, &self.tokens, start, false) else {
+            return Err(self.error_at(range.start, "invalid slice range bound"));
+        };
+        self.seek_scalar_offset(range.start);
+        let (value, ty) = self.lower_scalar_body_expression(&expression, slots)?;
+        if ty != Type::Int(IntTy::I64) {
+            return Err(self.fail("slice range bounds must be integers"));
+        }
+        Ok(value)
+    }
+
     /// The value/borrow/view argument rules for a direct or generic call:
     /// function-typed parameters take a function value, borrow parameters take
     /// a borrow argument with the statement's alias checks, `&string` takes a
@@ -1305,7 +1325,8 @@ let mut args = Vec::with_capacity(arguments.len());
                 return Err(self.fail("a borrow expression must be cast to a pointer"));
             }
             // A `&[T]` argument builds the fat pointer from a whole vector or
-            // array binding, or forwards a slice parameter (ADR-0236).
+            // array binding, forwards a slice parameter, or names a sub-range
+            // of any of the three (`&v[a..b]`, ADR-0236 rungs 1-3).
             if let Type::Slice(wanted) = expected {
                 let wanted_elem = self.ctx.slice_elem(wanted);
                 if let ExpressionKind::Atom(Kind::Ident(name)) = &argument.kind
@@ -1327,7 +1348,18 @@ let mut args = Vec::with_capacity(arguments.len());
                     self.seek_scalar_offset(argument.range.end);
                     return Err(self.fail("a slice argument borrows a whole vector or array: write '&name'"));
                 };
-                if *mutable || !fields.is_empty() || index.is_some() {
+                if !fields.is_empty() {
+                    self.seek_scalar_offset(argument.range.start);
+                    return Err(self.fail("a slice argument borrows a whole vector or array; field slices are not supported yet"));
+                }
+                if *mutable {
+                    self.seek_scalar_offset(argument.range.start);
+                    return Err(self.fail("a slice argument is read-only; '&mut name[..]' is not supported yet"));
+                }
+                // `&name[start..end]` is a sub-slice; a single `&name[index]`
+                // borrows one element and is not a slice source.
+                let range_bounds = index.as_ref().and_then(|index| ae_syntax::expression::split_range_argument(&self.tokens, index));
+                if index.is_some() && range_bounds.is_none() {
                     self.seek_scalar_offset(argument.range.start);
                     return Err(self.fail("a slice argument borrows a whole vector or array; element slices are not supported yet"));
                 }
@@ -1346,6 +1378,21 @@ let mut args = Vec::with_capacity(arguments.len());
                 };
                 if !matches_element {
                     return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx))));
+                }
+                if let Some((start_range, end_range)) = range_bounds {
+                    if start_range.is_empty() || end_range.is_empty() {
+                        self.seek_scalar_offset(argument.range.start);
+                        return Err(self.fail("a slice range needs both bounds; write 'start..end'"));
+                    }
+                    let start = self.lower_slice_bound(start_range, slots)?;
+                    let end = self.lower_slice_bound(end_range, slots)?;
+                    if matches!(actual, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
+                        self.call_borrows.push((slot, self.scopes.len()));
+                    }
+                    self.seek_scalar_offset(argument.range.start);
+                    let (line, column) = self.position();
+                    args.push(Argument::Value(Expr::SliceRange(slot, actual, wanted_elem, Box::new(start), Box::new(end), line, column)));
+                    continue;
                 }
                 if matches!(actual, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
                     self.call_borrows.push((slot, self.scopes.len()));

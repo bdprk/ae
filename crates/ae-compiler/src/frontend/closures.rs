@@ -450,6 +450,12 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
             used.insert(*slot);
             walk_expr(index, used, mutated);
         }
+        // A sub-slice reads its owner and both bounds.
+        Expr::SliceRange(slot, _, _, start, end, ..) => {
+            used.insert(*slot);
+            walk_expr(start, used, mutated);
+            walk_expr(end, used, mutated);
+        }
         // Both the pointer and its offset can reference captured values.
         Expr::PtrOffset(base, count, ..) | Expr::PtrWrite(base, count, ..) => {
             walk_expr(base, used, mutated);

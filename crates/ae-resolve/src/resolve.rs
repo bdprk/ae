@@ -1522,15 +1522,22 @@ impl Walker<'_> {
                 if mutable {
                     self.mutable_borrow_gate(target, name_range.clone());
                 }
-                // `&name[index]`: the index expression is a read; the bracket
-                // contents are a byte range in the shared grammar, so parse
-                // them back into a tree and resolve it like any other read.
+                // `&name[index]` reads the index; `&name[start..end]` reads both
+                // bounds (ADR-0236 rung 3). The bracket contents are a byte
+                // range in the shared grammar, so parse them back into trees
+                // and resolve them like any other read.
                 if let Some(range) = index {
-                    let start = self.tokens.partition_point(|token| token.offset < range.start);
-                    if let Ok((expression, _)) = ae_syntax::expression::parse_expression_tokens(
-                        &self.module.file, &self.module.source, self.tokens, start, false,
-                    ) {
-                        self.expr(&expression, Role::Read);
+                    let parts: Vec<std::ops::Range<usize>> = match ae_syntax::expression::split_range_argument(self.tokens, range) {
+                        Some((start, end)) => vec![start, end],
+                        None => vec![range.clone()],
+                    };
+                    for part in parts {
+                        let start = self.tokens.partition_point(|token| token.offset < part.start);
+                        if let Ok((expression, _)) = ae_syntax::expression::parse_expression_tokens(
+                            &self.module.file, &self.module.source, self.tokens, start, false,
+                        ) {
+                            self.expr(&expression, Role::Read);
+                        }
                     }
                 }
                 None

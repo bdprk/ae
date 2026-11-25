@@ -467,6 +467,12 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             if let Some(violation) = moved.read(*slot) { return Some(violation); }
             walk_expr(index, moved)
         }
+        // A sub-slice reads its owner and both bounds.
+        Expr::SliceRange(slot, _, _, start, end, ..) => {
+            if let Some(violation) = moved.read(*slot) { return Some(violation); }
+            if let Some(violation) = walk_expr(start, moved) { return Some(violation); }
+            walk_expr(end, moved)
+        }
         // The pointer itself is only read; the count can contain calls and
         // therefore reads or moves of its own, after evaluating the base.
         Expr::PtrOffset(base, count, ..) => {

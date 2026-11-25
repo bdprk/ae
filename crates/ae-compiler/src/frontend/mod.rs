@@ -570,9 +570,11 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // result is a value for Copy elements and a view for owned ones.
     VecIndexOf(Box<Expr>, Box<Expr>, usize, usize, Type),
     // ADR-0236: a slice value built at a call site from a vector, an array
-    // or another slice (the source kind picks the C construction), and an
-    // element read through a slice parameter.
-    SliceOf(usize, Type, Type, usize, usize), SliceIndex(usize, Box<Expr>, usize, usize, Type) }
+    // or another slice (the source kind picks the C construction), an
+    // element read through a slice parameter, and a sub-range of any of the
+    // three (`&v[start..end]`, rung 3: start/end are i64 expressions).
+    SliceOf(usize, Type, Type, usize, usize), SliceIndex(usize, Box<Expr>, usize, usize, Type),
+    SliceRange(usize, Type, Type, Box<Expr>, Box<Expr>, usize, usize) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IntMethodKind {

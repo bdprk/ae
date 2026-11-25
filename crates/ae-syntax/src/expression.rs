@@ -202,6 +202,31 @@ pub fn parse_borrow_argument(
     Ok((Expression { kind, range: amp.offset..tokens[end - 1].end }, end))
 }
 
+/// Split a borrow argument's bracket contents at a top-level `..` (ADR-0236's
+/// sub-slicing form, `&v[start..end]`). The returned byte ranges are the two
+/// bounds; an open side comes back empty so the compiler can name the missing
+/// bound. A `..` inside nested brackets or parentheses belongs to an inner
+/// expression and is ignored; `None` means the contents are one index.
+pub fn split_range_argument(tokens: &[Token], range: &Range<usize>) -> Option<(Range<usize>, Range<usize>)> {
+    let start = tokens.partition_point(|token| token.offset < range.start);
+    let end = tokens.partition_point(|token| token.end <= range.end);
+    let contents = tokens.get(start..end)?;
+    let first = contents.first()?;
+    let last = contents.last()?;
+    let mut depth = 0i32;
+    for token in contents {
+        match token.kind {
+            Kind::LParen | Kind::LBracket | Kind::LBrace => depth += 1,
+            Kind::RParen | Kind::RBracket | Kind::RBrace => depth -= 1,
+            Kind::DotDot if depth == 0 => {
+                return Some((first.offset..token.offset, token.end..last.end));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 struct Parser<'a> {
     file: &'a str,
     source: &'a str,

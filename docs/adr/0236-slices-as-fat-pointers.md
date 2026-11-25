@@ -1,6 +1,6 @@
 # ADR-0236: `&[T]` slices as borrowed fat pointers
 
-- Status: Accepted (rung 1 landed 2026-11-25)
+- Status: Accepted (rungs 1 and 3 landed 2026-11-25)
 - Date: 2026-11-25
 - Associated Milestone: P2.4 action 1 (generic `Slice[T]`), feeds P4.1/P7.1
 
@@ -73,10 +73,28 @@ Take option A, in rungs.
    existing whole-array borrow, and from a slice parameter a `Forward`. A slice
    held by a `for` loop freezes the owner like the vector loop.
 
-Rungs after this ADR's first slice: element views through a slice in every
-position the vector index supports; sub-slicing `v[a..b]` / `s[a..b]` (rung 3,
-with a range grammar and an offset in the fat pointer); `&mut [T]` (rung 4,
-with write tracking); and the stdlib `Slice[T]`/`Iterator` takeover (P4.4).
+Rung 3 (sub-slicing) is landed; element views through a slice already follow
+rung 1's index/loop element rules in the supported positions. `&mut [T]`
+(rung 4, with write tracking) remains, as does the stdlib
+`Slice[T]`/`Iterator` takeover (P4.4).
+
+### Rung 3 (landed): sub-slicing
+
+`&v[start..end]`, `&a[start..end]` and `&s[start..end]` (a slice parameter)
+window the fat pointer instead of forwarding the whole storage. The shared
+grammar's `split_range_argument` finds a top-level `..` in a borrow
+argument's brackets and returns the two bound byte ranges; the resolver
+walks both as reads (liveness and borrow tracking see every variable a bound
+names) and the lowering parses each bound as a scalar expression that must
+be i64. Both bounds are required in this rung (`&v[1..]` is rejected with
+"a slice range needs both bounds"). The C runtime's `ae_slice_sub` checks
+`0 <= start <= end <= len` and traps at the call site ("slice range out of
+bounds"), then offsets the data pointer and shrinks the length, so
+`len`/index/`for` need no change. The interpreter validates the same bounds
+against the same snapshot a whole slice copies, and the compiled and
+interpreted paths trap with the identical message and position. A field
+receiver (`&r.cells[0..1]`), a mutable range and an element slice remain
+rejected with pointed diagnostics.
 
 ## Consequences
 

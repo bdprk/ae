@@ -547,8 +547,10 @@ class Gen:
                 f"print(fuzz_slice_sum(&{name}));",
                 f"print(fuzz_slice_forward(&{name}));",
                 f"print(fuzz_slice_first(&{name}));",
+                f"print(fuzz_slice_sum(&{name}[1..3]));",
                 f"let {arr} = [{values[0]}, {values[1]}, {values[2]}];",
                 f"print(fuzz_slice_sum(&{arr}));",
+                f"print(fuzz_slice_first(&{arr}[0..2]));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
         if kind == 29:

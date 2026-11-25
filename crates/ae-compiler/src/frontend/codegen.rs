@@ -595,6 +595,33 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let get = format!("(*((const {c_elem} *)ae_slice_at(v{slot}, {}, {line}, {col})))", i.text);
             Emitted { text: get, ty: *elem, owned: false, moves: i.moves, materialized: true }
         }
+        Expr::SliceRange(slot, source, elem, start, end, line, col) => {
+            // ADR-0236 rung 3: the bounds evaluate first, then the whole
+            // slice is built in place and clipped by the runtime helper
+            // (which owns the bounds check and names the call site).
+            let st = emit_expr(start, out, next, false, ctx);
+            let en = emit_expr(end, out, next, false, ctx);
+            let c_elem = c_output::c_type_field(*elem, ctx);
+            let whole = match *source {
+                Type::Vector(_) => {
+                    out.push_str(&format!("    if (!v{slot}.data) ae_fail(\"use of moved vector\", {line}, {col});"));
+                    out.push('\n');
+                    format!("(ae_slice){{ v{slot}.data, v{slot}.len, (int64_t)sizeof({c_elem}) }}")
+                }
+                Type::VectorRef(_) => {
+                    out.push_str(&format!("    if (!v{slot}->data) ae_fail(\"use of moved vector\", {line}, {col});"));
+                    out.push('\n');
+                    format!("(ae_slice){{ v{slot}->data, v{slot}->len, (int64_t)sizeof({c_elem}) }}")
+                }
+                Type::ArrayOf(_, len) => format!("(ae_slice){{ (const void *)v{slot}, {len}, (int64_t)sizeof({c_elem}) }}"),
+                Type::Slice(_) => format!("v{slot}"),
+                _ => unreachable!("slice source kind"),
+            };
+            let text = format!("ae_slice_sub({whole}, {}, {}, {line}, {col})", st.text, en.text);
+            let mut moves = st.moves;
+            moves.extend(en.moves);
+            Emitted { text, ty: slice_type(ctx, *elem), owned: false, moves, materialized: true }
+        }
         Expr::Index(id, len, index, line, col, elem_ty) => {
             // A constant index inside the array's compile-time length is
             // provably in bounds: the check elides (M2.10). An out-of-range

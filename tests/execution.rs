@@ -9857,8 +9857,7 @@ fn main() {
 #[test]
 fn indexed_element_field_reads_match_across_backends() {
     fn lines(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("
-")
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
     }
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -9912,8 +9911,7 @@ fn indexed_element_field_reads_match_across_backends() {
 #[test]
 fn nested_vector_elements_drop_and_match_across_backends() {
     fn lines(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("
-")
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
     }
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -10745,6 +10743,122 @@ fn slices_match_across_backends() {
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-slices-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+
+/// ADR-0236 rung 3: `&v[start..end]` slices a window out of a vector, an
+/// array or another slice. The bounds check is a runtime trap with the same
+/// message and position on the compiled and interpreted paths.
+#[test]
+fn slice_ranges_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slice_ranges.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source) in [
+        ("start past end", "fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[3..1])); }"),
+        ("end past len", "fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[0..9])); }"),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slice-range-trap-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+        let interpreted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!compiled.status.success() && !interpreted.status.success(), "{label}: both modes must trap");
+        // The compiled path reaches the trap through C stdio (CRLF on
+        // Windows); the interpreter writes LF. Compare the text, not the
+        // platform's line-file terminator.
+        let compiled_stderr = String::from_utf8_lossy(&compiled.stderr).replace("\r\n", "\n");
+        let interpreted_stderr = String::from_utf8_lossy(&interpreted.stderr).replace("\r\n", "\n");
+        assert_eq!(
+            compiled_stderr,
+            interpreted_stderr,
+            "{label}: trap position/message differ"
+        );
+        assert!(
+            String::from_utf8_lossy(&compiled.stderr).contains("slice range out of bounds"),
+            "{label}: got {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+
+    for (label, source, needle) in [
+        (
+            "open end",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[1..])); }"#,
+            "a slice range needs both bounds",
+        ),
+        (
+            "non-integer bound",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v["a"..2])); }"#,
+            "slice range bounds must be integers",
+        ),
+        (
+            "field range",
+            r#"struct R { cells: vec } fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var r = R { cells: vec[1, 2] }; print(take(&r.cells[0..1])); }"#,
+            "field slices are not supported yet",
+        ),
+        (
+            "element slice",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[0])); }"#,
+            "element slices are not supported yet",
+        ),
+        (
+            "mutable range",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&mut v[0..1])); }"#,
+            "a slice argument is read-only",
+        ),
+        (
+            "moved source",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; let w = v; print(len(w)); print(take(&v[0..1])); }"#,
+            "cannot borrow 'v' because it was moved",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slice-range-bad-{}-{}.ae",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

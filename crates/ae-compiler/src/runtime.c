@@ -1277,6 +1277,13 @@ static const void *ae_slice_at(ae_slice s, int64_t index, size_t line, size_t co
     ae_vec_index(index, s.len, line, column);
     return (const char *)s.data + (size_t)index * (size_t)s.elem_size;
 }
+// ADR-0236 rung 3: `&v[start..end]`. The window keeps the owner's element
+// size and starts at the offset, so index/length/iteration need no change.
+static ae_slice ae_slice_sub(ae_slice s, int64_t start, int64_t end, size_t line, size_t column) {
+    if (start < 0 || end < start || end > s.len) ae_fail("slice range out of bounds", line, column);
+    ae_slice r = { (const char *)s.data + (size_t)start * (size_t)s.elem_size, end - start, s.elem_size };
+    return r;
+}
 
 // In-place orderings for i64 vectors. qsort is the C library's introsort and
 // the comparator is a plain function, so no allocation and no closure state is

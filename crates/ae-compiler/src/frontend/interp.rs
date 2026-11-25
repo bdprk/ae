@@ -1388,6 +1388,32 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: slice index on non-slice".to_owned())),
             }
         }
+        Expr::SliceRange(slot, source, _, start, end, line, col) => {
+            // ADR-0236 rung 3: the bounds evaluate first; the visible window
+            // is clipped from the same snapshot a whole slice would copy.
+            let start = match eval_expr(env, start, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+            };
+            let end = match eval_expr(env, end, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+            };
+            let value = read_var(locals, caller_locals, *slot, *line, *col)?;
+            let elements = match (*source, value) {
+                (Type::Slice(_), Val::Slice(values)) => values,
+                (Type::ArrayOf(..), Val::Array(values)) => values,
+                (_, Val::VecI(values)) => values.into_iter().map(Val::Int).collect(),
+                (_, Val::VecF(values)) => values.into_iter().map(Val::Float).collect(),
+                (_, Val::VecS(values)) => values.into_iter().map(Val::Str).collect(),
+                (_, Val::VecG(values)) => values,
+                _ => return Err(Flow::Trap("internal: slice source kind".to_owned())),
+            };
+            if start < 0 || end < start || end as usize > elements.len() {
+                return Err(trap("slice range out of bounds", *line, *col));
+            }
+            Ok(Val::Slice(elements[start as usize..end as usize].to_vec()))
+        }
         Expr::StrVecIndex(id, idx_expr, line, col, _) => {
             let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
                 Val::Int(n) => n,
