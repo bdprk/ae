@@ -189,7 +189,7 @@ impl<'a> TreePrinter<'a> {
                 let path = field_path_text(field);
                 self.line(&format!("{}(v{}.{}) ({}) @ {}:{}", if *reverse { "reverse" } else { "sort" }, id, path, elem.name(self.ctx), line, col));
             }
-            Statement::StrVecStore(id, index, value, line, col, _) | Statement::GVecStore(id, index, value, _, line, col) => {
+            Statement::StrVecStore(id, index, value, line, col, _) | Statement::GVecStore(id, index, value, _, line, col) | Statement::SliceStore(id, index, value, _, line, col) => {
                 let index_text = self.expression_text(index);
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} @ {}:{}", id, index_text, value_text, line, col));

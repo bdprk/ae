@@ -904,6 +904,20 @@ impl Parser<'_> {
             // the call runs.
             if *self.current() == Kind::Mut {
                 self.pos += 1;
+                // `&mut [T]` is a mutable slice (ADR-0236 rung 4): the callee
+                // may store elements through the fat pointer.
+                if *self.current() == Kind::LBracket {
+                    self.pos += 1;
+                    let elem_ty = self.named_type()?;
+                    if *self.current() != Kind::RBracket {
+                        return Err(self.fail("a mutable slice is written '&mut [T]'; fixed arrays stay read-only"));
+                    }
+                    self.pos += 1;
+                    if !self.is_vector_element_type(elem_ty) {
+                        return Err(self.fail("slice elements must be string, a value type, an owned struct, or a vec"));
+                    }
+                    return Ok(Type::SliceMut(self.ctx.intern_slice_elem(elem_ty)));
+                }
                 let borrowed = match self.current() {
                     Kind::Ident(text) => text.clone(),
                     _ => return Err(self.fail("'&mut' must be followed by a struct type")),
@@ -976,7 +990,7 @@ impl Parser<'_> {
                     return Ok(Type::StructRef(sid));
                 }
                 return Err(self.error_at(amp_offset,
-                    "unsupported borrow type; write &string, &vec, &vec[string], &vec[f64], &Struct, &[i64; N], or &T inside a generic function"));
+                    "unsupported borrow type; write &string, &vec, &vec[string], &vec[f64], &Struct, &[i64; N], &mut [T], or &T inside a generic function"));
             }
             self.take(Kind::LBracket)?;
             let elem_ty = self.named_type()?;

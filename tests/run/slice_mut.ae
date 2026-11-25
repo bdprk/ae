@@ -1,0 +1,53 @@
+// ADR-0236 rung 4: `&mut [T]` — a mutable slice over a whole vector binding.
+// The callee reads and stores through the fat pointer; the owner's mutability
+// and exclusivity are checked at the call site. Copy elements only.
+#[derive(Copy)]
+struct Point { x: i64, y: i64 }
+
+fn double_all(items: &mut [i64]) {
+    var i = 0;
+    while i < len(items) {
+        items[i] = items[i] * 2;
+        i += 1;
+    }
+}
+
+fn total(items: &mut [i64]) -> i64 {
+    var t = 0;
+    for x in items { t += x; }
+    return t;
+}
+
+fn fill_pair(items: &mut [i64], a: i64, b: i64) {
+    items[0] = a;
+    items[1] = b;
+}
+
+fn set_floats(items: &mut [f64]) {
+    items[0] = 1.5;
+    items[1] = 2.5;
+}
+
+fn move_point(items: &mut [Point], to: i64) {
+    items[0] = Point { x: to, y: to + 1 };
+}
+
+fn main() {
+    var v = vec[1, 2, 3];
+    double_all(&mut v);
+    print(v[0]);
+    print(v[1]);
+    print(total(&mut v));
+    fill_pair(&mut v, 7, 8);
+    print(v[0]);
+    print(v[1]);
+    print(v[2]);
+    var floats = vec[0.0, 0.0];
+    set_floats(&mut floats);
+    print(floats[0]);
+    print(floats[1]);
+    var points = vec[Point { x: 1, y: 2 }];
+    move_point(&mut points, 5);
+    print(points[0].x);
+    print(points[0].y);
+}

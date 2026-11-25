@@ -10849,7 +10849,7 @@ fn slice_ranges_match_across_backends() {
         (
             "mutable range",
             r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&mut v[0..1])); }"#,
-            "a slice argument is read-only",
+            "this parameter borrows read-only; write the argument as '&name'",
         ),
         (
             "moved source",
@@ -11029,4 +11029,131 @@ fn slice_element_borrows_match_across_backends() {
         "expected the pointer-cast remedy, got {}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+
+/// ADR-0236 rung 4: `&mut [T]` stores through the fat pointer. The owner is a
+/// whole vector binding, the call site checks exclusivity, and Copy elements
+/// (i64/f64/Copy struct) are writable; the four backends agree on the values.
+#[test]
+fn slice_mut_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slice_mut.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    // An out-of-range store traps at the same position on both paths (the
+    // container-index wording differs, as it already does for vector reads).
+    let path = std::env::temp_dir().join(format!(
+        "ae-slice-mut-oob-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn f(m: &mut [i64]) { m[5] = 1; } fn main() { var v = vec[1]; f(&mut v); }",
+    )
+    .unwrap();
+    let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!compiled.status.success() && !interpreted.status.success(), "both modes must trap");
+    let compiled_err = String::from_utf8_lossy(&compiled.stderr);
+    let interpreted_err = String::from_utf8_lossy(&interpreted.stderr);
+    assert!(compiled_err.contains("index out of bounds"), "got {compiled_err}");
+    assert!(interpreted_err.contains("index out of bounds"), "got {interpreted_err}");
+    assert_eq!(compiled_err.split(':').take(3).collect::<Vec<_>>(), interpreted_err.split(':').take(3).collect::<Vec<_>>(), "trap position differs");
+
+    for (label, source, needle) in [
+        (
+            "missing &mut",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1]; f(&v); }"#,
+            "this parameter borrows mutably; write the argument as '&mut name'",
+        ),
+        (
+            "bare name",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1]; f(v); }"#,
+            "a mutable slice argument is written '&mut name'",
+        ),
+        (
+            "immutable owner",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { let v = vec[1]; f(&mut v); }"#,
+            "cannot borrow 'v' mutably: it was declared without 'var'",
+        ),
+        (
+            "mutable arg to a read-only parameter",
+            r#"fn f(s: &[i64]) -> i64 { return s[0]; } fn main() { var v = vec[1]; print(f(&mut v)); }"#,
+            "this parameter borrows read-only; write the argument as '&name'",
+        ),
+        (
+            "store through a read-only slice",
+            r#"fn f(s: &[i64]) { s[0] = 1; } fn main() {}"#,
+            "a read-only slice cannot be written; take the parameter as '&mut [T]'",
+        ),
+        (
+            "owned element store",
+            r#"struct T { n: i64 } fn f(m: &mut [T]) { m[0] = T { n: 1 }; } fn main() {}"#,
+            "storing through a mutable slice of owned elements is not supported yet",
+        ),
+        (
+            "forwarded mutable slice",
+            r#"fn g(m: &mut [i64]) { m[0] = 1; } fn f(m: &mut [i64]) { g(&mut m); } fn main() {}"#,
+            "forwarding a mutable slice is not supported yet",
+        ),
+        (
+            "mutable window",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[0..1]); }"#,
+            "a mutable slice window is not supported yet",
+        ),
+        (
+            "field mutable slice",
+            r#"struct R { cells: vec } fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var r = R { cells: vec[1] }; f(&mut r.cells); }"#,
+            "field slices are not supported yet",
+        ),
+        (
+            "wrong store type",
+            r#"fn f(m: &mut [i64]) { m[0] = "x"; } fn main() {}"#,
+            "slice elements must be i64",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slice-mut-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }

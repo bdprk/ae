@@ -739,7 +739,7 @@ fn writes_slot(statement: &Statement) -> Option<usize> {
         Statement::FieldStore(id, ..) => Some(*id),
         Statement::StrVecPush(id, ..) | Statement::GVecPush(id, ..) => Some(*id),
         Statement::StrVecPop(id, ..) | Statement::GVecPop(id, ..) => Some(*id),
-        Statement::StrVecStore(id, ..) | Statement::GVecStore(id, ..) => Some(*id),
+        Statement::StrVecStore(id, ..) | Statement::GVecStore(id, ..) | Statement::SliceStore(id, ..) => Some(*id),
         Statement::Sort(id, ..) | Statement::Reverse(id, ..) => Some(*id),
         // A vector-field operation writes the owning struct's field: the root
         // slot is what a live borrow of the struct protects.

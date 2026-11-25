@@ -954,7 +954,7 @@ impl<'a> Parser<'a> {
                                     let elem_ty = self.ctx.array_elem(elem_id);
                                     (Expr::Index(slot, len, Box::new(index_value), line, column, elem_ty), elem_ty)
                                 }
-                                Type::Slice(id) => {
+                                Type::Slice(id) | Type::SliceMut(id) => {
                                     let element = self.ctx.slice_elem(id);
                                     (Expr::SliceIndex(slot, Box::new(index_value), line, column, element), vector_element_read_type(element, self.structs))
                                 }
@@ -1025,7 +1025,7 @@ impl<'a> Parser<'a> {
                         let value = self.lower_scalar_array_index(index, slots)?;
                         (Expr::Index(slot, len, Box::new(value), line, column, elem_ty), elem_ty)
                     }
-                    Type::Slice(id) => {
+                    Type::Slice(id) | Type::SliceMut(id) => {
                         let element = self.ctx.slice_elem(id);
                         let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
                         if index_ty != Type::Int(IntTy::I64) {
@@ -1319,10 +1319,68 @@ let mut args = Vec::with_capacity(arguments.len());
             // typed route's expression parser rejects it (a pointer
             // cast is the only legal use of `&expr`).
             if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::Slice(_))
+                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::Slice(_) | Type::SliceMut(_))
             {
                 self.seek_scalar_offset(argument.range.start);
                 return Err(self.fail("a borrow expression must be cast to a pointer"));
+            }
+            // A `&mut [T]` argument (ADR-0236 rung 4) borrows a whole vector
+            // binding exclusively: the owner must be mutable, no other borrow
+            // may be live in the statement, and the callee writes through the
+            // fat pointer.
+            if let Type::SliceMut(wanted) = expected {
+                let wanted_elem = self.ctx.slice_elem(wanted);
+                let ExpressionKind::BorrowArgument { name: borrowed, mutable, name_range, fields, index } = &argument.kind else {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail("a mutable slice argument is written '&mut name'"));
+                };
+                if !*mutable {
+                    self.seek_scalar_offset(name_range.start);
+                    return Err(self.fail("this parameter borrows mutably; write the argument as '&mut name'"));
+                }
+                if !fields.is_empty() {
+                    self.seek_scalar_offset(argument.range.start);
+                    return Err(self.fail("a mutable slice argument borrows a whole vector; field slices are not supported yet"));
+                }
+                if index.is_some() {
+                    self.seek_scalar_offset(argument.range.start);
+                    return Err(self.fail("a mutable slice window is not supported yet; pass the whole vector"));
+                }
+                let &(slot, binding_mutable, actual) = self.names.get(borrowed).ok_or_else(|| {
+                    self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
+                })?;
+                // Forwarding a mutable slice deeper would need a cross-frame
+                // owner model; reject it before the mutability check so the
+                // diagnostic names the real limitation.
+                if matches!(actual, Type::SliceMut(_) | Type::Slice(_)) {
+                    self.seek_scalar_offset(argument.range.start);
+                    return Err(self.fail("forwarding a mutable slice is not supported yet"));
+                }
+                if !binding_mutable {
+                    return Err(self.immutable_binding_error(self.fail(&format!("cannot borrow '{borrowed}' mutably: it was declared without 'var'")).with_code("E0103"), slot));
+                }
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
+                }
+                let matches_element = match actual {
+                    Type::Vector(id) => self.ctx.vector_elem(id) == wanted_elem,
+                    _ => false,
+                };
+                if !matches_element {
+                    return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx))));
+                }
+                if self.is_borrowed(slot) {
+                    if !self.only_view_borrows_active(slot) {
+                        return Err(self.fail(&format!("cannot borrow '{borrowed}' mutably while it is borrowed in this statement")));
+                    }
+                    self.deferred_write_conflicts.push((slot, name_range.start, borrowed.clone(), "mutate", None));
+                }
+                self.mut_borrows.push((slot, self.scopes.len()));
+                self.seek_scalar_offset(argument.range.start);
+                let (line, column) = self.position();
+                args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));
+                continue;
             }
             // A `&[T]` argument builds the fat pointer from a whole vector or
             // array binding, forwards a slice parameter, or names a sub-range
@@ -1354,7 +1412,7 @@ let mut args = Vec::with_capacity(arguments.len());
                 }
                 if *mutable {
                     self.seek_scalar_offset(argument.range.start);
-                    return Err(self.fail("a slice argument is read-only; '&mut name[..]' is not supported yet"));
+                    return Err(self.fail("this parameter borrows read-only; write the argument as '&name'"));
                 }
                 // `&name[start..end]` is a sub-slice; a single `&name[index]`
                 // borrows one element and is not a slice source.
@@ -1473,7 +1531,7 @@ let mut args = Vec::with_capacity(arguments.len());
                         // owns (ADR-0236 rung 2 borrows one slice element).
                         let (element, is_slice) = match ty {
                             Type::Vector(id) | Type::VectorRef(id) => (self.ctx.vector_elem(id), false),
-                            Type::Slice(id) => (self.ctx.slice_elem(id), true),
+                            Type::Slice(id) | Type::SliceMut(id) => (self.ctx.slice_elem(id), true),
                             other => {
                                 return Err(self.error_at(name_range.start, &format!(
                                     "'&{borrowed}...' needs a vector place to index, found {}", other.name(self.ctx),

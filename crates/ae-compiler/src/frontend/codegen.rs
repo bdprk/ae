@@ -644,7 +644,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let call = match t.ty {
                 Type::String | Type::StrView => format!("ae_str_len(AE_VIEW({}), {line}, {col})", t.text),
                 Type::Vector(elem_id) => format!("{}_len({}, {line}, {col})", c_output::vector_family(ctx, elem_id), t.text),
-                Type::Slice(_) => format!("ae_slice_len({}, {line}, {col})", t.text),
+                Type::Slice(_) | Type::SliceMut(_) => format!("ae_slice_len({}, {line}, {col})", t.text),
                 Type::MapOf(id) => format!("{}_len(&{}, {line}, {col})", c_output::map_family(ctx, id), t.text),
                 _ => format!("ae_gvec_len({}, {line}, {col})", t.text),
             };
@@ -1634,6 +1634,20 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             Statement::GVecPop(id, _, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
                 out.push_str(&format!("    ae_gvec_pop(&v{id}, {line}, {col});\n"));
+            }
+            Statement::SliceStore(id, index, value, elem_ty, line, col) => {
+                // The index is checked before the right side, like the vector
+                // store; `ae_slice_mut_at` hands back the element's address
+                // through the exclusive borrow (ADR-0236 rung 4).
+                let i = emit_expr(index, out, next, false, ctx);
+                let idx_tmp = *next; *next += 1;
+                out.push_str(&format!("    int64_t t{idx_tmp} = ae_vec_index({}, v{id}.len, {line}, {col});\n", i.text));
+                let value = emit_expr(value, out, next, false, ctx);
+                let val_tmp = *next; *next += 1;
+                let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));
+                out.push_str(&format!("    *(({c_elem} *)ae_slice_mut_at(v{id}, t{idx_tmp}, {line}, {col})) = t{val_tmp};\n"));
+                null_moves(out, &value.moves, ctx);
             }
             Statement::GVecStore(id, index, value, elem_ty, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));

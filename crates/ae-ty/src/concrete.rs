@@ -29,6 +29,9 @@ pub enum TyKind {
     /// A read-only slice `&[T]`: a borrowed fat pointer over contiguous
     /// elements owned elsewhere (ADR-0236).
     Slice(usize),
+    /// A mutable slice `&mut [T]`: the same fat pointer, but the callee may
+    /// write elements in place (ADR-0236 rung 4).
+    SliceMut(usize),
     Struct(usize),
     StructRef(usize),
     StructMut(usize),

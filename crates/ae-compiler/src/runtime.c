@@ -1277,6 +1277,13 @@ static const void *ae_slice_at(ae_slice s, int64_t index, size_t line, size_t co
     ae_vec_index(index, s.len, line, column);
     return (const char *)s.data + (size_t)index * (size_t)s.elem_size;
 }
+// ADR-0236 rung 4: the mutable accessor. The caller granted an exclusive
+// borrow, so the const on `data` only marks the read-only slice type; the
+// write is sound for the call's duration.
+static void *ae_slice_mut_at(ae_slice s, int64_t index, size_t line, size_t column) {
+    ae_vec_index(index, s.len, line, column);
+    return (char *)s.data + (size_t)index * (size_t)s.elem_size;
+}
 // ADR-0236 rung 3: `&v[start..end]`. The window keeps the owner's element
 // size and starts at the offset, so index/length/iteration need no change.
 static ae_slice ae_slice_sub(ae_slice s, int64_t start, int64_t end, size_t line, size_t column) {

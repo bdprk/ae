@@ -1,6 +1,6 @@
 # ADR-0236: `&[T]` slices as borrowed fat pointers
 
-- Status: Accepted (rungs 1, 2 and 3 landed 2026-11-25)
+- Status: Accepted (rungs 1-4 landed 2026-11-25)
 - Date: 2026-11-25
 - Associated Milestone: P2.4 action 1 (generic `Slice[T]`), feeds P4.1/P7.1
 
@@ -73,9 +73,29 @@ Take option A, in rungs.
    existing whole-array borrow, and from a slice parameter a `Forward`. A slice
    held by a `for` loop freezes the owner like the vector loop.
 
-Rung 2 (element views and place borrows through a slice) and rung 3
-(sub-slicing) are landed. `&mut [T]` (rung 4, with write tracking) remains,
-as does the stdlib `Slice[T]`/`Iterator` takeover (P4.4).
+Rungs 2 (element views and place borrows), 3 (sub-slicing) and 4 (mutable
+slices) are landed. Only the stdlib `Slice[T]`/`Iterator` takeover (P4.4)
+remains.
+
+### Rung 4 (landed): mutable slices
+
+`&mut [T]` is a distinct parameter type (`TyKind::SliceMut`, interning the
+same element table as `Slice`). The C representation is the same
+`ae_slice`; the call site builds it from a whole `var` vector binding
+(`&mut v`), checks that the binding is mutable and that no conflicting
+borrow is live in the statement (view-only borrows defer to the NLL
+adjudication, exactly like the `&mut Struct` argument), and records a
+mutable borrow for the statement. The callee reads through the usual
+`len`/index/`for` rules and stores with `m[i] = x`: codegen calls
+`ae_slice_mut_at` (bounds check, then the element's address through the
+exclusive borrow) and the interpreter models the parameter as
+`Val::SliceMutRef { owner, start, len }`, writing back into the owner's slot
+in the calling frame. This rung writes Copy elements only; owned-element
+stores, windows (`&mut v[0..1]`), field receivers (`&mut r.cells`),
+forwarding, local bindings and returns are rejected with pointed
+diagnostics. `tests/run/slice_mut.ae` pins i64/f64/Copy-struct stores and
+read-back across the four backends. `&mut [T; N]` stays out of scope: a
+fixed array is a value, not a place.
 
 ### Rung 2 (landed): element place borrows
 

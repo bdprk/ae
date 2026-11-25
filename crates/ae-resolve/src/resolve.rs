@@ -505,7 +505,10 @@ impl<'m> Pass<'m> {
                     } else {
                         matches!(
                             classify(self.tokens, &|name: &str| self.items.get(name).copied(), &type_params, self_name.as_deref(), parameter.ty.clone()).spelling,
-                            crate::TypeSpelling::Borrow { mutable: true, .. } | crate::TypeSpelling::Pointer { mutable: true, .. },
+                            crate::TypeSpelling::Borrow { mutable: true, .. }
+                                | crate::TypeSpelling::Pointer { mutable: true, .. }
+                                // `&mut [T]` stores elements through the slice (ADR-0236 rung 4).
+                                | crate::TypeSpelling::Slice { mutable: true, .. },
                         )
                     };
                     let inferred = if parameter.ty.start != parameter.ty.end {

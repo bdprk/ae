@@ -317,6 +317,7 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
         Statement::GVecPop(id, elem_ty, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false)))]),
         Statement::StrVecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Statement::GVecStore(id, index, value, elem_ty, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::SliceStore(id, index, value, elem_ty, ..) => ("slice_store", vec![MirOperand::Place(MirPlace::Local(*id, Type::SliceMut(lowering.ctx.find_slice_elem(*elem_ty).unwrap_or(0)))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         // The flag is the parser's sort-as-strings bit (vec[string] sorts by
         // bytes), so it names the intrinsic instead of posing as a direction.
         Statement::Sort(id, strings, ..) => (if *strings { "sort_strings" } else { "sort" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),

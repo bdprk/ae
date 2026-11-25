@@ -147,6 +147,13 @@ impl<'a> Parser<'a> {
                 let loop_elem = self.loop_element_binding(elem);
                 (*id, loop_elem, false, elem)
             }
+            // The same loop reads a mutable slice (`&mut [T]`, rung 4); the
+            // loop variable is a copy/view, so iteration itself never writes.
+            (Expr::Variable(id, Type::SliceMut(vid), _, _), Type::SliceMut(tid)) if *vid == tid => {
+                let elem = self.ctx.slice_elem(tid);
+                let loop_elem = self.loop_element_binding(elem);
+                (*id, loop_elem, false, elem)
+            }
             _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
         };
         if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
@@ -181,7 +188,7 @@ impl<'a> Parser<'a> {
             // element comes from the slice type, not the binding's view type.
             // An owned slice element binds through the same in-place address
             // the vector loop uses; string elements stay value-shaped views.
-            _ if matches!(first_ty, Type::Slice(_)) => {
+            _ if matches!(first_ty, Type::Slice(_) | Type::SliceMut(_)) => {
                 let index = Expr::SliceIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, storage_elem);
                 if matches!(elem_ty, Type::VectorRef(_) | Type::StructRef(_)) {
                     Expr::BorrowAs(Box::new(index), false, line, col)

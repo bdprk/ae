@@ -275,6 +275,7 @@ impl TypeDisplay for Type {
             Type::Vector(id) => format!("vec[{}]", ctx.vector_elem(id).name(ctx)),
             Type::VectorRef(id) => format!("&vec[{}]", ctx.vector_elem(id).name(ctx)),
             Type::Slice(id) => format!("&[{}]", ctx.slice_elem(id).name(ctx)),
+            Type::SliceMut(id) => format!("&mut [{}]", ctx.slice_elem(id).name(ctx)),
             Type::MapOf(id) => {
                 let (k, v) = ctx.map_types(id);
                 format!("map[{}, {}]", k.name(ctx), v.name(ctx))
@@ -329,7 +330,7 @@ impl TypeDisplay for Type {
             Type::StrView => "ae_strview ".to_owned(),
             Type::Vector(id) => format!("{} ", c_output::vector_family(ctx, id)),
             // A slice is a value: a 3-word fat pointer passed by value.
-            Type::Slice(_) => "ae_slice ".to_owned(),
+            Type::Slice(_) | Type::SliceMut(_) => "ae_slice ".to_owned(),
             // A borrow has no storage of its own; the declaration form exists
             // for a loop variable bound to an owned element's storage
             // (ADR-0235 slice 4), which is a pointer to the element.
@@ -683,7 +684,7 @@ enum Printed { Expr(Expr), Text(String) }
 // top of the arm's block, so the MIR backend can emit them from the block
 // graph. The parser never produces one; the tree form of a match keeps its
 // bindings on the `MatchArm`.
-enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, Vec<(String, Type)>, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize),
+enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), SliceStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, Vec<(String, Type)>, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize),
     // P2.4: vector operations on a struct's vector field (`r.cells`).
     // The statement carries the root slot, the field name and the root's
     // declared type (a `&mut` root reads through its pointer), so the

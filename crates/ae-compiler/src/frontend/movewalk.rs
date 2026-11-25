@@ -282,7 +282,7 @@ pub(super) fn walk_statement(statement: &Statement, moved: &mut dyn MoveTracker)
         }
         Statement::VecPopField(..) | Statement::VecSortField(..) => None,
         Statement::Sort(..) | Statement::Reverse(..) | Statement::StrVecPop(..) | Statement::GVecPop(..) => None,
-        Statement::StrVecStore(_, index, value, ..) | Statement::GVecStore(_, index, value, ..) => {
+        Statement::StrVecStore(_, index, value, ..) | Statement::GVecStore(_, index, value, ..) | Statement::SliceStore(_, index, value, ..) => {
             if let Some(violation) = walk_expr(index, moved) { return Some(violation); }
             if let Some(violation) = walk_expr(value, moved) { return Some(violation); }
             None

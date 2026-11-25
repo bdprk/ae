@@ -56,8 +56,8 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::StrView => "ae_strview".to_owned(),
         Type::Vector(id) => vector_family(ctx, id).to_owned(),
         // A slice is a borrowed fat pointer; the same struct serves every
-        // element kind (ADR-0236).
-        Type::Slice(_) => "ae_slice".to_owned(),
+        // element kind (ADR-0236). A mutable slice carries the same value.
+        Type::Slice(_) | Type::SliceMut(_) => "ae_slice".to_owned(),
         Type::MapOf(id) => map_family(ctx, id).to_owned(),
         Type::Struct(k) => format!("ae_t{k}"),
         // Unreachable: there is no syntax for a borrow-typed field; the value
@@ -104,7 +104,7 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::String => format!("ae_string v{id}"),
         Type::StrView => format!("ae_strview v{id}"),
         Type::Vector(elem) => format!("{} v{id}", vector_family(ctx, elem)),
-        Type::Slice(_) => format!("ae_slice v{id}"),
+        Type::Slice(_) | Type::SliceMut(_) => format!("ae_slice v{id}"),
         Type::MapOf(map_id) => format!("{} v{id}", map_family(ctx, map_id)),
         Type::Struct(k) => format!("ae_t{k} v{id}"),
         Type::StructRef(k) if declaration => format!("const ae_t{k} *v{id}"),

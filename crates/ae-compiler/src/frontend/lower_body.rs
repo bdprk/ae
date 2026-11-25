@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
             // value (a value capture, the FnOnce shape): the exit Frees
             // releases it unless the body moved it out, and the move checks
             // reject a second read after a move.
-            let ok = scalar_type(ty) || matches!(ty, Type::ArrayOf(..) | Type::Slice(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VectorRef(_) | Type::Vector(_) | Type::MapOf(_) | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
+            let ok = scalar_type(ty) || matches!(ty, Type::ArrayOf(..) | Type::Slice(_) | Type::SliceMut(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VectorRef(_) | Type::Vector(_) | Type::MapOf(_) | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
                 || matches!(ty, Type::String)
                 // A captured token cursor: the closure borrows the outer
                 // cursor (the capture form is the cursor itself), and the
@@ -378,7 +378,7 @@ impl<'a> Parser<'a> {
                         // other borrows take the argument's address
                         // (`Argument::Borrow`) with the typed route's own
                         // classify rules.
-                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::ArrayOf(..) | Type::Slice(_)
+                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::ArrayOf(..) | Type::Slice(_) | Type::SliceMut(_)
                             | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_)
                             // A by-value vector or map parameter owns the
                             // argument: the call moves it (tracked in

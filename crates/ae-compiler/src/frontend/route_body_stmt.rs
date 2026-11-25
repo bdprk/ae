@@ -226,7 +226,11 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                                     // A vector store (`v[i] = x`): the lowering
                                     // checks mutability, the element type, and the
                                     // string move for a view/value store.
-                                    || resolved.vector_definitions.contains(id)))
+                                    || resolved.vector_definitions.contains(id)
+                                    // A store through a mutable slice (`m[i] = x`,
+                                    // ADR-0236 rung 4): the lowering checks the
+                                    // element and rejects a read-only slice.
+                                    || resolved.slice_definitions.contains(id)))
                         // A map key is a string value or view; array indices
                         // are scalars.
                         && (scalar_body_expression(index, resolved, supports_call, supports_field)

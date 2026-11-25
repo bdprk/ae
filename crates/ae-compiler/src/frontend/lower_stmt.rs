@@ -404,6 +404,36 @@ impl<'a> Parser<'a> {
                             _ => Statement::GVecStore(slot, element_index, stored, elem_ty, line, column),
                         });
                     }
+                    // A store through a mutable slice parameter (`m[i] = x`, ADR-0236
+                    // rung 4). The parameter is already an exclusive borrow,
+                    // so the owner's mutability was checked at the call site;
+                    // only Copy elements are writable in this rung.
+                    if let Type::SliceMut(slice_id) = ty {
+                        let elem_ty = self.ctx.slice_elem(slice_id);
+                        if self.is_owned(elem_ty) {
+                            self.seek_scalar_offset(base.range.start);
+                            return Err(self.fail("storing through a mutable slice of owned elements is not supported yet"));
+                        }
+                        self.seek_scalar_offset(base.range.end);
+                        let (line, column) = self.position();
+                        let (element_index, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if index_ty != Type::Int(IntTy::I64) {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        let (stored, value_ty) = self.lower_scalar_body_expression(value, slots)?;
+                        if value_ty != elem_ty {
+                            self.seek_scalar_offset(value.range.end);
+                            return Err(self.fail(&format!("slice elements must be {}", elem_ty.name(self.ctx))));
+                        }
+                        self.seek_scalar_offset(value.range.end);
+                        self.take(Kind::Semi)?;
+                        return Ok(Statement::SliceStore(slot, element_index, stored, elem_ty, line, column));
+                    }
+                    if matches!(ty, Type::Slice(_)) {
+                        self.seek_scalar_offset(base.range.start);
+                        return Err(self.fail("a read-only slice cannot be written; take the parameter as '&mut [T]'"));
+                    }
                     let Type::ArrayOf(elem_id, len) = ty else {
                         unreachable!("resolved array store");
                     };

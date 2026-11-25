@@ -411,7 +411,7 @@ fn walk_statements(statements: &[Statement], used: &mut std::collections::HashSe
             Statement::VecStoreField(id, _, _, index, value, ..) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
             Statement::VecPopField(id, ..) | Statement::VecSortField(id, ..) => { mutated.insert(*id); }
             Statement::Sort(id, ..) | Statement::Reverse(id, ..) | Statement::StrVecPop(id, ..) | Statement::GVecPop(id, ..) => { mutated.insert(*id); }
-            Statement::StrVecStore(id, index, value, _, _, _) | Statement::GVecStore(id, index, value, _, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
+            Statement::StrVecStore(id, index, value, _, _, _) | Statement::GVecStore(id, index, value, _, _, _) | Statement::SliceStore(id, index, value, _, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
             Statement::FieldStore(id, _, _, value, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
             Statement::Print(printed) => if let Printed::Expr(expr) = printed { walk_expr(expr, used, mutated); },
             Statement::Assert(expr, _, _) => walk_expr(expr, used, mutated),

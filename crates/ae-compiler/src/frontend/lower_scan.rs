@@ -185,6 +185,9 @@ impl<'a> Parser<'a> {
                 let ae_syntax::declaration::DeclarationKind::Function { parameters, .. } = &function.declaration.kind else { continue };
                 for parameter in parameters {
                     let spelling = self.source.get(parameter.ty.clone()).unwrap_or("").trim().trim_start_matches('&').trim();
+                    // `&mut [T]` keeps the `mut` after the `&`; the bracket
+                    // classification is the same (ADR-0236 rung 4).
+                    let spelling = spelling.strip_prefix("mut ").map(str::trim).unwrap_or(spelling);
                     if !spelling.starts_with('[') { continue }
                     let is_array = spelling.contains(';');
                     if let Some(entry) = resolution.defs.iter().find(|entry| {
@@ -683,6 +686,10 @@ impl<'a> Parser<'a> {
                     }
                     let mut index = self.tokens.partition_point(|token| token.offset < parameter.ty.start);
                     if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::Amp) {
+                        index += 1;
+                    }
+                    // `&mut [T]`: the `mut` sits between the `&` and the `[`.
+                    if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::Ident("mut".to_owned())) {
                         index += 1;
                     }
                     if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::LBracket)
