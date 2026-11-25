@@ -591,8 +591,9 @@ class Gen:
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
         if kind == 30:
-            # ADR-0236 rung 4: `&mut [i64]` stores through the call; the
-            # owner sees the write afterwards and every mode agrees.
+            # ADR-0236 rung 4: `&mut [i64]` stores through the call, including a
+            # `&mut name[1..3]` window; the owner sees the writes afterwards
+            # and every mode agrees.
             name = self.fresh("mu")
             values = [self.int_expr(vars) for _ in range(3)]
             fill = self.int_expr(vars)
@@ -604,6 +605,8 @@ class Gen:
                 f"print({name}[2]);",
                 f"fuzz_slice_mut_fill(&mut {name}, {fill});",
                 f"print({name}[0]);",
+                f"fuzz_slice_mut_fill(&mut {name}[1..3], {fill});",
+                f"print({name}[1]);",
                 f"print(len({name}));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
