@@ -1,6 +1,6 @@
 # ADR-0236: `&[T]` slices as borrowed fat pointers
 
-- Status: Accepted (rungs 1 and 3 landed 2026-11-25)
+- Status: Accepted (rungs 1, 2 and 3 landed 2026-11-25)
 - Date: 2026-11-25
 - Associated Milestone: P2.4 action 1 (generic `Slice[T]`), feeds P4.1/P7.1
 
@@ -73,10 +73,24 @@ Take option A, in rungs.
    existing whole-array borrow, and from a slice parameter a `Forward`. A slice
    held by a `for` loop freezes the owner like the vector loop.
 
-Rung 3 (sub-slicing) is landed; element views through a slice already follow
-rung 1's index/loop element rules in the supported positions. `&mut [T]`
-(rung 4, with write tracking) remains, as does the stdlib
-`Slice[T]`/`Iterator` takeover (P4.4).
+Rung 2 (element views and place borrows through a slice) and rung 3
+(sub-slicing) are landed. `&mut [T]` (rung 4, with write tracking) remains,
+as does the stdlib `Slice[T]`/`Iterator` takeover (P4.4).
+
+### Rung 2 (landed): element place borrows
+
+A borrow argument may name one element of a slice parameter — `&items[0]`,
+`&rows[len(rows) - 1]` inside `fn f(items: &[Tag])` — and pass it to a
+`&Struct`/`&vec` parameter. The place-borrow lowering resolves the index
+against the slice's element type and emits `Expr::SliceIndex` under the
+same `BorrowAs` the vector element borrow uses, so the callee reads the
+owner's storage in place (`&(*((const ae_tN *)ae_slice_at(...)))`, the same
+address-of-deref the vector form emits). The interpreter evaluates the
+element read as a value, matching the vector element borrow's snapshot
+model. A `string` element is not a place-borrow target (the same rejection
+as the vector form), and an out-of-range index traps like any element read.
+`tests/run/slice_element_borrows.ae` pins owned-struct and nested-vector
+elements across the four backends.
 
 ### Rung 3 (landed): sub-slicing
 

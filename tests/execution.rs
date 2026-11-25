@@ -10973,3 +10973,60 @@ fn generic_slices_match_across_backends() {
         );
     }
 }
+
+
+/// ADR-0236 rung 2: a place borrow names one element of a slice parameter
+/// (`&items[0]`, `&rows[0]`) and passes it to a `&Struct`/`&vec` parameter,
+/// addressed in place exactly like the vector element borrow.
+#[test]
+fn slice_element_borrows_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slice_element_borrows.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    // A string element is not a place-borrow target (same as the vector form).
+    let path = std::env::temp_dir().join(format!(
+        "ae-slice-elem-borrow-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn sl(s: &string) -> i64 { return len(s); } fn f(words: &[string]) -> i64 { return sl(&words[0]); } fn main() { let w = vec[\"hello\"]; print(f(&w)); }",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!result.status.success(), "a string element borrow must be rejected");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("a borrow expression must be cast to a pointer"),
+        "expected the pointer-cast remedy, got {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

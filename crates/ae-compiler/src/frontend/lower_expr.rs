@@ -1468,17 +1468,18 @@ let mut args = Vec::with_capacity(arguments.len());
                         ty = fty;
                     }
                     if let Some(index_range) = element_index {
-                        // The root may itself be a `&vec` parameter: indexing
-                        // it reads the storage the lender owns.
-                        let id = match ty {
-                            Type::Vector(id) | Type::VectorRef(id) => id,
+                        // The root may itself be a `&vec` parameter or a
+                        // `&[T]` slice: indexing reads the storage the lender
+                        // owns (ADR-0236 rung 2 borrows one slice element).
+                        let (element, is_slice) = match ty {
+                            Type::Vector(id) | Type::VectorRef(id) => (self.ctx.vector_elem(id), false),
+                            Type::Slice(id) => (self.ctx.slice_elem(id), true),
                             other => {
                                 return Err(self.error_at(name_range.start, &format!(
                                     "'&{borrowed}...' needs a vector place to index, found {}", other.name(self.ctx),
                                 )));
                             }
                         };
-                        let element = self.ctx.vector_elem(id);
                         let start = self.tokens.partition_point(|token| token.offset < index_range.start);
                         let Ok((index_expression, _)) = ae_syntax::expression::parse_expression_tokens(&self.file, self.source, &self.tokens, start, false) else {
                             return Err(self.error_at(index_range.start, "invalid index expression"));
@@ -1488,7 +1489,11 @@ let mut args = Vec::with_capacity(arguments.len());
                         if index_ty != Type::Int(IntTy::I64) {
                             return Err(self.fail("vector index must be an integer"));
                         }
-                        place = Expr::VecIndexOf(Box::new(place), Box::new(index_value), line, column, element);
+                        place = if is_slice {
+                            Expr::SliceIndex(slot, Box::new(index_value), line, column, element)
+                        } else {
+                            Expr::VecIndexOf(Box::new(place), Box::new(index_value), line, column, element)
+                        };
                         ty = element;
                     }
                     let borrows_place = match expected {
