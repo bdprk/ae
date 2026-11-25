@@ -9848,3 +9848,59 @@ fn main() {
         assert!(!result.status.success(), "expected failure for: {bad_source}");
     }
 }
+
+
+/// ADR-0235 route coverage: a field read on an indexed aggregate
+/// (`v[i].x`, `v[i].inner.radius`) resolves the element type from the
+/// vector/array interner and lowers on every backend. A field *store*
+/// through an index has no lowering yet, so it stays an honest refusal.
+#[test]
+fn indexed_element_field_reads_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("
+")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("vector_element_field_reads.ae");
+    let expected = fs::read_to_string(fixture.with_extension("stdout")).unwrap();
+    let expected = lines(expected.as_bytes());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    let bad_source = r#"#[derive(Copy)] struct P { x: i64 } fn main() { var v = vec[P { x: 1 }]; v[0].x = 2; print(v[0].x); }"#;
+    let bad_path = std::env::temp_dir().join(format!(
+        "ae-indexed-field-store-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&bad_path, bad_source).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&bad_path)
+        .output()
+        .unwrap();
+    fs::remove_file(&bad_path).unwrap();
+    assert!(!result.status.success(), "expected a field store through an index to stay refused");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("resolved route"),
+        "the refusal must stay the route diagnostic: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

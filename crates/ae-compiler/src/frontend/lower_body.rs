@@ -165,6 +165,16 @@ impl<'a> Parser<'a> {
                     {
                         local_structs.insert(name.clone(), ty);
                     }
+                    // An aggregate literal binding (`var v = vec[Point { .. }]`
+                    // or `var a = [Point { .. }; N]`-style literal): its
+                    // element type answers a field chain rooted at an index
+                    // (`v[0].x`) before the lowering declares the slot. The
+                    // inference is deliberately narrow — literals, file-local
+                    // struct literals and earlier locals — and the lowering
+                    // re-checks every element anyway.
+                    if let Some(ty) = self.prepared_aggregate_literal_type(initializer, &local_structs) {
+                        local_structs.insert(name.clone(), ty);
+                    }
                     // A binding from a struct constructor call (`Point::new(..)`,
                     // `Pair[string, i64]::new(..)`): a layout instantiation only
                     // (no body parse), so it is safe in this precompute.
@@ -473,6 +483,13 @@ impl<'a> Parser<'a> {
                 return matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::StructRef(_) | Type::Enum(..));
             }
             let Some(root) = field_chain_root(expression) else { return false };
+            // A field store through an index (`v[i].x = ..`) has no lowering:
+            // the vector owns its element bytes, and a per-element struct
+            // rebuild is not in the typed surface. Refuse it here so the
+            // diagnostic stays the route denial instead of a lowering error.
+            if role == ae_resolve::Role::Write && field_chain_has_index(expression) {
+                return false;
+            }
             let def = match role {
                 ae_resolve::Role::Read => resolved.scalar_reads.get(&root.range.start)
                     .or_else(|| resolved.call_definitions.get(&root.range.start)),
@@ -496,14 +513,19 @@ impl<'a> Parser<'a> {
                     ae_resolve::Role::Read => resolved.generic_call_bindings.contains(def)
                         || matches!(&root.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                             if local_structs.get(name).is_some_and(|&ty| !field_chain_is_bare(expression)
-                                && receiver_field_type(expression, ty, self.structs)
+                                && receiver_field_type(expression, ty, self.structs, self.ctx)
                                     .is_some_and(|field| scalar_type(field)
                                         // A string field reads as a borrowed
                                         // view (print, a borrow argument, a
                                         // comparison); binding it as a value
                                         // is the binding arm's own move check.
                                         || matches!(field, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_) | Type::String)
-                                        || matches!(field, Type::Struct(env_sid) if self.generics.closure_envs.contains_key(&env_sid))))),
+                                        // A struct field is a chain step
+                                        // (`v[0].inner.radius`): the outer
+                                        // link decides whether the final value
+                                        // is a read; the consumers (print,
+                                        // binding) keep their own rules.
+                                        || matches!(field, Type::Struct(_))))),
                     _ => false,
                 };
             };
@@ -518,7 +540,7 @@ impl<'a> Parser<'a> {
                 // codegen releases the old value and consumes the new one);
                 // reads stay scalar-only here and reach the scan through the
                 // view and read marks.
-                receiver_field_type(expression, ty, self.structs)
+                receiver_field_type(expression, ty, self.structs, self.ctx)
                     .is_some_and(|field| scalar_type(field)
                         // A raw pointer field reads as its address (a copyable
                         // value with no release surface).
@@ -527,6 +549,8 @@ impl<'a> Parser<'a> {
                         // borrow argument, a comparison); binding it as a value
                         // is the binding arm's own move rejection.
                         || (role == ae_resolve::Role::Read && matches!(field, Type::String))
+                        // A struct field is a chain step too (`v[0].inner.radius`).
+                        || (role == ae_resolve::Role::Read && matches!(field, Type::Struct(_)))
                         || (role == ae_resolve::Role::Write
                             && matches!(field, Type::String | Type::Vector(_) | Type::MapOf(_))))
             }
@@ -550,6 +574,63 @@ impl<'a> Parser<'a> {
         let lowered = self.lower_scalar_statements(&body, &mut slots);
         self.owned_params.clear();
         Some(lowered)
+    }
+
+    /// The concrete element type of a literal aggregate binding, as far as
+    /// the body-route prepass can name it statelessly: scalar and struct
+    /// literals plus earlier locals. This answers field chains rooted at an
+    /// index before the lowering declares the binding; the lowering's own
+    /// element check stays authoritative.
+    fn prepared_literal_element_type(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        local_structs: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        use ae_syntax::expression::ExpressionKind;
+        match &expression.kind {
+            ExpressionKind::Group(inner) => self.prepared_literal_element_type(inner, local_structs),
+            ExpressionKind::Atom(Kind::Number(_)) => Some(Type::Int(IntTy::I64)),
+            ExpressionKind::Atom(Kind::Float(_)) => Some(Type::Float(FloatTy::F64)),
+            ExpressionKind::Atom(Kind::True | Kind::False) => Some(Type::Bool),
+            ExpressionKind::Atom(Kind::Char(_)) => Some(Type::Char),
+            ExpressionKind::Struct { target, .. } => match &target.kind {
+                ExpressionKind::Atom(Kind::Ident(struct_name)) if struct_name != "Self" =>
+                    self.struct_names.get(struct_name).map(|&sid| Type::Struct(sid)),
+                ExpressionKind::Atom(Kind::Ident(_)) =>
+                    self.impl_self.filter(|ty| matches!(ty, Type::Struct(_))),
+                _ => None,
+            },
+            ExpressionKind::Atom(Kind::Ident(name)) if name != "self" =>
+                local_structs.get(name).copied().or_else(|| self.names.get(name).map(|&(_, _, ty)| ty)),
+            _ => None,
+        }
+    }
+
+    /// A vector or fixed-array literal's type when every element's type is
+    /// statically nameable and they all agree. An empty literal defers (its
+    /// element type comes from a later `push`, which the prepass cannot see),
+    /// so it answers `None` and the route keeps its current refusal.
+    fn prepared_aggregate_literal_type(
+        &mut self,
+        expression: &ae_syntax::expression::Expression,
+        local_structs: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        use ae_syntax::expression::ExpressionKind;
+        let (elements, is_vector) = match &expression.kind {
+            ExpressionKind::Vector(elements) => (elements, true),
+            ExpressionKind::Array(elements) => (elements, false),
+            _ => return None,
+        };
+        let first = elements.first()?;
+        let element = self.prepared_literal_element_type(first, local_structs)?;
+        if elements.iter().skip(1).any(|other| self.prepared_literal_element_type(other, local_structs) != Some(element)) {
+            return None;
+        }
+        Some(if is_vector {
+            Type::Vector(self.ctx.intern_vector_elem(element))
+        } else {
+            Type::ArrayOf(self.ctx.intern_array_elem(element), elements.len())
+        })
     }
 
     pub(super) fn lower_scalar_statements(

@@ -88,7 +88,17 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
             let rooted = match &base.kind {
                 ExpressionKind::Atom(Kind::Ident(_)) => true,
                 ExpressionKind::Field { .. } => resolved.struct_field_reads.contains(&base.range.start)
-                    || resolved.struct_field_chains.contains(&base.range.start),
+                    || resolved.struct_field_chains.contains(&base.range.start)
+                    // A nested field over an indexed aggregate
+                    // (`v[i].inner.radius`): the inner chain is admissible on
+                    // its own, and the lowering walks it recursively.
+                    || (scalar_body_expression(base, resolved, supports_call, supports_field)
+                        && supports_field(base, ae_resolve::Role::Read)),
+                // A field read on an indexed aggregate (`v[i].x`): the index
+                // itself must be admissible and the field gate resolves the
+                // element's field type from the vector/array interner.
+                ExpressionKind::Index { .. } => scalar_body_expression(base, resolved, supports_call, supports_field)
+                    && supports_field(expression, ae_resolve::Role::Read),
                 ExpressionKind::Call { .. } => (plain_call_base || method_call_base)
                     && scalar_body_expression(base, resolved, supports_call, supports_field),
                 _ => false,

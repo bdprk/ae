@@ -241,8 +241,22 @@ pub(super) fn field_chain_root(expression: &ae_syntax::expression::Expression) -
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
         ExpressionKind::Field { base, .. } => field_chain_root(base),
+        ExpressionKind::Index { base, .. } => field_chain_root(base),
         ExpressionKind::Atom(Kind::Ident(_)) => Some(expression),
         _ => None,
+    }
+}
+
+/// Whether a field chain contains an index step (`v[i].x`). A field store
+/// through an index has no lowering (the vector owns its element bytes), so
+/// the body route's gate refuses it instead of collecting a body the
+/// lowering rejects.
+pub(super) fn field_chain_has_index(expression: &ae_syntax::expression::Expression) -> bool {
+    use ae_syntax::expression::ExpressionKind;
+    match &expression.kind {
+        ExpressionKind::Field { base, .. } => field_chain_has_index(base),
+        ExpressionKind::Index { .. } => true,
+        _ => false,
     }
 }
 
@@ -263,20 +277,30 @@ pub(super) fn receiver_value(expression: &ae_syntax::expression::Expression) -> 
 // The type of a field chain walked from `receiver`: the root node is the
 // chain's base ident (the caller supplies the root's type from its slot),
 // and each step resolves through the field table. `self.a.b` and `r.a.b`
-// answer the same way.
+// answer the same way. An index step projects the element of a vector or
+// fixed array (`v[i].x`), so the fields of an element struct read exactly
+// like a local's.
 pub(super) fn receiver_field_type(
     expression: &ae_syntax::expression::Expression,
     receiver: Type,
     structs: &[StructDef],
+    ctx: &CompileContext,
 ) -> Option<Type> {
     use ae_syntax::expression::ExpressionKind;
     match &expression.kind {
         ExpressionKind::Field { base, name } => {
-            let sid = match receiver_field_type(base, receiver, structs)? {
+            let sid = match receiver_field_type(base, receiver, structs, ctx)? {
                 Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
                 _ => return None,
             };
             field_ty_in(sid, name, structs)
+        }
+        ExpressionKind::Index { base, .. } => {
+            match receiver_field_type(base, receiver, structs, ctx)? {
+                Type::Vector(id) | Type::VectorRef(id) => Some(ctx.vector_elem(id)),
+                Type::ArrayOf(id, _) => Some(ctx.array_elem(id)),
+                _ => None,
+            }
         }
         ExpressionKind::Atom(Kind::Ident(_)) => Some(receiver),
         _ => None,
