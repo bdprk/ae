@@ -1502,7 +1502,7 @@ impl Walker<'_> {
             }
             // A scalar cast names a type, not a value: only the base is walked.
             ExpressionKind::ScalarCast { base, .. } => self.expr(base, role),
-            ExpressionKind::BorrowArgument { name, name_range, mutable, index } => {
+            ExpressionKind::BorrowArgument { name, name_range, mutable, index, .. } => {
                 let mutable = *mutable;
                 let target = self.occurrence(name, name_range.clone(), Role::Borrow, Lookup::LocalOnly);
                 if mutable {

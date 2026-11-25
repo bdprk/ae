@@ -440,12 +440,12 @@ impl<'a> Parser<'a> {
         let mut args = Vec::with_capacity(arguments.len());
         for (argument, expected) in arguments.iter().zip(params.iter().copied()) {
             if matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_)) {
-                let ExpressionKind::BorrowArgument { name, name_range, mutable, index } = &argument.kind else {
+                let ExpressionKind::BorrowArgument { name, name_range, mutable, index, fields } = &argument.kind else {
                     return None;
                 };
-                // An element borrow (`&name[i]`) is resolved by the resolved
-                // route, which owns the element/view rules.
-                if index.is_some() {
+                // A place borrow (`&name[i]`, `&name.field`) is resolved by
+                // the resolved route, which owns the field/element view rules.
+                if index.is_some() || !fields.is_empty() {
                     return None;
                 }
                 if *mutable != matches!(expected, Type::StructMut(_)) {

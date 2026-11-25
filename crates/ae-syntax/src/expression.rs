@@ -39,7 +39,7 @@ pub enum ExpressionKind {
     /// `base as TypeName` for a scalar spelling (`i64`, `f64`, ...). The
     /// compiler owns the cast semantics; the grammar keeps the target range.
     ScalarCast { base: Box<Expression>, target: Range<usize> },
-    BorrowArgument { mutable: bool, name: String, name_range: Range<usize>, index: Option<Range<usize>> },
+    BorrowArgument { mutable: bool, name: String, name_range: Range<usize>, fields: Vec<(String, Range<usize>)>, index: Option<Range<usize>> },
     Array(Vec<Expression>),
     Vector(Vec<Expression>),
     Struct { target: Box<Expression>, fields: Vec<FieldInitializer> },
@@ -147,9 +147,23 @@ pub fn parse_borrow_argument(
     let Kind::Ident(name) = &token.kind else {
         return Err(error(token, "expected identifier").with_code("E0010"));
     };
-    // `&name[expr]`: an element borrow. The bracket's contents are kept as a
-    // byte range; the compiler parses and type-checks the index expression.
+    // `&name.field.field` and `&name[expr]` (and `&name.field[expr]`): a
+    // borrow of one place inside a binding. Field names are kept with their
+    // spans; the bracket's contents are a byte range the compiler parses and
+    // type-checks.
     let mut end = index + 1;
+    let mut fields: Vec<(String, Range<usize>)> = Vec::new();
+    while tokens.get(end).is_some_and(|token| token.kind == Kind::Dot) {
+        let dot = &tokens[end];
+        let Some(field_token) = tokens.get(end + 1) else {
+            return Err(error(dot, "expected a field name after '.'").with_code("E0010"));
+        };
+        let Kind::Ident(field) = &field_token.kind else {
+            return Err(error(field_token, "expected a field name").with_code("E0010"));
+        };
+        fields.push((field.clone(), field_token.offset..field_token.end));
+        end += 2;
+    }
     let mut element_index = None;
     if tokens.get(end).is_some_and(|token| token.kind == Kind::LBracket) {
         let open = end;
@@ -182,6 +196,7 @@ pub fn parse_borrow_argument(
         mutable,
         name: name.clone(),
         name_range: token.offset..token.end,
+        fields,
         index: element_index,
     };
     Ok((Expression { kind, range: amp.offset..tokens[end - 1].end }, end))
@@ -246,11 +261,11 @@ impl Parser<'_> {
                         self.file, self.source, self.tokens, self.cursor, None,
                     )?;
                     self.cursor = end;
-                    let ExpressionKind::BorrowArgument { name, name_range, mutable, index } = argument.kind else {
+                    let ExpressionKind::BorrowArgument { name, name_range, mutable, fields, index } = argument.kind else {
                         unreachable!("expected a borrowed binding");
                     };
-                    if index.is_some() {
-                        return Err(self.error("an address cast must borrow a whole binding; '&name[index]' is a call argument only"));
+                    if index.is_some() || !fields.is_empty() {
+                        return Err(self.error("an address cast must borrow a whole binding; '&name.field'/'&name[index]' are call arguments only"));
                     }
                     if self.current().kind != Kind::As {
                         return Err(self.error("a borrow expression must be cast to a pointer"));

@@ -10233,7 +10233,7 @@ fn indexed_borrow_arguments_match_across_backends() {
         (
             "mutable element borrow",
             r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var items = vec[T { n: 1 }]; show(&mut items[0]); }"#,
-            "an element borrow is read-only",
+            "a place borrow is read-only",
         ),
         (
             "element shape mismatch",
@@ -10248,7 +10248,7 @@ fn indexed_borrow_arguments_match_across_backends() {
         (
             "element borrow of a non-vector binding",
             r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { let s = "x"; show(&s[0]); }"#,
-            "'&s[..]' needs a vector binding",
+            "'&s...' needs a vector place to index",
         ),
     ] {
         let path = std::env::temp_dir().join(format!(
@@ -10328,6 +10328,86 @@ fn field_vector_writes_match_across_backends() {
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-field-vector-writes-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: place borrow arguments (`&h.item`, `&r.cells`, `&t.rows[0]`,
+/// `&o.inner`). The place is addressed in place and the borrow lives only for
+/// the call, so a struct field, a vector field and an element of a vector
+/// field all reach `&T`/`&vec` parameters without moving or copying.
+#[test]
+fn place_borrow_arguments_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("place_borrow_arguments.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "mutable place borrow",
+            r#"struct T { n: i64 } struct H { item: T } fn mutate(t: &mut T) { t.n = 2; } fn main() { var h = H { item: T { n: 1 } }; mutate(&mut h.item); }"#,
+            "a place borrow is read-only",
+        ),
+        (
+            "root moved before the borrow",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var h = T { n: 1 }; let moved = h; show(&h); }"#,
+            "cannot borrow 'h' because it was moved",
+        ),
+        (
+            "missing field",
+            r#"struct T { n: i64 } struct H { item: T } fn show(t: &T) { print(t.n); } fn main() { let h = H { item: T { n: 1 } }; show(&h.missing); }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+        (
+            "field on a non-struct",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { let s = "abc"; show(&s.name); }"#,
+            "only a struct has fields, found string",
+        ),
+        (
+            "scalar field to a struct borrow",
+            r#"struct T { n: i64 } struct H { item: T, m: i64 } fn show(t: &T) { print(t.n); } fn main() { let h = H { item: T { n: 1 }, m: 2 }; show(&h.m); }"#,
+            "argument must be &struct #",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-place-borrows-bad-{}-{}.ae",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

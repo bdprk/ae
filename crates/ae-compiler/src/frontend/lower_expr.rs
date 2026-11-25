@@ -1309,23 +1309,25 @@ let mut args = Vec::with_capacity(arguments.len());
                     args.push(Argument::Borrow(slot, false));
                     continue;
                 }
-                let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, index: element_index } = &argument.kind else {
+                let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, fields, index: element_index } = &argument.kind else {
                     self.seek_scalar_offset(argument.range.end);
-                    // A borrow argument names a binding (`&name` or
-                    // `&name[index]`); a bare element or field expression is
-                    // not an addressable argument yet.
+                    // A borrow argument names a binding or a place inside one
+                    // (`&name`, `&name[index]`, `&name.field`); a bare element
+                    // or field expression is not an addressable argument.
                     if matches!(argument.kind, ExpressionKind::Index { .. } | ExpressionKind::Field { .. }) {
-                        return Err(self.fail("this parameter borrows a binding; pass '&name' or '&name[index]'"));
+                        return Err(self.fail("this parameter borrows a binding; pass '&name', '&name[index]' or '&name.field'"));
                     }
                     return Err(self.fail("expected Amp, found the argument"));
                 };
-                // `&name[index]`: a read-only borrow of one element. The
-                // element is addressed in place (a struct/vector element read
-                // is a view), so the callee sees the vector's storage.
-                if let Some(index_range) = element_index {
+                // A place borrow: `&name[index]`, `&name.field`, and
+                // `&name.field[index]`. The place is addressed in place (a
+                // struct/vector element read is a view), so the callee sees
+                // the owner's storage; the borrow is read-only and lives only
+                // for the call.
+                if element_index.is_some() || !fields.is_empty() {
                     if *argument_mutability || matches!(expected, Type::StructMut(_)) {
                         self.seek_scalar_offset(name_range.start);
-                        return Err(self.fail("an element borrow is read-only; '&mut name[index]' is not supported yet"));
+                        return Err(self.fail("a place borrow is read-only; '&mut name.field'/'&mut name[index]' is not supported yet"));
                     }
                     let &(slot, _, actual) = self.names.get(borrowed).ok_or_else(|| {
                         self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
@@ -1334,43 +1336,66 @@ let mut args = Vec::with_capacity(arguments.len());
                         return Err(moved_value_hint(self.binding_label(
                             self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
                     }
-                    let vector_id = match actual {
-                        Type::Vector(id) | Type::VectorRef(id) => id,
-                        other => {
-                            self.seek_scalar_offset(name_range.start);
-                            return Err(self.fail(&format!("'&{borrowed}[..]' needs a vector binding, found {}", other.name(self.ctx))));
-                        }
-                    };
-                    let element = self.ctx.vector_elem(vector_id);
-                    let borrowed_storage = matches!(actual, Type::VectorRef(_));
                     self.seek_scalar_offset(argument.range.start);
                     let (line, column) = self.position();
-                    let start = self.tokens.partition_point(|token| token.offset < index_range.start);
-                    let Ok((index_expression, _)) = ae_syntax::expression::parse_expression_tokens(&self.file, self.source, &self.tokens, start, false) else {
-                        return Err(self.error_at(index_range.start, "invalid index expression"));
-                    };
-                    self.seek_scalar_offset(index_range.start);
-                    let (index_value, index_ty) = self.lower_scalar_body_expression(&index_expression, slots)?;
-                    if index_ty != Type::Int(IntTy::I64) {
-                        return Err(self.fail("vector index must be an integer"));
+                    let mut ty = actual;
+                    let mut place = Expr::Variable(slot, actual, line, column);
+                    for (field, field_range) in fields {
+                        let sid = match ty {
+                            Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => sid,
+                            other => {
+                                return Err(self.error_at(field_range.start, &format!(
+                                    "only a struct has fields, found {}", other.name(self.ctx),
+                                )));
+                            }
+                        };
+                        let fty = field_ty_in(sid, field, self.structs).ok_or_else(|| {
+                            self.error_at(field_range.start, &format!("struct '{}' has no field '{field}'", self.structs[sid].name))
+                        })?;
+                        place = Expr::Field(Box::new(place), field.clone(), fty);
+                        ty = fty;
                     }
-                    let borrows_element = match expected {
-                        Type::StructRef(sid) => matches!(element, Type::Struct(found) if found == sid),
-                        Type::VectorRef(wanted) => matches!(element, Type::Vector(found) if found == wanted),
+                    if let Some(index_range) = element_index {
+                        // The root may itself be a `&vec` parameter: indexing
+                        // it reads the storage the lender owns.
+                        let id = match ty {
+                            Type::Vector(id) | Type::VectorRef(id) => id,
+                            other => {
+                                return Err(self.error_at(name_range.start, &format!(
+                                    "'&{borrowed}...' needs a vector place to index, found {}", other.name(self.ctx),
+                                )));
+                            }
+                        };
+                        let element = self.ctx.vector_elem(id);
+                        let start = self.tokens.partition_point(|token| token.offset < index_range.start);
+                        let Ok((index_expression, _)) = ae_syntax::expression::parse_expression_tokens(&self.file, self.source, &self.tokens, start, false) else {
+                            return Err(self.error_at(index_range.start, "invalid index expression"));
+                        };
+                        self.seek_scalar_offset(index_range.start);
+                        let (index_value, index_ty) = self.lower_scalar_body_expression(&index_expression, slots)?;
+                        if index_ty != Type::Int(IntTy::I64) {
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        place = Expr::VecIndexOf(Box::new(place), Box::new(index_value), line, column, element);
+                        ty = element;
+                    }
+                    let borrows_place = match expected {
+                        Type::StructRef(sid) => matches!(ty, Type::Struct(found) if found == sid),
+                        Type::VectorRef(wanted) => matches!(ty, Type::Vector(found) if found == wanted),
                         _ => false,
                     };
-                    if !borrows_element {
+                    if !borrows_place {
+                        let shape = if ty == Type::String { Type::StrView } else { ty };
                         return Err(self.fail(&format!(
                             "argument must be {}, found {}",
                             expected.name(self.ctx),
-                            vector_element_read_type(element, self.structs).name(self.ctx),
+                            shape.name(self.ctx),
                         )));
                     }
                     if !self.is_borrowed(slot) {
                         self.call_borrows.push((slot, self.scopes.len()));
                     }
-                    let element_expr = Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed_storage, element);
-                    args.push(Argument::Value(Expr::BorrowAs(Box::new(element_expr), false, line, column)));
+                    args.push(Argument::Value(Expr::BorrowAs(Box::new(place), false, line, column)));
                     continue;
                 }
                 if matches!(expected, Type::StructMut(_)) && !*argument_mutability {
