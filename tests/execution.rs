@@ -10196,3 +10196,78 @@ fn field_receiver_indexing_matches_across_backends() {
         );
     }
 }
+
+/// P2.4: `&vec[i]` borrow arguments. The element is addressed in place and
+/// passed to a `&T`/`&vec` parameter for the duration of the call; owned
+/// struct elements, Copy struct elements and nested vector elements all
+/// work, and the vector stays usable once the call returns.
+#[test]
+fn indexed_borrow_arguments_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("indexed_borrow_arguments.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "mutable element borrow",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var items = vec[T { n: 1 }]; show(&mut items[0]); }"#,
+            "an element borrow is read-only",
+        ),
+        (
+            "element shape mismatch",
+            r#"fn total(row: &vec) -> i64 { return len(row); } fn main() { let words = vec["a"]; print(total(&words[0])); }"#,
+            "argument must be &vec[i64]",
+        ),
+        (
+            "element borrow after the vector moved",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var items = vec[T { n: 1 }]; let moved = items; show(&items[0]); }"#,
+            "cannot borrow 'items' because it was moved",
+        ),
+        (
+            "element borrow of a non-vector binding",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { let s = "x"; show(&s[0]); }"#,
+            "'&s[..]' needs a vector binding",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-indexed-borrows-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

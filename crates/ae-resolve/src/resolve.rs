@@ -1502,11 +1502,22 @@ impl Walker<'_> {
             }
             // A scalar cast names a type, not a value: only the base is walked.
             ExpressionKind::ScalarCast { base, .. } => self.expr(base, role),
-            ExpressionKind::BorrowArgument { name, name_range, mutable, .. } => {
+            ExpressionKind::BorrowArgument { name, name_range, mutable, index } => {
                 let mutable = *mutable;
                 let target = self.occurrence(name, name_range.clone(), Role::Borrow, Lookup::LocalOnly);
                 if mutable {
                     self.mutable_borrow_gate(target, name_range.clone());
+                }
+                // `&name[index]`: the index expression is a read; the bracket
+                // contents are a byte range in the shared grammar, so parse
+                // them back into a tree and resolve it like any other read.
+                if let Some(range) = index {
+                    let start = self.tokens.partition_point(|token| token.offset < range.start);
+                    if let Ok((expression, _)) = ae_syntax::expression::parse_expression_tokens(
+                        &self.module.file, &self.module.source, self.tokens, start, false,
+                    ) {
+                        self.expr(&expression, Role::Read);
+                    }
                 }
                 None
             }

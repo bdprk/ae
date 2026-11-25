@@ -39,7 +39,7 @@ pub enum ExpressionKind {
     /// `base as TypeName` for a scalar spelling (`i64`, `f64`, ...). The
     /// compiler owns the cast semantics; the grammar keeps the target range.
     ScalarCast { base: Box<Expression>, target: Range<usize> },
-    BorrowArgument { mutable: bool, name: String, name_range: Range<usize> },
+    BorrowArgument { mutable: bool, name: String, name_range: Range<usize>, index: Option<Range<usize>> },
     Array(Vec<Expression>),
     Vector(Vec<Expression>),
     Struct { target: Box<Expression>, fields: Vec<FieldInitializer> },
@@ -147,12 +147,44 @@ pub fn parse_borrow_argument(
     let Kind::Ident(name) = &token.kind else {
         return Err(error(token, "expected identifier").with_code("E0010"));
     };
+    // `&name[expr]`: an element borrow. The bracket's contents are kept as a
+    // byte range; the compiler parses and type-checks the index expression.
+    let mut end = index + 1;
+    let mut element_index = None;
+    if tokens.get(end).is_some_and(|token| token.kind == Kind::LBracket) {
+        let open = end;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, token) in tokens[open..].iter().enumerate() {
+            match token.kind {
+                Kind::LBracket => depth += 1,
+                Kind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            return Err(error(&tokens[open], "unterminated index in a borrow argument").with_code("E0010"));
+        };
+        let contents = &tokens[open + 1..close];
+        let Some(first) = contents.first() else {
+            return Err(error(&tokens[open], "expected an index expression").with_code("E0010"));
+        };
+        element_index = Some(first.offset..contents[contents.len() - 1].end);
+        end = close + 1;
+    }
     let kind = ExpressionKind::BorrowArgument {
         mutable,
         name: name.clone(),
         name_range: token.offset..token.end,
+        index: element_index,
     };
-    Ok((Expression { kind, range: amp.offset..token.end }, index + 1))
+    Ok((Expression { kind, range: amp.offset..tokens[end - 1].end }, end))
 }
 
 struct Parser<'a> {
@@ -214,9 +246,12 @@ impl Parser<'_> {
                         self.file, self.source, self.tokens, self.cursor, None,
                     )?;
                     self.cursor = end;
-                    let ExpressionKind::BorrowArgument { name, name_range, mutable } = argument.kind else {
+                    let ExpressionKind::BorrowArgument { name, name_range, mutable, index } = argument.kind else {
                         unreachable!("expected a borrowed binding");
                     };
+                    if index.is_some() {
+                        return Err(self.error("an address cast must borrow a whole binding; '&name[index]' is a call argument only"));
+                    }
                     if self.current().kind != Kind::As {
                         return Err(self.error("a borrow expression must be cast to a pointer"));
                     }
@@ -736,7 +771,7 @@ mod tests {
             (&arguments[0], "items", false),
             (&arguments[1], "point", true),
         ] {
-            let ExpressionKind::BorrowArgument { mutable, name, name_range } = &argument.kind else {
+            let ExpressionKind::BorrowArgument { mutable, name, name_range, .. } = &argument.kind else {
                 panic!("expected a borrowed argument");
             };
             assert_eq!(name, expected);
