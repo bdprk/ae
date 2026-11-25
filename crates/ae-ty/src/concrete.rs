@@ -26,6 +26,9 @@ pub enum TyKind {
     MapOf(usize),
     /// A fixed-size borrowed array whose `(elem_id, len)` are interned/stored (ADR-0235).
     ArrayOf(usize, usize),
+    /// A read-only slice `&[T]`: a borrowed fat pointer over contiguous
+    /// elements owned elsewhere (ADR-0236).
+    Slice(usize),
     Struct(usize),
     StructRef(usize),
     StructMut(usize),

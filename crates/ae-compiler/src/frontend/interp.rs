@@ -32,6 +32,10 @@ enum Val {
     Unit,
     Str(String),
     Array(Vec<Val>),
+    // ADR-0236: a slice parameter's value. Read-only borrows are snapshots in
+    // the interpreter (the same model `&vec` uses), so the visible elements
+    // are copied and reads never reach across a frame.
+    Slice(Vec<Val>),
     VecI(Vec<i64>),
     VecS(Vec<String>),
     VecF(Vec<f64>),
@@ -1354,6 +1358,36 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
             }
         }
+        Expr::SliceOf(slot, source, ..) => {
+            // A read-only borrow is a snapshot here: the visible elements are
+            // copied, exactly like a `&vec` parameter's value.
+            let value = read_var(locals, caller_locals, *slot, 0, 0)?;
+            let elements = match (*source, value) {
+                (Type::Slice(_), Val::Slice(values)) => values,
+                (Type::ArrayOf(..), Val::Array(values)) => values,
+                (_, Val::VecI(values)) => values.into_iter().map(Val::Int).collect(),
+                (_, Val::VecF(values)) => values.into_iter().map(Val::Float).collect(),
+                (_, Val::VecS(values)) => values.into_iter().map(Val::Str).collect(),
+                (_, Val::VecG(values)) => values,
+                _ => return Err(Flow::Trap("internal: slice source kind".to_owned())),
+            };
+            Ok(Val::Slice(elements))
+        }
+        Expr::SliceIndex(slot, idx_expr, line, col, _) => {
+            let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: slice index type".to_owned())),
+            };
+            match read_var(locals, caller_locals, *slot, *line, *col)? {
+                Val::Slice(values) => {
+                    if idx < 0 || (idx as usize) >= values.len() {
+                        return Err(trap("vector index out of bounds", *line, *col));
+                    }
+                    Ok(values[idx as usize].clone())
+                }
+                _ => Err(Flow::Trap("internal: slice index on non-slice".to_owned())),
+            }
+        }
         Expr::StrVecIndex(id, idx_expr, line, col, _) => {
             let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
                 Val::Int(n) => n,
@@ -1476,6 +1510,7 @@ fn eval_expr(
                 Val::VecS(v) => Ok(Val::Int(v.len() as i64)),
                 Val::VecF(v) => Ok(Val::Int(v.len() as i64)),
                 Val::VecG(v) => Ok(Val::Int(v.len() as i64)),
+                Val::Slice(v) => Ok(Val::Int(v.len() as i64)),
                 Val::Array(v) => Ok(Val::Int(v.len() as i64)),
                 Val::Map(m) => Ok(Val::Int(m.len() as i64)),
                 Val::MapF(m) => Ok(Val::Int(m.len() as i64)),

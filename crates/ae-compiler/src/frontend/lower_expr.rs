@@ -954,6 +954,10 @@ impl<'a> Parser<'a> {
                                     let elem_ty = self.ctx.array_elem(elem_id);
                                     (Expr::Index(slot, len, Box::new(index_value), line, column, elem_ty), elem_ty)
                                 }
+                                Type::Slice(id) => {
+                                    let element = self.ctx.slice_elem(id);
+                                    (Expr::SliceIndex(slot, Box::new(index_value), line, column, element), vector_element_read_type(element, self.structs))
+                                }
                                 Type::Vector(id) | Type::VectorRef(id) => {
                                     let element = self.ctx.vector_elem(id);
                                     let borrowed = matches!(ty, Type::VectorRef(_));
@@ -1020,6 +1024,16 @@ impl<'a> Parser<'a> {
                         let elem_ty = self.ctx.array_elem(elem_id);
                         let value = self.lower_scalar_array_index(index, slots)?;
                         (Expr::Index(slot, len, Box::new(value), line, column, elem_ty), elem_ty)
+                    }
+                    Type::Slice(id) => {
+                        let element = self.ctx.slice_elem(id);
+                        let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                        if index_ty != Type::Int(IntTy::I64) {
+                            self.seek_scalar_offset(index.range.end);
+                            return Err(self.fail("vector index must be an integer"));
+                        }
+                        let read_ty = vector_element_read_type(element, self.structs);
+                        (Expr::SliceIndex(slot, Box::new(value), line, column, element), read_ty)
                     }
                     Type::Vector(id) | Type::VectorRef(id) => {
                         let element = self.ctx.vector_elem(id);
@@ -1285,10 +1299,61 @@ let mut args = Vec::with_capacity(arguments.len());
             // typed route's expression parser rejects it (a pointer
             // cast is the only legal use of `&expr`).
             if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_))
+                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::Slice(_))
             {
                 self.seek_scalar_offset(argument.range.start);
                 return Err(self.fail("a borrow expression must be cast to a pointer"));
+            }
+            // A `&[T]` argument builds the fat pointer from a whole vector or
+            // array binding, or forwards a slice parameter (ADR-0236).
+            if let Type::Slice(wanted) = expected {
+                let wanted_elem = self.ctx.slice_elem(wanted);
+                if let ExpressionKind::Atom(Kind::Ident(name)) = &argument.kind
+                    && let Some(&(slot, _, actual @ Type::Slice(_))) = self.names.get(name)
+                {
+                    if self.moved.contains(&slot) {
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"), slot)));
+                    }
+                    if let Type::Slice(found) = actual && self.ctx.slice_elem(found) != wanted_elem {
+                        return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx))));
+                    }
+                    self.seek_scalar_offset(argument.range.start);
+                    let (line, column) = self.position();
+                    args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));
+                    continue;
+                }
+                let ExpressionKind::BorrowArgument { name: borrowed, mutable, name_range: _, fields, index } = &argument.kind else {
+                    self.seek_scalar_offset(argument.range.end);
+                    return Err(self.fail("a slice argument borrows a whole vector or array: write '&name'"));
+                };
+                if *mutable || !fields.is_empty() || index.is_some() {
+                    self.seek_scalar_offset(argument.range.start);
+                    return Err(self.fail("a slice argument borrows a whole vector or array; element slices are not supported yet"));
+                }
+                let &(slot, _, actual) = self.names.get(borrowed).ok_or_else(|| {
+                    self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
+                })?;
+                if self.moved.contains(&slot) {
+                    return Err(moved_value_hint(self.binding_label(
+                        self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
+                }
+                let matches_element = match actual {
+                    Type::Vector(id) | Type::VectorRef(id) => self.ctx.vector_elem(id) == wanted_elem,
+                    Type::ArrayOf(id, _) => self.ctx.array_elem(id) == wanted_elem,
+                    Type::Slice(id) => self.ctx.slice_elem(id) == wanted_elem,
+                    _ => false,
+                };
+                if !matches_element {
+                    return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx))));
+                }
+                if matches!(actual, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
+                    self.call_borrows.push((slot, self.scopes.len()));
+                }
+                self.seek_scalar_offset(argument.range.start);
+                let (line, column) = self.position();
+                args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));
+                continue;
             }
             // A container or struct borrow takes the binding's
             // address (`Argument::Borrow`); the same classify rules,

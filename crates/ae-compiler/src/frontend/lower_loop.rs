@@ -130,16 +130,22 @@ impl<'a> Parser<'a> {
         // immutable element declaration per iteration.
         // Borrowed string vectors iterate the same way, with
         // element access going through the pointer.
-        let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
+        let (v_id, elem_ty, by_ref, storage_elem) = match (&first, first_ty) {
             (Expr::Variable(id, Type::Vector(vid), _, _), Type::Vector(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false)
+                (*id, loop_elem, false, elem)
             }
             (Expr::Variable(id, Type::VectorRef(vid), _, _), Type::VectorRef(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, elem == Type::String)
+                (*id, loop_elem, elem == Type::String, elem)
+            }
+            // `for x in slice` iterates a `&[T]` parameter (ADR-0236).
+            (Expr::Variable(id, Type::Slice(vid), _, _), Type::Slice(tid)) if *vid == tid => {
+                let elem = self.ctx.slice_elem(tid);
+                let loop_elem = self.loop_element_binding(elem);
+                (*id, loop_elem, false, elem)
             }
             _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
         };
@@ -171,6 +177,18 @@ impl<'a> Parser<'a> {
         self.close_loop_moves(base, moved_before, loop_offset)?;
         // Per-iteration element binding, then the user's body.
         let element = match elem_ty {
+            // A slice element reads through the fat pointer; the storage
+            // element comes from the slice type, not the binding's view type.
+            // An owned slice element binds through the same in-place address
+            // the vector loop uses; string elements stay value-shaped views.
+            _ if matches!(first_ty, Type::Slice(_)) => {
+                let index = Expr::SliceIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, storage_elem);
+                if matches!(elem_ty, Type::VectorRef(_) | Type::StructRef(_)) {
+                    Expr::BorrowAs(Box::new(index), false, line, col)
+                } else {
+                    index
+                }
+            }
             Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, by_ref),
             // An owned element binds as a reference to the element's storage
             // (`&vec` for a nested vector): the loop variable never owns or

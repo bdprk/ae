@@ -10,7 +10,7 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
         // remedy) at the name itself, so the scan admits it. The marked
         // shapes keep their exclusion rules.
         ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => match resolved.scalar_reads.get(&expression.range.start) {
-            Some(id) => !resolved.array_definitions.contains(id) && !resolved.struct_definitions.contains(id)
+            Some(id) => !resolved.array_definitions.contains(id) && !resolved.slice_definitions.contains(id) && !resolved.struct_definitions.contains(id)
                 && !resolved.owned_vectors.contains(id) && !resolved.owned_text_bindings.contains(id)
                 && !resolved.enum_bindings.contains(id)
                 && !resolved.token_cursor_definitions.contains(id)
@@ -399,6 +399,12 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                                 // An enum value passed by value (`describe(a)`):
                                 // the call moves it.
                                 || resolved.enum_bindings.contains(id)))
+                    // Any other known local in argument position: array and
+                    // slice parameters forward by name, and the lowering's
+                    // argument rules answer the rest (`sum(values)`).
+                    || matches!(&argument.kind, ExpressionKind::Atom(Kind::Ident(name))
+                        if name != "self" && resolved.scalar_reads.get(&argument.range.start)
+                            .is_some_and(|id| !resolved.array_definitions.contains(id)))
                     // A string-typed field in argument position reads as its
                     // view (builtins and `&string` parameters only ever
                     // borrow it).

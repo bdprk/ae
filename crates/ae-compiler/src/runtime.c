@@ -778,7 +778,7 @@ static ae_strview ae_slice_view(ae_strview s, int64_t start, int64_t end, size_t
     ae_strview r = { s.ptr + start, end - start };
     return r;
 }
-static ae_string ae_slice(ae_strview s, int64_t start, int64_t end, size_t line, size_t column) {
+static ae_string ae_str_slice(ae_strview s, int64_t start, int64_t end, size_t line, size_t column) {
     if (start < 0 || end < start || end > s.len) ae_fail("string index out of bounds", line, column);
     ae_utf8_check(s, start, end, line, column);
     char *out = ae_alloc((size_t)(end - start) + 1, line, column);
@@ -1263,6 +1263,19 @@ static void ae_gvec_forfeit(ae_gvec *v) {
     v->cap = 0;
     v->elem_size = 0;
     v->drop = NULL;
+}
+
+// ADR-0236: a read-only slice over contiguous elements owned elsewhere. The
+// fat pointer carries the visible length and the element size, so one struct
+// serves every element kind; accessors bounds-check like the vector index.
+typedef struct { const void *data; int64_t len; int64_t elem_size; } ae_slice;
+static int64_t ae_slice_len(ae_slice s, size_t line, size_t column) {
+    (void)line; (void)column;
+    return s.len;
+}
+static const void *ae_slice_at(ae_slice s, int64_t index, size_t line, size_t column) {
+    ae_vec_index(index, s.len, line, column);
+    return (const char *)s.data + (size_t)index * (size_t)s.elem_size;
 }
 
 // In-place orderings for i64 vectors. qsort is the C library's introsort and

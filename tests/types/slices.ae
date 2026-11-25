@@ -1,0 +1,21 @@
+struct Tagged { name: string, n: i64 }
+
+fn sum(values: &[i64]) -> i64 {
+    var total = 0;
+    for x in values { total += x; }
+    return total;
+}
+
+fn names(words: &[string]) -> i64 {
+    print(words[0]);
+    return len(words);
+}
+
+fn tags(items: &[Tagged]) -> i64 {
+    return items[0].n;
+}
+
+fn main() {
+    var v = vec[1, 2];
+    print(sum(&v));
+}

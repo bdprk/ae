@@ -1,6 +1,6 @@
 # ADR-0236: `&[T]` slices as borrowed fat pointers
 
-- Status: Proposed
+- Status: Accepted (rung 1 landed 2026-11-25)
 - Date: 2026-11-25
 - Associated Milestone: P2.4 action 1 (generic `Slice[T]`), feeds P4.1/P7.1
 

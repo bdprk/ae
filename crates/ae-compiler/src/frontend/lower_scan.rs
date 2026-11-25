@@ -186,10 +186,15 @@ impl<'a> Parser<'a> {
                 for parameter in parameters {
                     let spelling = self.source.get(parameter.ty.clone()).unwrap_or("").trim().trim_start_matches('&').trim();
                     if !spelling.starts_with('[') { continue }
+                    let is_array = spelling.contains(';');
                     if let Some(entry) = resolution.defs.iter().find(|entry| {
                         entry.kind == ae_resolve::DefKind::Parameter && entry.range.start == parameter.name_range.start
                     }) {
-                        expressions.array_definitions.insert(entry.id);
+                        if is_array {
+                            expressions.array_definitions.insert(entry.id);
+                        } else {
+                            expressions.slice_definitions.insert(entry.id);
+                        }
                     }
                 }
             }
@@ -682,7 +687,28 @@ impl<'a> Parser<'a> {
                     }
                     if self.tokens.get(index).map(|token| token.kind.clone()) == Some(Kind::LBracket)
                         && let Some(def) = expressions.scalar_definitions.get(&parameter.name_range.start) {
-                            expressions.array_definitions.insert(*def);
+                            // `[T; N]` is a fixed array; `[T]` is a slice.
+                            let mut depth = 0i32;
+                            let mut is_array = false;
+                            for token in &self.tokens[index + 1..] {
+                                match token.kind {
+                                    Kind::LBracket => depth += 1,
+                                    Kind::RBracket => {
+                                        if depth == 0 { break; }
+                                        depth -= 1;
+                                    }
+                                    Kind::Semi if depth == 0 => {
+                                        is_array = true;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if is_array {
+                                expressions.array_definitions.insert(*def);
+                            } else {
+                                expressions.slice_definitions.insert(*def);
+                            }
                         }
                 }
             }

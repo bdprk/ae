@@ -48,7 +48,7 @@ impl<'a> Parser<'a> {
                                     self.seek_scalar_offset(expression.range.end);
                                     return Ok((Expr::Number(n as i64), Type::Int(IntTy::I64)));
                                 }
-                                if matches!(ty, Type::Vector(_) | Type::VectorRef(_) | Type::MapOf(_)) {
+                                if matches!(ty, Type::Vector(_) | Type::VectorRef(_) | Type::MapOf(_) | Type::Slice(_)) {
                                     // The typed fast path stamps the operand with
                                     // the `len` call's position, not the variable's.
                                     let value = Expr::Variable(slot, ty, line, column);
@@ -63,9 +63,9 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(expression.range.end);
                         return Err(self.fail("a token cursor has no len: counting would consume the stream, so use split(text, sep) when the count is needed"));
                     }
-                    if !matches!(ty, Type::String | Type::StrView | Type::Vector(_) | Type::VectorRef(_) | Type::MapOf(_)) {
+                    if !matches!(ty, Type::String | Type::StrView | Type::Vector(_) | Type::VectorRef(_) | Type::MapOf(_) | Type::Slice(_)) {
                         self.seek_scalar_offset(expression.range.end);
-                        return Err(self.fail("len expects a string, vec, map, or array variable"));
+                        return Err(self.fail("len expects a string, vec, map, array, or slice variable"));
                     }
                     self.seek_scalar_offset(expression.range.end);
                     Ok((Expr::Len(Box::new(value), line, column), Type::Int(IntTy::I64)))

@@ -13,6 +13,7 @@ pub struct TypeInterner {
     vector_elems: Vec<TyKind>,
     map_types: Vec<(TyKind, TyKind)>,
     array_elems: Vec<TyKind>,
+    slice_elems: Vec<TyKind>,
 }
 
 impl TypeInterner {
@@ -81,6 +82,22 @@ impl TypeInterner {
 
     pub fn find_array_elem(&self, element: TyKind) -> Option<usize> {
         self.array_elems.iter().position(|existing| *existing == element)
+    }
+
+    pub fn intern_slice_elem(&mut self, element: TyKind) -> usize {
+        intern(&mut self.slice_elems, element)
+    }
+
+    pub fn slice_elem(&self, id: usize) -> TyKind {
+        self.slice_elems[id]
+    }
+
+    pub fn find_slice_elem(&self, element: TyKind) -> Option<usize> {
+        self.slice_elems.iter().position(|existing| *existing == element)
+    }
+
+    pub fn slice_elem_count(&self) -> usize {
+        self.slice_elems.len()
     }
 
     pub fn array_elem_count(&self) -> usize {

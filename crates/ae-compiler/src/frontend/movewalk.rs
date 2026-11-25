@@ -461,6 +461,12 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             if let Some(violation) = walk_expr(base, moved) { return Some(violation); }
             walk_expr(index, moved)
         }
+        // A slice is a read of its owner; the index is an ordinary read.
+        Expr::SliceOf(slot, ..) => moved.read(*slot),
+        Expr::SliceIndex(slot, index, ..) => {
+            if let Some(violation) = moved.read(*slot) { return Some(violation); }
+            walk_expr(index, moved)
+        }
         // The pointer itself is only read; the count can contain calls and
         // therefore reads or moves of its own, after evaluating the base.
         Expr::PtrOffset(base, count, ..) => {

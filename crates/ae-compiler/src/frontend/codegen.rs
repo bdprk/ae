@@ -567,6 +567,34 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
         }
+        Expr::SliceOf(slot, source, elem, line, col) => {
+            // ADR-0236: the fat pointer is built at the call site. A vector
+            // hands its storage; an array is already a pointer plus its
+            // compile-time length; a slice forwards its value.
+            let c_elem = c_output::c_type_field(*elem, ctx);
+            let text = match *source {
+                Type::Vector(_) => {
+                    out.push_str(&format!("    if (!v{slot}.data) ae_fail(\"use of moved vector\", {line}, {col});
+"));
+                    format!("(ae_slice){{ v{slot}.data, v{slot}.len, (int64_t)sizeof({c_elem}) }}")
+                }
+                Type::VectorRef(_) => {
+                    out.push_str(&format!("    if (!v{slot}->data) ae_fail(\"use of moved vector\", {line}, {col});
+"));
+                    format!("(ae_slice){{ v{slot}->data, v{slot}->len, (int64_t)sizeof({c_elem}) }}")
+                }
+                Type::ArrayOf(_, len) => format!("(ae_slice){{ (const void *)v{slot}, {len}, (int64_t)sizeof({c_elem}) }}"),
+                Type::Slice(_) => format!("v{slot}"),
+                _ => unreachable!("slice source kind"),
+            };
+            Emitted { text, ty: slice_type(ctx, *elem), owned: false, moves: Vec::new(), materialized: true }
+        }
+        Expr::SliceIndex(slot, index, line, col, elem) => {
+            let i = emit_expr(index, out, next, false, ctx);
+            let c_elem = c_output::c_type_field(*elem, ctx);
+            let get = format!("(*((const {c_elem} *)ae_slice_at(v{slot}, {}, {line}, {col})))", i.text);
+            Emitted { text: get, ty: *elem, owned: false, moves: i.moves, materialized: true }
+        }
         Expr::Index(id, len, index, line, col, elem_ty) => {
             // A constant index inside the array's compile-time length is
             // provably in bounds: the check elides (M2.10). An out-of-range
@@ -589,6 +617,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let call = match t.ty {
                 Type::String | Type::StrView => format!("ae_str_len(AE_VIEW({}), {line}, {col})", t.text),
                 Type::Vector(elem_id) => format!("{}_len({}, {line}, {col})", c_output::vector_family(ctx, elem_id), t.text),
+                Type::Slice(_) => format!("ae_slice_len({}, {line}, {col})", t.text),
                 Type::MapOf(id) => format!("{}_len(&{}, {line}, {col})", c_output::map_family(ctx, id), t.text),
                 _ => format!("ae_gvec_len({}, {line}, {col})", t.text),
             };
@@ -645,7 +674,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let st = emit_expr(start, out, next, false, ctx);
             let en = emit_expr(end, out, next, false, ctx);
             let id = *next; *next += 1;
-            out.push_str(&format!("    ae_string t{id} = ae_slice(AE_VIEW({}), {}, {}, {line}, {col});
+            out.push_str(&format!("    ae_string t{id} = ae_str_slice(AE_VIEW({}), {}, {}, {line}, {col});
 ", t.text, st.text, en.text));
             if t.owned { drop_owned_temp(out, &t, ctx); }
             Emitted { text: format!("t{id}"), ty: Type::String, owned: true, moves: Vec::new(), materialized: true }
@@ -1370,6 +1399,9 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
     // type is owned, so the temp must never be released (ADR-0235 slice 4).
     // A fresh value already reports `owned: true` and is released here.
     Emitted { text: format!("t{id}"), ..emitted }
+}
+fn slice_type(ctx: &CompileContext, elem: Type) -> Type {
+    Type::Slice(ctx.find_slice_elem(elem).expect("pre-interned slice element type"))
 }
 fn vector_type(ctx: &CompileContext, elem: Type) -> Type {
     Type::Vector(ctx.find_vector_elem(elem).expect("pre-interned vector element type"))

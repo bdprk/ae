@@ -1,0 +1,62 @@
+// P2.4 action 1: `&[T]` slices (ADR-0236).
+// A slice is a read-only fat pointer over a whole vector, a whole array, or
+// another slice. It carries the length, reads as values or views by element
+// kind, iterates with the vector loop's binding rules, and lasts only for the
+// call.
+struct Tagged { name: string, n: i64 }
+
+fn sum(values: &[i64]) -> i64 {
+    var total = 0;
+    for x in values { total += x; }
+    return total;
+}
+
+fn forward(values: &[i64]) -> i64 { return sum(values); }
+
+fn from_array(a: &[i64; 3]) -> i64 { return forward(&a); }
+
+fn show_words(words: &[string]) {
+    print(len(words));
+    print(words[0]);
+    for w in words { print(w); }
+}
+
+fn tag_total(items: &[Tagged]) -> i64 {
+    var total = 0;
+    for t in items { total += t.n; }
+    return total;
+}
+
+fn show_first(items: &[Tagged]) {
+    print(items[0].name);
+    print(items[0].n);
+}
+
+fn rows_total(rows: &[vec]) -> i64 {
+    var total = 0;
+    for row in rows { total += len(row); }
+    return total;
+}
+
+fn float_total(values: &[f64]) -> f64 {
+    var total = 0.0;
+    for x in values { total += x; }
+    return total;
+}
+
+fn main() {
+    var v = vec[1, 2, 3];
+    print(sum(&v));
+    print(forward(&v));
+    let a = [10, 20, 30];
+    print(from_array(&a));
+    var words = vec["alpha", "beta"];
+    show_words(&words);
+    let tags = vec[Tagged { name: "x", n: 4 }, Tagged { name: "y", n: 5 }];
+    print(tag_total(&tags));
+    show_first(&tags);
+    let rows = vec[vec[1, 2], vec[3]];
+    print(rows_total(&rows));
+    let floats = vec[1.5, 2.5];
+    print(float_total(&floats));
+}

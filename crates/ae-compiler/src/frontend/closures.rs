@@ -444,6 +444,12 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
             walk_expr(base, used, mutated);
             walk_expr(index, used, mutated);
         }
+        // A slice reads its owner; its index reads are ordinary reads.
+        Expr::SliceOf(slot, ..) => { used.insert(*slot); }
+        Expr::SliceIndex(slot, index, ..) => {
+            used.insert(*slot);
+            walk_expr(index, used, mutated);
+        }
         // Both the pointer and its offset can reference captured values.
         Expr::PtrOffset(base, count, ..) | Expr::PtrWrite(base, count, ..) => {
             walk_expr(base, used, mutated);

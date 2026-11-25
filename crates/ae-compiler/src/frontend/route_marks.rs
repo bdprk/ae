@@ -299,6 +299,7 @@ pub(super) fn receiver_field_type(
             match receiver_field_type(base, receiver, structs, ctx)? {
                 Type::Vector(id) | Type::VectorRef(id) => Some(ctx.vector_elem(id)),
                 Type::ArrayOf(id, _) => Some(ctx.array_elem(id)),
+                Type::Slice(id) => Some(ctx.slice_elem(id)),
                 _ => None,
             }
         }

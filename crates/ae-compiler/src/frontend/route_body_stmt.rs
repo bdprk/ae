@@ -344,7 +344,11 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                     | ae_syntax::expression::ExpressionKind::Call { .. })
                 && (matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Call { .. })
                     || resolved.scalar_reads.get(&iterable.range.start)
-                        .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id)))
+                        .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id))
+                    // A slice parameter (or a local the marks do not
+                    // classify) iterates permissively: the lowering's loop
+                    // check answers by the slot's type.
+                    || resolved.scalar_reads.contains_key(&iterable.range.start))
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::Match { subject, arms } => {
@@ -406,10 +410,13 @@ pub(super) fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::
     if !field_target {
         let Some(ExpressionKind::Atom(Kind::Ident(_))) = arguments.first().map(|argument| &argument.kind) else { return None };
         let def = resolved.scalar_reads.get(&arguments[0].range.start)?;
-        // An owned vector takes the statement; a borrowed one (`&vec`) is
-        // admitted too so the lowering reports the typed route's own shape
-        // diagnostic ('push expects a vec'), never a denial.
-        if !resolved.vector_definitions.contains(def) { return None }
+        // An owned vector takes the statement; a borrowed one (`&vec`), a
+        // slice parameter, or any other known local is admitted too so the
+        // lowering reports the typed route's own shape diagnostic
+        // ('push expects a vec, found &[i64]'), never a denial.
+        if !resolved.vector_definitions.contains(def) && !resolved.scalar_reads.contains_key(&arguments[0].range.start) {
+            return None;
+        }
     }
     match (builtin, arguments.len()) {
         ("push", 2) => Some((builtin, &arguments[1])),

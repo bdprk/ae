@@ -136,6 +136,24 @@ impl SpellingParser<'_> {
             Kind::Amp => {
                 self.cursor += 1;
                 let mutable = self.take(Kind::Mut);
+                // `&[T]` / `&[T; N]`: the element spelling, then an optional
+                // length after `;` (ADR-0236).
+                if self.take(Kind::LBracket) {
+                    let element = Box::new(self.spelling());
+                    let length = if self.take(Kind::Semi) {
+                        match self.current().map(|token| token.kind.clone()) {
+                            Some(Kind::Number(n)) => {
+                                self.cursor += 1;
+                                Some(n as usize)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    self.take(Kind::RBracket);
+                    return TypeSpelling::Slice { mutable, element, length };
+                }
                 let inner = Box::new(self.spelling());
                 TypeSpelling::Borrow { mutable, inner }
             }

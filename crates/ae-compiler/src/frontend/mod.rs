@@ -171,6 +171,18 @@ impl CompileContext {
         self.types.vector_elem_count()
     }
 
+    fn intern_slice_elem(&mut self, elem: Type) -> usize {
+        self.types.intern_slice_elem(elem)
+    }
+
+    fn find_slice_elem(&self, elem: Type) -> Option<usize> {
+        self.types.find_slice_elem(elem)
+    }
+
+    fn slice_elem(&self, id: usize) -> Type {
+        self.types.slice_elem(id)
+    }
+
     fn intern_map_types(&mut self, key: Type, value: Type) -> usize {
         self.types.intern_map_types(key, value)
     }
@@ -262,6 +274,7 @@ impl TypeDisplay for Type {
             // element type, whatever it is.
             Type::Vector(id) => format!("vec[{}]", ctx.vector_elem(id).name(ctx)),
             Type::VectorRef(id) => format!("&vec[{}]", ctx.vector_elem(id).name(ctx)),
+            Type::Slice(id) => format!("&[{}]", ctx.slice_elem(id).name(ctx)),
             Type::MapOf(id) => {
                 let (k, v) = ctx.map_types(id);
                 format!("map[{}, {}]", k.name(ctx), v.name(ctx))
@@ -315,6 +328,8 @@ impl TypeDisplay for Type {
             Type::String => "ae_string ".to_owned(),
             Type::StrView => "ae_strview ".to_owned(),
             Type::Vector(id) => format!("{} ", c_output::vector_family(ctx, id)),
+            // A slice is a value: a 3-word fat pointer passed by value.
+            Type::Slice(_) => "ae_slice ".to_owned(),
             // A borrow has no storage of its own; the declaration form exists
             // for a loop variable bound to an owned element's storage
             // (ADR-0235 slice 4), which is a pointer to the element.
@@ -553,7 +568,11 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // struct's vector field): the base expression is the vector lvalue, the
     // index is a value, and the element type names the storage element. The
     // result is a value for Copy elements and a view for owned ones.
-    VecIndexOf(Box<Expr>, Box<Expr>, usize, usize, Type) }
+    VecIndexOf(Box<Expr>, Box<Expr>, usize, usize, Type),
+    // ADR-0236: a slice value built at a call site from a vector, an array
+    // or another slice (the source kind picks the C construction), and an
+    // element read through a slice parameter.
+    SliceOf(usize, Type, Type, usize, usize), SliceIndex(usize, Box<Expr>, usize, usize, Type) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IntMethodKind {
@@ -1090,6 +1109,9 @@ struct ResolvedExpressions {
     /// Reads of an owned string through a closure capture slot.
     closure_capture_reads: HashSet<usize>,
     array_definitions: HashSet<ae_resolve::DefId>,
+    // A `&[T]` slice parameter (ADR-0236): a view, so a bare name is not a
+    // value, but it may be forwarded to a slice parameter by name.
+    slice_definitions: HashSet<ae_resolve::DefId>,
     struct_definitions: HashSet<ae_resolve::DefId>,
     /// The struct name each struct-typed local or parameter spells, resolved
     /// through the registry: a `Named` spelling reaches this module's def

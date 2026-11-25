@@ -10689,3 +10689,77 @@ fn typed_bindings_match_across_backends() {
         );
     }
 }
+
+/// ADR-0236: `&[T]` slices are read-only fat pointers built at call sites
+/// from a whole vector, a whole array, or another slice. Length, indexing and
+/// `for` iteration read through the pointer; owned elements read as views.
+#[test]
+fn slices_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slices.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "element mismatch",
+            r#"fn sum(values: &[i64]) -> i64 { return len(values); } fn main() { var words = vec["a"]; print(sum(&words)); }"#,
+            "argument must be &[i64], found vec[string]",
+        ),
+        (
+            "element slice",
+            r#"fn sum(values: &[i64]) -> i64 { return len(values); } fn main() { var v = vec[1, 2]; print(sum(&v[0])); }"#,
+            "a slice argument borrows a whole vector or array",
+        ),
+        (
+            "push through a slice",
+            r#"fn grow(values: &[i64]) { push(values, 1); } fn main() {}"#,
+            "push expects a vec, found &[i64]",
+        ),
+        (
+            "returning a slice",
+            r#"fn take(values: &[i64]) -> &[i64] { return values; } fn main() {}"#,
+            "a function cannot return a borrow",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slices-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

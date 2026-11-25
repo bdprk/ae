@@ -452,6 +452,20 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             "index_of",
             vec![lower_operand(base, bindings, lowering), lower_operand(index, bindings, lowering)],
         ),
+        Expr::SliceOf(slot, source, elem, ..) => (
+            "slice_of",
+            vec![MirOperand::Place(MirPlace::Local(*slot, match *source {
+                Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)),
+                other => other,
+            }))],
+        ),
+        Expr::SliceIndex(slot, index, _, _, elem) => (
+            "slice_index",
+            vec![
+                MirOperand::Place(MirPlace::Local(*slot, Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)))),
+                lower_operand(index, bindings, lowering),
+            ],
+        ),
         Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(sep, bindings, lowering)]),
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
@@ -559,6 +573,8 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::Index(.., elem_ty) => *elem_ty,
         Expr::VecIndex(_, _, _, _, _, ty) => *ty,
         Expr::VecIndexOf(_, _, _, _, ty) => *ty,
+        Expr::SliceOf(_, _, elem, ..) => Type::Slice(ctx.find_slice_elem(*elem).unwrap_or(0)),
+        Expr::SliceIndex(_, _, _, _, elem) => *elem,
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,
         Expr::FloatLit(..) | Expr::ToF64(..) => Type::Float(FloatTy::F64),

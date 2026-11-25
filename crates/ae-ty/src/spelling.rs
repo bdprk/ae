@@ -21,6 +21,8 @@ pub enum TypeSpelling {
     Pointer { mutable: bool, pointee: Box<TypeSpelling> },
     /// `&T` / `&mut T` in parameter and fn-value positions.
     Borrow { mutable: bool, inner: Box<TypeSpelling> },
+    /// `&[T]` (no length) or `&[T; N]` (a fixed array), ADR-0236.
+    Slice { mutable: bool, element: Box<TypeSpelling>, length: Option<usize> },
     /// `fn(T, …) -> R`.
     FnValue { parameters: Vec<TypeSpelling>, returns: Box<TypeSpelling> },
     /// A struct or enum of this module.
@@ -55,6 +57,11 @@ impl TypeSpelling {
             }
             TypeSpelling::Borrow { mutable, inner } => {
                 format!("&{} {}", if *mutable { "mut " } else { "" }, inner.describe())
+            }
+            TypeSpelling::Slice { mutable, element, length } => {
+                let element = element.describe();
+                let length = length.map(|n| format!("; {n}")).unwrap_or_default();
+                format!("&{}[{element}{length}]", if *mutable { "mut " } else { "" })
             }
             TypeSpelling::FnValue { parameters, returns } => {
                 let inner: Vec<String> = parameters.iter().map(|parameter| parameter.describe()).collect();

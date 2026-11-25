@@ -846,7 +846,7 @@ impl Parser<'_> {
             return self.named_type();
         }
         let ty = self.parameter_type()?;
-        if matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
+        if matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..) | Type::Slice(_)) {
             Ok(ty)
         } else {
             Err(self.fail("unsupported borrowed parameter type for a callable"))
@@ -980,6 +980,14 @@ impl Parser<'_> {
             }
             self.take(Kind::LBracket)?;
             let elem_ty = self.named_type()?;
+            // `&[T]` is a slice (ADR-0236); `&[T; N]` keeps its length.
+            if *self.current() == Kind::RBracket {
+                self.pos += 1;
+                if !self.is_vector_element_type(elem_ty) {
+                    return Err(self.fail("slice elements must be string, a value type, an owned struct, or a vec"));
+                }
+                return Ok(Type::Slice(self.ctx.intern_slice_elem(elem_ty)));
+            }
             if !self.is_array_element_type(elem_ty) {
                 return Err(self.fail("array elements must be a Copy non-borrow type"));
             }
