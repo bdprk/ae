@@ -10,8 +10,9 @@ vectors with Drop glue (push/overwrite/pop/scope release, drop prints in
 the compared output), string vector literals, vector fields and nested
 field chains (`box.cells`, `outer.box.cells`), indexed place borrows
 (`&v[i]`), typed local bindings (P2.4/P2.5), and `&[T]` slices built at
-call sites from vectors, arrays and forwarded parameters (ADR-0236),
-structs, enums,
+call sites from vectors, arrays and forwarded parameters, and sub-slice
+windows (`&v[0..0]`, `&v[3..3]`, `&arr[2..3]`, string/owned/nested element
+windows) (ADR-0236 rungs 1/3), structs, enums,
 matches with payload bindings, counted loops with `continue`, and the
 borrow surface (M2.5): a Doc struct with a `&mut self` method and a free
 `&mut` function, field views born and read inside one statement group,
@@ -548,9 +549,12 @@ class Gen:
                 f"print(fuzz_slice_forward(&{name}));",
                 f"print(fuzz_slice_first(&{name}));",
                 f"print(fuzz_slice_sum(&{name}[1..3]));",
+                f"print(fuzz_slice_sum(&{name}[0..0]));",
+                f"print(fuzz_slice_sum(&{name}[3..3]));",
                 f"let {arr} = [{values[0]}, {values[1]}, {values[2]}];",
                 f"print(fuzz_slice_sum(&{arr}));",
                 f"print(fuzz_slice_first(&{arr}[0..2]));",
+                f"print(fuzz_slice_sum(&{arr}[2..3]));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
         if kind == 29:
@@ -569,12 +573,17 @@ class Gen:
                 f'var {words} = vec["w{self.rnd() % 1000}", "w{self.rnd() % 1000}"];',
                 f"print(fuzz_slice_words(&{words}));",
                 f"print(fuzz_slice_word_len(&{words}));",
+                f"print(fuzz_slice_words(&{words}[0..1]));",
+                f"print(fuzz_slice_word_len(&{words}[1..2]));",
                 f"var {tags} = vec[{tag('s')}, {tag('t')}];",
                 f"print(fuzz_slice_tags(&{tags}));",
                 f"print(fuzz_slice_tag0(&{tags}));",
+                f"print(fuzz_slice_tags(&{tags}[0..1]));",
+                f"print(fuzz_slice_tag0(&{tags}[1..2]));",
                 f"print({tags}[0].n);",
                 f"var {rows} = vec[vec[{value()}, {value()}], vec[{value()}]];",
                 f"print(fuzz_slice_rows(&{rows}));",
+                f"print(fuzz_slice_rows(&{rows}[1..2]));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
         name = self.fresh("s")
