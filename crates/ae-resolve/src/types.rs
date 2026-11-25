@@ -41,6 +41,8 @@ pub enum SpellingRole {
     ClosureParameter,
     /// The return spelling of a closure literal.
     ClosureReturn,
+    /// A `let`/`var` binding's annotation (`let v: vec[f64] = vec[];`).
+    LocalBinding,
 }
 
 /// One entry of the module's spelling table: the owner (a function, struct
@@ -63,6 +65,7 @@ impl SpellingRole {
             SpellingRole::VariantPayload => "variant-payload",
             SpellingRole::ClosureParameter => "closure-parameter",
             SpellingRole::ClosureReturn => "closure-return",
+            SpellingRole::LocalBinding => "binding",
         }
     }
 }

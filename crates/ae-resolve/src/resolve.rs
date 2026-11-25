@@ -1153,9 +1153,23 @@ impl Walker<'_> {
 
     fn statement(&mut self, statement: &Statement) {
         match &statement.kind {
-            StatementKind::Binding { mutable, name, name_range, initializer } => {
+            StatementKind::Binding { mutable, name, name_range, ty, initializer } => {
                 self.expr(initializer, Role::Read);
-                let inferred = self.infer_expression(initializer);
+                // A `let v: Type = …` annotation is the binding's declared
+                // shape: it wins over the initializer's inference and joins
+                // the spelling table (so hover and type dumps show it).
+                let annotated = ty.as_ref().map(|range| {
+                    let spelled = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), range.clone());
+                    let spelling = spelled.spelling.clone();
+                    self.spellings.push(SpellingEntry {
+                        owner: self.function_def,
+                        role: SpellingRole::LocalBinding,
+                        name: name.clone(),
+                        spelled,
+                    });
+                    spelling
+                });
+                let inferred = annotated.or_else(|| self.infer_expression(initializer));
                 let binding = self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred, statement.range.end);
                 if let Some(ExpressionType::Checked(scalar)) = self.expression_types.get(&initializer.range) {
                     self.scalar_bindings.insert(binding, *scalar);

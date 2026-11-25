@@ -26,7 +26,7 @@ pub struct Statement {
 pub enum StatementKind {
     /// `let name = init;` / `var name = init;`. The initializer may carry a
     /// trailing `?` (already folded into `ExpressionKind::Propagate`).
-    Binding { mutable: bool, name: String, name_range: Range<usize>, initializer: Expression },
+    Binding { mutable: bool, name: String, name_range: Range<usize>, ty: Option<Range<usize>>, initializer: Expression },
     /// `target = value;`, `target += value;`, `name[i] = value;`,
     /// `name.field = value;`. The target is an expression because the grammar
     /// cannot tell a variable from a call without resolving names; the
@@ -99,22 +99,56 @@ pub struct BindingHeader<'a> {
     pub name: &'a str,
     pub name_range: Range<usize>,
     pub mutable: bool,
+    /// `let name: Type = …`: the annotation's byte range. The compiler owns
+    /// the spelling's meaning; the grammar only delimits it.
+    pub ty: Option<Range<usize>>,
 }
 
 /// Read a `let` or `var` header from the keyword token and stop before `=`.
-/// The compiler checks scope and writability before reading the initializer.
+/// Returns the header and the index of the `=` token. The compiler checks
+/// scope and writability before reading the initializer.
 pub fn parse_binding_header<'a>(
     file: &str,
     source: &str,
     tokens: &'a [Token],
     start: usize,
-) -> Result<BindingHeader<'a>, Diagnostic> {
+) -> Result<(BindingHeader<'a>, usize), Diagnostic> {
     let token = &tokens[start + 1];
-    Ok(BindingHeader {
-        name: crate::parse_identifier(file, source, token)?,
+    let name = crate::parse_identifier(file, source, token)?;
+    let mut pos = start + 2;
+    let mut ty = None;
+    if tokens.get(pos).is_some_and(|token| token.kind == Kind::Colon) {
+        pos += 1;
+        let begin = pos;
+        let mut depth = 0usize;
+        while let Some(token) = tokens.get(pos) {
+            match token.kind {
+                Kind::LBracket => depth += 1,
+                Kind::RBracket => {
+                    if depth == 0 { break; }
+                    depth -= 1;
+                }
+                Kind::Equal if depth == 0 => break,
+                Kind::Semi | Kind::Eof => break,
+                _ => {}
+            }
+            pos += 1;
+        }
+        if pos == begin {
+            return Err(diagnostic_range(
+                file, source, tokens[begin - 1].offset..tokens[begin - 1].end,
+                "expected a type after ':'",
+            ).with_code("E0010"));
+        }
+        let range = tokens[begin].offset..tokens[pos - 1].end;
+        ty = Some(range);
+    }
+    Ok((BindingHeader {
+        name,
         name_range: token.offset..token.end,
         mutable: tokens[start].kind == Kind::Var,
-    })
+        ty,
+    }, pos))
 }
 
 struct Parser<'a> {
@@ -236,13 +270,13 @@ impl Parser<'_> {
     fn simple_statement(&mut self) -> Result<StatementKind, Diagnostic> {
         Ok(match self.current().kind {
             Kind::Let | Kind::Var => {
-                let BindingHeader { name, name_range, mutable } =
+                let (BindingHeader { name, name_range, mutable, ty }, equal) =
                     parse_binding_header(self.file, self.source, self.tokens, self.pos)?;
-                self.pos += 2;
+                self.pos = equal;
                 self.take(Kind::Equal)?;
                 let initializer = self.expression(true, true)?;
                 self.take(Kind::Semi)?;
-                StatementKind::Binding { mutable, name: name.to_owned(), name_range, initializer }
+                StatementKind::Binding { mutable, name: name.to_owned(), name_range, ty, initializer }
             }
             Kind::Print => {
                 self.pos += 1;
@@ -464,12 +498,13 @@ mod tests {
         let wrapped = format!("{{ {source} }}");
         let statements = parse_body(&wrapped);
         assert_eq!(statements.len(), 2);
-        let StatementKind::Binding { mutable, name, name_range, initializer } = &statements[0].kind else {
+        let StatementKind::Binding { mutable, name, name_range, ty, initializer } = &statements[0].kind else {
             panic!("expected a binding");
         };
         assert!(!mutable);
         assert_eq!(name, "name");
         assert_eq!(&wrapped[name_range.clone()], "name");
+        assert!(ty.is_none());
         assert_eq!(&wrapped[initializer.range.clone()], "fetch()?");
         assert!(matches!(initializer.kind, crate::expression::ExpressionKind::Propagate(_)));
         let StatementKind::Binding { mutable, name, .. } = &statements[1].kind else {

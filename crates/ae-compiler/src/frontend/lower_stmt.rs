@@ -11,7 +11,7 @@ impl<'a> Parser<'a> {
     ) -> Result<Statement, ae_span::Diagnostic> {
         use ae_syntax::statement::{ElseBranch, StatementKind};
         let lowered = match &statement.kind {
-            StatementKind::Binding { name, name_range, mutable, initializer } => {
+            StatementKind::Binding { name, name_range, mutable, ty: annotation_range, initializer } => {
                 self.seek_scalar_offset(name_range.end);
                 if RESERVED.contains(&name.as_str()) {
                     return Err(self.fail(&format!("'{name}' is a built-in name and cannot be a variable")));
@@ -25,6 +25,19 @@ impl<'a> Parser<'a> {
                 if self.names.contains_key(name) {
                     return Err(self.duplicate_binding_error(name));
                 }
+                // `let v: Type = …` / `var v: Type = …`: the annotation is a
+                // declared shape. The initializer must agree with it; an empty
+                // `vec[]` takes its element type from it.
+                let annotation = match annotation_range {
+                    Some(range) => {
+                        self.seek_scalar_offset(range.start);
+                        if *self.current() == Kind::Amp {
+                            return Err(self.fail("a local binding cannot hold a borrow; borrows exist as parameters and match bindings"));
+                        }
+                        Some(self.named_type()?)
+                    }
+                    None => None,
+                };
                 let slot = self.next_var;
                 self.next_var += 1;
                 let def = self.resolved_definition(
@@ -125,7 +138,12 @@ impl<'a> Parser<'a> {
                         element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
                         values.push(value);
                     }
-                    let elem = element_type.unwrap_or(Type::Int(IntTy::I64));
+                    let elem = match (element_type, annotation) {
+                        // `let v: vec[f64] = vec[];` names the empty
+                        // literal's element type.
+                        (None, Some(Type::Vector(id))) => self.ctx.vector_elem(id),
+                        (element, _) => element.unwrap_or(Type::Int(IntTy::I64)),
+                    };
                     let ty = Type::Vector(self.ctx.intern_vector_elem(elem));
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
@@ -179,6 +197,18 @@ impl<'a> Parser<'a> {
                     self.take(Kind::Semi)?;
                     self.check_borrowed_binding(ty)?;
                     (Statement::Declare(slot, value), ty)
+                };
+                let ty = match (annotation, annotation_range) {
+                    (Some(expected), Some(range)) if expected != ty => {
+                        self.seek_scalar_offset(range.start);
+                        return Err(self.fail(&format!(
+                            "the annotation says {}, but the initializer is {}",
+                            expected.name(self.ctx),
+                            ty.name(self.ctx),
+                        )));
+                    }
+                    (Some(expected), _) => expected,
+                    (None, _) => ty,
                 };
                 slots.insert(def, (slot, ty));
                 self.names.insert(name.clone(), (slot, *mutable, ty));

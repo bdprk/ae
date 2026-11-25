@@ -10614,3 +10614,78 @@ fn bytes_values_match_across_backends_and_the_interpreter_is_complete() {
         assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
     }
 }
+
+/// P2.5.1 (M1.2.06): local type annotations. `let v: vec[f64] = vec[];`
+/// names an empty literal's element type, `let n: i64 = 41;` declares a
+/// scalar binding, and a mismatch reports "the annotation says X, but the
+/// initializer is Y". A borrow annotation is rejected outright.
+#[test]
+fn typed_bindings_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("typed_bindings.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "scalar annotation mismatch",
+            r#"fn main() { let n: i64 = 1.5; print(n); }"#,
+            "the annotation says i64, but the initializer is f64",
+        ),
+        (
+            "vector element annotation mismatch",
+            r#"fn main() { let v: vec[f64] = vec[1, 2]; }"#,
+            "the annotation says vec[f64], but the initializer is vec[i64]",
+        ),
+        (
+            "borrow annotation",
+            r#"struct P { x: i64 } fn main() { let p = P { x: 1 }; let r: &P = p; print(r.x); }"#,
+            "a local binding cannot hold a borrow",
+        ),
+        (
+            "unknown annotated type",
+            r#"fn main() { let extra: Vec[i64] = vec[1]; }"#,
+            "unknown type 'Vec'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-typed-bindings-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
