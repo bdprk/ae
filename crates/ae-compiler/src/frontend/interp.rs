@@ -652,6 +652,114 @@ fn eval_stmts(
                     return flow;
                 }
             }
+            // P2.4: vector operations on a struct's vector field. The field
+            // value is read out, mutated, and written back; a `&mut` root
+            // resolves through the lender's frame.
+            Statement::VecPushField(id, field, _, value_expr, elem_ty, _, line, col) => {
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let value = match eval_expr(env, value_expr, locals, caller_locals, moving) {
+                    Ok(value) => value,
+                    Err(flow) => return flow,
+                };
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                match &mut container {
+                    Val::VecI(v) => match value { Val::Int(n) => v.push(n), _ => return Flow::Trap("internal: vec push type".to_owned()) },
+                    Val::VecF(v) => match value { Val::Float(x) => v.push(x), _ => return Flow::Trap("internal: f64vec push type".to_owned()) },
+                    Val::VecS(v) => match value { Val::Str(s) => v.push(s), _ => return Flow::Trap("internal: strvec push type".to_owned()) },
+                    Val::VecG(v) => v.push(value),
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: push on non-vec".to_owned()),
+                }
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+            }
+            Statement::VecPopField(id, field, _, elem_ty, line, col) => {
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                let popped = match &mut container {
+                    Val::VecI(v) => v.pop().map(Val::Int),
+                    Val::VecF(v) => v.pop().map(Val::Float),
+                    Val::VecS(v) => v.pop().map(Val::Str),
+                    Val::VecG(v) => v.pop(),
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
+                };
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+                let Some(popped) = popped else { return trap("pop on empty vector", *line, *col) };
+                if let Err(flow) = release_val(env, popped, *elem_ty) {
+                    return flow;
+                }
+            }
+            Statement::VecStoreField(id, field, _, index_expr, value_expr, elem_ty, _, line, col) => {
+                let index = match eval_expr(env, index_expr, locals, caller_locals, false) {
+                    Ok(Val::Int(n)) => n,
+                    Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
+                    Err(f) => return f,
+                };
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let value = match eval_expr(env, value_expr, locals, caller_locals, moving) {
+                    Ok(value) => value,
+                    Err(flow) => return flow,
+                };
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                let replaced = match &mut container {
+                    Val::VecI(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match value {
+                            Val::Int(n) => Val::Int(std::mem::replace(&mut v[index as usize], n)),
+                            _ => return Flow::Trap("internal: vec store type".to_owned()),
+                        }
+                    }
+                    Val::VecF(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match value {
+                            Val::Float(x) => Val::Float(std::mem::replace(&mut v[index as usize], x)),
+                            _ => return Flow::Trap("internal: f64vec store type".to_owned()),
+                        }
+                    }
+                    Val::VecS(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match value {
+                            Val::Str(s) => Val::Str(std::mem::replace(&mut v[index as usize], s)),
+                            _ => return Flow::Trap("internal: strvec store type".to_owned()),
+                        }
+                    }
+                    Val::VecG(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        std::mem::replace(&mut v[index as usize], value)
+                    }
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: store on non-vec".to_owned()),
+                };
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+                if let Err(flow) = release_val(env, replaced, *elem_ty) {
+                    return flow;
+                }
+            }
+            Statement::VecSortField(id, field, _, elem_ty, reverse, line, col) => {
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                match &mut container {
+                    Val::VecI(v) => if *reverse { v.reverse() } else { v.sort() },
+                    Val::VecS(v) if *elem_ty == Type::String => if *reverse { v.reverse() } else { v.sort() },
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: sort on non-vec".to_owned()),
+                }
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+            }
             // `m[key] = value;` (and the field form): the map owns the
             // bytes, the key copies, and the value must match the map's
             // value type — the same contract the runtime's put enforces.
@@ -2980,6 +3088,55 @@ fn release_frees(
         }
     }
     Ok(())
+}
+
+/// Read a struct field's value out of the frame. A slot holding a `&mut`
+/// struct reference resolves through the caller's frame.
+fn field_place_get(
+    locals: &HashMap<usize, Val>,
+    caller_locals: &Option<&mut HashMap<usize, Val>>,
+    slot: usize,
+    field: &str,
+) -> Option<Val> {
+    let container = match locals.get(&slot)? {
+        Val::Ref(target) => caller_locals.as_ref()?.get(target)?,
+        other => other,
+    };
+    match container {
+        Val::Struct(_, fields) => fields.get(field).cloned(),
+        _ => None,
+    }
+}
+
+/// Write a struct field back; returns whether a struct storage was found.
+fn field_place_put(
+    locals: &mut HashMap<usize, Val>,
+    caller_locals: &mut Option<&mut HashMap<usize, Val>>,
+    slot: usize,
+    field: &str,
+    value: Val,
+) -> bool {
+    let target = match locals.get(&slot) {
+        Some(Val::Ref(target)) => Some(*target),
+        _ => None,
+    };
+    match target {
+        Some(target) => match caller_locals.as_mut() {
+            Some(map) => put_field(map, target, field, value),
+            None => false,
+        },
+        None => put_field(locals, slot, field, value),
+    }
+}
+
+fn put_field(map: &mut HashMap<usize, Val>, slot: usize, field: &str, value: Val) -> bool {
+    match map.get_mut(&slot) {
+        Some(Val::Struct(_, fields)) => {
+            fields.insert(field.to_owned(), value);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn release_val_inferred(env: &mut Env<'_>, val: Val) -> Result<(), Flow> {

@@ -10271,3 +10271,78 @@ fn indexed_borrow_arguments_match_across_backends() {
         );
     }
 }
+
+/// P2.4: vector operations on a struct's vector field. `push`, `pop`,
+/// `sort`, `reverse` and `r.cells[i] = x` address the field lvalue for every
+/// family; a `&mut` root writes through its pointer; an owned element
+/// releases the replaced/popped value exactly once, in order.
+#[test]
+fn field_vector_writes_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("field_vector_writes.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "immutable root",
+            r#"struct B { items: vec } fn main() { let b = B { items: vec[1] }; push(b.items, 2); }"#,
+            "cannot modify immutable variable 'b'",
+        ),
+        (
+            "field write while an element view is live",
+            r#"struct W { words: vec[string] } fn main() { var w = W { words: vec["a"] }; let s = w.words[0]; push(w.words, "b"); print(s); }"#,
+            "cannot modify 'w' while it is borrowed",
+        ),
+        (
+            "moved root",
+            r#"struct B { items: vec } fn main() { var b = B { items: vec[1] }; let moved = b; push(b.items, 2); }"#,
+            "cannot use 'b' because it was moved",
+        ),
+        (
+            "field is not a vector",
+            r#"struct P { n: i64 } fn main() { var p = P { n: 1 }; push(p.n, 2); }"#,
+            "push expects a vec, found i64",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-field-vector-writes-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

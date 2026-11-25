@@ -88,15 +88,37 @@ impl<'a> Parser<'a> {
         let (builtin, value) = vector_statement_builtin(statement, resolved).expect("vector builtin eligibility");
         let ae_syntax::statement::StatementKind::Expr { value: call, .. } = &statement.kind else { unreachable!("vector builtin statement") };
         let ExpressionKind::Call { callee, arguments } = &call.kind else { unreachable!("vector builtin call") };
-        let ExpressionKind::Atom(Kind::Ident(target)) = &arguments[0].kind else { unreachable!("vector builtin target") };
         self.seek_scalar_offset(callee.range.start);
         let (line, column) = self.position();
-        let (slot, ty) = self.resolved_slot(
-            resolved.scalar_reads.get(&arguments[0].range.start),
-            slots, arguments[0].range.start, target)?;
+        // The receiver is a vector binding or a named struct's vector field
+        // (`push(r.cells, x)`); a field target keeps (field, root type) for the
+        // field-statement forms.
+        let (target_name, slot, ty, field_target) = match &arguments[0].kind {
+            ExpressionKind::Atom(Kind::Ident(target)) => {
+                let (slot, ty) = self.resolved_slot(
+                    resolved.scalar_reads.get(&arguments[0].range.start),
+                    slots, arguments[0].range.start, target)?;
+                (target.clone(), slot, ty, None)
+            }
+            ExpressionKind::Field { base: root, name: field } => {
+                let ExpressionKind::Atom(Kind::Ident(root_name)) = &root.kind else {
+                    return Err(self.error_at(arguments[0].range.start, "a vector builtin needs a named vector field"));
+                };
+                let &(slot, _, struct_ty) = self.names.get(root_name)
+                    .ok_or_else(|| self.error_at(root.range.start, &format!("unknown variable '{root_name}'")).with_code("E0101"))?;
+                let sid = match struct_ty {
+                    Type::Struct(sid) | Type::StructMut(sid) => sid,
+                    _ => return Err(self.error_at(root.range.start, "only a named struct field holds a vector here")),
+                };
+                let field_ty = super::route_marks::field_ty_in(sid, field, self.structs)
+                    .ok_or_else(|| self.error_at(arguments[0].range.start, &format!("struct '{}' has no field '{field}'", self.structs[sid].name)))?;
+                (root_name.clone(), slot, field_ty, Some((field.clone(), struct_ty)))
+            }
+            _ => return Err(self.error_at(arguments[0].range.start, "a vector builtin needs a named vector binding or field")),
+        };
         if self.moved.contains(&slot) {
             return Err(moved_value_hint(self.binding_label(
-                self.fail(&format!("cannot use '{target}' because it was moved")).with_code("E0102"), slot)));
+                self.fail(&format!("cannot use '{target_name}' because it was moved")).with_code("E0102"), slot)));
         }
         let Type::Vector(vec_id) = ty else {
             self.seek_scalar_offset(arguments[0].range.end);
@@ -105,7 +127,7 @@ impl<'a> Parser<'a> {
         let elem_ty = self.ctx.vector_elem(vec_id);
         if self.is_borrowed(slot) {
             self.seek_scalar_offset(arguments[0].range.end);
-            return Err(self.fail(&format!("cannot modify '{target}' while it is borrowed")));
+            return Err(self.fail(&format!("cannot modify '{target_name}' while it is borrowed")));
         }
         // The immutability diagnostic is emitted per branch: the typed route
         // reports a `push` target at the value's token (the shared expression
@@ -113,10 +135,10 @@ impl<'a> Parser<'a> {
         // Ordering happens in place (qsort for i64, byte order for strings);
         // f64 has no total order, so sort/reverse reject it.
         if matches!(builtin, "sort" | "reverse") {
-            if !self.names[target].1 {
+            if !self.names[&target_name].1 {
                 self.seek_scalar_offset(arguments[0].range.end);
                 return Err(self.immutable_binding_error(
-                    self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
+                    self.fail(&format!("cannot modify immutable variable '{target_name}'")).with_code("E0103"), slot));
             }
             if elem_ty == Type::Float(FloatTy::F64) {
                 self.seek_scalar_offset(arguments[0].range.end);
@@ -129,15 +151,18 @@ impl<'a> Parser<'a> {
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
             let strings = elem_ty == Type::String;
+            if let Some((field, base_ty)) = field_target.clone() {
+                return Ok(Statement::VecSortField(slot, field, base_ty, elem_ty, builtin == "reverse", line, column));
+            }
             return Ok(if builtin == "sort" { Statement::Sort(slot, strings, line, column) } else { Statement::Reverse(slot, strings, line, column) });
         }
         if builtin == "push" {
             // The immutability diagnostic points just past the target name
             // (the `,`), the token the typed parser's cursor ends on.
-            if !self.names[target].1 {
+            if !self.names[&target_name].1 {
                 self.seek_scalar_offset(arguments[0].range.end);
                 return Err(self.immutable_binding_error(
-                    self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
+                    self.fail(&format!("cannot modify immutable variable '{target_name}'")).with_code("E0103"), slot));
             }
             let (lowered, value_ty) = self.lower_scalar_body_expression(value, slots)?;
             let ok = if elem_ty == Type::String {
@@ -167,6 +192,10 @@ impl<'a> Parser<'a> {
             }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
+            if let Some((field, base_ty)) = field_target.clone() {
+                let view = value_ty == Type::StrView || super::codegen::string_expr_is_view(&lowered);
+                return Ok(Statement::VecPushField(slot, field, base_ty, lowered, elem_ty, view, line, column));
+            }
             return Ok(match elem_ty {
                 Type::Int(IntTy::I64) => Statement::VecPush(slot, lowered, line, column),
                 Type::String => Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView),
@@ -174,13 +203,16 @@ impl<'a> Parser<'a> {
                 _ => Statement::GVecPush(slot, lowered, elem_ty, line, column),
             });
         }
-        if !self.names[target].1 {
+        if !self.names[&target_name].1 {
             self.seek_scalar_offset(arguments[0].range.end);
             return Err(self.immutable_binding_error(
-                self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
+                self.fail(&format!("cannot modify immutable variable '{target_name}'")).with_code("E0103"), slot));
         }
         self.seek_scalar_offset(call.range.end);
         self.take(Kind::Semi)?;
+        if let Some((field, base_ty)) = field_target {
+            return Ok(Statement::VecPopField(slot, field, base_ty, elem_ty, line, column));
+        }
         Ok(match elem_ty {
             Type::Int(IntTy::I64) => Statement::VecPop(slot, line, column),
             Type::String => Statement::StrVecPop(slot, line, column),

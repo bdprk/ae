@@ -174,6 +174,21 @@ impl<'a> TreePrinter<'a> {
             Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
                 self.line(&format!("pop v{} @ {}:{}", id, line, col));
             }
+            Statement::VecPushField(id, field, _, value, elem, _, line, col) => {
+                let value_text = self.expression_text(value);
+                self.line(&format!("push v{}.{} <- {} ({}) @ {}:{}", id, field, value_text, elem.name(self.ctx), line, col));
+            }
+            Statement::VecPopField(id, field, _, elem, line, col) => {
+                self.line(&format!("pop v{}.{} ({}) @ {}:{}", id, field, elem.name(self.ctx), line, col));
+            }
+            Statement::VecStoreField(id, field, _, index, value, elem, _, line, col) => {
+                let index_text = self.expression_text(index);
+                let value_text = self.expression_text(value);
+                self.line(&format!("v{}.{}[{}] = {} ({}) @ {}:{}", id, field, index_text, value_text, elem.name(self.ctx), line, col));
+            }
+            Statement::VecSortField(id, field, _, elem, reverse, line, col) => {
+                self.line(&format!("{}(v{}.{}) ({}) @ {}:{}", if *reverse { "reverse" } else { "sort" }, id, field, elem.name(self.ctx), line, col));
+            }
             Statement::VecStore(id, index, value, line, col) | Statement::StrVecStore(id, index, value, line, col, _) | Statement::VecFStore(id, index, value, line, col) | Statement::GVecStore(id, index, value, _, line, col) => {
                 let index_text = self.expression_text(index);
                 let value_text = self.expression_text(value);

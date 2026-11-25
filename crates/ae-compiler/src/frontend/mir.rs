@@ -353,6 +353,28 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
         }
         Statement::Break => ("break", vec![]),
         Statement::Continue(label) => ("continue", label.iter().map(|l| MirOperand::Int(*l as i64)).collect()),
+        // P2.4: vector operations on a struct's vector field. The receiver is
+        // the field place; the value/index operands are the statement's own.
+        Statement::VecPushField(id, field, base_ty, value, elem_ty, ..) => (
+            "push_field",
+            vec![field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx), lower_operand(value, bindings, lowering)],
+        ),
+        Statement::VecPopField(id, field, base_ty, elem_ty, ..) => (
+            "pop_field",
+            vec![field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx)],
+        ),
+        Statement::VecStoreField(id, field, base_ty, index, value, elem_ty, ..) => (
+            "store_field",
+            vec![
+                field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx),
+                lower_operand(index, bindings, lowering),
+                lower_operand(value, bindings, lowering),
+            ],
+        ),
+        Statement::VecSortField(id, field, base_ty, elem_ty, reverse, ..) => (
+            if *reverse { "reverse_field" } else { "sort_field" },
+            vec![field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx)],
+        ),
         // Control shapes never survive into a MIR block; a bare placeholder
         // here is a tripwire, not a rendering.
         _ => ("stmt", vec![]),
@@ -365,6 +387,14 @@ fn map_kind_type(kind: &MapKind, ctx: &CompileContext) -> Type {
         MapKind::Float => Type::Float(FloatTy::F64),
     };
     Type::MapOf(ctx.find_map_types(Type::String, value).unwrap_or(0))
+}
+
+/// The receiver of a vector-field operation: `root.field` typed with the
+/// field's vector type. The element type was interned when the field's type
+/// spelling was parsed, so the lookup always answers.
+fn field_vector_operand(id: usize, field: &str, base_ty: Type, elem_ty: Type, ctx: &CompileContext) -> MirOperand {
+    let vector_ty = ctx.find_vector_elem(elem_ty).map(Type::Vector).unwrap_or(Type::Vector(0));
+    MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(id, base_ty)), field.to_owned(), vector_ty))
 }
 
 fn map_place_operand(place: &MapPlace, ctx: &CompileContext) -> MirOperand {

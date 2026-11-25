@@ -31,6 +31,13 @@ pub(super) fn string_expr_is_view(expr: &Expr) -> bool {
     }
 }
 
+/// The C lvalue of a struct's field: `v{id}.field`, or `v{id}->field` when the
+/// root is a mutable borrow (ADR-0185's through-pointer access).
+pub(super) fn field_member(id: usize, field: &str, base_ty: Type) -> String {
+    let dot = if matches!(base_ty, Type::StructMut(_)) { "->" } else { "." };
+    format!("v{id}{dot}{field}")
+}
+
 // Rust's Debug formatting is the shortest decimal that round-trips and always
 // carries a '.' or an exponent, so it is a valid C double literal. Non-finite
 // values never reach here: the lexer rejects them (ADR-37).
@@ -1632,6 +1639,92 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));
                 out.push_str(&format!("    ae_gvec_set(&v{id}, t{idx_tmp}, &t{val_tmp}, {line}, {col});\n"));
                 null_moves(out, &value.moves, ctx);
+            }
+            // P2.4: vector operations on a struct's vector field (`r.cells`).
+            // The receiver is the field lvalue; a `&mut` root reads through
+            // its pointer. Each arm mirrors its slot form exactly.
+            Statement::VecPushField(id, field, base_ty, value, elem_ty, str_view, line, col) => {
+                let member = field_member(*id, field, *base_ty);
+                out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                match elem_ty {
+                    Type::Int(IntTy::I64) => {
+                        let value = emit_expr(value, out, next, false, ctx);
+                        out.push_str(&format!("    ae_vec_push(&({member}), {}, {line}, {col});\n", value.text));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                    Type::Float(FloatTy::F64) => {
+                        let value = emit_expr(value, out, next, false, ctx);
+                        out.push_str(&format!("    ae_f64vec_push(&({member}), {}, {line}, {col});\n", value.text));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                    Type::String => {
+                        let borrowed = *str_view || string_expr_is_view(value);
+                        let value = emit_expr(value, out, next, !borrowed, ctx);
+                        let text = if borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
+                        out.push_str(&format!("    ae_strvec_push(&({member}), {text}, {line}, {col});\n"));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                    _ => {
+                        let moving = is_owned_type(*elem_ty, ctx.structs, ctx.enums);
+                        let value = emit_expr(value, out, next, moving, ctx);
+                        let tmp = *next; *next += 1;
+                        let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                        out.push_str(&format!("    {c_elem} t{tmp} = {};\n", value.text));
+                        out.push_str(&format!("    ae_gvec_push(&({member}), &t{tmp}, {line}, {col});\n"));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                }
+            }
+            Statement::VecPopField(id, field, base_ty, elem_ty, line, col) => {
+                let member = field_member(*id, field, *base_ty);
+                out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                let pop = match elem_ty {
+                    Type::Int(IntTy::I64) => "ae_vec_pop",
+                    Type::Float(FloatTy::F64) => "ae_f64vec_pop",
+                    Type::String => "ae_strvec_pop",
+                    _ => "ae_gvec_pop",
+                };
+                out.push_str(&format!("    {pop}(&({member}), {line}, {col});\n"));
+            }
+            Statement::VecStoreField(id, field, base_ty, index, value, elem_ty, str_view, line, col) => {
+                let member = field_member(*id, field, *base_ty);
+                out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                let i = emit_expr(index, out, next, false, ctx);
+                let checked = *next; *next += 1;
+                out.push_str(&format!("    int64_t t{checked} = ae_vec_index({}, ({member}).len, {line}, {col});\n", i.text));
+                match elem_ty {
+                    Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) => {
+                        let value = emit_expr(value, out, next, false, ctx);
+                        out.push_str(&format!("    ({member}).data[t{checked}] = {};\n", value.text));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                    Type::String => {
+                        let borrowed = *str_view || string_expr_is_view(value);
+                        let value = emit_expr(value, out, next, !borrowed, ctx);
+                        let text = if borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
+                        let replacement = *next; *next += 1;
+                        out.push_str(&format!("    {}t{replacement} = {text};\n", Type::String.c_temp(ctx)));
+                        out.push_str(&format!("    ae_strvec_clear_slot(&({member}), t{checked}, {line}, {col});\n"));
+                        out.push_str(&format!("    ({member}).data[t{checked}] = t{replacement};\n"));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                    _ => {
+                        let moving = is_owned_type(*elem_ty, ctx.structs, ctx.enums);
+                        let value = emit_expr(value, out, next, moving, ctx);
+                        let val_tmp = *next; *next += 1;
+                        let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                        out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));
+                        out.push_str(&format!("    ae_gvec_set(&({member}), t{checked}, &t{val_tmp}, {line}, {col});\n"));
+                        null_moves(out, &value.moves, ctx);
+                    }
+                }
+            }
+            Statement::VecSortField(id, field, base_ty, elem_ty, reverse, line, col) => {
+                let member = field_member(*id, field, *base_ty);
+                out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                let family = if *elem_ty == Type::String { "strvec" } else { "vec" };
+                let op = if *reverse { "reverse" } else { "sort" };
+                out.push_str(&format!("    ae_{family}_{op}(&({member}));\n"));
             }
             Statement::StrVecPush(id, value, line, col, borrowed) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));

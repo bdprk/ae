@@ -381,9 +381,10 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
     }
 }
 
-/// A `push`/`pop`/`sort`/`reverse` statement over an owned vector binding:
-/// (the builtin's name, the pushed value expression when it has one). Shape
-/// only — the lowering enforces mutability, element types and borrow rules.
+/// A `push`/`pop`/`sort`/`reverse` statement over an owned vector binding or a
+/// struct's vector field: (the builtin's name, the pushed value expression
+/// when it has one). Shape only — the lowering enforces mutability, element
+/// types and borrow rules.
 pub(super) fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::Statement, resolved: &ResolvedExpressions) -> Option<(&'static str, &'a ae_syntax::expression::Expression)> {
     use ae_syntax::expression::ExpressionKind;
     use ae_syntax::statement::StatementKind;
@@ -394,12 +395,18 @@ pub(super) fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::
         "push" => "push", "pop" => "pop", "sort" => "sort", "reverse" => "reverse",
         _ => return None,
     };
-    let Some(ExpressionKind::Atom(Kind::Ident(_))) = arguments.first().map(|argument| &argument.kind) else { return None };
-    let def = resolved.scalar_reads.get(&arguments[0].range.start)?;
-    // An owned vector takes the statement; a borrowed one (`&vec`) is admitted
-    // too so the lowering reports the typed route's own shape diagnostic
-    // ('push expects a vec'), never a denial.
-    if !resolved.vector_definitions.contains(def) { return None }
+    // A struct field receiver (`push(r.cells, x)`): the lowering resolves the
+    // field's declared type, so the gate only checks the shape.
+    let field_target = matches!(&arguments.first().map(|argument| &argument.kind),
+        Some(ExpressionKind::Field { base, .. }) if matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))));
+    if !field_target {
+        let Some(ExpressionKind::Atom(Kind::Ident(_))) = arguments.first().map(|argument| &argument.kind) else { return None };
+        let def = resolved.scalar_reads.get(&arguments[0].range.start)?;
+        // An owned vector takes the statement; a borrowed one (`&vec`) is
+        // admitted too so the lowering reports the typed route's own shape
+        // diagnostic ('push expects a vec'), never a denial.
+        if !resolved.vector_definitions.contains(def) { return None }
+    }
     match (builtin, arguments.len()) {
         ("push", 2) => Some((builtin, &arguments[1])),
         ("pop" | "sort" | "reverse", 1) => Some((builtin, &arguments[0])),

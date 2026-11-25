@@ -270,13 +270,13 @@ impl<'a> Parser<'a> {
                     // element must be i64 (E0201 for the index). A container
                     // held in a struct field (`p.table[k] = v`) resolves the
                     // field's declared type and keeps the field as the place.
-                    let (slot, ty, root_name, field_place) = if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind {
+                    let (slot, ty, root_name, field_place, field_base_ty) = if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &base.kind {
                         let def = self.resolved_expressions().scalar_writes.get(&base.range.start)
                             .or_else(|| self.resolved_expressions().scalar_reads.get(&base.range.start))
                             .copied()
                             .ok_or_else(|| self.error_at(base.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
                         let (slot, ty) = self.resolved_slot(Some(&def), slots, base.range.start, name)?;
-                        (slot, ty, name.clone(), None)
+                        (slot, ty, name.clone(), None, None)
                     } else if let ae_syntax::expression::ExpressionKind::Field { base: root, name: field } = &base.kind {
                         let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(root_name)) = &root.kind else {
                             return Err(self.error_at(base.range.start, "an index store needs a named container"));
@@ -289,7 +289,7 @@ impl<'a> Parser<'a> {
                         };
                         let field_ty = field_ty_in(sid, field, self.structs)
                             .ok_or_else(|| self.error_at(base.range.start, &format!("struct '{}' has no field '{field}'", self.structs[sid].name)))?;
-                        (slot, field_ty, root_name.clone(), Some(field.clone()))
+                        (slot, field_ty, root_name.clone(), Some(field.clone()), Some(struct_ty))
                     } else {
                         return Err(self.error_at(base.range.start, "an index store needs a named container"));
                     };
@@ -329,9 +329,7 @@ impl<'a> Parser<'a> {
                     }
                     if let Type::Vector(vec_id) = ty {
                         let elem_ty = self.ctx.vector_elem(vec_id);
-                        if field_place.is_some() {
-                            return Err(self.error_at(base.range.start, "an element store into a vector field is not supported by the body route yet"));
-                        }
+
                         // A vector element store: overwriting a string element
                         // releases the old one, so a live borrow blocks it
                         // (the typed store's rule).
@@ -380,6 +378,11 @@ impl<'a> Parser<'a> {
                             }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
+                        if let Some(field) = &field_place {
+                            let view = value_ty == Type::StrView || super::codegen::string_expr_is_view(&stored);
+                            let base_ty = field_base_ty.expect("a field place carries its root type");
+                            return Ok(Statement::VecStoreField(slot, field.clone(), base_ty, element_index, stored, elem_ty, view, line, column));
+                        }
                         return Ok(match elem_ty {
                             Type::String => Statement::StrVecStore(slot, element_index, stored, line, column, value_ty == Type::StrView),
                             Type::Float(FloatTy::F64) => Statement::VecFStore(slot, element_index, stored, line, column),
