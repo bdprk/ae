@@ -23,4 +23,9 @@ fn main() {
     print(size[string](&words));
     print(count[string](&words));
     print(head_size[string](&words));
+    let rows = vec[vec[1, 2], vec[3]];
+    print(size[vec](&rows));
+    print(head_size[vec](&rows));
+    let fixed = [7, 8, 9];
+    print(size[i64](&fixed));
 }
