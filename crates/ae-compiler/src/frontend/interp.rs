@@ -2723,19 +2723,39 @@ fn invoke_call(
             // window, not a snapshot: the callee's reads and (rung 4b)
             // stores go through the calling frame (ADR-0236 rung 4).
             Argument::Value(e) if matches!(param_ty, Type::SliceMut(_)) => {
-                if let Expr::SliceOf(slot, Type::Vector(_), ..) = e {
-                    let len = match locals.get(slot) {
-                        Some(Val::VecI(values)) => values.len() as i64,
-                        Some(Val::VecF(values)) => values.len() as i64,
-                        Some(Val::VecS(values)) => values.len() as i64,
-                        Some(Val::VecG(values)) => values.len() as i64,
-                        Some(Val::Array(values)) => values.len() as i64,
-                        Some(Val::Moved) => return Err(trap("use of moved vector", 0, 0)),
-                        _ => return Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
-                    };
-                    Val::SliceMutRef { owner: *slot, start: 0, len }
-                } else {
-                    eval_expr(env, e, locals, caller_locals, true)?
+                let owner_len = |locals: &HashMap<usize, Val>, slot: &usize| -> Result<i64, Flow> {
+                    match locals.get(slot) {
+                        Some(Val::VecI(values)) => Ok(values.len() as i64),
+                        Some(Val::VecF(values)) => Ok(values.len() as i64),
+                        Some(Val::VecS(values)) => Ok(values.len() as i64),
+                        Some(Val::VecG(values)) => Ok(values.len() as i64),
+                        Some(Val::Array(values)) => Ok(values.len() as i64),
+                        Some(Val::Moved) => Err(trap("use of moved vector", 0, 0)),
+                        _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
+                    }
+                };
+                match e {
+                    Expr::SliceOf(slot, Type::Vector(_), ..) => {
+                        Val::SliceMutRef { owner: *slot, start: 0, len: owner_len(locals, slot)? }
+                    }
+                    // `&mut v[start..end]` (ADR-0236 rung 4): the bounds run in
+                    // the caller's frame; the window keeps the owner's slot.
+                    Expr::SliceRange(slot, Type::Vector(_), _, start_expr, end_expr, line, col) => {
+                        let start = match eval_expr(env, start_expr, locals, caller_locals, false)? {
+                            Val::Int(n) => n,
+                            _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+                        };
+                        let end = match eval_expr(env, end_expr, locals, caller_locals, false)? {
+                            Val::Int(n) => n,
+                            _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+                        };
+                        let len = owner_len(locals, slot)?;
+                        if start < 0 || end < start || end > len {
+                            return Err(trap("slice range out of bounds", *line, *col));
+                        }
+                        Val::SliceMutRef { owner: *slot, start, len: end - start }
+                    }
+                    _ => eval_expr(env, e, locals, caller_locals, true)?,
                 }
             }
             Argument::Value(e) => eval_expr(env, e, locals, caller_locals, true)?,

@@ -1342,9 +1342,12 @@ let mut args = Vec::with_capacity(arguments.len());
                     self.seek_scalar_offset(argument.range.start);
                     return Err(self.fail("a mutable slice argument borrows a whole vector; field slices are not supported yet"));
                 }
-                if index.is_some() {
+                // `&mut name[start..end]` windows the exclusive borrow; a single
+                // element is not a slice.
+                let range_bounds = index.as_ref().and_then(|index| ae_syntax::expression::split_range_argument(&self.tokens, index));
+                if index.is_some() && range_bounds.is_none() {
                     self.seek_scalar_offset(argument.range.start);
-                    return Err(self.fail("a mutable slice window is not supported yet; pass the whole vector"));
+                    return Err(self.fail("a single element is not a mutable slice; write '&mut name[start..end]'"));
                 }
                 let &(slot, binding_mutable, actual) = self.names.get(borrowed).ok_or_else(|| {
                     self.fail(&format!("unknown variable '{borrowed}'")).with_code("E0101")
@@ -1377,6 +1380,18 @@ let mut args = Vec::with_capacity(arguments.len());
                     self.deferred_write_conflicts.push((slot, name_range.start, borrowed.clone(), "mutate", None));
                 }
                 self.mut_borrows.push((slot, self.scopes.len()));
+                if let Some((start_range, end_range)) = range_bounds {
+                    if start_range.is_empty() || end_range.is_empty() {
+                        self.seek_scalar_offset(argument.range.start);
+                        return Err(self.fail("a slice range needs both bounds; write 'start..end'"));
+                    }
+                    let start = self.lower_slice_bound(start_range, slots)?;
+                    let end = self.lower_slice_bound(end_range, slots)?;
+                    self.seek_scalar_offset(argument.range.start);
+                    let (line, column) = self.position();
+                    args.push(Argument::Value(Expr::SliceRange(slot, actual, wanted_elem, Box::new(start), Box::new(end), line, column)));
+                    continue;
+                }
                 self.seek_scalar_offset(argument.range.start);
                 let (line, column) = self.position();
                 args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));

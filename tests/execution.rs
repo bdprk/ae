@@ -11085,6 +11085,29 @@ fn slice_mut_match_across_backends() {
     assert!(interpreted_err.contains("index out of bounds"), "got {interpreted_err}");
     assert_eq!(compiled_err.split(':').take(3).collect::<Vec<_>>(), interpreted_err.split(':').take(3).collect::<Vec<_>>(), "trap position differs");
 
+    // A bad mutable window traps at the call site with the same text and
+    // position on both paths.
+    let path = std::env::temp_dir().join(format!(
+        "ae-slice-mut-window-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[2..1]); }",
+    )
+    .unwrap();
+    let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!compiled.status.success() && !interpreted.status.success(), "both modes must trap");
+    assert_eq!(
+        String::from_utf8_lossy(&compiled.stderr).replace("\r\n", "\n"),
+        String::from_utf8_lossy(&interpreted.stderr).replace("\r\n", "\n"),
+        "window trap position/message differ"
+    );
+    assert!(String::from_utf8_lossy(&compiled.stderr).contains("slice range out of bounds"));
+
     for (label, source, needle) in [
         (
             "missing &mut",
@@ -11122,9 +11145,14 @@ fn slice_mut_match_across_backends() {
             "forwarding a mutable slice is not supported yet",
         ),
         (
-            "mutable window",
-            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[0..1]); }"#,
-            "a mutable slice window is not supported yet",
+            "mutable element borrow",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[0]); }"#,
+            "a single element is not a mutable slice",
+        ),
+        (
+            "mutable window open bound",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[1..]); }"#,
+            "a slice range needs both bounds",
         ),
         (
             "field mutable slice",
