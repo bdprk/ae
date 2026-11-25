@@ -2,9 +2,17 @@
 // parameter (`&items[0]`, `&rows[0]`), addressed in place and passed to a
 // `&Struct`/`&vec` parameter for the call's duration — the same shape the
 // vector element borrow uses. The owner is a slice, so nothing moves.
-struct Tag { name: string, n: i64 }
+struct Tag { name: string, n: i64, cells: vec }
 
 fn tag_n(t: &Tag) -> i64 { return t.n; }
+
+// The borrowed element exposes every field kind: a string view, a Copy
+// value and a nested vector, all read through the one place borrow.
+fn show(t: &Tag) -> i64 {
+    print(t.name);
+    print(t.n);
+    return len(t.cells);
+}
 
 fn row_len(v: &vec) -> i64 { return len(v); }
 
@@ -12,12 +20,15 @@ fn first_n(items: &[Tag]) -> i64 { return tag_n(&items[0]); }
 
 fn last_n(items: &[Tag]) -> i64 { return tag_n(&items[len(items) - 1]); }
 
+fn first_show(items: &[Tag]) -> i64 { return show(&items[0]); }
+
 fn first_row_len(rows: &[vec]) -> i64 { return row_len(&rows[0]); }
 
 fn main() {
-    let tags = vec[Tag { name: "x", n: 7 }, Tag { name: "y", n: 9 }];
+    let tags = vec[Tag { name: "x", n: 7, cells: vec[1, 2, 3] }, Tag { name: "y", n: 9, cells: vec[4] }];
     print(first_n(&tags));
     print(last_n(&tags));
+    print(first_show(&tags));
     let rows = vec[vec[1, 2, 3], vec[4]];
     print(first_row_len(&rows));
 }
