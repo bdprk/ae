@@ -230,7 +230,7 @@ impl<'a> Parser<'a> {
                 };
                 let index = Box::new(index);
                 match ty {
-                    Type::Array(len) => Some((Expr::Index(slot, len, index, line, column), Type::Int(IntTy::I64))),
+                    Type::ArrayOf(_, len) => Some((Expr::Index(slot, len, index, line, column), Type::Int(IntTy::I64))),
                     Type::Vector(id) | Type::VectorRef(id) => {
                         let element = self.ctx.vector_elem(id);
                         if element == Type::String {
@@ -352,7 +352,7 @@ impl<'a> Parser<'a> {
                 if self.ctx.is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
                     || !params.iter().all(|ty| {
                         matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::StrView
-                            | Type::Vector(_) | Type::VectorRef(_) | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
+                            | Type::Vector(_) | Type::VectorRef(_) | Type::ArrayOf(..) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
                     })
                     || !matches!(ret, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Struct(_) | Type::Enum(..))
                 {
@@ -429,7 +429,7 @@ impl<'a> Parser<'a> {
         use ae_syntax::expression::ExpressionKind;
         let mut args = Vec::with_capacity(arguments.len());
         for (argument, expected) in arguments.iter().zip(params.iter().copied()) {
-            if matches!(expected, Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+            if matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_)) {
                 let ExpressionKind::BorrowArgument { name, name_range, mutable } = &argument.kind else {
                     return None;
                 };

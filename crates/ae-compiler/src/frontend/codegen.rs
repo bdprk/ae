@@ -235,8 +235,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let call = match pointee {
                 Type::String => format!("(ae_str_release({}), (int64_t)0)", p.text),
                 Type::Vector(id) => format!("({}_release({}), (int64_t)0)", c_output::vector_family(ctx, *id), p.text),
-                Type::Map => format!("(ae_map_release({}), (int64_t)0)", p.text),
-                Type::MapF => format!("(ae_mapf_release({}), (int64_t)0)", p.text),
+                Type::MapOf(id) => format!("({}_release({}), (int64_t)0)", c_output::map_family(ctx, *id), p.text),
                 Type::Struct(sid) => format!("(ae_t{sid}_release((ae_t{sid} *)({})), (int64_t)0)", p.text),
                 Type::Enum(_, eid) => format!("(ae_e{eid}_release((ae_e{eid} *)({})), (int64_t)0)", p.text),
                 _ => format!("((void)({}), (int64_t)0)", p.text),
@@ -435,8 +434,8 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                     // string/vec sentinel backstop here.
                     Type::Thread(_) | Type::Guard | Type::TaskScope => {}
                     _ => {
-                        let probe = match ty { Type::Vector(_) => format!("!v{id}.data"), Type::Map | Type::MapF => format!("!v{id}.slots"), _ => format!("!v{id}.ptr") };
-                        let message = match ty { Type::Vector(_) => "use of moved vector", Type::Map | Type::MapF => "use of moved map", _ => "use of moved string" };
+                        let probe = match ty { Type::Vector(_) => format!("!v{id}.data"), Type::MapOf(_) => format!("!v{id}.slots"), _ => format!("!v{id}.ptr") };
+                        let message = match ty { Type::Vector(_) => "use of moved vector", Type::MapOf(_) => "use of moved map", _ => "use of moved string" };
                         out.push_str(&format!("    if ({probe}) ae_fail(\"{message}\", {line}, {column});\n"));
                     }
                 }
@@ -526,8 +525,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let call = match t.ty {
                 Type::String | Type::StrView => format!("ae_str_len(AE_VIEW({}), {line}, {col})", t.text),
                 Type::Vector(elem_id) => format!("{}_len({}, {line}, {col})", c_output::vector_family(ctx, elem_id), t.text),
-                Type::Map => format!("ae_map_len(&{}, {line}, {col})", t.text),
-                Type::MapF => format!("ae_mapf_len(&{}, {line}, {col})", t.text),
+                Type::MapOf(id) => format!("{}_len(&{}, {line}, {col})", c_output::map_family(ctx, id), t.text),
                 _ => format!("ae_vec_len({}, {line}, {col})", t.text),
             };
             out.push_str(&format!("    int64_t t{id} = {call};\n"));
@@ -930,11 +928,12 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         }
         Expr::MapNew(line, col, kind) => {
             let id = *next; *next += 1;
-            let (c_ty, new_fn, ty) = if *kind == MapKind::Float {
-                ("ae_mapf", "ae_mapf_new", Type::MapF)
+            let (c_ty, new_fn, val_ty) = if *kind == MapKind::Float {
+                ("ae_mapf", "ae_mapf_new", Type::Float(FloatTy::F64))
             } else {
-                ("ae_map", "ae_map_new", Type::Map)
+                ("ae_map", "ae_map_new", Type::Int(IntTy::I64))
             };
+            let ty = Type::MapOf(ctx.find_map_types(Type::String, val_ty).expect("pre-interned map types"));
             out.push_str(&format!("    {c_ty} t{id} = {new_fn}({line}, {col});\n"));
             Emitted { text: format!("t{id}"), ty, owned: true, moves: Vec::new(), materialized: true }
         }
@@ -1311,8 +1310,7 @@ fn vector_type(ctx: &CompileContext, elem: Type) -> Type {
 pub(super) fn release_var(out: &mut String, id: usize, ty: Type, ctx: &CompileContext) {
     match ty {
         Type::Vector(elem_id) => out.push_str(&format!("    {}_release(&v{id});\n", c_output::vector_family(ctx, elem_id))),
-        Type::Map => out.push_str(&format!("    ae_map_release(&v{id});\n")),
-        Type::MapF => out.push_str(&format!("    ae_mapf_release(&v{id});\n")),
+        Type::MapOf(map_id) => out.push_str(&format!("    {}_release(&v{id});\n", c_output::map_family(ctx, map_id))),
         Type::Struct(k) => out.push_str(&format!("    ae_t{k}_release(&v{id});\n")),
         Type::Enum(_, k) => out.push_str(&format!("    ae_e{k}_release(&v{id});\n")),
         // A never-joined handle leaks its thread slot (spec/concurrency.md
@@ -1334,8 +1332,7 @@ pub(super) fn release_var(out: &mut String, id: usize, ty: Type, ctx: &CompileCo
 pub(super) fn release_member(out: &mut String, member: &str, ty: Type, ctx: &CompileContext) {
     match ty {
         Type::Vector(elem_id) => out.push_str(&format!("    {}_release(&{member});\n", c_output::vector_family(ctx, elem_id))),
-        Type::Map => out.push_str(&format!("    ae_map_release(&{member});\n")),
-        Type::MapF => out.push_str(&format!("    ae_mapf_release(&{member});\n")),
+        Type::MapOf(map_id) => out.push_str(&format!("    {}_release(&{member});\n", c_output::map_family(ctx, map_id))),
         Type::Struct(k) => out.push_str(&format!("    ae_t{k}_release(&{member});\n")),
         Type::Enum(_, k) => out.push_str(&format!("    ae_e{k}_release(&{member});\n")),
         _ => out.push_str(&format!("    ae_str_release(&{member});\n")),
@@ -1346,8 +1343,7 @@ pub(super) fn drop_owned_temp(out: &mut String, emitted: &Emitted, ctx: &Compile
     match emitted.ty {
         Type::Vector(elem_id) => out.push_str(&format!("    {}_release(&{});\n", c_output::vector_family(ctx, elem_id), emitted.text)),
         Type::String => out.push_str(&format!("    ae_str_release(&{});\n", emitted.text)),
-        Type::Map => out.push_str(&format!("    ae_map_release(&{});\n", emitted.text)),
-        Type::MapF => out.push_str(&format!("    ae_mapf_release(&{});\n", emitted.text)),
+        Type::MapOf(map_id) => out.push_str(&format!("    {}_release(&{});\n", c_output::map_family(ctx, map_id), emitted.text)),
         Type::Struct(k) => out.push_str(&format!("    ae_t{k}_release(&{});\n", emitted.text)),
         Type::Enum(_, k) => out.push_str(&format!("    ae_e{k}_release(&{});\n", emitted.text)),
         Type::Guard => out.push_str(&format!("    ae_mutex_unlock(&{});\n", emitted.text)),
@@ -1360,8 +1356,7 @@ pub(super) fn null_moves(out: &mut String, moves: &[(usize, Type)], ctx: &Compil
         match ty {
             Type::Vector(elem_id) => out.push_str(&format!("    {}_forfeit(&v{id});\n", c_output::vector_family(ctx, elem_id))),
             Type::String => out.push_str(&format!("    ae_str_forfeit(&v{id});\n")),
-            Type::Map => out.push_str(&format!("    ae_map_forfeit(&v{id});\n")),
-            Type::MapF => out.push_str(&format!("    ae_mapf_forfeit(&v{id});\n")),
+            Type::MapOf(map_id) => out.push_str(&format!("    {}_forfeit(&v{id});\n", c_output::map_family(ctx, map_id))),
             Type::Struct(k) => out.push_str(&format!("    ae_t{k}_forfeit(&v{id});\n")),
             Type::Enum(_, k) => out.push_str(&format!("    ae_e{k}_forfeit(&v{id});\n")),
             Type::Guard => out.push_str(&format!("    v{id}.lock = NULL;\n")),
@@ -1575,8 +1570,7 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let release_old = match fty {
                     Type::String => format!("    ae_str_release(&v{id}{}{});\n", dot, fname),
                     Type::Vector(elem_id) => format!("    {}_release(&v{id}{}{});\n", c_output::vector_family(ctx, *elem_id), dot, fname),
-                    Type::Map => format!("    ae_map_release(&v{id}{}{});\n", dot, fname),
-                    Type::MapF => format!("    ae_mapf_release(&v{id}{}{});\n", dot, fname),
+                    Type::MapOf(map_id) => format!("    {}_release(&v{id}{}{});\n", c_output::map_family(ctx, *map_id), dot, fname),
                     Type::Struct(k) if !ctx.structs[*k].is_copy => format!("    ae_t{k}_release(&v{id}{}{});\n", dot, fname),
                     Type::Enum(_, k) if !ctx.enums[*k].is_copy => format!("    ae_e{k}_release(&v{id}{}{});\n", dot, fname),
                     _ => String::new(),

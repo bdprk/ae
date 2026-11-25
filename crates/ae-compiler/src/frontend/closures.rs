@@ -626,14 +626,14 @@ impl Parser<'_> {
         let mut fields: Vec<(String, Type)> = Vec::new();
         let mut outer_tys: Vec<Type> = Vec::new();
         for (i, &(_, ty)) in def.value_captures.iter().enumerate() {
-            if for_return && matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+            if for_return && matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
                 return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
             }
             fields.push((format!("c{i}"), ty));
             outer_tys.push(ty);
         }
         for (i, &(_, ty)) in def.mut_captures.iter().enumerate() {
-            if for_return && matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+            if for_return && matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
                 return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
             }
             fields.push((format!("m{i}"), ty));
@@ -645,7 +645,7 @@ impl Parser<'_> {
                     .find(|&&(id, _, _)| id == outer_id)
                     .map(|&(_, _, t)| t)
                     .unwrap_or(hidden_ty);
-                if matches!(outer_ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+                if matches!(outer_ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
                     return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
                 }
                 outer_ty

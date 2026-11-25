@@ -53,6 +53,9 @@ use c_output::*;
 pub(super) const PRELUDE_I64_VEC_ELEM_ID: usize = 0;
 pub(super) const PRELUDE_STR_VEC_ELEM_ID: usize = 1;
 pub(super) const PRELUDE_F64_VEC_ELEM_ID: usize = 2;
+pub(super) const PRELUDE_I64_MAP_ID: usize = 0;
+pub(super) const PRELUDE_F64_MAP_ID: usize = 1;
+pub(super) const PRELUDE_I64_ARRAY_ELEM_ID: usize = 0;
 
 #[derive(Debug, Clone)]
 pub struct CompileContext {
@@ -90,6 +93,12 @@ impl CompileContext {
         debug_assert_eq!(i64_id, PRELUDE_I64_VEC_ELEM_ID);
         debug_assert_eq!(str_id, PRELUDE_STR_VEC_ELEM_ID);
         debug_assert_eq!(f64_id, PRELUDE_F64_VEC_ELEM_ID);
+        let i64_map_id = ctx.intern_map_types(Type::String, Type::Int(IntTy::I64));
+        let f64_map_id = ctx.intern_map_types(Type::String, Type::Float(FloatTy::F64));
+        debug_assert_eq!(i64_map_id, PRELUDE_I64_MAP_ID);
+        debug_assert_eq!(f64_map_id, PRELUDE_F64_MAP_ID);
+        let i64_arr_id = ctx.intern_array_elem(Type::Int(IntTy::I64));
+        debug_assert_eq!(i64_arr_id, PRELUDE_I64_ARRAY_ELEM_ID);
         ctx
     }
 
@@ -156,6 +165,30 @@ impl CompileContext {
 
     fn vector_elem(&self, id: usize) -> Type {
         self.types.vector_elem(id)
+    }
+
+    fn intern_map_types(&mut self, key: Type, value: Type) -> usize {
+        self.types.intern_map_types(key, value)
+    }
+
+    fn map_types(&self, id: usize) -> (Type, Type) {
+        self.types.map_types(id)
+    }
+
+    fn find_map_types(&self, key: Type, value: Type) -> Option<usize> {
+        self.types.find_map_types(key, value)
+    }
+
+    fn intern_array_elem(&mut self, elem: Type) -> usize {
+        self.types.intern_array_elem(elem)
+    }
+
+    fn array_elem(&self, id: usize) -> Type {
+        self.types.array_elem(id)
+    }
+
+    fn find_array_elem(&self, elem: Type) -> Option<usize> {
+        self.types.find_array_elem(elem)
     }
 
     fn shared_types_get(&self, id: usize) -> Type {
@@ -225,10 +258,11 @@ impl TypeDisplay for Type {
             // element type, whatever it is.
             Type::Vector(id) => format!("vec[{}]", ctx.vector_elem(id).name(ctx)),
             Type::VectorRef(id) => format!("&vec[{}]", ctx.vector_elem(id).name(ctx)),
-            // One map shape for now: string keys, i64 values.
-            Type::Map => "map[string, i64]".to_owned(),
-            Type::MapF => "map[string, f64]".to_owned(),
-            Type::Array(n) => format!("&[i64; {n}]"),
+            Type::MapOf(id) => {
+                let (k, v) = ctx.map_types(id);
+                format!("map[{}, {}]", k.name(ctx), v.name(ctx))
+            }
+            Type::ArrayOf(elem, n) => format!("&[{}; {n}]", ctx.array_elem(elem).name(ctx)),
             Type::Struct(id) => format!("struct #{}", id),
             // A read-only borrow of a struct (ADR-0184). It names the same
             // layout as `Struct(id)`; the `&` is what keeps it from moving.
@@ -281,8 +315,7 @@ impl TypeDisplay for Type {
                 Type::Float(FloatTy::F64) => "ae_f64vec ".to_owned(),
                 _ => "ae_vec ".to_owned(),
             },
-            Type::Map => "ae_map ".to_owned(),
-            Type::MapF => "ae_mapf ".to_owned(),
+            Type::MapOf(id) => format!("{} ", c_output::map_family(ctx, id)),
             Type::Struct(k) => format!("ae_t{k} "),
             // A borrow has no storage of its own, so a temporary of these
             // types is never declared; the arms exist so a stray use fails
@@ -599,8 +632,11 @@ impl MapPlace {
         matches!(self, MapPlace::Var(_, MapKind::Float) | MapPlace::Field(_, _, MapKind::Float))
     }
 }
-fn map_kind_of(ty: Type) -> MapKind {
-    if ty == Type::MapF { MapKind::Float } else { MapKind::Int }
+fn map_kind_of(ty: Type, ctx: &CompileContext) -> MapKind {
+    if let Type::MapOf(id) = ty && ctx.map_types(id).1 == Type::Float(FloatTy::F64) {
+        return MapKind::Float;
+    }
+    MapKind::Int
 }
 fn map_element_ty(kind: MapKind) -> Type {
     if kind == MapKind::Float { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) }
@@ -835,8 +871,8 @@ const AUDIT_TYPES: &[Type] = &[
     Type::Int(IntTy::I64), Type::Bool, Type::Float(FloatTy::F64), Type::String, Type::StrView,
     Type::Vector(PRELUDE_I64_VEC_ELEM_ID), Type::Vector(PRELUDE_STR_VEC_ELEM_ID), Type::Vector(PRELUDE_F64_VEC_ELEM_ID),
     Type::VectorRef(PRELUDE_I64_VEC_ELEM_ID), Type::VectorRef(PRELUDE_STR_VEC_ELEM_ID), Type::VectorRef(PRELUDE_F64_VEC_ELEM_ID),
-    Type::Map, Type::MapF,
-    Type::Array(0), Type::Struct(0), Type::StructRef(0), Type::StructMut(0), Type::Enum("audit", 0),
+    Type::MapOf(PRELUDE_I64_MAP_ID), Type::MapOf(PRELUDE_F64_MAP_ID),
+    Type::ArrayOf(PRELUDE_I64_ARRAY_ELEM_ID, 0), Type::Struct(0), Type::StructRef(0), Type::StructMut(0), Type::Enum("audit", 0),
 ];
 
 // Capabilities mirror the binary-operator rules in `expression`. They live
@@ -1331,6 +1367,29 @@ mod tests {
         assert_eq!(view.name(&ctx), "&vec[string]");
         assert_eq!(c_output::c_type_field(view, &ctx), "const ae_strvec *");
         assert!(!view.owned(), "a borrow owns nothing");
+    }
+
+    // ADR-0235 slice 2: generic map and array constructors name their
+    // interned types and map onto the C families that currently carry them.
+    #[test]
+    fn generic_map_and_array_constructors_names_and_c_families() {
+        let mut ctx = CompileContext::new();
+        let m_int_id = ctx.intern_map_types(Type::String, Type::Int(IntTy::I64));
+        let m_int = Type::MapOf(m_int_id);
+        assert_eq!(m_int.name(&ctx), "map[string, i64]");
+        assert_eq!(c_output::map_family(&ctx, m_int_id), "ae_map");
+        assert!(m_int.owned(), "a map owns its storage");
+        let m_f64_id = ctx.intern_map_types(Type::String, Type::Float(FloatTy::F64));
+        let m_f64 = Type::MapOf(m_f64_id);
+        assert_eq!(m_f64.name(&ctx), "map[string, f64]");
+        assert_eq!(c_output::map_family(&ctx, m_f64_id), "ae_mapf");
+        assert_eq!(ctx.find_map_types(Type::String, Type::Float(FloatTy::F64)), Some(m_f64_id));
+
+        let arr_elem = ctx.intern_array_elem(Type::Int(IntTy::I64));
+        let arr = Type::ArrayOf(arr_elem, 4);
+        assert_eq!(arr.name(&ctx), "&[i64; 4]");
+        assert!(!arr.owned(), "a borrowed array owns nothing");
+        assert_eq!(ctx.find_array_elem(Type::Int(IntTy::I64)), Some(arr_elem));
     }
 
     // P2.4: every preset result family derives from the one generic Result

@@ -929,7 +929,7 @@ impl<'a> Parser<'a> {
                     && !self.generics.struct_names.contains_key(name)
                     && !self.generics.names.contains_key(name)
                     && let Some(&(slot, _, ty)) = self.names.get(name)
-                    && matches!(ty, Type::Array(_) | Type::Vector(_) | Type::VectorRef(_))
+                    && matches!(ty, Type::ArrayOf(..) | Type::Vector(_) | Type::VectorRef(_))
                 {
                     if self.moved.contains(&slot) {
                         self.seek_scalar_offset(base.range.start);
@@ -950,7 +950,7 @@ impl<'a> Parser<'a> {
                             self.seek_scalar_offset(base.range.end);
                             let (line, column) = self.position();
                             lowered = Some(match ty {
-                                Type::Array(len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int(IntTy::I64)),
+                                Type::ArrayOf(_, len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int(IntTy::I64)),
                                 Type::Vector(id) | Type::VectorRef(id) => {
                                     let element = self.ctx.vector_elem(id);
                                     let borrowed = matches!(ty, Type::VectorRef(_));
@@ -984,7 +984,7 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(base.range.end);
                 let (line, column) = self.position();
                 match ty {
-                    Type::Array(len) => {
+                    Type::ArrayOf(_, len) => {
                         let value = self.lower_scalar_array_index(index, slots)?;
                         (Expr::Index(slot, len, Box::new(value), line, column), Type::Int(IntTy::I64))
                     }
@@ -1246,7 +1246,7 @@ let mut args = Vec::with_capacity(arguments.len());
             // typed route's expression parser rejects it (a pointer
             // cast is the only legal use of `&expr`).
             if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                && !matches!(expected, Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_))
+                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_))
             {
                 self.seek_scalar_offset(argument.range.start);
                 return Err(self.fail("a borrow expression must be cast to a pointer"));
@@ -1255,7 +1255,7 @@ let mut args = Vec::with_capacity(arguments.len());
             // address (`Argument::Borrow`); the same classify rules,
             // messages and statement-scoped borrow registers the typed
             // route uses.
-            if matches!(expected, Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+            if matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_)) {
                 let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
                     self.seek_scalar_offset(argument.range.end);
                     return Err(self.fail("expected Amp, found the argument"));
@@ -1314,7 +1314,7 @@ let mut args = Vec::with_capacity(arguments.len());
                         self.mut_borrows.push((slot, self.scopes.len()));
                         args.push(Argument::Borrow(slot, address));
                     }
-                    (Type::VectorRef(_) | Type::Array(_), borrow) => {
+                    (Type::VectorRef(_) | Type::ArrayOf(..), borrow) => {
                         // An owned vector takes the address; a
                         // parameter already spelled `&vec` forwards
                         // its pointer unchanged.

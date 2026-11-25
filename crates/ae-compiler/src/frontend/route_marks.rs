@@ -103,7 +103,7 @@ pub(super) fn plain_drop_struct(ty: Type, structs: &[StructDef]) -> bool {
             // an owned value): a guard that points at a slot releases cleanly.
             || matches!(ty, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_)
                 | Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex
-                | Type::Vector(_) | Type::Map | Type::MapF)
+                | Type::Vector(_) | Type::MapOf(_))
             || owned_plain_struct(*ty, structs)
             || owned_field_struct(*ty, structs)
             || plain_drop_struct(*ty, structs)))
@@ -117,7 +117,7 @@ pub(super) fn owned_field_struct(ty: Type, structs: &[StructDef]) -> bool {
             // vec/strvec/f64vec/map field in place, `release_member`): the
             // construction moves the value in and the exit free releases it.
             || matches!(ty, Type::String | Type::Atomic | Type::Shared(_) | Type::Mutex
-                | Type::Vector(_) | Type::Map | Type::MapF | Type::Fn(_))
+                | Type::Vector(_) | Type::MapOf(_) | Type::Fn(_))
             // A nested struct carries its own release routine; the generated
             // release recurses into every struct field (c_output).
             || owned_plain_struct(*ty, structs)

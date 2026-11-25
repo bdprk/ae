@@ -85,7 +85,8 @@ impl<'a> Parser<'a> {
                         }
                         values.push(value);
                     }
-                    (Statement::Array(slot, values), Type::Array(elements.len()))
+                    let ty = Type::ArrayOf(self.ctx.intern_array_elem(Type::Int(IntTy::I64)), elements.len());
+                    (Statement::Array(slot, values), ty)
                 } else if let ae_syntax::expression::ExpressionKind::Vector(elements) = &initializer.kind {
                     self.seek_scalar_offset(initializer.range.start);
                     let (line, column) = self.position();
@@ -271,8 +272,8 @@ impl<'a> Parser<'a> {
                     // `m[key] = v` inserts or overwrites in a map: the key is
                     // copied by the runtime, the value must match the map's
                     // element type, and the store is statement-scoped.
-                    if matches!(ty, Type::Map | Type::MapF) {
-                        let kind = map_kind_of(ty);
+                    if matches!(ty, Type::MapOf(_)) {
+                        let kind = map_kind_of(ty, self.ctx);
                         if !self.names[&root_name].1 {
                             self.seek_scalar_offset(base.range.start);
                             let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
@@ -355,7 +356,7 @@ impl<'a> Parser<'a> {
                             _ => Statement::VecStore(slot, element_index, stored, line, column),
                         });
                     }
-                    let Type::Array(len) = ty else {
+                    let Type::ArrayOf(_, len) = ty else {
                         unreachable!("resolved array store");
                     };
                     if !self.names[&root_name].1 {

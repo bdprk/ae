@@ -47,7 +47,7 @@ impl<'a> Parser<'a> {
         // in a way the marking pass cannot classify falls back at the scan.
         let impl_body_supported = true;
         let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String | Type::Fn(_))
-            || matches!(self.return_type, Type::Vector(_) | Type::Map | Type::MapF)
+            || matches!(self.return_type, Type::Vector(_) | Type::MapOf(_))
             || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
             || (matches!(self.return_type, Type::Struct(_))
                 && (self.receiver == Some(self.return_type)
@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
             // value (a value capture, the FnOnce shape): the exit Frees
             // releases it unless the body moved it out, and the move checks
             // reject a second read after a move.
-            let ok = scalar_type(ty) || matches!(ty, Type::Array(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VectorRef(_) | Type::Vector(_) | Type::Map | Type::MapF | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
+            let ok = scalar_type(ty) || matches!(ty, Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::VectorRef(_) | Type::Vector(_) | Type::MapOf(_) | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
                 || matches!(ty, Type::String)
                 // A captured token cursor: the closure borrows the outer
                 // cursor (the capture form is the cursor itself), and the
@@ -349,7 +349,7 @@ impl<'a> Parser<'a> {
                     // enforces the `unsafe` block (so the pinned E0701 travels
                     // the same path).
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
-                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vector(_) | Type::Map | Type::MapF | Type::Fn(_))
+                        || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vector(_) | Type::MapOf(_) | Type::Fn(_))
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
                         // A scalar-pointee pointer (`extern "C" fn
                         // ae_std_alloc(..) -> *mut i64`): the binding holds a
@@ -368,12 +368,12 @@ impl<'a> Parser<'a> {
                         // other borrows take the argument's address
                         // (`Argument::Borrow`) with the typed route's own
                         // classify rules.
-                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::Array(_)
+                        scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::ArrayOf(..)
                             | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_)
                             // A by-value vector or map parameter owns the
                             // argument: the call moves it (tracked in
                             // `moved`).
-                            | Type::Vector(_) | Type::Map | Type::MapF
+                            | Type::Vector(_) | Type::MapOf(_)
                             // An enum parameter owns a value argument the
                             // same way (a result enum, an Option payload).
                             | Type::Enum(..)
@@ -528,7 +528,7 @@ impl<'a> Parser<'a> {
                         // is the binding arm's own move rejection.
                         || (role == ae_resolve::Role::Read && matches!(field, Type::String))
                         || (role == ae_resolve::Role::Write
-                            && matches!(field, Type::String | Type::Vector(_) | Type::Map | Type::MapF)))
+                            && matches!(field, Type::String | Type::Vector(_) | Type::MapOf(_))))
             }
         };
         // Parameters owned by this body, minus capture slots (the closure

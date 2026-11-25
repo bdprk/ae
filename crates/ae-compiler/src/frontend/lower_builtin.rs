@@ -44,11 +44,11 @@ impl<'a> Parser<'a> {
                                     return Err(moved_value_hint(self.binding_label(
                                         self.fail(&format!("cannot use '{argument_name}' because it was moved")).with_code("E0102"), slot)));
                                 }
-                                if let Type::Array(n) = ty {
+                                if let Type::ArrayOf(_, n) = ty {
                                     self.seek_scalar_offset(expression.range.end);
                                     return Ok((Expr::Number(n as i64), Type::Int(IntTy::I64)));
                                 }
-                                if matches!(ty, Type::Vector(_) | Type::VectorRef(_) | Type::Map) {
+                                if matches!(ty, Type::Vector(_) | Type::VectorRef(_) | Type::MapOf(_)) {
                                     // The typed fast path stamps the operand with
                                     // the `len` call's position, not the variable's.
                                     let value = Expr::Variable(slot, ty, line, column);
@@ -63,7 +63,7 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(expression.range.end);
                         return Err(self.fail("a token cursor has no len: counting would consume the stream, so use split(text, sep) when the count is needed"));
                     }
-                    if !matches!(ty, Type::String | Type::StrView | Type::Vector(_) | Type::VectorRef(_) | Type::Map | Type::MapF) {
+                    if !matches!(ty, Type::String | Type::StrView | Type::Vector(_) | Type::VectorRef(_) | Type::MapOf(_)) {
                         self.seek_scalar_offset(expression.range.end);
                         return Err(self.fail("len expects a string, vec, map, or array variable"));
                     }
@@ -172,7 +172,12 @@ impl<'a> Parser<'a> {
                 }
                 "map_new" | "f64map_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
-                    let (kind, ty) = if name == "map_new" { (MapKind::Int, Type::Map) } else { (MapKind::Float, Type::MapF) };
+                    let (kind, val_ty) = if name == "map_new" {
+                        (MapKind::Int, Type::Int(IntTy::I64))
+                    } else {
+                        (MapKind::Float, Type::Float(FloatTy::F64))
+                    };
+                    let ty = Type::MapOf(self.ctx.intern_map_types(Type::String, val_ty));
                     self.seek_scalar_offset(expression.range.end);
                     Ok((Expr::MapNew(line, column, kind), ty))
                 }
@@ -182,10 +187,10 @@ impl<'a> Parser<'a> {
                     // The map argument is a bare map variable, or a map field of
                     // a struct *variable* (the borrow stays statement-scoped).
                     let (map, map_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
-                    let kind = map_kind_of(map_ty);
+                    let kind = map_kind_of(map_ty, self.ctx);
                     let place = match (&map, map_ty) {
-                        (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::Map | Type::MapF) => MapPlace::Var(*id, kind),
-                        (Expr::Field(base, fname, t), _) if matches!(*t, Type::Map | Type::MapF) => match **base {
+                        (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::MapOf(_)) => MapPlace::Var(*id, kind),
+                        (Expr::Field(base, fname, t), _) if matches!(*t, Type::MapOf(_)) => match **base {
                             Expr::Variable(id, ..) => MapPlace::Field(id, fname.clone(), kind),
                             _ => {
                                 self.seek_scalar_offset(arguments[0].range.end);

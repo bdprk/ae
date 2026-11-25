@@ -10,6 +10,15 @@ pub(super) fn vector_family(ctx: &CompileContext, elem: usize) -> &'static str {
         _ => "ae_vec",
     }
 }
+/// ADR-0235 migration: a generic map's key/value pair maps onto the C family
+/// that currently carries it.
+pub(super) fn map_family(ctx: &CompileContext, id: usize) -> &'static str {
+    if ctx.map_types(id).1 == Type::Float(FloatTy::F64) {
+        "ae_mapf"
+    } else {
+        "ae_map"
+    }
+}
 pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
     match ty {
         Type::Int(width) => width.c_name().to_owned(),
@@ -20,8 +29,7 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
         Type::Vector(id) => vector_family(ctx, id).to_owned(),
-        Type::Map => "ae_map".to_owned(),
-        Type::MapF => "ae_mapf".to_owned(),
+        Type::MapOf(id) => map_family(ctx, id).to_owned(),
         Type::Struct(k) => format!("ae_t{k}"),
         // Unreachable: there is no syntax for a borrow-typed field; the value
         // keeps the pointer shape so a future slip prints valid C.
@@ -29,7 +37,7 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::StructMut(k) => format!("ae_t{k} *"),
         Type::Enum(_, k) => format!("ae_e{k}"),
         Type::VectorRef(id) => format!("const {} *", vector_family(ctx, id)),
-        Type::Array(n) => format!("int64_t [{n}]"),
+        Type::ArrayOf(elem, n) => format!("{} [{n}]", c_type_field(ctx.array_elem(elem), ctx)),
         // Unreachable: there is no syntax for a cursor-typed field.
         Type::Tokens => "ae_tokens".to_owned(),
         // Unreachable: no syntax for a closure-typed field.
@@ -67,8 +75,7 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::String => format!("ae_string v{id}"),
         Type::StrView => format!("ae_strview v{id}"),
         Type::Vector(elem) => format!("{} v{id}", vector_family(ctx, elem)),
-        Type::Map => format!("ae_map v{id}"),
-        Type::MapF => format!("ae_mapf v{id}"),
+        Type::MapOf(map_id) => format!("{} v{id}", map_family(ctx, map_id)),
         Type::Struct(k) => format!("ae_t{k} v{id}"),
         Type::StructRef(k) if declaration => format!("const ae_t{k} *v{id}"),
         Type::StructRef(k) => format!("const ae_t{k} *"),
@@ -105,7 +112,7 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::Fn(sig) => {
             let (params, ret) = ctx.fn_sig(sig);
             let c_params = if params.is_empty() { "void".to_owned() } else { params.iter().map(|t| match t {
-                Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_) => c_type(*t, 0, false, ctx),
+                Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..) => c_type(*t, 0, false, ctx),
                 _ => t.c_temp(ctx).trim_end().to_owned(),
             }).collect::<Vec<_>>().join(", ") };
             let c_ret = c_return(ret, ctx);
@@ -115,8 +122,8 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
                 format!("{c_ret} (*)({c_params})")
             }
         }
-        Type::Array(_) if declaration => format!("const int64_t *v{id}"),
-        Type::Array(_) => "const int64_t *".to_owned(),
+        Type::ArrayOf(elem, _) if declaration => format!("const {} *v{id}", c_type_field(ctx.array_elem(elem), ctx)),
+        Type::ArrayOf(elem, _) => format!("const {} *", c_type_field(ctx.array_elem(elem), ctx)),
         // M2.12 slice 2: a pointer binds as a plain local (no release, no
         // move tracking), so the declaration is the plain C pointer form.
         Type::Ptr(pid) if declaration => format!("const {} *v{id}", c_type_field(ctx.ptr_pointee(pid), ctx)),
@@ -138,8 +145,7 @@ pub(super) fn c_return(ty: Type, ctx: &CompileContext) -> String {
         Type::String => "ae_string".to_owned(),
         Type::StrView => "ae_strview".to_owned(),
         Type::Vector(_) => c_type_field(ty, ctx),
-        Type::Map => "ae_map".to_owned(),
-        Type::MapF => "ae_mapf".to_owned(),
+        Type::MapOf(_) => c_type_field(ty, ctx),
         Type::Struct(k) => format!("ae_t{k}"),
         Type::Enum(_, k) => format!("ae_e{k}"),
         // A fake-clock value (std/std/test/fake_clock.ae) is a copy-semantics
@@ -544,13 +550,10 @@ pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, structs: &[Stru
                     let _ = writeln!(release, "        {fam}_release(&v->u.v{vidx}.p{index});");
                     let _ = writeln!(forfeit, "        {fam}_forfeit(&v->u.v{vidx}.p{index});");
                 }
-                Type::Map => {
-                    let _ = writeln!(release, "        ae_map_release(&v->u.v{vidx}.p{index});");
-                    let _ = writeln!(forfeit, "        ae_map_forfeit(&v->u.v{vidx}.p{index});");
-                }
-                Type::MapF => {
-                    let _ = writeln!(release, "        ae_mapf_release(&v->u.v{vidx}.p{index});");
-                    let _ = writeln!(forfeit, "        ae_mapf_forfeit(&v->u.v{vidx}.p{index});");
+                Type::MapOf(id) => {
+                    let fam = map_family(ctx, *id);
+                    let _ = writeln!(release, "        {fam}_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        {fam}_forfeit(&v->u.v{vidx}.p{index});");
                 }
                 Type::Bool => {
                     let _ = writeln!(release, "        v->u.v{vidx}.p{index} = false;");
@@ -698,13 +701,10 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
                     let _ = writeln!(release, "    ae_t{k}_release(&v->{n});");
                     let _ = writeln!(forfeit, "    ae_t{k}_forfeit(&v->{n});");
                 }
-                Type::Map => {
-                    let _ = writeln!(release, "    ae_map_release(&v->{n});");
-                    let _ = writeln!(forfeit, "    ae_map_forfeit(&v->{n});");
-                }
-                Type::MapF => {
-                    let _ = writeln!(release, "    ae_mapf_release(&v->{n});");
-                    let _ = writeln!(forfeit, "    ae_mapf_forfeit(&v->{n});");
+                Type::MapOf(id) => {
+                    let fam = map_family(&program.ctx, *id);
+                    let _ = writeln!(release, "    {fam}_release(&v->{n});");
+                    let _ = writeln!(forfeit, "    {fam}_forfeit(&v->{n});");
                 }
                 Type::Enum(_, k) if !enums[*k].is_copy => {
                     let _ = writeln!(release, "    ae_e{k}_release(&v->{n});");
@@ -876,7 +876,7 @@ typedef struct {{
                 "void".to_owned()
             } else {
                 params.iter().map(|t| match t {
-                    Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_) => c_type(*t, 0, false, &program.ctx),
+                    Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..) => c_type(*t, 0, false, &program.ctx),
                     _ => t.c_temp(&program.ctx).trim_end().to_owned(),
                 }).collect::<Vec<_>>().join(", ")
             };

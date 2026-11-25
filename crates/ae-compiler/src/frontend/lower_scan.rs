@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
                                                     // `return counts;` answer by this
                                                     // mark when the resolver leaves
                                                     // the spelling open.
-                                                    if matches!(signature.ret, Type::Map | Type::MapF) {
+                                                    if matches!(signature.ret, Type::MapOf(_)) {
                                                         expressions.map_definitions.insert(id);
                                                     }
                                                     // A call returning a struct (often an
@@ -641,7 +641,7 @@ impl<'a> Parser<'a> {
                                         && let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                             if scalar_type(field_ty) {
                                                 expressions.struct_field_writes.insert(target.range.start);
-                                            } else if matches!(field_ty, Type::String | Type::Vector(_) | Type::Map | Type::MapF) {
+                                            } else if matches!(field_ty, Type::String | Type::Vector(_) | Type::MapOf(_)) {
                                                 // An owned field store releases the
                                                 // old value and consumes the new one
                                                 // (the FieldStore codegen); containers

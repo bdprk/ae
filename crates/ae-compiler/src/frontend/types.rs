@@ -129,11 +129,12 @@ impl Parser<'_> {
                 self.take(Kind::Comma)?;
                 let value = self.identifier()?;
                 self.take(Kind::RBracket)?;
-                match value.as_str() {
-                    "i64" => Ok(Type::Map),
-                    "f64" => Ok(Type::MapF),
-                    _ => Err(self.fail("map values must be i64 or f64")),
-                }
+                let val_ty = match value.as_str() {
+                    "i64" => Type::Int(IntTy::I64),
+                    "f64" => Type::Float(FloatTy::F64),
+                    _ => return Err(self.fail("map values must be i64 or f64")),
+                };
+                Ok(Type::MapOf(self.ctx.intern_map_types(Type::String, val_ty)))
             }
             other => {
                 if let Some(&gid) = self.generics.names.get(other) {
@@ -822,7 +823,7 @@ impl Parser<'_> {
             return self.named_type();
         }
         let ty = self.parameter_type()?;
-        if matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+        if matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
             Ok(ty)
         } else {
             Err(self.fail("unsupported borrowed parameter type for a callable"))
@@ -971,7 +972,7 @@ impl Parser<'_> {
                 _ => return Err(self.fail("array parameter length must be between 1 and 4096")),
             };
             self.pos += 1; self.take(Kind::RBracket)?;
-            Ok(Type::Array(len))
+            Ok(Type::ArrayOf(self.ctx.intern_array_elem(Type::Int(IntTy::I64)), len))
         } else {
             self.named_type()
         }

@@ -11,6 +11,8 @@ pub struct TypeInterner {
     shared: Vec<TyKind>,
     fn_sigs: Vec<(Vec<TyKind>, TyKind)>,
     vector_elems: Vec<TyKind>,
+    map_types: Vec<(TyKind, TyKind)>,
+    array_elems: Vec<TyKind>,
 }
 
 impl TypeInterner {
@@ -45,6 +47,44 @@ impl TypeInterner {
 
     pub fn vector_elem_count(&self) -> usize {
         self.vector_elems.len()
+    }
+
+    /// ADR-0235: the key and value types of a generic map (`MapOf(MapId)`).
+    pub fn intern_map_types(&mut self, key: TyKind, value: TyKind) -> usize {
+        if let Some(index) = self.map_types.iter().position(|&(k, v)| k == key && v == value) {
+            return index;
+        }
+        self.map_types.push((key, value));
+        self.map_types.len() - 1
+    }
+
+    pub fn map_types(&self, id: usize) -> (TyKind, TyKind) {
+        self.map_types[id]
+    }
+
+    pub fn find_map_types(&self, key: TyKind, value: TyKind) -> Option<usize> {
+        self.map_types.iter().position(|&(k, v)| k == key && v == value)
+    }
+
+    pub fn map_types_count(&self) -> usize {
+        self.map_types.len()
+    }
+
+    /// ADR-0235: the element type of a fixed-size array (`ArrayOf(ElemId, len)`).
+    pub fn intern_array_elem(&mut self, element: TyKind) -> usize {
+        intern(&mut self.array_elems, element)
+    }
+
+    pub fn array_elem(&self, id: usize) -> TyKind {
+        self.array_elems[id]
+    }
+
+    pub fn find_array_elem(&self, element: TyKind) -> Option<usize> {
+        self.array_elems.iter().position(|existing| *existing == element)
+    }
+
+    pub fn array_elem_count(&self) -> usize {
+        self.array_elems.len()
     }
 
     pub fn intern_shared(&mut self, element: TyKind) -> usize {
@@ -100,5 +140,33 @@ mod tests {
         assert_eq!(text, 1);
         assert_eq!(interner.vector_elem(first), int);
         assert_eq!(interner.vector_elem_count(), 2);
+    }
+
+    #[test]
+    fn map_and_array_ids_are_structural_and_ordered() {
+        let mut interner = TypeInterner::new();
+        let int = TyKind::Int(crate::numeric::IntTy::I64);
+        let float = TyKind::Float(crate::numeric::FloatTy::F64);
+        let m_int = interner.intern_map_types(TyKind::String, int);
+        let m_again = interner.intern_map_types(TyKind::String, int);
+        let m_float = interner.intern_map_types(TyKind::String, float);
+        assert_eq!(m_int, m_again);
+        assert_ne!(m_int, m_float);
+        assert_eq!(m_int, 0);
+        assert_eq!(m_float, 1);
+        assert_eq!(interner.map_types(m_int), (TyKind::String, int));
+        assert_eq!(interner.find_map_types(TyKind::String, float), Some(m_float));
+        assert_eq!(interner.find_map_types(int, int), None);
+        assert_eq!(interner.map_types_count(), 2);
+
+        let a_int = interner.intern_array_elem(int);
+        let a_again = interner.intern_array_elem(int);
+        let a_float = interner.intern_array_elem(float);
+        assert_eq!(a_int, a_again);
+        assert_ne!(a_int, a_float);
+        assert_eq!(interner.array_elem(a_int), int);
+        assert_eq!(interner.find_array_elem(float), Some(a_float));
+        assert_eq!(interner.find_array_elem(TyKind::Bool), None);
+        assert_eq!(interner.array_elem_count(), 2);
     }
 }

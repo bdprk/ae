@@ -649,7 +649,8 @@ use super::*;
         assert!(parser.lower_resolved_scalar_body().is_none(), "compound store stays typed");
 
         let param_offset = source.find("(a: &[i64; 2]").unwrap() + 1;
-        parser.names.insert("a".into(), (0, false, Type::Array(2)));
+        let i64_array = Type::ArrayOf(parser.ctx.intern_array_elem(Type::Int(IntTy::I64)), 2);
+        parser.names.insert("a".into(), (0, false, i64_array));
         parser.binding_ranges.insert(0, param_offset..param_offset + 1);
         parser.seek_scalar_offset(source.find("{ return a[1]").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved array param").unwrap();

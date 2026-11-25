@@ -22,9 +22,10 @@ pub enum TyKind {
     Vector(usize),
     /// A read-only borrow of a generic vector.
     VectorRef(usize),
-    Map,
-    MapF,
-    Array(usize),
+    /// A generic map whose `(key, value)` types are interned (ADR-0235).
+    MapOf(usize),
+    /// A fixed-size borrowed array whose `(elem_id, len)` are interned/stored (ADR-0235).
+    ArrayOf(usize, usize),
     Struct(usize),
     StructRef(usize),
     StructMut(usize),
@@ -65,7 +66,7 @@ impl TyKind {
     /// slots, which may hold strings. A raw pointer is a plain value: copying
     /// it moves nothing, so it neither moves nor releases.
     pub fn owned(self) -> bool {
-        matches!(self, TyKind::String | TyKind::Vector(_) | TyKind::Map | TyKind::MapF | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
+        matches!(self, TyKind::String | TyKind::Vector(_) | TyKind::MapOf(_) | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
     }
 }
 
