@@ -9,7 +9,9 @@ their mutation surface (push, indexed store, sort) and string vectors
 vectors with Drop glue (push/overwrite/pop/scope release, drop prints in
 the compared output), string vector literals, vector fields and nested
 field chains (`box.cells`, `outer.box.cells`), indexed place borrows
-(`&v[i]`), and typed local bindings (P2.4/P2.5), structs, enums,
+(`&v[i]`), typed local bindings (P2.4/P2.5), and `&[T]` slices built at
+call sites from vectors, arrays and forwarded parameters (ADR-0236),
+structs, enums,
 matches with payload bindings, counted loops with `continue`, and the
 borrow surface (M2.5): a Doc struct with a `&mut self` method and a free
 `&mut` function, field views born and read inside one statement group,
@@ -143,7 +145,7 @@ class Gen:
         """
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
-        kind = self.rnd() % 28
+        kind = self.rnd() % 30
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -533,6 +535,46 @@ class Gen:
                 f"print(len({sname}));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
+        if kind == 28:
+            # ADR-0236: a `&[i64]` built from a vector and from an array, plus
+            # a forwarded slice parameter. The callee's loop and index reads
+            # see the caller's elements and length through the fat pointer.
+            name = self.fresh("sl")
+            arr = self.fresh("sa")
+            values = [self.int_expr(vars) for _ in range(3)]
+            return [
+                f"var {name} = vec[{values[0]}, {values[1]}, {values[2]}];",
+                f"print(fuzz_slice_sum(&{name}));",
+                f"print(fuzz_slice_forward(&{name}));",
+                f"print(fuzz_slice_first(&{name}));",
+                f"let {arr} = [{values[0]}, {values[1]}, {values[2]}];",
+                f"print(fuzz_slice_sum(&{arr}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 29:
+            # ADR-0236 element kinds: `&[string]` reads views, `&[FuzzTag]`
+            # projects an owned element's field, and `&[vec]` iterates nested
+            # containers — none of it moves the owner.
+            words = self.fresh("ss")
+            tags = self.fresh("st")
+            rows = self.fresh("sr")
+
+            def tag(prefix: str) -> str:
+                return f'FuzzTag {{ name: "{prefix}{self.rnd() % 1000}", n: {self.int_expr(vars)} }}'
+
+            value = lambda: self.int_expr(vars)
+            return [
+                f'var {words} = vec["w{self.rnd() % 1000}", "w{self.rnd() % 1000}"];',
+                f"print(fuzz_slice_words(&{words}));",
+                f"print(fuzz_slice_word_len(&{words}));",
+                f"var {tags} = vec[{tag('s')}, {tag('t')}];",
+                f"print(fuzz_slice_tags(&{tags}));",
+                f"print(fuzz_slice_tag0(&{tags}));",
+                f"print({tags}[0].n);",
+                f"var {rows} = vec[vec[{value()}, {value()}], vec[{value()}]];",
+                f"print(fuzz_slice_rows(&{rows}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
         name = self.fresh("s")
         return [
             f"var {name} = {self.int_expr(vars)};",
@@ -555,6 +597,14 @@ class Gen:
             "struct FuzzBox { cells: vec, tags: vec[FuzzTag] }",
             "struct FuzzOuter { box: FuzzBox }",
             "fn fuzz_tag_n(t: &FuzzTag) -> i64 { return t.n; }",
+            "fn fuzz_slice_sum(v: &[i64]) -> i64 { var t = 0; for x in v { t += x; } return t; }",
+            "fn fuzz_slice_forward(v: &[i64]) -> i64 { return fuzz_slice_sum(v); }",
+            "fn fuzz_slice_first(v: &[i64]) -> i64 { return v[0]; }",
+            "fn fuzz_slice_words(v: &[string]) -> i64 { var t = 0; for w in v { t += len(w); } return t; }",
+            "fn fuzz_slice_word_len(v: &[string]) -> i64 { return len(v[0]); }",
+            "fn fuzz_slice_tags(v: &[FuzzTag]) -> i64 { var t = 0; for x in v { t += x.n; } return t; }",
+            "fn fuzz_slice_tag0(v: &[FuzzTag]) -> i64 { return v[0].n; }",
+            "fn fuzz_slice_rows(v: &[vec]) -> i64 { var t = 0; for r in v { t += len(r); } return t; }",
             "fn eat(t: string) -> i64 { return len(t); }",
             "impl Doc {",
             "    fn rename(&mut self, to: string) -> i64 {",
