@@ -194,10 +194,11 @@ impl<'a> TreePrinter<'a> {
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} @ {}:{}", id, index_text, value_text, line, col));
             }
-            Statement::FieldStore(id, fname, fty, value, base_ty) => {
+            Statement::FieldStore(id, path, fty, value, base_ty) => {
                 let value_text = self.expression_text(value);
                 let access = if matches!(base_ty, Type::StructMut(_)) { "->" } else { "." };
-                self.line(&format!("v{}{}{} = {} (field {})", id, access, fname, value_text, fty.name(self.ctx)));
+                let path_text = field_path_text(path);
+                self.line(&format!("v{}{}{} = {} (field {})", id, access, path_text, value_text, fty.name(self.ctx)));
             }
             Statement::Sort(id, ascending, line, col) => {
                 self.line(&format!("sort v{} {} @ {}:{}", id, if *ascending { "asc" } else { "desc" }, line, col));

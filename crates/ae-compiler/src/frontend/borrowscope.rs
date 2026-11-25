@@ -430,10 +430,14 @@ type Place = (usize, Option<String>);
 fn statement_targets(statement: &Statement) -> std::collections::HashSet<Place> {
     let mut targets = std::collections::HashSet::new();
     if let Some(written) = writes_slot(statement) { targets.insert((written, None)); }
-    if let Statement::FieldStore(id, fname, ..) = statement {
-        // A field write releases the written field's bytes only.
+    if let Statement::FieldStore(id, path, ..) = statement {
+        // A field write releases the written field's bytes only. A nested
+        // path keys on its first segment: the whole root field's storage is
+        // what a view of it may observe.
         targets.remove(&(id.to_owned(), None));
-        targets.insert((*id, Some(fname.clone())));
+        if let Some((first, _)) = path.first() {
+            targets.insert((*id, Some(first.clone())));
+        }
     }
     targets.extend(statement_move_effects(statement).moved.into_iter().map(|id| (id, None)));
     targets

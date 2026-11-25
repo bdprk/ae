@@ -244,9 +244,9 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                                         || resolved.owned_vectors.contains(id)
                                         || resolved.owned_struct_bindings.contains(id))))
                 }
-                ae_syntax::expression::ExpressionKind::Field { base, .. }
+                ae_syntax::expression::ExpressionKind::Field { .. }
                     if (*operator == Kind::Equal || compound_assignment_operator(operator).is_some())
-                        && matches!(&base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) =>
+                        && field_chain_root(target).is_some() =>
                 {
                     supports_field(target, ae_resolve::Role::Write)
                         && (scalar_body_expression(value, resolved, supports_call, supports_field)

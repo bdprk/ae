@@ -633,17 +633,19 @@ impl<'a> Parser<'a> {
                         // and the root's spelling must be a mutable borrow.
                         if (*operator == Kind::Equal || compound_assignment_operator(operator).is_some())
                             && let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
-                                let base_def = expressions.scalar_writes.get(&base.range.start).copied();
-                                let mutable_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                                    && base_def.is_some_and(|def| {
-                                        resolution.defs.get(def.0 as usize).is_some_and(|entry| matches!(entry.inferred,
-                                            Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })))
-                                    });
+                                // The writability verdict belongs to the chain's
+                                // root binding: a `&mut` borrow or an owned struct
+                                // local (`a.b.c = 1` included).
+                                let root_def = field_chain_root(target)
+                                    .and_then(|root| expressions.scalar_writes.get(&root.range.start).copied());
+                                let mutable_base = root_def.is_some_and(|def| {
+                                    resolution.defs.get(def.0 as usize).is_some_and(|entry| matches!(entry.inferred,
+                                        Some(ae_resolve::TypeSpelling::Borrow { mutable: true, .. })))
+                                });
                                 // An owned struct local is a writable receiver too
                                 // (`plot.w = 40;`): its binding names a struct
                                 // (from a spelling, a literal or a call return).
-                                let owned_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
-                                    && base_def.is_some_and(|def| expressions.struct_definition_names.contains_key(&def));
+                                let owned_base = root_def.is_some_and(|def| expressions.struct_definition_names.contains_key(&def));
                                 if (mutable_base || owned_base)
                                     && let Some(sid) = field_owner_struct(base, &expressions, self.struct_names, self.structs)
                                         && let Some(field_ty) = field_ty_in(sid, name, self.structs) {

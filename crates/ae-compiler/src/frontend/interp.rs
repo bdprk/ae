@@ -546,7 +546,7 @@ fn eval_stmts(
                     arr[idx as usize] = val;
                 }
             }
-            Statement::FieldStore(id, fname, _, val_expr, _through_ptr) => {
+            Statement::FieldStore(id, path, _, val_expr, _through_ptr) => {
                 let val = match eval_expr(env, val_expr, locals, caller_locals, true) {
                     Ok(v) => v,
                     Err(f) => return f,
@@ -566,12 +566,11 @@ fn eval_stmts(
                 if let Some(target_id) = ref_target
                     && let Some(caller) = caller_locals.as_mut()
                         && let Some(Val::Struct(_, fields)) = caller.get_mut(&target_id) {
-                            fields.insert(fname.clone(), val.clone());
-                            wrote = true;
+                            wrote = insert_field_path(fields, path, val.clone());
                         }
                 if !wrote
                     && let Some(Val::Struct(_, fields)) = locals.get_mut(id) {
-                        fields.insert(fname.clone(), val);
+                        insert_field_path(fields, path, val);
                     }
             }
             Statement::StrVecPush(id, val_expr, line, col, _) => {

@@ -10500,3 +10500,83 @@ fn nested_field_receiver_writes_match_across_backends() {
         );
     }
 }
+
+/// P2.4: field stores through a nested receiver. `o.m.inner.n = 5`,
+/// `o.m.inner.name = "beta"`, `o.m.inner.cells = vec[7, 8]` and a `&mut`
+/// helper's compound write all resolve the chain from the root binding; a
+/// write into a moved value is rejected like any other use of it.
+#[test]
+fn nested_field_stores_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_field_stores.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "immutable root",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { let h = H { i: I { n: 1 } }; h.i.n = 2; }"#,
+            "cannot assign to immutable variable 'h'",
+        ),
+        (
+            "read-only struct borrow root",
+            r#"struct I { n: i64 } struct H { i: I } fn write(h: &H) { h.i.n = 2; } fn main() {}"#,
+            "cannot assign to immutable variable 'h'",
+        ),
+        (
+            "moved root",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { var h = H { i: I { n: 1 } }; let moved = h; h.i.n = 2; }"#,
+            "cannot use 'h' because it was moved",
+        ),
+        (
+            "one-level field write after a move",
+            r#"struct P { x: i64 } fn main() { var p = P { x: 1 }; let q = p; p.x = 2; }"#,
+            "cannot use 'p' because it was moved",
+        ),
+        (
+            "missing intermediate field",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { var h = H { i: I { n: 1 } }; h.missing.n = 2; }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-field-stores-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

@@ -751,7 +751,7 @@ fn rewrite_mut_closure_stmts(
             Statement::Assign(slot, expr, _) => {
                 rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
                 if let Some((fname, fty)) = slot_to_field.get(slot) {
-                    *stmt = Statement::FieldStore(0, fname.clone(), *fty, expr.clone(), env_ty);
+                    *stmt = Statement::FieldStore(0, vec![(fname.clone(), *fty)], *fty, expr.clone(), env_ty);
                 } else if let Some(&new_slot) = param_remap.get(slot) {
                     *slot = new_slot;
                 } else {

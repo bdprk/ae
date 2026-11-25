@@ -146,12 +146,17 @@ fn lower_statement(statement: &Statement, bindings: &mut Vec<MirBinding>, loweri
             let rvalue = lower_expr(expr, bindings, lowering);
             bindings.push(MirBinding { target: MirPlace::Local(*id, expr_type(expr, lowering.ctx)), rvalue });
         }
-        Statement::FieldStore(id, fname, fty, value, base_ty) => {
+        Statement::FieldStore(id, path, fty, value, base_ty) => {
             let rvalue = lower_expr(value, bindings, lowering);
-            bindings.push(MirBinding {
-                target: MirPlace::Field(Box::new(MirPlace::Local(*id, *base_ty)), fname.clone(), *fty),
-                rvalue,
-            });
+            let mut place = MirPlace::Local(*id, *base_ty);
+            for (name, step_ty) in path {
+                place = MirPlace::Field(Box::new(place), name.clone(), *step_ty);
+            }
+            let target = match place {
+                MirPlace::Field(..) => place,
+                local => MirPlace::Field(Box::new(local), String::new(), *fty),
+            };
+            bindings.push(MirBinding { target, rvalue });
         }
         Statement::Return(expr, _) => {
             let rvalue = lower_expr(expr, bindings, lowering);

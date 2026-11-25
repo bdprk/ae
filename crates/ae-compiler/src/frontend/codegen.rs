@@ -1691,7 +1691,7 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 out.push_str(&format!("    v{id}.data[t{checked}] = t{replacement};\n"));
                 null_moves(out, &value.moves, ctx);
             }
-            Statement::FieldStore(id, fname, fty, value, base_ty) => {
+            Statement::FieldStore(id, path, fty, value, base_ty) => {
                 if *fty == Type::Unit {
                     // A unit field has no storage: run the right side for side
                     // effects, then write nothing (`t = ;` would be invalid C).
@@ -1702,13 +1702,13 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 // A mutable borrow writes through a pointer, so
                 // every access reads `v{id}->field` instead of `v{id}.field`
                 // (ADR-0185); the release targets what the caller owns.
-                let dot = if matches!(base_ty, Type::StructMut(_)) { "->" } else { "." };
+                let member = field_member(*id, path, *base_ty);
                 let release_old = match fty {
-                    Type::String => format!("    ae_str_release(&v{id}{}{});\n", dot, fname),
-                    Type::Vector(elem_id) => format!("    {}_release(&v{id}{}{});\n", c_output::vector_family(ctx, *elem_id), dot, fname),
-                    Type::MapOf(map_id) => format!("    {}_release(&v{id}{}{});\n", c_output::map_family(ctx, *map_id), dot, fname),
-                    Type::Struct(k) if !ctx.structs[*k].is_copy => format!("    ae_t{k}_release(&v{id}{}{});\n", dot, fname),
-                    Type::Enum(_, k) if !ctx.enums[*k].is_copy => format!("    ae_e{k}_release(&v{id}{}{});\n", dot, fname),
+                    Type::String => format!("    ae_str_release(&{member});\n"),
+                    Type::Vector(elem_id) => format!("    {}_release(&{member});\n", c_output::vector_family(ctx, *elem_id)),
+                    Type::MapOf(map_id) => format!("    {}_release(&{member});\n", c_output::map_family(ctx, *map_id)),
+                    Type::Struct(k) if !ctx.structs[*k].is_copy => format!("    ae_t{k}_release(&{member});\n"),
+                    Type::Enum(_, k) if !ctx.enums[*k].is_copy => format!("    ae_e{k}_release(&{member});\n"),
                     _ => String::new(),
                 };
                 // The value emits in a moving context: an owned variable
@@ -1721,7 +1721,7 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let temp = *next; *next += 1;
                 out.push_str(&format!("    {}t{temp} = {};\n", fty.c_temp(ctx), value.text));
                 out.push_str(&release_old);
-                out.push_str(&format!("    v{id}{}{} = t{temp};\n", dot, fname));
+                out.push_str(&format!("    {member} = t{temp};\n"));
                 null_moves(out, &value.moves, ctx);
                 }
             }

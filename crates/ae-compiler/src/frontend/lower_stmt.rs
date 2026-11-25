@@ -1,8 +1,7 @@
 //! Lowering module: stmt (P1.4 parser split).
 use super::*;
-use super::parser::moved_self_assignment_hint;
+use super::parser::{moved_self_assignment_hint, moved_value_hint};
 use super::route_body_stmt::*;
-use super::route_marks::*;
 
 impl<'a> Parser<'a> {
     pub(super) fn lower_scalar_statement(
@@ -190,52 +189,42 @@ impl<'a> Parser<'a> {
                 statement
             }
             StatementKind::Assign { target, operator, value } => {
-                if let ae_syntax::expression::ExpressionKind::Field { base, name } = &target.kind {
-                    let store_name = match &base.kind {
-                        ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) => name.as_str(),
-                        _ => "value",
-                    };
-                    // The store writes through a `&mut` receiver or into an
-                    // owned local struct; both reach the same FieldStore, and
-                    // codegen picks `.`/`->` from the receiver type.
-                    let (slot, receiver) = self.resolved_slot(
-                        self.resolved_expressions().scalar_writes.get(&base.range.start),
-                        slots, base.range.start, store_name)?;
-                    if let Type::StructRef(_) = receiver {
-                        // A read-only struct borrow: neither the pointer nor
-                        // anything behind it may be written. The typed route
-                        // distinguishes an immutable binding from a mutable one
-                        // (`var r: &Rect`), and so does this arm.
-                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind else {
-                            unreachable!("borrowed struct store base");
-                        };
-                        if !self.names.get(base_name).is_some_and(|&(_, mutable, _)| mutable) {
+                if matches!(target.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
+                    // A field store writes through a `&mut` receiver or into
+                    // an owned local struct; the receiver may be a nested
+                    // field chain (`a.m.x = 2`). Codegen picks `.`/`->` from
+                    // the root type at every level.
+                    let super::lower_expr::FieldChain { root: root_name, slot, root_ty, path } =
+                        super::lower_expr::resolve_field_chain(self, target)?;
+                    // Writing into a moved value is a use of it, exactly like
+                    // reading it (the whole-variable assignment above is the
+                    // re-initialization form and stays allowed).
+                    if self.moved.contains(&slot) {
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{root_name}' because it was moved")).with_code("E0102"), slot)));
+                    }
+                    let (last_name, field) = path.last().cloned().expect("a field chain has a field");
+                    if let Type::StructRef(_) = root_ty {
+                        if !self.names.get(&root_name).is_some_and(|&(_, mutable, _)| mutable) {
                             self.seek_scalar_offset(target.range.start);
-                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{base_name}'")).with_code("E0103");
+                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
                             return Err(self.immutable_binding_error(diagnostic, slot));
                         }
-                        self.seek_scalar_offset(base.range.end);
-                        return Err(self.fail(&format!("cannot write through '{base_name}': struct borrows are read-only in this version")));
-                    }
-                    let sid = match receiver {
-                        Type::StructMut(sid) | Type::Struct(sid) | Type::StructRef(sid) => sid,
-                        other => return Err(self.error_at(target.range.start, &format!("type {} has no fields or methods", other.name(self.ctx)))),
-                    };
-                    if matches!(receiver, Type::Struct(_)) {
-                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(base_name)) = &base.kind else {
-                            unreachable!("owned struct store base");
-                        };
-                        if !self.names[base_name].1 {
-                            self.seek_scalar_offset(target.range.start);
-                            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{base_name}'")).with_code("E0103");
-                            return Err(self.immutable_binding_error(diagnostic, slot));
+                        // Point at the end of the root name, the cursor
+                        // position the typed store's rejection used.
+                        let mut root_node = target;
+                        while let ae_syntax::expression::ExpressionKind::Field { base, .. } = &root_node.kind {
+                            root_node = base;
                         }
+                        self.seek_scalar_offset(root_node.range.end);
+                        return Err(self.fail(&format!("cannot write through '{root_name}': struct borrows are read-only in this version")));
                     }
-                    let field = field_ty_in(sid, name, self.structs)
-                        .ok_or_else(|| self.error_at(target.range.start, &format!("struct '{}' has no field '{name}'", self.structs[sid].name)))?;
+                    if matches!(root_ty, Type::Struct(_)) && !self.names[&root_name].1 {
+                        self.seek_scalar_offset(target.range.start);
+                        let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
+                        return Err(self.immutable_binding_error(diagnostic, slot));
+                    }
                     let compound = compound_assignment_operator(operator);
-                    // The check takes the operator's plain form (`+=` -> `+`),
-                    // exactly like the typed store.
                     if let Some(op) = &compound {
                         self.check_compound_assignment(field, op)?;
                     }
@@ -250,17 +239,20 @@ impl<'a> Parser<'a> {
                             self.moved.insert(*source);
                         }
                     self.seek_scalar_offset(statement.range.end);
-                    self.check_field_value_type(name, field, actual, None)?;
-                    // `c.n += 5` stores `c.n + 5`: the typed route's FieldStore
-                    // with the field read applied in place.
+                    self.check_field_value_type(&last_name, field, actual, None)?;
+                    // `c.n += 5` stores `c.n + 5`: the field read is applied
+                    // in place, walking the same chain.
                     let stored = match compound {
                         Some(op) => {
-                            let current = Expr::Field(Box::new(Expr::Variable(slot, receiver, line, column)), name.clone(), field);
-                            Expr::Binary(Box::new(current), op, Box::new(value), line, column, field)
+                            let mut place = Expr::Variable(slot, root_ty, line, column);
+                            for (name, fty) in &path {
+                                place = Expr::Field(Box::new(place), name.clone(), *fty);
+                            }
+                            Expr::Binary(Box::new(place), op, Box::new(value), line, column, field)
                         }
                         None => value,
                     };
-                    return Ok(Statement::FieldStore(slot, name.clone(), field, stored, receiver));
+                    return Ok(Statement::FieldStore(slot, path, field, stored, root_ty));
                 }
                 if let ae_syntax::expression::ExpressionKind::Index { base, index } = &target.kind {
                     // An array element store (`a[i] = v`): eligibility

@@ -421,8 +421,8 @@ use super::*;
         parser.binding_ranges.insert(81, value_binding..value_binding + "new_value".len());
         parser.seek_scalar_offset(setter_body);
         let lowered = parser.lower_resolved_scalar_body().expect("resolved generic receiver store").unwrap();
-        assert!(matches!(lowered.as_slice(), [Statement::FieldStore(80, name, Type::Int(IntTy::I64), Expr::Variable(81, Type::Int(IntTy::I64), ..), actual), Statement::Return(Expr::Field(..), _)]
-            if name == "item" && *actual == mutable_receiver));
+        assert!(matches!(lowered.as_slice(), [Statement::FieldStore(80, path, Type::Int(IntTy::I64), Expr::Variable(81, Type::Int(IntTy::I64), ..), actual), Statement::Return(Expr::Field(..), _)]
+            if path.len() == 1 && path[0].0 == "item" && *actual == mutable_receiver));
         parser.names.insert("new_value".into(), (81, false, Type::Bool));
         parser.seek_scalar_offset(setter_body);
         let error = parser.lower_resolved_scalar_body().expect("resolved setter error").err().unwrap();
