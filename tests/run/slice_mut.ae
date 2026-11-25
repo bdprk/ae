@@ -32,6 +32,15 @@ fn move_point(items: &mut [Point], to: i64) {
     items[0] = Point { x: to, y: to + 1 };
 }
 
+fn set_flags(flags: &mut [bool]) {
+    flags[0] = true;
+    flags[1] = false;
+}
+
+fn set_char(chars: &mut [char]) {
+    chars[0] = 'z';
+}
+
 fn main() {
     var v = vec[1, 2, 3];
     double_all(&mut v);
@@ -50,4 +59,12 @@ fn main() {
     move_point(&mut points, 5);
     print(points[0].x);
     print(points[0].y);
+    var flags = vec[false, true];
+    set_flags(&mut flags);
+    print(flags[0]);
+    print(flags[1]);
+    var chars = vec['a', 'b'];
+    set_char(&mut chars);
+    print(chars[0]);
+    print(chars[1]);
 }
