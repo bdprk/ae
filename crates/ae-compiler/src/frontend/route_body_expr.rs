@@ -130,8 +130,8 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 })
         }
         ExpressionKind::Index { base, index } => {
-            matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
-                && resolved.scalar_reads.get(&base.range.start).is_some_and(|id| {
+            let base_ok = match &base.kind {
+                ExpressionKind::Atom(Kind::Ident(_)) => resolved.scalar_reads.get(&base.range.start).is_some_and(|id| {
                     resolved.array_definitions.contains(id)
                         // A vector indexes as element copies/views, whether
                         // the binding owns the vector or borrows it
@@ -143,8 +143,13 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 // answers by the slot's type.
                 .then_some(())
                 .or_else(|| resolved.scalar_reads.get(&base.range.start).map(|_| ()))
-                .is_some()
-                && scalar_body_expression(index, resolved, supports_call, supports_field)
+                .is_some(),
+                // A field receiver (`r.cells[0]`): the lowering resolves the
+                // field's type and reports a non-container base itself.
+                ExpressionKind::Field { .. } => true,
+                _ => false,
+            };
+            base_ok && scalar_body_expression(index, resolved, supports_call, supports_field)
         }
         ExpressionKind::Atom(Kind::Number(_) | Kind::Float(_) | Kind::True | Kind::False | Kind::Text(_) | Kind::Char(_)) | ExpressionKind::Unit => true,
         // A collection literal used as a value (`print(vec[1])`): the scan

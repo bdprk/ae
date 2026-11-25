@@ -1235,6 +1235,31 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
             }
         }
+        Expr::VecIndexOf(base, idx_expr, line, col, _elem_ty) => {
+            let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: vec index type".to_owned())),
+            };
+            match eval_expr(env, base, locals, caller_locals, false)? {
+                Val::VecI(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(Val::Int(v[idx as usize]))
+                }
+                Val::VecF(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(Val::Float(v[idx as usize]))
+                }
+                Val::VecS(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(Val::Str(v[idx as usize].clone()))
+                }
+                Val::VecG(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(v[idx as usize].clone())
+                }
+                _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
+            }
+        }
         Expr::StrVecIndex(id, idx_expr, line, col, _) => {
             let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
                 Val::Int(n) => n,

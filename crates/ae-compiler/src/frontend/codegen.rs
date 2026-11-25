@@ -558,6 +558,25 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
         }
+        Expr::VecIndexOf(base, index, line, col, elem_ty) => {
+            // An element read through a field receiver (`r.cells[0]`). The
+            // base is an lvalue, so the pointer accessors take its address;
+            // the by-value accessors copy the vector header.
+            let b = emit_expr(base, out, next, false, ctx);
+            out.push_str(&format!("    if (!({}).data) ae_fail(\"use of moved vector\", {line}, {col});\n", b.text));
+            let i = emit_expr(index, out, next, false, ctx);
+            let ptr = format!("&({})", b.text);
+            let get = match *elem_ty {
+                Type::Int(IntTy::I64) => format!("ae_vec_get({}, {}, {line}, {col})", b.text, i.text),
+                Type::Float(FloatTy::F64) => format!("ae_f64vec_get({}, {}, {line}, {col})", b.text, i.text),
+                Type::String => format!("(*ae_strvec_get_const({ptr}, {}, {line}, {col}))", i.text),
+                _ => {
+                    let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                    format!("(*((const {c_elem} *)ae_gvec_at({ptr}, {}, {line}, {col})))", i.text)
+                }
+            };
+            Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
+        }
         Expr::Index(id, len, index, line, col, elem_ty) => {
             // A constant index inside the array's compile-time length is
             // provably in bounds: the check elides (M2.10). An out-of-range

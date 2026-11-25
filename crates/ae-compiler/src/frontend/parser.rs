@@ -301,6 +301,22 @@ impl<'a> Parser<'a> {
             Expr::Neg(a, _, _) | Expr::Not(a) | Expr::Len(a, _, _) => self.record_borrow_bases(a),
             Expr::Index(_, _, a, _, _, _) => self.record_borrow_bases(a),
             Expr::VecIndex(_, a, _, _, _, _) => self.record_borrow_bases(a),
+            Expr::VecIndexOf(base, index, _, _, elem_ty) => {
+                self.record_borrow_bases(base);
+                self.record_borrow_bases(index);
+                // A view of an owned element (a string element, a nested
+                // vector, an owned struct) keeps the receiver's root variable
+                // alive: reassigning or moving the struct while the view is
+                // read would leave the view dangling.
+                if *elem_ty == Type::String || self.is_owned(*elem_ty) {
+                    let mut root = base.as_ref();
+                    while let Expr::Field(inner, _, _) = root { root = inner; }
+                    if let Expr::Variable(slot, ..) = root
+                        && !self.is_borrowed(*slot) {
+                        self.borrows.push((*slot, self.scopes.len(), BorrowKind::Container));
+                    }
+                }
+            }
             Expr::Call(_, args, _) => {
                 for arg in args {
                     match arg {

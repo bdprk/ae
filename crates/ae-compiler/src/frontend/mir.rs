@@ -413,6 +413,10 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             let vector = vector_type(lowering.ctx, Type::String, *borrowed);
             ("index", vec![MirOperand::Place(MirPlace::Local(*id, vector)), lower_operand(index, bindings, lowering)])
         }
+        Expr::VecIndexOf(base, index, _, _, _) => (
+            "index_of",
+            vec![lower_operand(base, bindings, lowering), lower_operand(index, bindings, lowering)],
+        ),
         Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(sep, bindings, lowering)]),
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
@@ -519,6 +523,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::Number(..) | Expr::Len(..) => Type::Int(IntTy::I64),
         Expr::Index(.., elem_ty) => *elem_ty,
         Expr::VecIndex(_, _, _, _, _, ty) => *ty,
+        Expr::VecIndexOf(_, _, _, _, ty) => *ty,
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,
         Expr::FloatLit(..) | Expr::ToF64(..) => Type::Float(FloatTy::F64),

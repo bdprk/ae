@@ -986,6 +986,26 @@ impl<'a> Parser<'a> {
                 }
             }
             ExpressionKind::Index { base, index } => {
+                // A receiver that is not a bare binding (`r.cells[0]`): the
+                // field expression is lowered as an lvalue and the element
+                // read goes through it.
+                if !matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))) {
+                    let (base_expr, base_ty) = self.lower_scalar_body_expression(base, slots)?;
+                    self.seek_scalar_offset(base.range.end);
+                    let (line, column) = self.position();
+                    let id = match base_ty {
+                        Type::Vector(id) | Type::VectorRef(id) => id,
+                        other => return Err(self.error_at(base.range.start, &format!("cannot index a value of type {}", other.name(self.ctx)))),
+                    };
+                    let element = self.ctx.vector_elem(id);
+                    let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
+                    if index_ty != Type::Int(IntTy::I64) {
+                        self.seek_scalar_offset(index.range.end);
+                        return Err(self.fail("vector index must be an integer"));
+                    }
+                    let read_ty = vector_element_read_type(element, self.structs);
+                    return Ok((Expr::VecIndexOf(Box::new(base_expr), Box::new(value), line, column, element), read_ty));
+                }
                 let index_name = match &base.kind {
                     ExpressionKind::Atom(Kind::Ident(name)) => name.as_str(),
                     _ => "value",
@@ -1009,21 +1029,13 @@ impl<'a> Parser<'a> {
                             self.seek_scalar_offset(index.range.end);
                             return Err(self.fail("vector index must be an integer"));
                         }
+                        let read_ty = vector_element_read_type(element, self.structs);
                         if element == Type::String {
                             // A borrowed string vector's element is a view; an
                             // owned one hands the element's view too.
-                            (Expr::StrVecIndex(slot, Box::new(value), line, column, borrowed), Type::StrView)
-                        } else if let Type::Vector(inner) = element {
-                            // An owned element is a view: the outer vector
-                            // keeps the storage, so the read type is `&vec`.
-                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), Type::VectorRef(inner))
-                        } else if let Type::Struct(sid) = element
-                            && !self.structs[sid].is_copy {
-                            // An owned struct element reads as a borrow; a
-                            // Copy struct stays a value.
-                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), Type::StructRef(sid))
+                            (Expr::StrVecIndex(slot, Box::new(value), line, column, borrowed), read_ty)
                         } else {
-                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
+                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), read_ty)
                         }
                     }
                     other => return Err(self.error_at(base.range.start, &format!("cannot index a value of type {}", other.name(self.ctx)))),
@@ -1921,5 +1933,17 @@ let mut args = Vec::with_capacity(arguments.len());
             final_args.push(Argument::Value(value));
         }
         Ok(Some((Expr::Call(inst_id, final_args, inst_ret), inst_ret)))
+    }
+}
+
+/// The type an element read hands back: a view for owned storage (a string
+/// element, a nested vector, an owned struct) and the element value itself
+/// for Copy elements.
+pub(super) fn vector_element_read_type(element: Type, structs: &[StructDef]) -> Type {
+    match element {
+        Type::String => Type::StrView,
+        Type::Vector(inner) => Type::VectorRef(inner),
+        Type::Struct(sid) if !structs[sid].is_copy => Type::StructRef(sid),
+        other => other,
     }
 }

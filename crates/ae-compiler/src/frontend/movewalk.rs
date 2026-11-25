@@ -450,6 +450,11 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             None
         }
         Expr::BorrowAs(e, ..) | Expr::DerefPtr(e, ..) => walk_expr(e, moved),
+        // A field receiver and its index are reads (`r.cells[0]`).
+        Expr::VecIndexOf(base, index, ..) => {
+            if let Some(violation) = walk_expr(base, moved) { return Some(violation); }
+            walk_expr(index, moved)
+        }
         // The pointer itself is only read; the count can contain calls and
         // therefore reads or moves of its own, after evaluating the base.
         Expr::PtrOffset(base, count, ..) => {

@@ -10125,3 +10125,74 @@ fn string_vector_literals_copy_views_and_move_owned_strings() {
         );
     }
 }
+
+/// P2.4: element reads through a struct-field receiver (`r.cells[0]`).
+/// The receiver is an lvalue, so every vector family reads through it —
+/// i64, f64, string (a view), and an owned struct element's fields — and a
+/// string/owned view keeps the struct variable borrowed while a binding can
+/// still read it.
+#[test]
+fn field_receiver_indexing_matches_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("field_receiver_indexing.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "indexing a non-vector field",
+            r#"struct P { n: i64 } fn main() { let p = P { n: 1 }; print(p.n[0]); }"#,
+            "cannot index a value of type i64",
+        ),
+        (
+            "struct reassigned while a field-element view is live",
+            r#"struct W { words: vec[string] } fn main() { var w = W { words: vec["alpha"] }; let s = w.words[0]; w = W { words: vec["beta"] }; print(s); }"#,
+            "cannot assign to 'w' while it is borrowed",
+        ),
+        (
+            "owned struct element bound to a local",
+            r#"struct I { name: string, n: i64 } struct B { items: vec[I] } fn main() { let b = B { items: vec[I { name: "a", n: 1 }] }; let t = b.items[0]; print(t.n); }"#,
+            "cannot store a borrowed struct in a variable",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-field-receiver-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

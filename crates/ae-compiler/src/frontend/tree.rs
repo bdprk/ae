@@ -483,6 +483,12 @@ impl<'a> TreePrinter<'a> {
                 self.expression(index, out);
                 out.push_str(&format!("] ({}) @ {}:{}", elem.name(self.ctx), line, col));
             }
+            Expr::VecIndexOf(base, index, line, col, elem) => {
+                self.expression(base, out);
+                out.push('[');
+                self.expression(index, out);
+                out.push_str(&format!("] ({}) @ {}:{}", elem.name(self.ctx), line, col));
+            }
             Expr::StrVecIndex(id, index, line, col, borrowed) => {
                 out.push_str(&format!("v{}{}[", id, if *borrowed { "&" } else { "" }));
                 self.expression(index, out);
