@@ -10933,4 +10933,43 @@ fn generic_slices_match_across_backends() {
         "expected the type-argument remedy, got {}",
         String::from_utf8_lossy(&result.stderr)
     );
+
+    // A generic slice instantiates to the spelled element; a source of a
+    // different element is rejected with the concrete instantiated type.
+    for (label, source, needle) in [
+        (
+            "i64 slice, string source",
+            r#"fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let w = vec["a"]; print(size[i64](&w)); }"#,
+            "argument must be &[i64], found vec[string]",
+        ),
+        (
+            "string slice, i64 source",
+            r#"fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1]; print(size[string](&a)); }"#,
+            "argument must be &[string], found vec[i64]",
+        ),
+        (
+            "vec slice, scalar source",
+            r#"fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1]; print(size[vec](&a)); }"#,
+            "argument must be &[vec[i64]], found vec[i64]",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-generic-slices-mis-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
