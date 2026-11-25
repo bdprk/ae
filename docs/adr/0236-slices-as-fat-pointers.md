@@ -90,7 +90,9 @@ be i64. Both bounds are required in this rung (`&v[1..]` is rejected with
 "a slice range needs both bounds"). The C runtime's `ae_slice_sub` checks
 `0 <= start <= end <= len` and traps at the call site ("slice range out of
 bounds"), then offsets the data pointer and shrinks the length, so
-`len`/index/`for` need no change. The interpreter validates the same bounds
+`len`/index/`for` need no change. A full window (`start == 0 && end == len`)
+returns the slice unchanged, which also keeps an empty slice's NULL data out
+of pointer arithmetic. The interpreter validates the same bounds
 against the same snapshot a whole slice copies, and the compiled and
 interpreted paths trap with the identical message and position. A field
 receiver (`&r.cells[0..1]`), a mutable range and an element slice remain

@@ -61,4 +61,8 @@ fn main() {
     print(float_total(&floats[0..2]));
     print(inner(&v));
     print(inner_forward(&v));
+    // A full window of an empty vector: the guard returns the slice itself,
+    // so the NULL data never enters pointer arithmetic.
+    let empty = vec[];
+    print(sum(&empty[0..0]));
 }

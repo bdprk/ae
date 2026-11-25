@@ -1281,6 +1281,9 @@ static const void *ae_slice_at(ae_slice s, int64_t index, size_t line, size_t co
 // size and starts at the offset, so index/length/iteration need no change.
 static ae_slice ae_slice_sub(ae_slice s, int64_t start, int64_t end, size_t line, size_t column) {
     if (start < 0 || end < start || end > s.len) ae_fail("slice range out of bounds", line, column);
+    // A full window is the slice itself. Returning it unchanged also keeps an
+    // empty slice's NULL data out of pointer arithmetic (ADR-0236).
+    if (start == 0 && end == s.len) return s;
     ae_slice r = { (const char *)s.data + (size_t)start * (size_t)s.elem_size, end - start, s.elem_size };
     return r;
 }
