@@ -668,10 +668,10 @@ enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(u
     // declared type (a `&mut` root reads through its pointer), so the
     // codegen can address the field lvalue and the interpreter can
     // mutate the field value in place.
-    VecPushField(usize, String, Type, Expr, Type, bool, usize, usize),
-    VecPopField(usize, String, Type, Type, usize, usize),
-    VecStoreField(usize, String, Type, Expr, Expr, Type, bool, usize, usize),
-    VecSortField(usize, String, Type, Type, bool, usize, usize) }
+    VecPushField(usize, Vec<(String, Type)>, Type, Expr, Type, bool, usize, usize),
+    VecPopField(usize, Vec<(String, Type)>, Type, Type, usize, usize),
+    VecStoreField(usize, Vec<(String, Type)>, Type, Expr, Expr, Type, bool, usize, usize),
+    VecSortField(usize, Vec<(String, Type)>, Type, Type, bool, usize, usize) }
 #[derive(Debug)]
 #[derive(Clone)]
 struct Function { id: usize, params: Vec<(usize, Type)>, body: Vec<Statement>, is_main: bool, returns: Type }

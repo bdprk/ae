@@ -277,19 +277,10 @@ impl<'a> Parser<'a> {
                             .ok_or_else(|| self.error_at(base.range.start, &format!("unknown variable '{name}'")).with_code("E0101"))?;
                         let (slot, ty) = self.resolved_slot(Some(&def), slots, base.range.start, name)?;
                         (slot, ty, name.clone(), None, None)
-                    } else if let ae_syntax::expression::ExpressionKind::Field { base: root, name: field } = &base.kind {
-                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(root_name)) = &root.kind else {
-                            return Err(self.error_at(base.range.start, "an index store needs a named container"));
-                        };
-                        let &(slot, _, struct_ty) = self.names.get(root_name)
-                            .ok_or_else(|| self.error_at(root.range.start, &format!("unknown variable '{root_name}'")).with_code("E0101"))?;
-                        let sid = match struct_ty {
-                            Type::Struct(sid) | Type::StructMut(sid) => sid,
-                            _ => return Err(self.error_at(root.range.start, "only a named struct field holds a container here")),
-                        };
-                        let field_ty = field_ty_in(sid, field, self.structs)
-                            .ok_or_else(|| self.error_at(base.range.start, &format!("struct '{}' has no field '{field}'", self.structs[sid].name)))?;
-                        (slot, field_ty, root_name.clone(), Some(field.clone()), Some(struct_ty))
+                    } else if matches!(base.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
+                        let super::lower_expr::FieldChain { root: root_name, slot, root_ty, path } = super::lower_expr::resolve_field_chain(self, base)?;
+                        let field_ty = path.last().map(|(_, ty)| *ty).expect("a field chain has a field");
+                        (slot, field_ty, root_name, Some(path), Some(root_ty))
                     } else {
                         return Err(self.error_at(base.range.start, "an index store needs a named container"));
                     };
@@ -322,7 +313,10 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
                         let place = match field_place {
-                            Some(field) => MapPlace::Field(slot, field, kind),
+                            // The map place carries one field name; a deeper
+                            // chain has no lowering yet.
+                            Some(field) if field.len() == 1 => MapPlace::Field(slot, field[0].0.clone(), kind),
+                            Some(_) => return Err(self.error_at(base.range.start, "a nested map field store is not supported yet")),
                             None => MapPlace::Var(slot, kind),
                         };
                         return Ok(Statement::MapPut(place, key, stored, line, column));

@@ -171,19 +171,23 @@ impl<'a> TreePrinter<'a> {
                 self.line(&format!("pop v{} @ {}:{}", id, line, col));
             }
             Statement::VecPushField(id, field, _, value, elem, _, line, col) => {
+                let path = field_path_text(field);
                 let value_text = self.expression_text(value);
-                self.line(&format!("push v{}.{} <- {} ({}) @ {}:{}", id, field, value_text, elem.name(self.ctx), line, col));
+                self.line(&format!("push v{}.{} <- {} ({}) @ {}:{}", id, path, value_text, elem.name(self.ctx), line, col));
             }
             Statement::VecPopField(id, field, _, elem, line, col) => {
-                self.line(&format!("pop v{}.{} ({}) @ {}:{}", id, field, elem.name(self.ctx), line, col));
+                let path = field_path_text(field);
+                self.line(&format!("pop v{}.{} ({}) @ {}:{}", id, path, elem.name(self.ctx), line, col));
             }
             Statement::VecStoreField(id, field, _, index, value, elem, _, line, col) => {
+                let path = field_path_text(field);
                 let index_text = self.expression_text(index);
                 let value_text = self.expression_text(value);
-                self.line(&format!("v{}.{}[{}] = {} ({}) @ {}:{}", id, field, index_text, value_text, elem.name(self.ctx), line, col));
+                self.line(&format!("v{}.{}[{}] = {} ({}) @ {}:{}", id, path, index_text, value_text, elem.name(self.ctx), line, col));
             }
             Statement::VecSortField(id, field, _, elem, reverse, line, col) => {
-                self.line(&format!("{}(v{}.{}) ({}) @ {}:{}", if *reverse { "reverse" } else { "sort" }, id, field, elem.name(self.ctx), line, col));
+                let path = field_path_text(field);
+                self.line(&format!("{}(v{}.{}) ({}) @ {}:{}", if *reverse { "reverse" } else { "sort" }, id, path, elem.name(self.ctx), line, col));
             }
             Statement::StrVecStore(id, index, value, line, col, _) | Statement::GVecStore(id, index, value, _, line, col) => {
                 let index_text = self.expression_text(index);
@@ -598,4 +602,9 @@ fn expr_type_name(expr: &Expr) -> &'static str {
         Expr::BoolLit(..) | Expr::StrEq(..) | Expr::Contains(..) | Expr::StartsWith(..) | Expr::EndsWith(..) => "bool",
         _ => "owned",
     }
+}
+
+/// A field path's display spelling (`a.b.cells`).
+fn field_path_text(field: &[(String, Type)]) -> String {
+    field.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(".")
 }

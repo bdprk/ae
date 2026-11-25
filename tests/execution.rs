@@ -10426,3 +10426,77 @@ fn place_borrow_arguments_match_across_backends() {
         );
     }
 }
+
+/// P2.4: vector operations through a nested struct-field receiver
+/// (`a.b.c.cells`). The field path resolves step by step from the root
+/// binding; a `&mut` root writes through its pointer at every level.
+#[test]
+fn nested_field_receiver_writes_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_field_receiver_writes.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "moved root",
+            r#"struct C { cells: vec } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { cells: vec[1] } } }; let moved = a; push(a.b.c.cells, 2); }"#,
+            "cannot use 'a' because it was moved",
+        ),
+        (
+            "non-vector final field",
+            r#"struct C { n: i64 } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { n: 1 } } }; push(a.b.c.n, 2); }"#,
+            "push expects a vec, found i64",
+        ),
+        (
+            "missing intermediate field",
+            r#"struct C { cells: vec } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { cells: vec[1] } }, }; push(a.b.missing.cells, 2); }"#,
+            "struct 'B' has no field 'missing'",
+        ),
+        (
+            "nested map field store",
+            r#"struct M { counts: map[string, i64] } struct A { m: M } fn main() { var a = A { m: M { counts: map_new() } }; a.m.counts["k"] = 2; }"#,
+            "a nested map field store is not supported yet",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-field-writes-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

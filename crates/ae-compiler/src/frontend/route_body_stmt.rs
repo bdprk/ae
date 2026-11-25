@@ -215,8 +215,8 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                     // A named container, or a field of a name (`p.table[k]`):
                     // the field's declared type comes from the struct table, so
                     // a field base needs no container mark on the root.
-                    let field_base = matches!(&base.kind, ae_syntax::expression::ExpressionKind::Field { base: inner, .. }
-                        if matches!(inner.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))));
+                    let field_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Field { .. })
+                        && field_chain_root(base).is_some();
                     (matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) || field_base)
                         && (field_base
                             || resolved.scalar_writes.get(&base.range.start)
@@ -397,8 +397,12 @@ pub(super) fn vector_statement_builtin<'a>(statement: &'a ae_syntax::statement::
     };
     // A struct field receiver (`push(r.cells, x)`): the lowering resolves the
     // field's declared type, so the gate only checks the shape.
-    let field_target = matches!(&arguments.first().map(|argument| &argument.kind),
-        Some(ExpressionKind::Field { base, .. }) if matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_))));
+    // A struct field chain receiver (`push(r.cells, x)`, `push(a.b.cells, x)`):
+    // the lowering resolves the declared field type, so the gate checks only
+    // that the chain roots at a binding.
+    let field_target = arguments.first().is_some_and(|argument| {
+        matches!(argument.kind, ExpressionKind::Field { .. }) && field_chain_root(argument).is_some()
+    });
     if !field_target {
         let Some(ExpressionKind::Atom(Kind::Ident(_))) = arguments.first().map(|argument| &argument.kind) else { return None };
         let def = resolved.scalar_reads.get(&arguments[0].range.start)?;

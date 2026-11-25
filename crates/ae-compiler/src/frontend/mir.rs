@@ -386,9 +386,15 @@ fn map_kind_type(kind: &MapKind, ctx: &CompileContext) -> Type {
 /// The receiver of a vector-field operation: `root.field` typed with the
 /// field's vector type. The element type was interned when the field's type
 /// spelling was parsed, so the lookup always answers.
-fn field_vector_operand(id: usize, field: &str, base_ty: Type, elem_ty: Type, ctx: &CompileContext) -> MirOperand {
+fn field_vector_operand(id: usize, path: &[(String, Type)], base_ty: Type, elem_ty: Type, ctx: &CompileContext) -> MirOperand {
     let vector_ty = ctx.find_vector_elem(elem_ty).map(Type::Vector).unwrap_or(Type::Vector(0));
-    MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(id, base_ty)), field.to_owned(), vector_ty))
+    let last = path.len().saturating_sub(1);
+    let mut place = MirPlace::Local(id, base_ty);
+    for (index, (name, ty)) in path.iter().enumerate() {
+        let place_ty = if index == last { vector_ty } else { *ty };
+        place = MirPlace::Field(Box::new(place), name.clone(), place_ty);
+    }
+    MirOperand::Place(place)
 }
 
 fn map_place_operand(place: &MapPlace, ctx: &CompileContext) -> MirOperand {

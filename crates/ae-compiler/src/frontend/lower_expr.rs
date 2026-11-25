@@ -2015,6 +2015,58 @@ let mut args = Vec::with_capacity(arguments.len());
     }
 }
 
+/// Resolve a struct-field receiver chain (`a.b.cells`) to its root binding
+/// and the field path with each field's declared type. The root's slot and
+/// declared type come from the binding table; every step names a real field.
+pub(super) struct FieldChain {
+    pub(super) root: String,
+    pub(super) slot: usize,
+    pub(super) root_ty: Type,
+    pub(super) path: Vec<(String, Type)>,
+}
+
+pub(super) fn resolve_field_chain(
+    parser: &Parser<'_>,
+    target: &ae_syntax::expression::Expression,
+) -> Result<FieldChain, ae_span::Diagnostic> {
+    use ae_syntax::expression::ExpressionKind;
+    let mut fields = Vec::new();
+    let mut node = target;
+    loop {
+        match &node.kind {
+            ExpressionKind::Field { base, name } => {
+                fields.push((name.clone(), node.range.clone()));
+                node = base;
+            }
+            ExpressionKind::Atom(Kind::Ident(root)) => {
+                let &(slot, _, root_ty) = parser.names.get(root).ok_or_else(|| {
+                    parser.error_at(node.range.start, &format!("unknown variable '{root}'")).with_code("E0101")
+                })?;
+                fields.reverse();
+                let mut path = Vec::new();
+                let mut current = root_ty;
+                for (name, range) in fields {
+                    let sid = match current {
+                        Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => sid,
+                        other => {
+                            return Err(parser.error_at(range.start, &format!(
+                                "only a struct has fields, found {}", other.name(parser.ctx),
+                            )));
+                        }
+                    };
+                    let fty = field_ty_in(sid, &name, parser.structs).ok_or_else(|| {
+                        parser.error_at(range.start, &format!("struct '{}' has no field '{name}'", parser.structs[sid].name))
+                    })?;
+                    path.push((name, fty));
+                    current = fty;
+                }
+                return Ok(FieldChain { root: root.clone(), slot, root_ty, path });
+            }
+            _ => return Err(parser.error_at(node.range.start, "a container receiver needs a named field chain")),
+        }
+    }
+}
+
 /// The type an element read hands back: a view for owned storage (a string
 /// element, a nested vector, an owned struct) and the element value itself
 /// for Copy elements.

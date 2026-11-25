@@ -100,19 +100,10 @@ impl<'a> Parser<'a> {
                     slots, arguments[0].range.start, target)?;
                 (target.clone(), slot, ty, None)
             }
-            ExpressionKind::Field { base: root, name: field } => {
-                let ExpressionKind::Atom(Kind::Ident(root_name)) = &root.kind else {
-                    return Err(self.error_at(arguments[0].range.start, "a vector builtin needs a named vector field"));
-                };
-                let &(slot, _, struct_ty) = self.names.get(root_name)
-                    .ok_or_else(|| self.error_at(root.range.start, &format!("unknown variable '{root_name}'")).with_code("E0101"))?;
-                let sid = match struct_ty {
-                    Type::Struct(sid) | Type::StructMut(sid) => sid,
-                    _ => return Err(self.error_at(root.range.start, "only a named struct field holds a vector here")),
-                };
-                let field_ty = super::route_marks::field_ty_in(sid, field, self.structs)
-                    .ok_or_else(|| self.error_at(arguments[0].range.start, &format!("struct '{}' has no field '{field}'", self.structs[sid].name)))?;
-                (root_name.clone(), slot, field_ty, Some((field.clone(), struct_ty)))
+            ExpressionKind::Field { .. } => {
+                let super::lower_expr::FieldChain { root: root_name, slot, root_ty, path } = super::lower_expr::resolve_field_chain(self, &arguments[0])?;
+                let field_ty = path.last().map(|(_, ty)| *ty).expect("a field chain has a field");
+                (root_name, slot, field_ty, Some((path, root_ty)))
             }
             _ => return Err(self.error_at(arguments[0].range.start, "a vector builtin needs a named vector binding or field")),
         };
@@ -151,8 +142,8 @@ impl<'a> Parser<'a> {
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
             let strings = elem_ty == Type::String;
-            if let Some((field, base_ty)) = field_target.clone() {
-                return Ok(Statement::VecSortField(slot, field, base_ty, elem_ty, builtin == "reverse", line, column));
+            if let Some((path, base_ty)) = field_target.clone() {
+                return Ok(Statement::VecSortField(slot, path, base_ty, elem_ty, builtin == "reverse", line, column));
             }
             return Ok(if builtin == "sort" { Statement::Sort(slot, strings, line, column) } else { Statement::Reverse(slot, strings, line, column) });
         }
@@ -192,9 +183,9 @@ impl<'a> Parser<'a> {
             }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
-            if let Some((field, base_ty)) = field_target.clone() {
+            if let Some((path, base_ty)) = field_target.clone() {
                 let view = value_ty == Type::StrView || super::codegen::string_expr_is_view(&lowered);
-                return Ok(Statement::VecPushField(slot, field, base_ty, lowered, elem_ty, view, line, column));
+                return Ok(Statement::VecPushField(slot, path, base_ty, lowered, elem_ty, view, line, column));
             }
             return Ok(match elem_ty {
                 Type::String => Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView),
@@ -209,8 +200,8 @@ impl<'a> Parser<'a> {
         }
         self.seek_scalar_offset(call.range.end);
         self.take(Kind::Semi)?;
-        if let Some((field, base_ty)) = field_target {
-            return Ok(Statement::VecPopField(slot, field, base_ty, elem_ty, line, column));
+        if let Some((path, base_ty)) = field_target {
+            return Ok(Statement::VecPopField(slot, path, base_ty, elem_ty, line, column));
         }
         Ok(match elem_ty {
             Type::String => Statement::StrVecPop(slot, line, column),

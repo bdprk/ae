@@ -33,9 +33,10 @@ pub(super) fn string_expr_is_view(expr: &Expr) -> bool {
 
 /// The C lvalue of a struct's field: `v{id}.field`, or `v{id}->field` when the
 /// root is a mutable borrow (ADR-0185's through-pointer access).
-pub(super) fn field_member(id: usize, field: &str, base_ty: Type) -> String {
+pub(super) fn field_member(id: usize, field: &[(String, Type)], base_ty: Type) -> String {
     let dot = if matches!(base_ty, Type::StructMut(_)) { "->" } else { "." };
-    format!("v{id}{dot}{field}")
+    let path = field.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(".");
+    format!("v{id}{dot}{path}")
 }
 
 // Rust's Debug formatting is the shortest decimal that round-trips and always

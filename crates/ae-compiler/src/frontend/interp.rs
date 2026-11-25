@@ -3083,16 +3083,23 @@ fn field_place_get(
     locals: &HashMap<usize, Val>,
     caller_locals: &Option<&mut HashMap<usize, Val>>,
     slot: usize,
-    field: &str,
+    path: &[(String, Type)],
 ) -> Option<Val> {
     let container = match locals.get(&slot)? {
         Val::Ref(target) => caller_locals.as_ref()?.get(target)?,
         other => other,
     };
-    match container {
-        Val::Struct(_, fields) => fields.get(field).cloned(),
-        _ => None,
+    field_path_ref(container, path).cloned()
+}
+
+/// Walk a struct field path; every step must be a struct field.
+fn field_path_ref<'a>(container: &'a Val, path: &[(String, Type)]) -> Option<&'a Val> {
+    let mut current = container;
+    for (name, _) in path {
+        let Val::Struct(_, fields) = current else { return None };
+        current = fields.get(name)?;
     }
+    Some(current)
 }
 
 /// Write a struct field back; returns whether a struct storage was found.
@@ -3100,7 +3107,7 @@ fn field_place_put(
     locals: &mut HashMap<usize, Val>,
     caller_locals: &mut Option<&mut HashMap<usize, Val>>,
     slot: usize,
-    field: &str,
+    path: &[(String, Type)],
     value: Val,
 ) -> bool {
     let target = match locals.get(&slot) {
@@ -3109,19 +3116,28 @@ fn field_place_put(
     };
     match target {
         Some(target) => match caller_locals.as_mut() {
-            Some(map) => put_field(map, target, field, value),
+            Some(map) => put_field(map, target, path, value),
             None => false,
         },
-        None => put_field(locals, slot, field, value),
+        None => put_field(locals, slot, path, value),
     }
 }
 
-fn put_field(map: &mut HashMap<usize, Val>, slot: usize, field: &str, value: Val) -> bool {
+fn put_field(map: &mut HashMap<usize, Val>, slot: usize, path: &[(String, Type)], value: Val) -> bool {
     match map.get_mut(&slot) {
-        Some(Val::Struct(_, fields)) => {
-            fields.insert(field.to_owned(), value);
-            true
-        }
+        Some(Val::Struct(_, fields)) => insert_field_path(fields, path, value),
+        _ => false,
+    }
+}
+
+fn insert_field_path(fields: &mut HashMap<String, Val>, path: &[(String, Type)], value: Val) -> bool {
+    let Some(((name, _), rest)) = path.split_first() else { return false };
+    if rest.is_empty() {
+        fields.insert(name.clone(), value);
+        return true;
+    }
+    match fields.get_mut(name) {
+        Some(Val::Struct(_, inner)) => insert_field_path(inner, rest, value),
         _ => false,
     }
 }
