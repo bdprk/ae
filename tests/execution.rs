@@ -442,7 +442,7 @@ fn float_vectors_move_release_and_borrow_like_other_owned_types() {
 fn float_vector_misuse_is_rejected() {
     for (source, expected) in [
         ("fn main() { let v = vec[1, 2.0]; }", "does not convert implicitly"),
-        ("fn main() { let v = vec[\"a\"]; }", "vector literal elements must be a Copy type, an owned struct, or a vec"),
+        ("enum E { A(string) } fn main() { let v = vec[E::A(\"a\")]; }", "vector literal elements must be a value type"),
         ("fn main() { var v = vec[1.0]; push(v, 2); }", "vector elements must be f64"),
         ("fn main() { var v = vec[1.0]; sort(v); }", "not supported for vec[f64]"),
         ("fn main() { var v = vec[1.0]; reverse(v); }", "not supported for vec[f64]"),
@@ -1088,7 +1088,7 @@ fn vector_misuse_is_rejected_at_compile_time() {
         "fn main() { let v = vec[1]; push(v, 2); }",
         "fn main() { var v = vec[1]; let w = v; push(v, 2); }",
         "fn main() { var v = vec[1]; let w = v; print(len(v)); }",
-        "fn main() { let v = vec[\"hi\"]; }",
+        "fn main() { let v = vec[\"hi\", 2]; }",
         "fn main() { print(vec[1, 2]); }",
         "fn push(v: vec) -> i64 { return 1; } fn main() {}",
         "fn main() { var len = 1; }",
@@ -10034,6 +10034,79 @@ fn owned_struct_vector_elements_drop_and_match_across_backends() {
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-owned-struct-vectors-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// ADR-0235 slice 6: string vector literals. `vec["a", "b"]` builds a
+/// `vec[string]` where text literals are owned, a string view (field read,
+/// `slice_view`, string-vector element) is copied in, and an owned string
+/// variable moves in — the vector never aliases the struct that still owns a
+/// field. `push(v, p.name)` follows the same copy rule (a pre-existing
+/// aliasing bug: the field bytes were handed to the vector and both owners
+/// freed them).
+#[test]
+fn string_vector_literals_copy_views_and_move_owned_strings() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("string_vector_literals.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "moved string element used after the literal",
+            r#"fn main() { var s = "delta"; var w = vec[s]; print(s); }"#,
+            "cannot use 's' because it was moved",
+        ),
+        (
+            "mixed string and integer elements",
+            r#"fn main() { let v = vec["a", 1]; }"#,
+            "vector elements must all be string",
+        ),
+        (
+            "field moved out instead of copied",
+            r#"struct L { name: string, n: i64 } fn main() { let p = L { name: "a", n: 1 }; let s = p.name; print(s); }"#,
+            "cannot move a field out of a struct",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-string-vector-literals-bad-{}-{}.ae",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

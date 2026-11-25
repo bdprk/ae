@@ -26,6 +26,10 @@ fn sum(items: &vec[Tagged]) -> i64 {
     return total;
 }
 
+fn make() -> vec[Tagged] {
+    return vec[Tagged { name: "e", n: 5 }];
+}
+
 fn main() {
     var items = vec[Tagged { name: "a", n: 1 }, Tagged { name: "b", n: 2 }];
     print(len(items));
@@ -46,4 +50,9 @@ fn main() {
     pop(items);
     print(len(items));
     print(sum(&items));
+
+    // A call-returned vector types its elements too.
+    var made = make();
+    print(len(made));
+    print(made[0].n);
 }

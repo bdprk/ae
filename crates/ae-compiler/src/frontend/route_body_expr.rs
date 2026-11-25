@@ -152,7 +152,14 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
         // `Expr::VecLit`/array the typed route builds. The print arm's type
         // check then rejects a vector exactly as the typed route does.
         ExpressionKind::Array(elements) | ExpressionKind::Vector(elements) => {
-            elements.iter().all(|element| scalar_body_expression(element, resolved, supports_call, supports_field))
+            elements.iter().all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)
+                // A text literal is admitted by the atom arm; an owned string
+                // or string view moves/copies into the container.
+                || matches!(&element.kind, ExpressionKind::Atom(Kind::Ident(name))
+                    if name != "self" && resolved.scalar_reads.get(&element.range.start)
+                        .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                            || resolved.owned_string_bindings.contains(id)))
+                || resolved.struct_field_views.contains(&element.range.start))
         }
         ExpressionKind::AddressCast { binding_range, .. } => {
             resolved.scalar_address_casts.contains(&expression.range.start)

@@ -1158,6 +1158,7 @@ fn eval_expr(
         Expr::VecLit(values, ty, _, _) => {
             match ty {
                 Type::Vector(id) => match env.program.ctx.vector_elem(*id) {
+                    // `elem` is bound below in each arm that needs it.
                     Type::Int(IntTy::I64) => {
                         let mut out = Vec::with_capacity(values.len());
                         for v in values {
@@ -1172,11 +1173,25 @@ fn eval_expr(
                         }
                         Ok(Val::VecF(out))
                     }
-                    Type::String => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
-                    _ => {
+                    Type::String => {
                         let mut out = Vec::with_capacity(values.len());
                         for v in values {
-                            out.push(eval_expr(env, v, locals, caller_locals, false)?);
+                            // An owned string moves into the literal; a view
+                            // is copied (the interpreter's Str values are
+                            // independent, so the copy is the same bytes).
+                            let moving = matches!(v, Expr::Variable(..));
+                            match eval_expr(env, v, locals, caller_locals, moving)? {
+                                Val::Str(s) => out.push(s),
+                                _ => return Err(Flow::Trap("internal: string vec literal element".to_owned())),
+                            }
+                        }
+                        Ok(Val::VecS(out))
+                    }
+                    elem => {
+                        let mut out = Vec::with_capacity(values.len());
+                        let moving = is_owned_type(elem, &env.program.structs, &env.program.enums);
+                        for v in values {
+                            out.push(eval_expr(env, v, locals, caller_locals, moving)?);
                         }
                         Ok(Val::VecG(out))
                     }

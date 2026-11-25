@@ -1043,6 +1043,11 @@ impl<'a> Parser<'a> {
                     }
                     let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
                     self.seek_scalar_offset(element.range.end);
+                    if self.is_owned(ty)
+                        && let Expr::Variable(source, ..) = &value {
+                            self.check_variable_move(*source)?;
+                            self.moved.insert(*source);
+                        }
                     element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
                     values.push(value);
                 }

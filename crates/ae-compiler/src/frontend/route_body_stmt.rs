@@ -95,7 +95,12 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                 && match &initializer.kind {
                     ae_syntax::expression::ExpressionKind::Array(elements)
                     | ae_syntax::expression::ExpressionKind::Vector(elements) => elements.iter()
-                        .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)),
+                        .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)
+                            || matches!(&element.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                                if name != "self" && resolved.scalar_reads.get(&element.range.start)
+                                    .is_some_and(|id| resolved.owned_text_bindings.contains(id)
+                                        || resolved.owned_string_bindings.contains(id)))
+                            || resolved.struct_field_views.contains(&element.range.start)),
                     ae_syntax::expression::ExpressionKind::Atom(Kind::Text(_)) => true,
                     // `let x = foo()?;` — a direct-call propagation binding. A result-returning
                     // builtin (`let a = try_read_file(first)?;`) propagates the

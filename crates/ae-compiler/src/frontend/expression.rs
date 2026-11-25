@@ -294,13 +294,18 @@ impl Parser<'_> {
 
 
     pub(super) fn check_numeric_vector_element(&self, previous: Option<Type>, actual: Type) -> Result<Type, ae_span::Diagnostic> {
+        // A string view element (`slice_view(..)` inside `vec[..]`, a field
+        // read) is copied into the vector, so the literal's element type is
+        // the owning `string`.
+        let actual = if actual == Type::StrView { Type::String } else { actual };
         match previous {
             Some(expected) if expected == actual => Ok(actual),
             Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(self.ctx), actual.name(self.ctx)))),
-            None if self.is_array_element_type(actual)
+            None if actual == Type::String
+                || self.is_array_element_type(actual)
                 || matches!(actual, Type::Vector(_))
                 || matches!(actual, Type::Struct(sid) if !self.structs[sid].is_copy) => Ok(actual),
-            None => Err(self.fail(&format!("vector literal elements must be a Copy type, an owned struct, or a vec, found {}", actual.name(self.ctx)))),
+            None => Err(self.fail(&format!("vector literal elements must be a value type, found {}", actual.name(self.ctx)))),
         }
     }
 

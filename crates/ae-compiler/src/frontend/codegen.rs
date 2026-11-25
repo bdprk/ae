@@ -18,6 +18,19 @@ impl Emitted {
     fn moved(id: usize, ty: Type, text: String) -> Self { Emitted { text, ty, owned: true, moves: vec![(id, ty)], materialized: true } }
 }
 
+/// Whether a lowered string expression observes bytes owned elsewhere: a
+/// struct field read, a string-vector element, a slice view, or a view
+/// binding. Such a value is *copied* when a container takes it, never moved —
+/// `push(v, p.name)` must not hand the vector the struct's bytes.
+pub(super) fn string_expr_is_view(expr: &Expr) -> bool {
+    match expr {
+        Expr::StrVecIndex(..) | Expr::SliceView(..) => true,
+        Expr::Variable(_, Type::StrView, ..) => true,
+        Expr::Field(_, _, fty) => *fty == Type::String,
+        _ => false,
+    }
+}
+
 // Rust's Debug formatting is the shortest decimal that round-trips and always
 // carries a '.' or an exponent, so it is a valid C double literal. Non-finite
 // values never reach here: the lexer rejects them (ADR-37).
@@ -488,11 +501,27 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                     _ => "NULL".to_owned(),
                 };
                 out.push_str(&format!("    ae_gvec t{t} = ae_gvec_new((int64_t)sizeof({c_elem}), {drop_fn}, {line}, {column});\n"));
+                let moving = is_owned_type(elem_ty, ctx.structs, ctx.enums);
                 for value in values {
-                    let element = emit_expr(value, out, next, false, ctx);
+                    let element = emit_expr(value, out, next, moving, ctx);
                     let e = *next; *next += 1;
                     out.push_str(&format!("    {c_elem} t{e} = {};\n", element.text));
                     out.push_str(&format!("    ae_gvec_push(&t{t}, &t{e}, {line}, {column});\n"));
+                    null_moves(out, &element.moves, ctx);
+                }
+            } else if elem_ty == Type::String {
+                // A string literal vector: elements that are views are copied
+                // into the vector, owned strings move in (ADR-0235).
+                out.push_str(&format!("    ae_strvec t{t} = ae_strvec_new({line}, {column});\n"));
+                for value in values {
+                    let view = string_expr_is_view(value);
+                    let element = emit_expr(value, out, next, !view, ctx);
+                    let text = if view {
+                        format!("ae_str_copy_view(AE_VIEW({}), {line}, {column})", element.text)
+                    } else {
+                        element.text.clone()
+                    };
+                    out.push_str(&format!("    ae_strvec_push(&t{t}, {text}, {line}, {column});\n"));
                     null_moves(out, &element.moves, ctx);
                 }
             } else {
@@ -1587,11 +1616,13 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             }
             Statement::StrVecPush(id, value, line, col, borrowed) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                // A borrowed element is copied into the vector; only an owned
+                // A borrowed element (view binding, string field, string
+                // vector element) is copied into the vector; only an owned
                 // string is moved, because moving a view would empty the slot
                 // it was read from.
-                let value = emit_expr(value, out, next, !*borrowed, ctx);
-                let text = if *borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
+                let borrowed = *borrowed || string_expr_is_view(value);
+                let value = emit_expr(value, out, next, !borrowed, ctx);
+                let text = if borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
                 out.push_str(&format!("    ae_strvec_push(&v{id}, {text}, {line}, {col});\n"));
                 null_moves(out, &value.moves, ctx);
             }
@@ -1604,8 +1635,9 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let i = emit_expr(index, out, next, false, ctx);
                 let checked = *next; *next += 1;
                 out.push_str(&format!("    int64_t t{checked} = ae_strvec_index({}, v{id}.len, {line}, {col});\n", i.text));
-                let value = emit_expr(value, out, next, !*borrowed, ctx);
-                let text = if *borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
+                let borrowed = *borrowed || string_expr_is_view(value);
+                let value = emit_expr(value, out, next, !borrowed, ctx);
+                let text = if borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
                 // The source may borrow the destination element, so copy or
                 // evaluate it before releasing that element.
                 let replacement = *next; *next += 1;

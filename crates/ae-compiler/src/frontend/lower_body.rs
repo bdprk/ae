@@ -243,15 +243,15 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
-                    // A binding from a method call whose signature returns a
-                    // struct or enum (`let fixed = u2.with_min_radius(1);`,
-                    // `let moved = start.shifted(1, 2).shifted(0, -6);`), or a
-                    // pointer-valued binding (`let raw = ae_std_alloc(..)`,
-                    // `let view = raw as *mut f64`, `let p = buf.offset(1)`):
-                    // a parameter or an earlier local roots the chain, so each
-                    // link's declared type answers statelessly and the gate can
-                    // ask before the lowering declares the binding.
+                    // A binding from a call or method call whose signature returns a
+                    // value the gate types statelessly: a struct/enum
+                    // (`let fixed = u2.with_min_radius(1);`), a pointer
+                    // (`let raw = ae_std_alloc(..)`), a scalar, or a
+                    // generic vector (`let items = make();` — the element
+                    // type then answers `items[0].field` before the slot
+                    // exists).
                     if let Some(ret @ (Type::Enum(..) | Type::Struct(_) | Type::Ptr(_) | Type::PtrMut(_)
+                        | Type::Vector(_)
                         | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit)) = self.chain_call_type(initializer, &local_structs)
                     {
                         local_structs.insert(name.clone(), ret);
