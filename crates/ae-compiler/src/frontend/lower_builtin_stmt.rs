@@ -197,9 +197,8 @@ impl<'a> Parser<'a> {
                 return Ok(Statement::VecPushField(slot, field, base_ty, lowered, elem_ty, view, line, column));
             }
             return Ok(match elem_ty {
-                Type::Int(IntTy::I64) => Statement::VecPush(slot, lowered, line, column),
                 Type::String => Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView),
-                Type::Float(FloatTy::F64) => Statement::VecFPush(slot, lowered, line, column),
+                // Every non-string element rides the generic vector header.
                 _ => Statement::GVecPush(slot, lowered, elem_ty, line, column),
             });
         }
@@ -214,9 +213,7 @@ impl<'a> Parser<'a> {
             return Ok(Statement::VecPopField(slot, field, base_ty, elem_ty, line, column));
         }
         Ok(match elem_ty {
-            Type::Int(IntTy::I64) => Statement::VecPop(slot, line, column),
             Type::String => Statement::StrVecPop(slot, line, column),
-            Type::Float(FloatTy::F64) => Statement::VecFPop(slot, line, column),
             _ => Statement::GVecPop(slot, elem_ty, line, column),
         })
     }

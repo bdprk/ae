@@ -532,37 +532,22 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                     null_moves(out, &element.moves, ctx);
                 }
             } else {
-                let (c_ty, new_fn, push_fn) = if elem_ty == Type::Float(FloatTy::F64) {
-                    ("ae_f64vec", "ae_f64vec_new", "ae_f64vec_push")
-                } else {
-                    ("ae_vec", "ae_vec_new", "ae_vec_push")
-                };
-                out.push_str(&format!("    {c_ty} t{t} = {new_fn}({line}, {column});\n"));
-                for value in values {
-                    let element = emit_expr(value, out, next, false, ctx);
-                    out.push_str(&format!("    {push_fn}(&t{t}, {}, {line}, {column});\n", element.text));
-                    null_moves(out, &element.moves, ctx);
-                }
+                // Only the string family has its own literal form left.
+                unreachable!("vector literal family: every non-string element uses ae_gvec")
             }
             Emitted { text: format!("t{t}"), ty: *vector_ty, owned: true, moves: Vec::new(), materialized: true }
         }
         Expr::VecIndex(id, index, line, col, by_ref, elem_ty) => {
-            let (check, receiver) = if *by_ref {
-                (format!("if (!v{id}->data) ae_fail(\"use of moved vector\", {line}, {col});"), format!("(*v{id})"))
+            let check = if *by_ref {
+                format!("if (!v{id}->data) ae_fail(\"use of moved vector\", {line}, {col});")
             } else {
-                (format!("if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});"), format!("v{id}"))
+                format!("if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});")
             };
             out.push_str(&format!("    {check}\n"));
             let i = emit_expr(index, out, next, false, ctx);
-            let get = match *elem_ty {
-                Type::Int(IntTy::I64) => format!("ae_vec_get({receiver}, {}, {line}, {col})", i.text),
-                Type::Float(FloatTy::F64) => format!("ae_f64vec_get({receiver}, {}, {line}, {col})", i.text),
-                _ => {
-                    let c_elem = c_output::c_type_field(*elem_ty, ctx);
-                    let ptr_recv = if *by_ref { format!("v{id}") } else { format!("&v{id}") };
-                    format!("(*((const {c_elem} *)ae_gvec_at({ptr_recv}, {}, {line}, {col})))", i.text)
-                }
-            };
+            let c_elem = c_output::c_type_field(*elem_ty, ctx);
+            let ptr_recv = if *by_ref { format!("v{id}") } else { format!("&v{id}") };
+            let get = format!("(*((const {c_elem} *)ae_gvec_at({ptr_recv}, {}, {line}, {col})))", i.text);
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
         }
         Expr::VecIndexOf(base, index, line, col, elem_ty) => {
@@ -573,14 +558,11 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             out.push_str(&format!("    if (!({}).data) ae_fail(\"use of moved vector\", {line}, {col});\n", b.text));
             let i = emit_expr(index, out, next, false, ctx);
             let ptr = format!("&({})", b.text);
-            let get = match *elem_ty {
-                Type::Int(IntTy::I64) => format!("ae_vec_get({}, {}, {line}, {col})", b.text, i.text),
-                Type::Float(FloatTy::F64) => format!("ae_f64vec_get({}, {}, {line}, {col})", b.text, i.text),
-                Type::String => format!("(*ae_strvec_get_const({ptr}, {}, {line}, {col}))", i.text),
-                _ => {
-                    let c_elem = c_output::c_type_field(*elem_ty, ctx);
-                    format!("(*((const {c_elem} *)ae_gvec_at({ptr}, {}, {line}, {col})))", i.text)
-                }
+            let get = if *elem_ty == Type::String {
+                format!("(*ae_strvec_get_const({ptr}, {}, {line}, {col}))", i.text)
+            } else {
+                let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                format!("(*((const {c_elem} *)ae_gvec_at({ptr}, {}, {line}, {col})))", i.text)
             };
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
         }
@@ -607,7 +589,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 Type::String | Type::StrView => format!("ae_str_len(AE_VIEW({}), {line}, {col})", t.text),
                 Type::Vector(elem_id) => format!("{}_len({}, {line}, {col})", c_output::vector_family(ctx, elem_id), t.text),
                 Type::MapOf(id) => format!("{}_len(&{}, {line}, {col})", c_output::map_family(ctx, id), t.text),
-                _ => format!("ae_vec_len({}, {line}, {col})", t.text),
+                _ => format!("ae_gvec_len({}, {line}, {col})", t.text),
             };
             out.push_str(&format!("    int64_t t{id} = {call};\n"));
             if t.owned { drop_owned_temp(out, &t, ctx); }
@@ -652,7 +634,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::Bytes(e, line, col) => {
             let t = emit_expr(e, out, next, false, ctx);
             let id = *next; *next += 1;
-            out.push_str(&format!("    ae_vec t{id} = ae_bytes(AE_VIEW({}), {line}, {col});
+            out.push_str(&format!("    ae_gvec t{id} = ae_bytes(AE_VIEW({}), {line}, {col});
 ", t.text));
             if t.owned { drop_owned_temp(out, &t, ctx); }
             Emitted { text: format!("t{id}"), ty: vector_type(ctx, Type::Int(IntTy::I64)), owned: true, moves: Vec::new(), materialized: true }
@@ -918,7 +900,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             Emitted { text: format!("t{id}"), ty: *ty, owned: true, moves: Vec::new(), materialized: true }
         }
         Expr::F64VecNew(line, col) => Emitted {
-            text: format!("ae_f64vec_new({line}, {col})"),
+            text: format!("ae_gvec_new((int64_t)sizeof(double), NULL, {line}, {col})"),
             ty: vector_type(ctx, Type::Float(FloatTy::F64)), owned: true, moves: Vec::new(), materialized: true
         },
         Expr::StrVecNew(line, col) => Emitted {
@@ -1565,51 +1547,17 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let value = emit_expr(value, out, next, false, ctx);
                 out.push_str(&format!("    v{id}[{slot}] = {};\n", value.text));
             }
-            Statement::VecPush(id, value, line, col) => {
-                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                let value = emit_expr(value, out, next, false, ctx);
-                out.push_str(&format!("    ae_vec_push(&v{id}, {}, {line}, {col});\n", value.text));
-                null_moves(out, &value.moves, ctx);
-            }
             Statement::Sort(id, strings, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                out.push_str(&format!("    ae_{}_sort(&v{id});\n", if *strings { "strvec" } else { "vec" }));
+                // The string family keeps its own byte-order sort; the i64
+                // vector is an `ae_gvec` and sorts in place through qsort.
+                let callee = if *strings { "ae_strvec_sort" } else { "ae_gvec_sort_i64" };
+                out.push_str(&format!("    {callee}(&v{id});\n"));
             }
             Statement::Reverse(id, strings, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                out.push_str(&format!("    ae_{}_reverse(&v{id});\n", if *strings { "strvec" } else { "vec" }));
-            }
-            Statement::VecPop(id, line, col) => {
-                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                out.push_str(&format!("    ae_vec_pop(&v{id}, {line}, {col});\n"));
-            }
-            Statement::VecStore(id, index, value, line, col) => {
-                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                // The index is computed and checked before the right side, as
-                // with fixed arrays.
-                let i = emit_expr(index, out, next, false, ctx);
-                let checked = *next; *next += 1;
-                out.push_str(&format!("    int64_t t{checked} = ae_vec_index({}, v{id}.len, {line}, {col});\n", i.text));
-                let value = emit_expr(value, out, next, false, ctx);
-                out.push_str(&format!("    v{id}.data[t{checked}] = {};\n", value.text));
-            }
-            Statement::VecFPush(id, value, line, col) => {
-                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                let value = emit_expr(value, out, next, false, ctx);
-                out.push_str(&format!("    ae_f64vec_push(&v{id}, {}, {line}, {col});\n", value.text));
-                null_moves(out, &value.moves, ctx);
-            }
-            Statement::VecFPop(id, line, col) => {
-                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                out.push_str(&format!("    ae_f64vec_pop(&v{id}, {line}, {col});\n"));
-            }
-            Statement::VecFStore(id, index, value, line, col) => {
-                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                let i = emit_expr(index, out, next, false, ctx);
-                let checked = *next; *next += 1;
-                out.push_str(&format!("    int64_t t{checked} = ae_vec_index({}, v{id}.len, {line}, {col});\n", i.text));
-                let value = emit_expr(value, out, next, false, ctx);
-                out.push_str(&format!("    v{id}.data[t{checked}] = {};\n", value.text));
+                let callee = if *strings { "ae_strvec_reverse" } else { "ae_gvec_reverse_i64" };
+                out.push_str(&format!("    {callee}(&v{id});\n"));
             }
             Statement::GVecPush(id, value, elem_ty, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
@@ -1629,9 +1577,11 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             }
             Statement::GVecStore(id, index, value, elem_ty, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                // The index is computed and checked before the right side (the
+                // store's own check in ae_gvec_set is a backstop only).
                 let i = emit_expr(index, out, next, false, ctx);
                 let idx_tmp = *next; *next += 1;
-                out.push_str(&format!("    int64_t t{idx_tmp} = {};\n", i.text));
+                out.push_str(&format!("    int64_t t{idx_tmp} = ae_vec_index({}, v{id}.len, {line}, {col});\n", i.text));
                 let moving = is_owned_type(*elem_ty, ctx.structs, ctx.enums);
                 let value = emit_expr(value, out, next, moving, ctx);
                 let val_tmp = *next; *next += 1;
@@ -1647,16 +1597,6 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let member = field_member(*id, field, *base_ty);
                 out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
                 match elem_ty {
-                    Type::Int(IntTy::I64) => {
-                        let value = emit_expr(value, out, next, false, ctx);
-                        out.push_str(&format!("    ae_vec_push(&({member}), {}, {line}, {col});\n", value.text));
-                        null_moves(out, &value.moves, ctx);
-                    }
-                    Type::Float(FloatTy::F64) => {
-                        let value = emit_expr(value, out, next, false, ctx);
-                        out.push_str(&format!("    ae_f64vec_push(&({member}), {}, {line}, {col});\n", value.text));
-                        null_moves(out, &value.moves, ctx);
-                    }
                     Type::String => {
                         let borrowed = *str_view || string_expr_is_view(value);
                         let value = emit_expr(value, out, next, !borrowed, ctx);
@@ -1678,12 +1618,7 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             Statement::VecPopField(id, field, base_ty, elem_ty, line, col) => {
                 let member = field_member(*id, field, *base_ty);
                 out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                let pop = match elem_ty {
-                    Type::Int(IntTy::I64) => "ae_vec_pop",
-                    Type::Float(FloatTy::F64) => "ae_f64vec_pop",
-                    Type::String => "ae_strvec_pop",
-                    _ => "ae_gvec_pop",
-                };
+                let pop = if *elem_ty == Type::String { "ae_strvec_pop" } else { "ae_gvec_pop" };
                 out.push_str(&format!("    {pop}(&({member}), {line}, {col});\n"));
             }
             Statement::VecStoreField(id, field, base_ty, index, value, elem_ty, str_view, line, col) => {
@@ -1693,11 +1628,6 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let checked = *next; *next += 1;
                 out.push_str(&format!("    int64_t t{checked} = ae_vec_index({}, ({member}).len, {line}, {col});\n", i.text));
                 match elem_ty {
-                    Type::Int(IntTy::I64) | Type::Float(FloatTy::F64) => {
-                        let value = emit_expr(value, out, next, false, ctx);
-                        out.push_str(&format!("    ({member}).data[t{checked}] = {};\n", value.text));
-                        null_moves(out, &value.moves, ctx);
-                    }
                     Type::String => {
                         let borrowed = *str_view || string_expr_is_view(value);
                         let value = emit_expr(value, out, next, !borrowed, ctx);
@@ -1722,9 +1652,11 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             Statement::VecSortField(id, field, base_ty, elem_ty, reverse, line, col) => {
                 let member = field_member(*id, field, *base_ty);
                 out.push_str(&format!("    if (!({member}).data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                let family = if *elem_ty == Type::String { "strvec" } else { "vec" };
-                let op = if *reverse { "reverse" } else { "sort" };
-                out.push_str(&format!("    ae_{family}_{op}(&({member}));\n"));
+                let callee = match elem_ty {
+                    Type::String => if *reverse { "ae_strvec_reverse" } else { "ae_strvec_sort" },
+                    _ => if *reverse { "ae_gvec_reverse_i64" } else { "ae_gvec_sort_i64" },
+                };
+                out.push_str(&format!("    {callee}(&({member}));\n"));
             }
             Statement::StrVecPush(id, value, line, col, borrowed) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));

@@ -99,3 +99,20 @@ Take option A, in this order.
 6. **Stdlib takeover.** `std/alloc` `RawVec`/`Vec`/`Map` over the allocator
    trait, `vec[...]`/`map_new` lowering to the stdlib constructors, and the
    container entries deleted from the intrinsic allowlist.
+
+## Amendment (2026-11-25, container slices 8–9)
+
+The i64 and f64 vector families are gone: `vector_family` maps every
+non-string element to `ae_gvec`, so the runtime carries one generic vector
+header (`ae_gvec`, with the drop hook for owned elements) plus `ae_strvec`,
+whose arena still backs zero-copy `split`/`lines` and is retired with the
+stdlib takeover (slice 5). `ae_vec`/`ae_f64vec` (typedefs, push/pop/get/
+release/forfeit/sort/reverse) are deleted; `ae_vec_index` remains as the shared
+bounds check, `ae_gvec_sort_i64`/`ae_gvec_reverse_i64` carry the i64 orderings,
+and `bytes()` constructs an `ae_gvec` of i64 elements. Statements
+`VecPush`/`VecPop`/`VecStore`/`VecFPush`/`VecFPop`/`VecFStore` are deleted;
+the lowering emits `GVec*` for i64/f64 as well, and the interpreter's `GVec`
+arms accept its `VecI`/`VecF` value shapes. The byte-parity gate does not apply
+to this slice by construction (the generated C changes everywhere); the
+differential fuzzer (300 seeds, 3 backends), the 41-case generated-C
+sanitizer/leak sweep, and the workspace suite carry the regression check.

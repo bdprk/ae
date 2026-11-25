@@ -306,17 +306,11 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
             lower_operand(index, bindings, lowering),
             lower_operand(value, bindings, lowering),
         ]),
-        Statement::VecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Int(IntTy::I64), false))), lower_operand(value, bindings, lowering)]),
         Statement::StrVecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(value, bindings, lowering)]),
-        Statement::VecFPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Float(FloatTy::F64), false))), lower_operand(value, bindings, lowering)]),
         Statement::GVecPush(id, value, elem_ty, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false))), lower_operand(value, bindings, lowering)]),
-        Statement::VecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Int(IntTy::I64), false)))]),
         Statement::StrVecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false)))]),
-        Statement::VecFPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Float(FloatTy::F64), false)))]),
         Statement::GVecPop(id, elem_ty, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false)))]),
-        Statement::VecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Int(IntTy::I64), false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Statement::StrVecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
-        Statement::VecFStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Float(FloatTy::F64), false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Statement::GVecStore(id, index, value, elem_ty, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         // The flag is the parser's sort-as-strings bit (vec[string] sorts by
         // bytes), so it names the intrinsic instead of posing as a direction.

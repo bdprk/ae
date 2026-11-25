@@ -159,19 +159,15 @@ impl<'a> TreePrinter<'a> {
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} (len {})", id, index_text, value_text, len));
             }
-            Statement::VecPush(id, value, line, col) => {
-                let value_text = self.expression_text(value);
-                self.line(&format!("push v{} <- {} @ {}:{}", id, value_text, line, col));
-            }
             Statement::StrVecPush(id, value, line, col, is_view) => {
                 let value_text = self.expression_text(value);
                 self.line(&format!("push v{} <- {}{} @ {}:{}", id, if *is_view { "view " } else { "" }, value_text, line, col));
             }
-            Statement::VecFPush(id, value, line, col) | Statement::GVecPush(id, value, _, line, col) => {
+            Statement::GVecPush(id, value, _, line, col) => {
                 let value_text = self.expression_text(value);
                 self.line(&format!("push v{} <- {} @ {}:{}", id, value_text, line, col));
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
+            Statement::StrVecPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
                 self.line(&format!("pop v{} @ {}:{}", id, line, col));
             }
             Statement::VecPushField(id, field, _, value, elem, _, line, col) => {
@@ -189,7 +185,7 @@ impl<'a> TreePrinter<'a> {
             Statement::VecSortField(id, field, _, elem, reverse, line, col) => {
                 self.line(&format!("{}(v{}.{}) ({}) @ {}:{}", if *reverse { "reverse" } else { "sort" }, id, field, elem.name(self.ctx), line, col));
             }
-            Statement::VecStore(id, index, value, line, col) | Statement::StrVecStore(id, index, value, line, col, _) | Statement::VecFStore(id, index, value, line, col) | Statement::GVecStore(id, index, value, _, line, col) => {
+            Statement::StrVecStore(id, index, value, line, col, _) | Statement::GVecStore(id, index, value, _, line, col) => {
                 let index_text = self.expression_text(index);
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} @ {}:{}", id, index_text, value_text, line, col));

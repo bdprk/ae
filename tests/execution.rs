@@ -4801,7 +4801,7 @@ fn field_assignment_evaluates_rhs_before_releasing_old_value() {
         let emitted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("emit-c").arg(&vector).env("AE_CODEGEN", backend).output().unwrap();
         assert!(emitted.status.success(), "{backend}: {}", String::from_utf8_lossy(&emitted.stderr));
         let c = String::from_utf8_lossy(&emitted.stdout);
-        assert!(c.contains("ae_f64vec_release(&v0.value);"), "{backend}: old vector field must be released");
+        assert!(c.contains("ae_gvec_release(&v0.value);"), "{backend}: old vector field must be released");
         let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&vector).env("AE_CODEGEN", backend).output().unwrap();
         assert!(run.status.success(), "{backend}: {}", String::from_utf8_lossy(&run.stderr));
         assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "done\n");

@@ -574,18 +574,6 @@ fn eval_stmts(
                         fields.insert(fname.clone(), val);
                     }
             }
-            Statement::VecPush(id, val_expr, line, col) => {
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: vec push type".to_owned()),
-                    Err(f) => return f,
-                };
-                match locals.get_mut(id) {
-                    Some(Val::VecI(v)) => v.push(val),
-                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: vec push on non-vec".to_owned()),
-                }
-            }
             Statement::StrVecPush(id, val_expr, line, col, _) => {
                 let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
                     Ok(Val::Str(s)) => s,
@@ -598,18 +586,6 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: strvec push on non-vec".to_owned()),
                 }
             }
-            Statement::VecFPush(id, val_expr, line, col) => {
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Float(x)) => x,
-                    Ok(_) => return Flow::Trap("internal: f64vec push type".to_owned()),
-                    Err(f) => return f,
-                };
-                match locals.get_mut(id) {
-                    Some(Val::VecF(v)) => v.push(val),
-                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: f64vec push on non-vec".to_owned()),
-                }
-            }
             Statement::GVecPush(id, val_expr, elem_ty, line, col) => {
                 // An owned element moves into the vector, so the source slot
                 // is consumed (the compiled side forfeits it).
@@ -619,20 +595,26 @@ fn eval_stmts(
                     Err(f) => return f,
                 };
                 match locals.get_mut(id) {
+                    Some(Val::VecI(v)) => match val {
+                        Val::Int(n) => v.push(n),
+                        _ => return Flow::Trap("internal: vec push type".to_owned()),
+                    },
+                    Some(Val::VecF(v)) => match val {
+                        Val::Float(x) => v.push(x),
+                        _ => return Flow::Trap("internal: f64vec push type".to_owned()),
+                    },
+                    Some(Val::VecS(v)) => match val {
+                        Val::Str(s) => v.push(s),
+                        _ => return Flow::Trap("internal: strvec push type".to_owned()),
+                    },
                     Some(Val::VecG(v)) => v.push(val),
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
                     _ => return Flow::Trap("internal: gvec push on non-vec".to_owned()),
                 }
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) => {
+            Statement::StrVecPop(id, line, col) => {
                 match locals.get_mut(id) {
-                    Some(Val::VecI(v)) => {
-                        if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
-                    }
                     Some(Val::VecS(v)) => {
-                        if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
-                    }
-                    Some(Val::VecF(v)) => {
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
                     }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
@@ -641,6 +623,9 @@ fn eval_stmts(
             }
             Statement::GVecPop(id, elem_ty, line, col) => {
                 let popped = match locals.get_mut(id) {
+                    Some(Val::VecI(v)) => v.pop().map(Val::Int),
+                    Some(Val::VecF(v)) => v.pop().map(Val::Float),
+                    Some(Val::VecS(v)) => v.pop().map(Val::Str),
                     Some(Val::VecG(v)) => v.pop(),
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
                     _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
@@ -702,13 +687,23 @@ fn eval_stmts(
                     Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
                     Err(f) => return f,
                 };
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                // The index traps before the right side runs.
+                let len = match &container {
+                    Val::VecI(v) => v.len(),
+                    Val::VecF(v) => v.len(),
+                    Val::VecS(v) => v.len(),
+                    Val::VecG(v) => v.len(),
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: store on non-vec".to_owned()),
+                };
+                if index < 0 || (index as usize) >= len { return trap("vector index out of bounds", *line, *col); }
                 let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
                 let value = match eval_expr(env, value_expr, locals, caller_locals, moving) {
                     Ok(value) => value,
                     Err(flow) => return flow,
-                };
-                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
-                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
                 };
                 let replaced = match &mut container {
                     Val::VecI(v) => {
@@ -831,26 +826,6 @@ fn eval_stmts(
                     },
                 }
             }
-            Statement::VecStore(id, idx_expr, val_expr, line, col) => {
-                let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
-                    Err(f) => return f,
-                };
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: vec store type".to_owned()),
-                    Err(f) => return f,
-                };
-                match locals.get_mut(id) {
-                    Some(Val::VecI(v)) => {
-                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
-                        v[idx as usize] = val;
-                    }
-                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: vec store on non-vec".to_owned()),
-                }
-            }
             Statement::StrVecStore(id, idx_expr, val_expr, line, col, _) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
@@ -871,38 +846,50 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: strvec store on non-vec".to_owned()),
                 }
             }
-            Statement::VecFStore(id, idx_expr, val_expr, line, col) => {
-                let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
-                    Err(f) => return f,
-                };
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Float(x)) => x,
-                    Ok(_) => return Flow::Trap("internal: f64vec store type".to_owned()),
-                    Err(f) => return f,
-                };
-                match locals.get_mut(id) {
-                    Some(Val::VecF(v)) => {
-                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
-                        v[idx as usize] = val;
-                    }
-                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: f64vec store on non-vec".to_owned()),
-                }
-            }
             Statement::GVecStore(id, idx_expr, val_expr, elem_ty, line, col) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
                     Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
                     Err(f) => return f,
                 };
+                // The index traps before the right side runs, like the
+                // compiled store.
+                let len = match locals.get(id) {
+                    Some(Val::VecI(v)) => v.len(),
+                    Some(Val::VecF(v)) => v.len(),
+                    Some(Val::VecS(v)) => v.len(),
+                    Some(Val::VecG(v)) => v.len(),
+                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: store on non-vec".to_owned()),
+                };
+                if idx < 0 || (idx as usize) >= len { return trap("vector index out of bounds", *line, *col); }
                 let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
                 let val = match eval_expr(env, val_expr, locals, caller_locals, moving) {
                     Ok(v) => v,
                     Err(f) => return f,
                 };
                 let replaced = match locals.get_mut(id) {
+                    Some(Val::VecI(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match val {
+                            Val::Int(n) => Some(Val::Int(std::mem::replace(&mut v[idx as usize], n))),
+                            _ => return Flow::Trap("internal: vec store type".to_owned()),
+                        }
+                    }
+                    Some(Val::VecF(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match val {
+                            Val::Float(x) => Some(Val::Float(std::mem::replace(&mut v[idx as usize], x))),
+                            _ => return Flow::Trap("internal: f64vec store type".to_owned()),
+                        }
+                    }
+                    Some(Val::VecS(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match val {
+                            Val::Str(s) => Some(Val::Str(std::mem::replace(&mut v[idx as usize], s))),
+                            _ => return Flow::Trap("internal: strvec store type".to_owned()),
+                        }
+                    }
                     Some(Val::VecG(v)) => {
                         if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
                         let old = std::mem::replace(&mut v[idx as usize], val);

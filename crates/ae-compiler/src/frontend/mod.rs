@@ -662,7 +662,7 @@ enum Printed { Expr(Expr), Text(String) }
 // top of the arm's block, so the MIR backend can emit them from the block
 // graph. The parser never produces one; the tree form of a match keeps its
 // bindings on the `MatchArm`.
-enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), VecPush(usize, Expr, usize, usize), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), VecPop(usize, usize, usize), VecStore(usize, Expr, Expr, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), VecFPush(usize, Expr, usize, usize), VecFPop(usize, usize, usize), VecFStore(usize, Expr, Expr, usize, usize), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, String, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize),
+enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, String, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize),
     // P2.4: vector operations on a struct's vector field (`r.cells`).
     // The statement carries the root slot, the field name and the root's
     // declared type (a `&mut` root reads through its pointer), so the
@@ -1376,13 +1376,13 @@ mod tests {
         let int = ctx.intern_vector_elem(Type::Int(IntTy::I64));
         let number = Type::Vector(int);
         assert_eq!(number.name(&ctx), "vec[i64]");
-        assert_eq!(c_output::c_type_field(number, &ctx), "ae_vec");
+        assert_eq!(c_output::c_type_field(number, &ctx), "ae_gvec");
         assert!(number.owned(), "a vector owns its storage");
         let text = ctx.intern_vector_elem(Type::String);
         assert_eq!(Type::Vector(text).name(&ctx), "vec[string]");
         assert_eq!(c_output::c_type_field(Type::Vector(text), &ctx), "ae_strvec");
         let float = ctx.intern_vector_elem(Type::Float(FloatTy::F64));
-        assert_eq!(c_output::c_type_field(Type::Vector(float), &ctx), "ae_f64vec");
+        assert_eq!(c_output::c_type_field(Type::Vector(float), &ctx), "ae_gvec");
         let view = Type::VectorRef(text);
         assert_eq!(view.name(&ctx), "&vec[string]");
         assert_eq!(c_output::c_type_field(view, &ctx), "const ae_strvec *");

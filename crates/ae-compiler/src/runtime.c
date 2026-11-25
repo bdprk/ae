@@ -1190,101 +1190,11 @@ static int64_t ae_count_lines_with(ae_strview s, ae_strview pat, size_t line, si
 static int64_t ae_argc_g = 0;
 static char **ae_argv_g = NULL;
 
-// Owned growable i64 vector. Moves copy the struct and forfeit the source
-// slot (zeroed without freeing); releases are idempotent, so overlapping
-// release paths can never double-free.
-typedef struct { int64_t *data; int64_t len; int64_t cap; } ae_vec;
-static ae_vec ae_vec_new(size_t line, size_t column) {
-    ae_vec v;
-    v.len = 0;
-    v.cap = 4;
-    v.data = ae_alloc((size_t)v.cap * sizeof(int64_t), line, column);
-    return v;
-}
-static void ae_vec_push(ae_vec *v, int64_t x, size_t line, size_t column) {
-    if (v->len == v->cap) {
-        if (v->cap > INT64_MAX / 2) ae_fail("vector too large", line, column);
-        int64_t ncap = v->cap * 2;
-        int64_t *nd = ae_alloc_resize(v->data, (size_t)ncap * sizeof(int64_t), line, column);
-        v->data = nd;
-        v->cap = ncap;
-    }
-    v->data[v->len] = x;
-    v->len = v->len + 1;
-}
-static void ae_vec_pop(ae_vec *v, size_t line, size_t column) {
-    if (v->len == 0) ae_fail("pop from empty vector", line, column);
-    v->len = v->len - 1;
-}
-static int64_t ae_vec_len(ae_vec v, size_t line, size_t column) {
-    (void)line; (void)column;
-    return v.len;
-}
+// Shared bounds check for every vector family (ADR-0235): the element
+// index is the same contract whatever the storage shape.
 static int64_t ae_vec_index(int64_t index, int64_t len, size_t line, size_t column) {
     if (index < 0 || index >= len) ae_fail("array index out of bounds", line, column);
     return index;
-}
-static int64_t ae_vec_get(ae_vec v, int64_t index, size_t line, size_t column) {
-    ae_vec_index(index, v.len, line, column);
-    return v.data[index];
-}
-static void ae_vec_release(ae_vec *v) {
-    ae_free(v->data);
-    v->data = NULL;
-    v->len = 0;
-    v->cap = 0;
-}
-// Zero a slot whose contents were moved elsewhere: no free.
-static void ae_vec_forfeit(ae_vec *v) {
-    v->data = NULL;
-    v->len = 0;
-    v->cap = 0;
-}
-
-typedef struct { double *data; int64_t len; int64_t cap; } ae_f64vec; // ADR-61
-static ae_f64vec ae_f64vec_new(size_t line, size_t column) {
-    // Same shape as ae_vec with double elements (ADR-61). The element
-    // type is a plain value — no ownership, no borrowed views, no release
-    // per element — so this family has no borrow tracking at all.
-    ae_f64vec v;
-    v.len = 0;
-    v.cap = 4;
-    v.data = ae_alloc((size_t)v.cap * sizeof(double), line, column);
-    return v;
-}
-static void ae_f64vec_push(ae_f64vec *v, double x, size_t line, size_t column) {
-    if (v->len == v->cap) {
-        if (v->cap > INT64_MAX / 2) ae_fail("vector too large", line, column);
-        int64_t ncap = v->cap * 2;
-        double *nd = ae_alloc_resize(v->data, (size_t)ncap * sizeof(double), line, column);
-        v->data = nd;
-        v->cap = ncap;
-    }
-    v->data[v->len] = x;
-    v->len = v->len + 1;
-}
-static void ae_f64vec_pop(ae_f64vec *v, size_t line, size_t column) {
-    if (v->len == 0) ae_fail("pop from empty vector", line, column);
-    v->len = v->len - 1;
-}
-static int64_t ae_f64vec_len(ae_f64vec v, size_t line, size_t column) {
-    (void)line; (void)column;
-    return v.len;
-}
-static double ae_f64vec_get(ae_f64vec v, int64_t index, size_t line, size_t column) {
-    ae_vec_index(index, v.len, line, column);
-    return v.data[index];
-}
-static void ae_f64vec_release(ae_f64vec *v) {
-    ae_free(v->data);
-    v->data = NULL;
-    v->len = 0;
-    v->cap = 0;
-}
-static void ae_f64vec_forfeit(ae_f64vec *v) {
-    v->data = NULL;
-    v->len = 0;
-    v->cap = 0;
 }
 
 // A generic vector stores element bytes and, for owned elements, the drop
@@ -1364,14 +1274,15 @@ static int ae_cmp_i64(const void *left, const void *right) {
     const int64_t b = *(const int64_t *)right;
     return (a > b) - (a < b);
 }
-static void ae_vec_sort(ae_vec *v) {
+static void ae_gvec_sort_i64(ae_gvec *v) {
     if (v->len > 1) qsort(v->data, (size_t)v->len, sizeof(int64_t), ae_cmp_i64);
 }
-static void ae_vec_reverse(ae_vec *v) {
+static void ae_gvec_reverse_i64(ae_gvec *v) {
+    int64_t *data = v->data;
     for (int64_t i = 0, j = v->len - 1; i < j; i = i + 1, j = j - 1) {
-        const int64_t swap = v->data[i];
-        v->data[i] = v->data[j];
-        v->data[j] = swap;
+        const int64_t swap = data[i];
+        data[i] = data[j];
+        data[j] = swap;
     }
 }
 
@@ -1556,14 +1467,16 @@ static int64_t ae_write_file(ae_string path, ae_strview content, size_t line, si
     if (fclose(f) != 0 || written != (size_t)content.len) ae_fail("cannot write file", line, column);
     return (int64_t)written;
 }
-static ae_vec ae_bytes(ae_strview s, size_t line, size_t column) {
+static ae_gvec ae_bytes(ae_strview s, size_t line, size_t column) {
     if (s.len > INT64_MAX / (int64_t)sizeof(int64_t)) ae_fail("vector too large", line, column);
-    ae_vec v;
+    ae_gvec v;
     v.len = s.len;
     v.cap = s.len > 4 ? s.len : 4;
+    v.elem_size = (int64_t)sizeof(int64_t);
+    v.drop = NULL;
     v.data = ae_alloc((size_t)v.cap * sizeof(int64_t), line, column);
     for (int64_t i = 0; i < s.len; i++) {
-        v.data[i] = (int64_t)(unsigned char)s.ptr[i];
+        ((int64_t *)v.data)[i] = (int64_t)(unsigned char)s.ptr[i];
     }
     return v;
 }

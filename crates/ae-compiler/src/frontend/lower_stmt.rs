@@ -385,8 +385,6 @@ impl<'a> Parser<'a> {
                         }
                         return Ok(match elem_ty {
                             Type::String => Statement::StrVecStore(slot, element_index, stored, line, column, value_ty == Type::StrView),
-                            Type::Float(FloatTy::F64) => Statement::VecFStore(slot, element_index, stored, line, column),
-                            Type::Int(IntTy::I64) => Statement::VecStore(slot, element_index, stored, line, column),
                             _ => Statement::GVecStore(slot, element_index, stored, elem_ty, line, column),
                         });
                     }
