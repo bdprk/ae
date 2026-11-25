@@ -12,8 +12,9 @@ field chains (`box.cells`, `outer.box.cells`), indexed place borrows
 (`&v[i]`), typed local bindings (P2.4/P2.5), and `&[T]` slices built at
 call sites from vectors, arrays and forwarded parameters, and sub-slice
 windows (`&v[0..0]`, `&v[3..3]`, `&arr[2..3]`, string/owned/nested element
-windows), and place borrows of one slice element (`&v[0]` to a `&Struct`/
-`&vec` parameter) (ADR-0236 rungs 1/2/3), structs, enums,
+windows), place borrows of one slice element (`&v[0]` to a `&Struct`/
+`&vec` parameter), and mutable-slice stores (`&mut [T]`, rung 4)
+(ADR-0236 rungs 1-4), structs, enums,
 matches with payload bindings, counted loops with `continue`, and the
 borrow surface (M2.5): a Doc struct with a `&mut self` method and a free
 `&mut` function, field views born and read inside one statement group,
@@ -147,7 +148,7 @@ class Gen:
         """
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
-        kind = self.rnd() % 30
+        kind = self.rnd() % 31
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -589,6 +590,23 @@ class Gen:
                 f"print(fuzz_slice_borrow_row(&{rows}));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
+        if kind == 30:
+            # ADR-0236 rung 4: `&mut [i64]` stores through the call; the
+            # owner sees the write afterwards and every mode agrees.
+            name = self.fresh("mu")
+            values = [self.int_expr(vars) for _ in range(3)]
+            fill = self.int_expr(vars)
+            return [
+                f"var {name} = vec[{values[0]}, {values[1]}, {values[2]}];",
+                f"print(fuzz_slice_sum(&{name}));",
+                f"fuzz_slice_mut_double(&mut {name});",
+                f"print({name}[0]);",
+                f"print({name}[2]);",
+                f"fuzz_slice_mut_fill(&mut {name}, {fill});",
+                f"print({name}[0]);",
+                f"print(len({name}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
         name = self.fresh("s")
         return [
             f"var {name} = {self.int_expr(vars)};",
@@ -622,6 +640,8 @@ class Gen:
             "fn fuzz_slice_borrow_tag(v: &[FuzzTag]) -> i64 { return fuzz_tag_n(&v[0]); }",
             "fn fuzz_vec_len(v: &vec) -> i64 { return len(v); }",
             "fn fuzz_slice_borrow_row(v: &[vec]) -> i64 { return fuzz_vec_len(&v[0]); }",
+            "fn fuzz_slice_mut_double(m: &mut [i64]) { var i = 0; while i < len(m) { m[i] = m[i] * 2; i += 1; } }",
+            "fn fuzz_slice_mut_fill(m: &mut [i64], v: i64) { m[0] = v; }",
             "fn eat(t: string) -> i64 { return len(t); }",
             "impl Doc {",
             "    fn rename(&mut self, to: string) -> i64 {",
