@@ -297,8 +297,10 @@ impl Parser<'_> {
         match previous {
             Some(expected) if expected == actual => Ok(actual),
             Some(expected) => Err(self.fail(&format!("vector elements must all be {}; {} does not convert implicitly", expected.name(self.ctx), actual.name(self.ctx)))),
-            None if self.is_array_element_type(actual) || matches!(actual, Type::Vector(_)) => Ok(actual),
-            None => Err(self.fail(&format!("vector literal elements must be a Copy non-borrow type or a vec, found {}", actual.name(self.ctx)))),
+            None if self.is_array_element_type(actual)
+                || matches!(actual, Type::Vector(_))
+                || matches!(actual, Type::Struct(sid) if !self.structs[sid].is_copy) => Ok(actual),
+            None => Err(self.fail(&format!("vector literal elements must be a Copy type, an owned struct, or a vec, found {}", actual.name(self.ctx)))),
         }
     }
 

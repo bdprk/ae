@@ -442,7 +442,7 @@ fn float_vectors_move_release_and_borrow_like_other_owned_types() {
 fn float_vector_misuse_is_rejected() {
     for (source, expected) in [
         ("fn main() { let v = vec[1, 2.0]; }", "does not convert implicitly"),
-        ("fn main() { let v = vec[\"a\"]; }", "vector literal elements must be a Copy non-borrow type"),
+        ("fn main() { let v = vec[\"a\"]; }", "vector literal elements must be a Copy type, an owned struct, or a vec"),
         ("fn main() { var v = vec[1.0]; push(v, 2); }", "vector elements must be f64"),
         ("fn main() { var v = vec[1.0]; sort(v); }", "not supported for vec[f64]"),
         ("fn main() { var v = vec[1.0]; reverse(v); }", "not supported for vec[f64]"),
@@ -9831,7 +9831,7 @@ fn main() {
 
     for bad_source in [
         "fn main() { let v = vec[true, 1]; }",
-        "struct OwnedStruct { name: string } fn main() { let v = vec[OwnedStruct { name: \"a\" }]; }",
+        "enum OwnedEnum { Item(string) } fn main() { let v = vec[OwnedEnum::Item(\"a\")]; }",
     ] {
         let bad_path = std::env::temp_dir().join(format!(
             "ae-generic-vectors-bad-{}-{}.ae",
@@ -9957,6 +9957,83 @@ fn nested_vector_elements_drop_and_match_across_backends() {
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-nested-vectors-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// ADR-0235 slice 5: an owned struct element (`vec[Tagged]`) stores the
+/// struct by value and releases each element exactly once on pop, overwrite
+/// and scope exit through the drop hook. Element reads are `&Struct` views:
+/// fields read inline, a `for` variable forwards to `&Struct` parameters, and
+/// the element cannot be bound or moved out. The interpreter runs the same
+/// drops in the same order as the compiled backends.
+#[test]
+fn owned_struct_vector_elements_drop_and_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("owned_struct_vector.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "element view pushed into its own vector",
+            r#"struct Tagged { name: string, n: i64 } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; push(items, items[0]); }"#,
+            "vector elements must be",
+        ),
+        (
+            "borrowed element binding",
+            r#"struct Tagged { name: string, n: i64 } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; let t = items[0]; print(t.n); }"#,
+            "cannot store a borrowed struct in a variable",
+        ),
+        (
+            "field moved into the vector",
+            r#"struct Tagged { name: string, n: i64 } struct Holder { item: Tagged } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; let h = Holder { item: Tagged { name: "b", n: 2 } }; push(items, h.item); }"#,
+            "cannot move a field out of a struct",
+        ),
+        (
+            "stored value used after the move",
+            r#"struct Tagged { name: string, n: i64 } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; var extra = Tagged { name: "c", n: 3 }; items[0] = extra; print(extra.n); }"#,
+            "cannot use 'extra' because it was moved",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-owned-struct-vectors-bad-{}-{}.ae",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

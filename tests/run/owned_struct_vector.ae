@@ -1,0 +1,49 @@
+// P2.4 container rung: owned struct elements (`vec[Tagged]`).
+// The vector stores the struct bytes and releases each element exactly once
+// (pop, overwrite, scope exit) through the drop hook. Element reads are
+// `&Tagged` views: fields read inline, a `for` variable forwards to
+// `&Tagged` parameters, and the element itself cannot be bound or moved out.
+struct Tagged {
+    name: string,
+    n: i64,
+}
+
+impl Drop for Tagged {
+    fn drop(&mut self) {
+        print("drop " + self.name);
+    }
+}
+
+fn show(t: &Tagged) {
+    print(t.name + "=" + to_string(t.n));
+}
+
+fn sum(items: &vec[Tagged]) -> i64 {
+    var total = 0;
+    for item in items {
+        total += item.n;
+    }
+    return total;
+}
+
+fn main() {
+    var items = vec[Tagged { name: "a", n: 1 }, Tagged { name: "b", n: 2 }];
+    print(len(items));
+    print(items[0].n);
+    print(items[1].name);
+    print(sum(&items));
+
+    var extra = Tagged { name: "c", n: 3 };
+    push(items, extra);
+    print(len(items));
+    for item in items {
+        show(item);
+    }
+
+    var replacement = Tagged { name: "d", n: 4 };
+    items[0] = replacement;
+    print(len(items));
+    pop(items);
+    print(len(items));
+    print(sum(&items));
+}

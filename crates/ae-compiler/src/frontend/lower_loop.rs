@@ -133,12 +133,12 @@ impl<'a> Parser<'a> {
         let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
             (Expr::Variable(id, Type::Vector(vid), _, _), Type::Vector(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
-                let loop_elem = loop_element_binding(elem);
+                let loop_elem = self.loop_element_binding(elem);
                 (*id, loop_elem, false)
             }
             (Expr::Variable(id, Type::VectorRef(vid), _, _), Type::VectorRef(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
-                let loop_elem = loop_element_binding(elem);
+                let loop_elem = self.loop_element_binding(elem);
                 (*id, loop_elem, elem == Type::String)
             }
             _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
@@ -178,6 +178,11 @@ impl<'a> Parser<'a> {
             // by the binding's type.
             Type::VectorRef(inner) => Expr::BorrowAs(
                 Box::new(Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), Type::Vector(inner))),
+                false, line, col,
+            ),
+            // An owned struct element binds the same way (`&Struct`).
+            Type::StructRef(sid) => Expr::BorrowAs(
+                Box::new(Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), Type::Struct(sid))),
                 false, line, col,
             ),
             _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), elem_ty),
@@ -257,13 +262,16 @@ impl<'a> Parser<'a> {
 
 }
 
-/// The type a `for` variable takes for an element: a string and an owned
-/// nested vector both bind as views (the container keeps the storage), every
-/// other element binds as its value.
-fn loop_element_binding(elem: Type) -> Type {
-    match elem {
-        Type::String => Type::StrView,
-        Type::Vector(inner) => Type::VectorRef(inner),
-        other => other,
+/// The type a `for` variable takes for an element: a string, an owned nested
+/// vector and an owned struct bind as views (the container keeps the
+/// storage), every other element binds as its value.
+impl Parser<'_> {
+    fn loop_element_binding(&self, elem: Type) -> Type {
+        match elem {
+            Type::String => Type::StrView,
+            Type::Vector(inner) => Type::VectorRef(inner),
+            Type::Struct(sid) if !self.structs[sid].is_copy => Type::StructRef(sid),
+            other => other,
+        }
     }
 }

@@ -323,8 +323,10 @@ impl TypeDisplay for Type {
             Type::Struct(k) => format!("ae_t{k} "),
             // A borrow has no storage of its own, so a temporary of these
             // types is never declared; the arms exist so a stray use fails
-            // the build instead of formatting a bad C type.
-            Type::StructRef(k) => format!("ae_t{k}* "),
+            // the build instead of formatting a bad C type. The read-only
+            // form keeps `const` (a `for` element binding takes the address
+            // of a const element place).
+            Type::StructRef(k) => format!("const ae_t{k}* "),
             Type::StructMut(k) => format!("ae_t{k}* "),
             Type::Enum(_, k) => format!("ae_e{k} "),
             Type::Tokens => "ae_tokens ".to_owned(),

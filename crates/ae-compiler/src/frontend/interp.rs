@@ -610,8 +610,11 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: f64vec push on non-vec".to_owned()),
                 }
             }
-            Statement::GVecPush(id, val_expr, _, line, col) => {
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
+            Statement::GVecPush(id, val_expr, elem_ty, line, col) => {
+                // An owned element moves into the vector, so the source slot
+                // is consumed (the compiled side forfeits it).
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let val = match eval_expr(env, val_expr, locals, caller_locals, moving) {
                     Ok(v) => v,
                     Err(f) => return f,
                 };
@@ -621,7 +624,7 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: gvec push on non-vec".to_owned()),
                 }
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
+            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) => {
                 match locals.get_mut(id) {
                     Some(Val::VecI(v)) => {
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
@@ -632,11 +635,21 @@ fn eval_stmts(
                     Some(Val::VecF(v)) => {
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
                     }
-                    Some(Val::VecG(v)) => {
-                        if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
-                    }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
                     _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
+                }
+            }
+            Statement::GVecPop(id, elem_ty, line, col) => {
+                let popped = match locals.get_mut(id) {
+                    Some(Val::VecG(v)) => v.pop(),
+                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
+                };
+                let Some(popped) = popped else { return trap("pop on empty vector", *line, *col) };
+                // The popped element releases exactly once, like the runtime's
+                // `ae_gvec_pop` drop hook.
+                if let Err(flow) = release_val(env, popped, *elem_ty) {
+                    return flow;
                 }
             }
             // `m[key] = value;` (and the field form): the map owns the
@@ -770,23 +783,32 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: f64vec store on non-vec".to_owned()),
                 }
             }
-            Statement::GVecStore(id, idx_expr, val_expr, _, line, col) => {
+            Statement::GVecStore(id, idx_expr, val_expr, elem_ty, line, col) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
                     Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
                     Err(f) => return f,
                 };
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let val = match eval_expr(env, val_expr, locals, caller_locals, moving) {
                     Ok(v) => v,
                     Err(f) => return f,
                 };
-                match locals.get_mut(id) {
+                let replaced = match locals.get_mut(id) {
                     Some(Val::VecG(v)) => {
                         if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
-                        v[idx as usize] = val;
+                        let old = std::mem::replace(&mut v[idx as usize], val);
+                        Some(old)
                     }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
                     _ => return Flow::Trap("internal: gvec store on non-vec".to_owned()),
+                };
+                // The overwritten element releases exactly once, like the
+                // runtime's `ae_gvec_set` drop hook.
+                if let Some(old) = replaced
+                    && let Err(flow) = release_val(env, old, *elem_ty)
+                {
+                    return flow;
                 }
             }
             Statement::Sort(id, is_str, line, col) => {
@@ -2924,6 +2946,12 @@ fn release_val_inferred(env: &mut Env<'_>, val: Val) -> Result<(), Flow> {
     match val {
         Val::Struct(sid, _) => release_val(env, val, Type::Struct(sid)),
         Val::Enum(eid, _, _) => release_val(env, val, Type::Enum("", eid)),
+        Val::VecG(values) => {
+            for value in values {
+                release_val_inferred(env, value)?;
+            }
+            Ok(())
+        }
         Val::TaskScope(_) => release_val(env, val, Type::TaskScope),
         _ => Ok(()),
     }
@@ -2935,6 +2963,15 @@ fn release_val(env: &mut Env<'_>, val: Val, ty: Type) -> Result<(), Flow> {
     }
     match (ty, val) {
         (Type::TaskScope, Val::TaskScope(eid)) => drain_exec_queue(env, eid).map(|_| ()),
+        // An owned element releases through its own type, in element order,
+        // exactly like the runtime's `ae_gvec_release` drop loop.
+        (Type::Vector(id), Val::VecG(values)) => {
+            let element = env.program.ctx.vector_elem(id);
+            for value in values {
+                release_val(env, value, element)?;
+            }
+            Ok(())
+        }
         (Type::Struct(sid), Val::Struct(_, mut fields)) => {
             let def = env.program.structs[sid].clone();
             if let Some(drop_id) = def.drop_fn

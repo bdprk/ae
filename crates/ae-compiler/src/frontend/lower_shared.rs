@@ -242,6 +242,9 @@ impl<'a> Parser<'a> {
                         let borrowed = matches!(ty, Type::VectorRef(_));
                         if let Type::Vector(inner) = element {
                             Some((Expr::VecIndex(slot, index, line, column, borrowed, element), Type::VectorRef(inner)))
+                        } else if let Type::Struct(sid) = element
+                            && !self.structs[sid].is_copy {
+                            Some((Expr::VecIndex(slot, index, line, column, borrowed, element), Type::StructRef(sid)))
                         } else {
                             Some((Expr::VecIndex(slot, index, line, column, borrowed, element), element))
                         }

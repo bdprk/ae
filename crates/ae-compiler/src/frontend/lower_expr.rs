@@ -963,6 +963,11 @@ impl<'a> Parser<'a> {
                                         // An owned element is a view: the
                                         // outer vector keeps the storage.
                                         (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), Type::VectorRef(inner))
+                                    } else if let Type::Struct(sid) = element
+                                        && !self.structs[sid].is_copy {
+                                        // An owned struct element reads as a
+                                        // borrow; a Copy struct stays a value.
+                                        (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), Type::StructRef(sid))
                                     } else {
                                         (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), element)
                                     }
@@ -1012,6 +1017,11 @@ impl<'a> Parser<'a> {
                             // An owned element is a view: the outer vector
                             // keeps the storage, so the read type is `&vec`.
                             (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), Type::VectorRef(inner))
+                        } else if let Type::Struct(sid) = element
+                            && !self.structs[sid].is_copy {
+                            // An owned struct element reads as a borrow; a
+                            // Copy struct stays a value.
+                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), Type::StructRef(sid))
                         } else {
                             (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
                         }
@@ -1268,8 +1278,28 @@ let mut args = Vec::with_capacity(arguments.len());
             // messages and statement-scoped borrow registers the typed
             // route uses.
             if matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_)) {
+                // A binding already spelled as a borrow (`&vec`/`&Struct`, a
+                // `for` element view) forwards its pointer unchanged: the
+                // argument is the binding itself, not `&binding`.
+                if let ExpressionKind::Atom(Kind::Ident(borrowed)) = &argument.kind
+                    && let Some(&(slot, _, actual)) = self.names.get(borrowed)
+                    && matches!(super::declarations::CallBorrow::classify(expected, actual), Some(super::declarations::CallBorrow::Forward))
+                {
+                    if self.moved.contains(&slot) {
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
+                    }
+                    args.push(Argument::Borrow(slot, false));
+                    continue;
+                }
                 let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
                     self.seek_scalar_offset(argument.range.end);
+                    // A borrow argument names a binding. An element or field
+                    // expression is not an addressable argument yet; say so
+                    // instead of only asking for an `&`.
+                    if matches!(argument.kind, ExpressionKind::Index { .. } | ExpressionKind::Field { .. }) {
+                        return Err(self.fail("this parameter borrows a binding; `&name[index]`/`&name.field` is not supported yet — bind the value or read the fields inline"));
+                    }
                     return Err(self.fail("expected Amp, found the argument"));
                 };
                 if matches!(expected, Type::StructMut(_)) && !*argument_mutability {
