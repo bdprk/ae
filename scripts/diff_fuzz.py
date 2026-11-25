@@ -5,7 +5,11 @@ Generates random *well-typed* programs from a grammar of arithmetic,
 comparisons, control flow, strings (including one a branch moves into a
 by-value call, the mixed drop shape M2.4 keeps unproven), vectors with
 their mutation surface (push, indexed store, sort) and string vectors
-(push, element store releasing the old element, join), structs, enums,
+(push, element store releasing the old element, join), owned struct
+vectors with Drop glue (push/overwrite/pop/scope release, drop prints in
+the compared output), string vector literals, vector fields and nested
+field chains (`box.cells`, `outer.box.cells`), indexed place borrows
+(`&v[i]`), and typed local bindings (P2.4/P2.5), structs, enums,
 matches with payload bindings, counted loops with `continue`, and the
 borrow surface (M2.5): a Doc struct with a `&mut self` method and a free
 `&mut` function, field views born and read inside one statement group,
@@ -139,7 +143,7 @@ class Gen:
         """
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
-        kind = self.rnd() % 24
+        kind = self.rnd() % 28
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -446,6 +450,89 @@ class Gen:
                 f"unsafe {{ print({name}.deref()); }}",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
+        if kind == 24:
+            # Owned struct vector with Drop glue (P2.4 slices 4-5): element
+            # construction, push, indexed overwrite, pop and scope release all
+            # run the destructor exactly once, in the same order on every
+            # backend (the drop prints are part of the differential output).
+            name = self.fresh("tg")
+
+            def tag(prefix: str) -> str:
+                return f'FuzzTag {{ name: "{prefix}{self.rnd() % 1000}", n: {self.int_expr(vars)} }}'
+
+            return [
+                f"var {name} = vec[{tag('a')}, {tag('b')}];",
+                f"push({name}, {tag('c')});",
+                f"print(len({name}));",
+                f"print({name}[0].n);",
+                f"{name}[0] = {tag('d')};",
+                f"print({name}[0].n);",
+                f"print(fuzz_tag_n(&{name}[1]));",
+                f"pop({name});",
+                f"print(len({name}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 25:
+            # String vector literals and the full mutation surface (P2.4
+            # slice 6): text elements are owned, the store releases the old
+            # element, and join reads the container.
+            name = self.fresh("sw")
+
+            def lit(prefix: str) -> str:
+                return f'"{prefix}{self.rnd() % 1000}"'
+
+            return [
+                f"var {name} = vec[{lit('la')}, {lit('lb')}];",
+                f"push({name}, {lit('lc')});",
+                f"{name}[0] = {lit('ld')};",
+                f"print(len({name}));",
+                f'print(join({name}, "-"));',
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 26:
+            # Vector fields and their nested receivers (P2.4 slices 9-11):
+            # a struct's i64 vector field and an owned-struct vector field
+            # mutate through `box.cells`, an assignment through the field
+            # releases the old element, and a nested `outer.box.cells` chain
+            # writes and reads in place.
+            box = self.fresh("fb")
+            outer = self.fresh("fo")
+
+            def tag(prefix: str) -> str:
+                return f'FuzzTag {{ name: "{prefix}{self.rnd() % 1000}", n: {self.int_expr(vars)} }}'
+
+            value = lambda: self.int_expr(vars)
+            return [
+                f"var {box} = FuzzBox {{ cells: vec[{value()}, {value()}], tags: vec[{tag('f')}] }};",
+                f"push({box}.cells, {value()});",
+                f"{box}.cells[0] = {value()};",
+                f"print(len({box}.cells));",
+                f"print({box}.cells[0]);",
+                f"push({box}.tags, {tag('g')});",
+                f"print({box}.tags[0].n);",
+                f"print(len({box}.tags));",
+                f"var {outer} = FuzzOuter {{ box: FuzzBox {{ cells: vec[{value()}], tags: vec[{tag('h')}] }} }};",
+                f"push({outer}.box.cells, {value()});",
+                f"{outer}.box.cells[0] = {value()};",
+                f"print(len({outer}.box.cells));",
+                f"print(fuzz_tag_n(&{outer}.box.tags[0]));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 27:
+            # Local type annotations (P2.5.1): an empty `vec` takes its
+            # element type from the annotation, a scalar binding declares its
+            # shape, and a string literal binds with an annotation.
+            name = self.fresh("tv")
+            sname = self.fresh("ts")
+            return [
+                f"var {name}: vec = vec[];",
+                f"push({name}, {self.int_expr(vars)});",
+                f"print(len({name}));",
+                f"print({name}[0]);",
+                f'let {sname}: string = "t{self.rnd() % 1000}";',
+                f"print(len({sname}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
         name = self.fresh("s")
         return [
             f"var {name} = {self.int_expr(vars)};",
@@ -461,6 +548,13 @@ class Gen:
             "struct Pt { a: i64, b: i64 }",
             "struct Doc { name: string, note: string }",
             "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
+            "struct FuzzTag { name: string, n: i64 }",
+            "impl Drop for FuzzTag {",
+            '    fn drop(&mut self) { print("d" + self.name); }',
+            "}",
+            "struct FuzzBox { cells: vec, tags: vec[FuzzTag] }",
+            "struct FuzzOuter { box: FuzzBox }",
+            "fn fuzz_tag_n(t: &FuzzTag) -> i64 { return t.n; }",
             "fn eat(t: string) -> i64 { return len(t); }",
             "impl Doc {",
             "    fn rename(&mut self, to: string) -> i64 {",
