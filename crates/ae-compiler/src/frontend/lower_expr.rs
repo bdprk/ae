@@ -959,6 +959,10 @@ impl<'a> Parser<'a> {
                                     let borrowed = matches!(ty, Type::VectorRef(_));
                                     if element == Type::String {
                                         (Expr::StrVecIndex(slot, Box::new(index_value), line, column, borrowed), Type::StrView)
+                                    } else if let Type::Vector(inner) = element {
+                                        // An owned element is a view: the
+                                        // outer vector keeps the storage.
+                                        (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), Type::VectorRef(inner))
                                     } else {
                                         (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), element)
                                     }
@@ -1004,6 +1008,10 @@ impl<'a> Parser<'a> {
                             // A borrowed string vector's element is a view; an
                             // owned one hands the element's view too.
                             (Expr::StrVecIndex(slot, Box::new(value), line, column, borrowed), Type::StrView)
+                        } else if let Type::Vector(inner) = element {
+                            // An owned element is a view: the outer vector
+                            // keeps the storage, so the read type is `&vec`.
+                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), Type::VectorRef(inner))
                         } else {
                             (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
                         }

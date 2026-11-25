@@ -813,8 +813,8 @@ impl Parser<'_> {
         self.pos += 1;
         let elem_ty = self.named_type()?;
         self.take(Kind::RBracket)?;
-        if elem_ty != Type::String && !self.is_array_element_type(elem_ty) {
-            return Err(self.fail("vec[T] element type must be string or a Copy non-borrow type"));
+        if !self.is_vector_element_type(elem_ty) {
+            return Err(self.fail("vec[T] element type must be string, a Copy non-borrow type, or a vec"));
         }
         Ok(elem_ty)
     }
@@ -827,6 +827,14 @@ impl Parser<'_> {
             Type::Enum(_, eid) => self.enums[eid].is_copy,
             _ => false,
         }
+    }
+
+    /// A `vec[T]` element may be a string (its own family), any Copy value
+    /// type, or a nested vector. The nested form is owned: the outer vector
+    /// stores the inner header and releases it through the drop hook
+    /// (ADR-0235 slice 4).
+    pub(super) fn is_vector_element_type(&self, ty: Type) -> bool {
+        ty == Type::String || self.is_array_element_type(ty) || matches!(ty, Type::Vector(_))
     }
 
     // Arrays are borrowed read-only; strings and scalars pass by value.

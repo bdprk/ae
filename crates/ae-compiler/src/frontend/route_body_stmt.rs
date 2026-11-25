@@ -233,7 +233,9 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                             || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                                 if name != "self" && resolved.scalar_reads.get(&value.range.start)
                                     .is_some_and(|id| resolved.owned_text_bindings.contains(id)
-                                        || resolved.owned_string_bindings.contains(id))))
+                                        || resolved.owned_string_bindings.contains(id)
+                                        // A nested vector moves into the slot.
+                                        || resolved.owned_vectors.contains(id))))
                 }
                 ae_syntax::expression::ExpressionKind::Field { base, .. }
                     if (*operator == Kind::Equal || compound_assignment_operator(operator).is_some())
@@ -364,7 +366,9 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                     || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
                         if name != "self" && resolved.scalar_reads.get(&value.range.start)
                             .is_some_and(|id| resolved.owned_text_bindings.contains(id)
-                                || resolved.owned_string_bindings.contains(id)))),
+                                || resolved.owned_string_bindings.contains(id)
+                                // A nested vector moves into the outer one.
+                                || resolved.owned_vectors.contains(id)))),
     }
 }
 

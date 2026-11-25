@@ -133,12 +133,12 @@ impl<'a> Parser<'a> {
         let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
             (Expr::Variable(id, Type::Vector(vid), _, _), Type::Vector(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
-                let loop_elem = if elem == Type::String { Type::StrView } else { elem };
+                let loop_elem = loop_element_binding(elem);
                 (*id, loop_elem, false)
             }
             (Expr::Variable(id, Type::VectorRef(vid), _, _), Type::VectorRef(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
-                let loop_elem = if elem == Type::String { Type::StrView } else { elem };
+                let loop_elem = loop_element_binding(elem);
                 (*id, loop_elem, elem == Type::String)
             }
             _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
@@ -172,6 +172,14 @@ impl<'a> Parser<'a> {
         // Per-iteration element binding, then the user's body.
         let element = match elem_ty {
             Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, by_ref),
+            // An owned element binds as a reference to the element's storage
+            // (`&vec` for a nested vector): the loop variable never owns or
+            // releases the inner value, and mutation through it is rejected
+            // by the binding's type.
+            Type::VectorRef(inner) => Expr::BorrowAs(
+                Box::new(Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), Type::Vector(inner))),
+                false, line, col,
+            ),
             _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), elem_ty),
         };
         body.insert(0, Statement::Declare(var, element));
@@ -247,4 +255,15 @@ impl<'a> Parser<'a> {
         self.scopes[base.min(self.scopes.len())..].iter().rev().flat_map(|s| s.iter().rev()).filter(|(_, ty)| self.is_owned(*ty)).map(|&(id, ty)| (id, ty)).collect()
     }
 
+}
+
+/// The type a `for` variable takes for an element: a string and an owned
+/// nested vector both bind as views (the container keeps the storage), every
+/// other element binds as its value.
+fn loop_element_binding(elem: Type) -> Type {
+    match elem {
+        Type::String => Type::StrView,
+        Type::Vector(inner) => Type::VectorRef(inner),
+        other => other,
+    }
 }

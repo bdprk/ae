@@ -9904,3 +9904,74 @@ fn indexed_element_field_reads_match_across_backends() {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+/// ADR-0235 slice 4: `vec[vec]` is the first owned element type. The outer
+/// vector owns each inner header; `push`, `pop`, overwrite and scope exit
+/// release through the runtime's drop hook, element reads are views, and the
+/// compiled, MIR, tree and interpreter backends agree on every operation.
+#[test]
+fn nested_vector_elements_drop_and_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("
+")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_vectors.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "moved inner vector",
+            "fn main() { var rows = vec[vec[1]]; var row = vec[2]; push(rows, row); print(len(row)); }",
+            "cannot use 'row' because it was moved",
+        ),
+        (
+            "borrowed element binding",
+            "fn main() { var rows = vec[vec[1]]; let row = rows[0]; print(len(row)); }",
+            "cannot store a borrowed vector in a variable",
+        ),
+        (
+            "mixed inner literals",
+            "fn main() { let rows = vec[vec[1], vec[2.5]]; }",
+            "vector elements must all be",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-vectors-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

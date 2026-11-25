@@ -551,17 +551,22 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::MathCall(..) => Type::Float(FloatTy::F64),
         Expr::Not(..) | Expr::PathExists(..) | Expr::PathIsDir(..) | Expr::StartsWith(..) | Expr::EndsWith(..) | Expr::JsonHas(..) => Type::Bool,
         // M2.12 slice 2: the address takes the pointee's pointer shape; a
-        // deref yields the pointee.
-        Expr::BorrowAs(e, mutable, ..) => {
-            let pointee = expr_type(e, ctx);
-            if let Some(pid) = ctx.find_pointee(pointee) {
-                if *mutable { Type::PtrMut(pid) } else { Type::Ptr(pid) }
-            } else if let Type::Struct(sid) = pointee {
+        // deref yields the pointee. A borrow of an aggregate keeps its
+        // dedicated view type: `&vec`/`&struct` are `VectorRef`/`StructRef`,
+        // not raw pointers (ADR-0235 slice 4 binds a `for` variable this way).
+        Expr::BorrowAs(e, mutable, ..) => match expr_type(e, ctx) {
+            Type::Vector(id) => Type::VectorRef(id),
+            Type::Struct(sid) => {
                 if *mutable { Type::StructMut(sid) } else { Type::StructRef(sid) }
-            } else if *mutable {
-                Type::PtrMut(0)
-            } else {
-                Type::Ptr(0)
+            }
+            pointee => {
+                if let Some(pid) = ctx.find_pointee(pointee) {
+                    if *mutable { Type::PtrMut(pid) } else { Type::Ptr(pid) }
+                } else if *mutable {
+                    Type::PtrMut(0)
+                } else {
+                    Type::Ptr(0)
+                }
             }
         }
         // Both pointer forms deref to their pointee — PtrMut was missing

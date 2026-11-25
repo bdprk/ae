@@ -483,7 +483,11 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let is_gvec = matches!(*vector_ty, Type::Vector(id) if c_output::vector_family(ctx, id) == "ae_gvec");
             if is_gvec {
                 let c_elem = c_output::c_type_field(elem_ty, ctx);
-                out.push_str(&format!("    ae_gvec t{t} = ae_gvec_new((int64_t)sizeof({c_elem}), {line}, {column});\n"));
+                let drop_fn = match *vector_ty {
+                    Type::Vector(id) => c_output::gvec_drop_expr(ctx, id, ctx.structs, ctx.enums),
+                    _ => "NULL".to_owned(),
+                };
+                out.push_str(&format!("    ae_gvec t{t} = ae_gvec_new((int64_t)sizeof({c_elem}), {drop_fn}, {line}, {column});\n"));
                 for value in values {
                     let element = emit_expr(value, out, next, false, ctx);
                     let e = *next; *next += 1;
@@ -523,7 +527,7 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                     format!("(*((const {c_elem} *)ae_gvec_at({ptr_recv}, {}, {line}, {col})))", i.text)
                 }
             };
-            Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: false }
+            Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
         }
         Expr::Index(id, len, index, line, col, elem_ty) => {
             // A constant index inside the array's compile-time length is
@@ -1323,7 +1327,11 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
     if emitted.materialized { return emitted; }
     let id = *next; *next += 1;
     out.push_str(&format!("    {}t{id} = {};\n", emitted.ty.c_temp(ctx), emitted.text));
-    Emitted { text: format!("t{id}"), owned: is_owned_type(emitted.ty, ctx.structs, ctx.enums), ..emitted }
+    // Materializing keeps the expression's ownership: a view of an owned
+    // element (`v[i]` of a `vec[vec]`) is a *borrow* even though its storage
+    // type is owned, so the temp must never be released (ADR-0235 slice 4).
+    // A fresh value already reports `owned: true` and is released here.
+    Emitted { text: format!("t{id}"), ..emitted }
 }
 fn vector_type(ctx: &CompileContext, elem: Type) -> Type {
     Type::Vector(ctx.find_vector_elem(elem).expect("pre-interned vector element type"))
@@ -1550,7 +1558,10 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             }
             Statement::GVecPush(id, value, elem_ty, line, col) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
-                let value = emit_expr(value, out, next, false, ctx);
+                // An owned element moves into the vector: the source slot is
+                // forfeited after the bytes are copied (ADR-0235 slice 4).
+                let moving = is_owned_type(*elem_ty, ctx.structs, ctx.enums);
+                let value = emit_expr(value, out, next, moving, ctx);
                 let tmp = *next; *next += 1;
                 let c_elem = c_output::c_type_field(*elem_ty, ctx);
                 out.push_str(&format!("    {c_elem} t{tmp} = {};\n", value.text));
@@ -1566,7 +1577,8 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let i = emit_expr(index, out, next, false, ctx);
                 let idx_tmp = *next; *next += 1;
                 out.push_str(&format!("    int64_t t{idx_tmp} = {};\n", i.text));
-                let value = emit_expr(value, out, next, false, ctx);
+                let moving = is_owned_type(*elem_ty, ctx.structs, ctx.enums);
+                let value = emit_expr(value, out, next, moving, ctx);
                 let val_tmp = *next; *next += 1;
                 let c_elem = c_output::c_type_field(*elem_ty, ctx);
                 out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));

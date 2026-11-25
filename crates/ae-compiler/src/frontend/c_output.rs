@@ -11,6 +11,31 @@ pub(super) fn vector_family(ctx: &CompileContext, elem: usize) -> &'static str {
         _ => "ae_gvec",
     }
 }
+/// The drop routine an `ae_gvec` of this element needs, or `NULL` for a Copy
+/// element (nothing to release). The thunk wraps the element's own release so
+/// the vector header can call it through `void *` (ADR-0235 slice 4).
+pub(super) fn gvec_drop_expr(ctx: &CompileContext, elem: usize, structs: &[StructDef], enums: &[EnumDef]) -> String {
+    if vector_family(ctx, elem) != "ae_gvec" { return "NULL".to_owned(); }
+    if !is_owned_type(ctx.vector_elem(elem), structs, enums) { return "NULL".to_owned(); }
+    format!("ae_gdrop{elem}")
+}
+/// One thunk definition per owned element type, emitted only when generated
+/// code names it (the pruner's reachability already saw the release symbol).
+pub(super) fn gvec_drop_thunk(ctx: &CompileContext, elem: usize, structs: &[StructDef], enums: &[EnumDef]) -> Option<String> {
+    if vector_family(ctx, elem) != "ae_gvec" { return None; }
+    let element = ctx.vector_elem(elem);
+    if !is_owned_type(element, structs, enums) { return None; }
+    let release = match element {
+        Type::Vector(inner) => format!("{}_release", vector_family(ctx, inner)),
+        Type::MapOf(id) => format!("{}_release", map_family(ctx, id)),
+        Type::Struct(k) => format!("ae_t{k}_release"),
+        Type::Enum(_, k) => format!("ae_e{k}_release"),
+        // A string element rides its own family, so a gvec never stores one.
+        _ => return None,
+    };
+    let c_ty = c_type_field(element, ctx);
+    Some(format!("static void ae_gdrop{elem}(void *p) {{ {release}(({c_ty} *)p); }}\n"))
+}
 /// ADR-0235 migration: a generic map's key/value pair maps onto the C family
 /// that currently carries it.
 pub(super) fn map_family(ctx: &CompileContext, id: usize) -> &'static str {
@@ -199,13 +224,32 @@ pub(super) fn c_brace_delta(line: &str, state: &mut CScan) -> i32 {
 
 /// Recognise the single-line `static <ret> ae_xxx(<args>) {` form used by
 /// every runtime function. Returns (specifier prefix, signature, name, tail).
+/// The parameter list is matched by parenthesis depth, so a function-pointer
+/// parameter (`void (*drop)(void *)`) does not end the signature early — an
+/// early `)` would hide the whole function from the pruner and drag its body
+/// into an always-kept text unit.
 pub(super) fn runtime_function_start(line: &str) -> Option<(&str, &str, &str, &str)> {
     let at = line.find("static ")?;
     let head = &line[..at];
     if !head.trim().is_empty() && head.trim() != "_Noreturn" { return None; }
     let rest = &line[at + "static ".len()..];
     let open = rest.find('(')?;
-    let close = open + rest[open..].find(')')?;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (index, byte) in rest.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
     let brace = close + rest[close..].find('{')?;
     if !rest[close + 1..brace].trim().is_empty() { return None; }
     let name = &rest[..open];
@@ -816,6 +860,12 @@ typedef struct {{
             }
         }
     }
+    // Function bodies are emitted into their own buffer: a generic vector of
+    // owned elements needs one drop thunk per element type, and the thunks
+    // must be defined before their first use. Scanning the finished bodies
+    // keeps the emitted set exact (an interned element the program never
+    // stores names no thunk and keeps no runtime unit alive).
+    let mut bodies = String::new();
     for function in &all {
         if function.is_main { continue; }
         let non_unit_params: Vec<_> = function.params.iter().copied().filter(|&(_, ty)| ty != Type::Unit).collect();
@@ -827,16 +877,33 @@ typedef struct {{
             Some(name) => format!("{ret} {name}({params})"),
             None => format!("static {ret} ae_fn_{}({params})", function.id),
         };
-        out.push_str(&format!("\n{signature} {{\n"));
-        emit_body(function, &mut out, &program.ctx, structs, enums)?;
+        bodies.push_str(&format!("\n{signature} {{\n"));
+        emit_body(function, &mut bodies, &program.ctx, structs, enums)?;
         // Defensive backstop: even a future control-flow analysis bug must not
         // produce a C function that falls through without returning a value.
-        out.push_str("    ae_fail(\"function exited without return\", 0, 0);\n}\n");
+        bodies.push_str("    ae_fail(\"function exited without return\", 0, 0);\n}\n");
     }
     let main = all.iter().find(|f| f.is_main).expect("load_program checks exactly one main");
-    out.push_str("\nint main(int argc, char **argv) {\n    ae_args_init(argc, argv);\n    ae_argc_g = (int64_t)argc;\n    ae_argv_g = argv;\n");
-    emit_body(main, &mut out, &program.ctx, structs, enums)?;
-    out.push_str("    if (fflush(stdout) == EOF) return 1;\n    return 0;\n}\n");
+    bodies.push_str("\nint main(int argc, char **argv) {\n    ae_args_init(argc, argv);\n    ae_argc_g = (int64_t)argc;\n    ae_argv_g = argv;\n");
+    emit_body(main, &mut bodies, &program.ctx, structs, enums)?;
+    bodies.push_str("    if (fflush(stdout) == EOF) return 1;\n    return 0;\n}\n");
+    // Drop thunks for the owned element types the bodies actually name.
+    {
+        let mut needed: Vec<usize> = Vec::new();
+        for symbol in ae_symbols(&bodies) {
+            if let Some(id) = symbol.strip_prefix("ae_gdrop").and_then(|digits| digits.parse::<usize>().ok())
+                && id < program.ctx.vector_elem_count() && !needed.contains(&id) {
+                    needed.push(id);
+                }
+        }
+        needed.sort_unstable();
+        for id in needed {
+            if let Some(thunk) = gvec_drop_thunk(&program.ctx, id, structs, enums) {
+                out.push_str(&thunk);
+            }
+        }
+    }
+    out.push_str(&bodies);
     let mut fn_typedefs = String::new();
     if out.contains("ae_fn_t") {
         let mut roots = Vec::new();

@@ -167,6 +167,10 @@ impl CompileContext {
         self.types.vector_elem(id)
     }
 
+    fn vector_elem_count(&self) -> usize {
+        self.types.vector_elem_count()
+    }
+
     fn intern_map_types(&mut self, key: Type, value: Type) -> usize {
         self.types.intern_map_types(key, value)
     }
@@ -311,6 +315,10 @@ impl TypeDisplay for Type {
             Type::String => "ae_string ".to_owned(),
             Type::StrView => "ae_strview ".to_owned(),
             Type::Vector(id) => format!("{} ", c_output::vector_family(ctx, id)),
+            // A borrow has no storage of its own; the declaration form exists
+            // for a loop variable bound to an owned element's storage
+            // (ADR-0235 slice 4), which is a pointer to the element.
+            Type::VectorRef(id) => format!("const {} *", c_output::vector_family(ctx, id)),
             Type::MapOf(id) => format!("{} ", c_output::map_family(ctx, id)),
             Type::Struct(k) => format!("ae_t{k} "),
             // A borrow has no storage of its own, so a temporary of these

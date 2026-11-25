@@ -149,6 +149,22 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(value.range.end);
                 return Err(self.fail(&format!("vector elements must be {}", elem_ty.name(self.ctx))));
             }
+            // An owned element moves into the vector. A field cannot be
+            // moved out of its struct, and a vector cannot be pushed into
+            // itself (the byte copy would alias the vector's own storage).
+            if self.is_owned(elem_ty) && elem_ty != Type::String {
+                if matches!(&value.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
+                    self.seek_scalar_offset(value.range.end);
+                    return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
+                }
+                if let Expr::Variable(source, ..) = &lowered {
+                    if *source == slot {
+                        self.seek_scalar_offset(value.range.end);
+                        return Err(self.fail("cannot push a vector into itself"));
+                    }
+                    self.moved.insert(*source);
+                }
+            }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
             return Ok(match elem_ty {

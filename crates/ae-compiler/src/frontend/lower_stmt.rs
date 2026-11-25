@@ -358,7 +358,17 @@ impl<'a> Parser<'a> {
                         // a view store only borrows it.
                         if self.is_owned(value_ty)
                             && let Expr::Variable(source, ..) = &stored {
+                                if *source == slot {
+                                    self.seek_scalar_offset(value.range.end);
+                                    return Err(self.fail("cannot assign a vector into its own element"));
+                                }
                                 self.moved.insert(*source);
+                            }
+                        // An owned field cannot be moved out of its struct.
+                        if self.is_owned(value_ty)
+                            && matches!(&value.kind, ae_syntax::expression::ExpressionKind::Field { .. }) {
+                                self.seek_scalar_offset(value.range.end);
+                                return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
                             }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;

@@ -1287,12 +1287,18 @@ static void ae_f64vec_forfeit(ae_f64vec *v) {
     v->cap = 0;
 }
 
-typedef struct { void *data; int64_t len; int64_t cap; int64_t elem_size; } ae_gvec; // ADR-0235
-static ae_gvec ae_gvec_new(int64_t elem_size, size_t line, size_t column) {
+// A generic vector stores element bytes and, for owned elements, the drop
+// routine that releases one element in place. Copy elements pass NULL: the
+// vector then only moves bytes and frees its buffer. The drop routine is what
+// makes `pop`, overwrite and scope release run each element's own release
+// exactly once (ADR-0235 slice 4).
+typedef struct { void *data; int64_t len; int64_t cap; int64_t elem_size; void (*drop)(void *); } ae_gvec; // ADR-0235
+static ae_gvec ae_gvec_new(int64_t elem_size, void (*drop)(void *), size_t line, size_t column) {
     ae_gvec v;
     v.len = 0;
     v.cap = 4;
     v.elem_size = elem_size > 0 ? elem_size : 1;
+    v.drop = drop;
     if ((size_t)v.cap > SIZE_MAX / (size_t)v.elem_size) ae_fail("vector too large", line, column);
     v.data = ae_alloc((size_t)v.cap * (size_t)v.elem_size, line, column);
     return v;
@@ -1312,6 +1318,7 @@ static void ae_gvec_push(ae_gvec *v, const void *elem, size_t line, size_t colum
 static void ae_gvec_pop(ae_gvec *v, size_t line, size_t column) {
     if (v->len == 0) ae_fail("pop from empty vector", line, column);
     v->len = v->len - 1;
+    if (v->drop) v->drop((char *)v->data + (size_t)v->len * (size_t)v->elem_size);
 }
 static int64_t ae_gvec_len(ae_gvec v, size_t line, size_t column) {
     (void)line; (void)column;
@@ -1323,20 +1330,29 @@ static const void *ae_gvec_at(const ae_gvec *v, int64_t index, size_t line, size
 }
 static void ae_gvec_set(ae_gvec *v, int64_t index, const void *elem, size_t line, size_t column) {
     ae_vec_index(index, v->len, line, column);
-    memcpy((char *)v->data + (size_t)index * (size_t)v->elem_size, elem, (size_t)v->elem_size);
+    void *slot = (char *)v->data + (size_t)index * (size_t)v->elem_size;
+    if (v->drop) v->drop(slot);
+    memcpy(slot, elem, (size_t)v->elem_size);
 }
 static void ae_gvec_release(ae_gvec *v) {
+    if (v->drop) {
+        for (int64_t i = 0; i < v->len; i++) {
+            v->drop((char *)v->data + (size_t)i * (size_t)v->elem_size);
+        }
+    }
     ae_free(v->data);
     v->data = NULL;
     v->len = 0;
     v->cap = 0;
     v->elem_size = 0;
+    v->drop = NULL;
 }
 static void ae_gvec_forfeit(ae_gvec *v) {
     v->data = NULL;
     v->len = 0;
     v->cap = 0;
     v->elem_size = 0;
+    v->drop = NULL;
 }
 
 // In-place orderings for i64 vectors. qsort is the C library's introsort and

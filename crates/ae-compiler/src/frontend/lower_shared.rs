@@ -240,7 +240,11 @@ impl<'a> Parser<'a> {
                             return None;
                         }
                         let borrowed = matches!(ty, Type::VectorRef(_));
-                        Some((Expr::VecIndex(slot, index, line, column, borrowed, element), element))
+                        if let Type::Vector(inner) = element {
+                            Some((Expr::VecIndex(slot, index, line, column, borrowed, element), Type::VectorRef(inner)))
+                        } else {
+                            Some((Expr::VecIndex(slot, index, line, column, borrowed, element), element))
+                        }
                     }
                     _ => None,
                 }
