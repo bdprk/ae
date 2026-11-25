@@ -1381,6 +1381,15 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: join on non-strvec".to_owned())),
             }
         }
+        // `bytes(s)` copies the string's bytes into an i64 vector: the same
+        // values the runtime's ae_bytes fills.
+        Expr::Bytes(inner, ..) => {
+            let text = match eval_expr(env, inner, locals, caller_locals, false)? {
+                Val::Str(s) => s,
+                _ => return Err(Flow::Trap("internal: bytes operand".to_owned())),
+            };
+            Ok(Val::VecI(text.as_bytes().iter().map(|byte| *byte as i64).collect()))
+        }
         Expr::Contains(haystack, needle, ..) => {
             let hay = match eval_expr(env, haystack, locals, caller_locals, false)? { Val::Str(s) => s, _ => return Err(Flow::Trap("internal: contains haystack".to_owned())) };
             let needle = match eval_expr(env, needle, locals, caller_locals, false)? { Val::Str(s) => s, _ => return Err(Flow::Trap("internal: contains needle".to_owned())) };
@@ -2542,7 +2551,9 @@ fn eval_expr(
             let ready2 = !env.chans[id2].0.is_empty();
             if closed1 { Ok(Val::Int(0)) } else if closed2 { Ok(Val::Int(1)) } else if ready1 { Ok(Val::Int(0)) } else if ready2 { Ok(Val::Int(1)) } else { Ok(Val::Int(0)) }
         }
-        other => Err(Flow::Trap(format!("unsupported expression in MIR interpreter: {}", format!("{other:?}").chars().take(60).collect::<String>()))),
+        // Every expression variant is handled above: the interpreter is the
+        // differential oracle, so a new variant must add its arm here (the
+        // build fails otherwise) instead of silently trapping.
     }
 }
 

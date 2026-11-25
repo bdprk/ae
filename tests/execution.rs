@@ -10580,3 +10580,37 @@ fn nested_field_stores_match_across_backends() {
         );
     }
 }
+
+/// `bytes(s)` copies a string's UTF-8 bytes into an i64 vector. The
+/// interpreter now implements it too, and with its `bytes` arm the interpreter
+/// covers every expression variant — there is no "unsupported expression"
+/// fallback left, so a new variant must add an arm (the build fails
+/// otherwise) instead of silently trapping.
+#[test]
+fn bytes_values_match_across_backends_and_the_interpreter_is_complete() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("bytes_values.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+}
