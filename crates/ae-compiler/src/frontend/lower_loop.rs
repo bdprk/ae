@@ -131,12 +131,16 @@ impl<'a> Parser<'a> {
         // Borrowed string vectors iterate the same way, with
         // element access going through the pointer.
         let (v_id, elem_ty, by_ref) = match (&first, first_ty) {
-            (Expr::Variable(id, Type::Vec, _, _), Type::Vec) => (*id, Type::Int(IntTy::I64), false),
-            (Expr::Variable(id, Type::StrVec, _, _), Type::StrVec) => (*id, Type::StrView, false),
-            (Expr::Variable(id, Type::StrVecRef, _, _), Type::StrVecRef) => (*id, Type::StrView, true),
-            (Expr::Variable(id, Type::VecRef, _, _), Type::VecRef) => (*id, Type::Int(IntTy::I64), false),
-            (Expr::Variable(id, Type::VecF, _, _), Type::VecF) => (*id, Type::Float(FloatTy::F64), false),
-            (Expr::Variable(id, Type::VecFRef, _, _), Type::VecFRef) => (*id, Type::Float(FloatTy::F64), false),
+            (Expr::Variable(id, Type::Vector(vid), _, _), Type::Vector(tid)) if *vid == tid => {
+                let elem = self.ctx.vector_elem(tid);
+                let loop_elem = if elem == Type::String { Type::StrView } else { elem };
+                (*id, loop_elem, false)
+            }
+            (Expr::Variable(id, Type::VectorRef(vid), _, _), Type::VectorRef(tid)) if *vid == tid => {
+                let elem = self.ctx.vector_elem(tid);
+                let loop_elem = if elem == Type::String { Type::StrView } else { elem };
+                (*id, loop_elem, elem == Type::String)
+            }
             _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
         };
         if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
@@ -168,7 +172,7 @@ impl<'a> Parser<'a> {
         // Per-iteration element binding, then the user's body.
         let element = match elem_ty {
             Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, by_ref),
-            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, first_ty == Type::VecRef || first_ty == Type::VecFRef, elem_ty),
+            _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), elem_ty),
         };
         body.insert(0, Statement::Declare(var, element));
         result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));

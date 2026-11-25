@@ -98,10 +98,11 @@ impl<'a> Parser<'a> {
             return Err(moved_value_hint(self.binding_label(
                 self.fail(&format!("cannot use '{target}' because it was moved")).with_code("E0102"), slot)));
         }
-        if !matches!(ty, Type::Vec | Type::StrVec | Type::VecF) {
+        let Type::Vector(vec_id) = ty else {
             self.seek_scalar_offset(arguments[0].range.end);
             return Err(self.fail(&format!("{builtin} expects a vec, found {}", ty.name(self.ctx))));
-        }
+        };
+        let elem_ty = self.ctx.vector_elem(vec_id);
         if self.is_borrowed(slot) {
             self.seek_scalar_offset(arguments[0].range.end);
             return Err(self.fail(&format!("cannot modify '{target}' while it is borrowed")));
@@ -117,13 +118,13 @@ impl<'a> Parser<'a> {
                 return Err(self.immutable_binding_error(
                     self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
             }
-            if ty == Type::VecF {
+            if elem_ty == Type::Float(FloatTy::F64) {
                 self.seek_scalar_offset(arguments[0].range.end);
                 return Err(self.fail(&format!("{builtin} is not supported for vec[f64]; NaN has no total order")));
             }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
-            let strings = ty == Type::StrVec;
+            let strings = elem_ty == Type::String;
             return Ok(if builtin == "sort" { Statement::Sort(slot, strings, line, column) } else { Statement::Reverse(slot, strings, line, column) });
         }
         if builtin == "push" {
@@ -135,23 +136,25 @@ impl<'a> Parser<'a> {
                     self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
             }
             let (lowered, value_ty) = self.lower_scalar_body_expression(value, slots)?;
-            let ok = match ty {
-                Type::Vec => value_ty == Type::Int(IntTy::I64),
-                Type::VecF => value_ty == Type::Float(FloatTy::F64),
+            let ok = match elem_ty {
+                Type::Int(IntTy::I64) => value_ty == Type::Int(IntTy::I64),
+                Type::Float(FloatTy::F64) => value_ty == Type::Float(FloatTy::F64),
                 _ => matches!(value_ty, Type::String | Type::StrView),
             };
             if !ok {
                 self.seek_scalar_offset(value.range.end);
-                return Err(self.fail(&format!("vector elements must be {}", match ty { Type::Vec => "i64", Type::VecF => "f64", _ => "string" })));
+                return Err(self.fail(&format!("vector elements must be {}", match elem_ty {
+                    Type::Int(IntTy::I64) => "i64",
+                    Type::Float(FloatTy::F64) => "f64",
+                    _ => "string",
+                })));
             }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
-            return Ok(if ty == Type::StrVec {
-                Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView)
-            } else if ty == Type::VecF {
-                Statement::VecFPush(slot, lowered, line, column)
-            } else {
-                Statement::VecPush(slot, lowered, line, column)
+            return Ok(match elem_ty {
+                Type::String => Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView),
+                Type::Float(FloatTy::F64) => Statement::VecFPush(slot, lowered, line, column),
+                _ => Statement::VecPush(slot, lowered, line, column),
             });
         }
         if !self.names[target].1 {
@@ -161,12 +164,10 @@ impl<'a> Parser<'a> {
         }
         self.seek_scalar_offset(call.range.end);
         self.take(Kind::Semi)?;
-        Ok(if ty == Type::StrVec {
-            Statement::StrVecPop(slot, line, column)
-        } else if ty == Type::VecF {
-            Statement::VecFPop(slot, line, column)
-        } else {
-            Statement::VecPop(slot, line, column)
+        Ok(match elem_ty {
+            Type::String => Statement::StrVecPop(slot, line, column),
+            Type::Float(FloatTy::F64) => Statement::VecFPop(slot, line, column),
+            _ => Statement::VecPop(slot, line, column),
         })
     }
 

@@ -227,7 +227,7 @@ impl<'a> Parser<'a> {
                             let Some(payload_types) = payload_types else { continue };
                             for (binding, ty) in bindings.iter().zip(payload_types.iter()) {
                                 if !matches!(binding.kind, ae_syntax::pattern::PatternKind::Binding(_)) { continue }
-                                if !matches!(ty, Type::Vec | Type::StrVec | Type::VecF) { continue }
+                                if !matches!(ty, Type::Vector(_)) { continue }
                                 if let Some(&id) = expressions.scalar_definitions.get(&binding.range.start) {
                                     expressions.vector_definitions.insert(id);
                                     expressions.owned_vectors.insert(id);
@@ -339,7 +339,7 @@ impl<'a> Parser<'a> {
                                 }
                                 _ => match iterator_constructor(initializer) {
                                     Some(Type::Tokens) => { expressions.token_cursor_definitions.insert(id); }
-                                    Some(Type::StrVec) => {
+                                    Some(Type::Vector(_)) => {
                                         expressions.vector_definitions.insert(id);
                                         expressions.owned_vectors.insert(id);
                                     }
@@ -641,7 +641,7 @@ impl<'a> Parser<'a> {
                                         && let Some(field_ty) = field_ty_in(sid, name, self.structs) {
                                             if scalar_type(field_ty) {
                                                 expressions.struct_field_writes.insert(target.range.start);
-                                            } else if matches!(field_ty, Type::String | Type::Vec | Type::VecF | Type::StrVec | Type::Map | Type::MapF) {
+                                            } else if matches!(field_ty, Type::String | Type::Vector(_) | Type::Map | Type::MapF) {
                                                 // An owned field store releases the
                                                 // old value and consumes the new one
                                                 // (the FieldStore codegen); containers

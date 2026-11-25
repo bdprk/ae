@@ -929,7 +929,7 @@ impl<'a> Parser<'a> {
                     && !self.generics.struct_names.contains_key(name)
                     && !self.generics.names.contains_key(name)
                     && let Some(&(slot, _, ty)) = self.names.get(name)
-                    && matches!(ty, Type::Array(_) | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVec | Type::StrVecRef)
+                    && matches!(ty, Type::Array(_) | Type::Vector(_) | Type::VectorRef(_))
                 {
                     if self.moved.contains(&slot) {
                         self.seek_scalar_offset(base.range.start);
@@ -951,15 +951,16 @@ impl<'a> Parser<'a> {
                             let (line, column) = self.position();
                             lowered = Some(match ty {
                                 Type::Array(len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int(IntTy::I64)),
-                                Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef => {
-                                    let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) };
-                                    let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
-                                    (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), element)
+                                Type::Vector(id) | Type::VectorRef(id) => {
+                                    let element = self.ctx.vector_elem(id);
+                                    let borrowed = matches!(ty, Type::VectorRef(_));
+                                    if element == Type::String {
+                                        (Expr::StrVecIndex(slot, Box::new(index_value), line, column, borrowed), Type::StrView)
+                                    } else {
+                                        (Expr::VecIndex(slot, Box::new(index_value), line, column, borrowed, element), element)
+                                    }
                                 }
-                                _ => {
-                                    let by_ref = matches!(ty, Type::StrVecRef);
-                                    (Expr::StrVecIndex(slot, Box::new(index_value), line, column, by_ref), Type::StrView)
-                                }
+                                _ => unreachable!(),
                             });
                         }
                     }
@@ -987,26 +988,21 @@ impl<'a> Parser<'a> {
                         let value = self.lower_scalar_array_index(index, slots)?;
                         (Expr::Index(slot, len, Box::new(value), line, column), Type::Int(IntTy::I64))
                     }
-                    Type::VecRef | Type::VecFRef | Type::Vec | Type::VecF => {
+                    Type::Vector(id) | Type::VectorRef(id) => {
+                        let element = self.ctx.vector_elem(id);
+                        let borrowed = matches!(ty, Type::VectorRef(_));
                         let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
                         if index_ty != Type::Int(IntTy::I64) {
                             self.seek_scalar_offset(index.range.end);
                             return Err(self.fail("vector index must be an integer"));
                         }
-                        let element = if matches!(ty, Type::VecFRef | Type::VecF) { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) };
-                        let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
-                        (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
-                    }
-                    Type::StrVecRef | Type::StrVec => {
-                        // A borrowed string vector's element is a view; an
-                        // owned one hands the element's view too.
-                        let (value, index_ty) = self.lower_scalar_body_expression(index, slots)?;
-                        if index_ty != Type::Int(IntTy::I64) {
-                            self.seek_scalar_offset(index.range.end);
-                            return Err(self.fail("vector index must be an integer"));
+                        if element == Type::String {
+                            // A borrowed string vector's element is a view; an
+                            // owned one hands the element's view too.
+                            (Expr::StrVecIndex(slot, Box::new(value), line, column, borrowed), Type::StrView)
+                        } else {
+                            (Expr::VecIndex(slot, Box::new(value), line, column, borrowed, element), element)
                         }
-                        let by_ref = matches!(ty, Type::StrVecRef);
-                        (Expr::StrVecIndex(slot, Box::new(value), line, column, by_ref), Type::StrView)
                     }
                     other => return Err(self.error_at(base.range.start, &format!("cannot index a value of type {}", other.name(self.ctx)))),
                 }
@@ -1028,7 +1024,8 @@ impl<'a> Parser<'a> {
                     element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
                     values.push(value);
                 }
-                let ty = if element_type == Some(Type::Float(FloatTy::F64)) { Type::VecF } else { Type::Vec };
+                let elem = element_type.unwrap_or(Type::Int(IntTy::I64));
+                let ty = Type::Vector(self.ctx.intern_vector_elem(elem));
                 (Expr::VecLit(values, ty, line, column), ty)
             }
             _ => return Err(self.error_at(expression.range.start, "this expression is not supported by the body route")),
@@ -1207,7 +1204,8 @@ impl<'a> Parser<'a> {
                 }
                 self.seek_scalar_offset(expression.range.end);
                 let (line, column) = self.position();
-                Ok(Some((Expr::Bytes(Box::new(value), line, column), Type::Vec)))
+                let ty = Type::Vector(self.ctx.intern_vector_elem(Type::Int(IntTy::I64)));
+                Ok(Some((Expr::Bytes(Box::new(value), line, column), ty)))
             }
             _ => Ok(None),
         }
@@ -1248,7 +1246,7 @@ let mut args = Vec::with_capacity(arguments.len());
             // typed route's expression parser rejects it (a pointer
             // cast is the only legal use of `&expr`).
             if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                && !matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_))
+                && !matches!(expected, Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_))
             {
                 self.seek_scalar_offset(argument.range.start);
                 return Err(self.fail("a borrow expression must be cast to a pointer"));
@@ -1257,7 +1255,7 @@ let mut args = Vec::with_capacity(arguments.len());
             // address (`Argument::Borrow`); the same classify rules,
             // messages and statement-scoped borrow registers the typed
             // route uses.
-            if matches!(expected, Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+            if matches!(expected, Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
                 let ExpressionKind::BorrowArgument { name: borrowed, mutable: argument_mutability, name_range, .. } = &argument.kind else {
                     self.seek_scalar_offset(argument.range.end);
                     return Err(self.fail("expected Amp, found the argument"));
@@ -1272,7 +1270,8 @@ let mut args = Vec::with_capacity(arguments.len());
                 })?;
                 let Some(borrow) = super::declarations::CallBorrow::classify(expected, actual) else {
                     let shape = match expected {
-                        Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
+                        Type::VectorRef(id) => Type::Vector(id),
+                        _ => expected,
                     };
                     return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
                 };
@@ -1315,7 +1314,7 @@ let mut args = Vec::with_capacity(arguments.len());
                         self.mut_borrows.push((slot, self.scopes.len()));
                         args.push(Argument::Borrow(slot, address));
                     }
-                    (Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_), borrow) => {
+                    (Type::VectorRef(_) | Type::Array(_), borrow) => {
                         // An owned vector takes the address; a
                         // parameter already spelled `&vec` forwards
                         // its pointer unchanged.
@@ -1323,7 +1322,8 @@ let mut args = Vec::with_capacity(arguments.len());
                     }
                     _ => {
                         let shape = match expected {
-                            Type::VecRef => Type::Vec, Type::StrVecRef => Type::StrVec, Type::VecFRef => Type::VecF, _ => expected,
+                            Type::VectorRef(id) => Type::Vector(id),
+                            _ => expected,
                         };
                         return Err(self.fail(&format!("argument must be {}, found {}", shape.name(self.ctx), actual.name(self.ctx))));
                     }
@@ -1622,7 +1622,7 @@ let mut args = Vec::with_capacity(arguments.len());
                     // The typed route admits only the flat payload-capable
                     // arguments for a generic enum; a struct or enum argument
                     // is a diagnostic, not an instantiation.
-                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::Unit | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_))) {
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Fn(_))) {
                         return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, char, string, vec, vec[string], fn(...), or ()"));
                     }
                     self.instantiate_enum(gid, args, base.range.start)?

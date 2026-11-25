@@ -50,7 +50,11 @@ use c_output::*;
 
 
 
-#[derive(Debug, Default, Clone)]
+pub(super) const PRELUDE_I64_VEC_ELEM_ID: usize = 0;
+pub(super) const PRELUDE_STR_VEC_ELEM_ID: usize = 1;
+pub(super) const PRELUDE_F64_VEC_ELEM_ID: usize = 2;
+
+#[derive(Debug, Clone)]
 pub struct CompileContext {
     types: ae_ty::TypeInterner,
     extern_names: BTreeMap<usize, (String, Vec<Type>, Type)>,
@@ -62,13 +66,35 @@ pub struct CompileContext {
     package_imports: PackageImports,
 }
 
+impl Default for CompileContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompileContext {
     pub fn new() -> Self {
-        Self::default()
+        let mut ctx = Self {
+            types: ae_ty::TypeInterner::default(),
+            extern_names: BTreeMap::new(),
+            exposure_names: HashMap::new(),
+            unsafe_fns: HashSet::new(),
+            closure_fn_ids: Vec::new(),
+            spawned_threads: Vec::new(),
+            closure_borrow_captures: Vec::new(),
+            package_imports: PackageImports::default(),
+        };
+        let i64_id = ctx.intern_vector_elem(Type::Int(IntTy::I64));
+        let str_id = ctx.intern_vector_elem(Type::String);
+        let f64_id = ctx.intern_vector_elem(Type::Float(FloatTy::F64));
+        debug_assert_eq!(i64_id, PRELUDE_I64_VEC_ELEM_ID);
+        debug_assert_eq!(str_id, PRELUDE_STR_VEC_ELEM_ID);
+        debug_assert_eq!(f64_id, PRELUDE_F64_VEC_ELEM_ID);
+        ctx
     }
 
     pub fn with_package_imports(package_imports: PackageImports) -> Self {
-        Self { package_imports, ..Self::default() }
+        Self { package_imports, ..Self::new() }
     }
 
     fn register_extern(&mut self, id: usize, c_name: String, params: Vec<Type>, ret: Type) {
@@ -119,11 +145,13 @@ impl CompileContext {
         self.types.intern_shared(elem)
     }
 
-    /// ADR-0235: the element type of a generic vector. Producers switch to
-    /// the constructor in slice 1b; until then only the tests call it.
-    #[allow(dead_code)]
+    /// ADR-0235: the element type of a generic vector.
     fn intern_vector_elem(&mut self, elem: Type) -> usize {
         self.types.intern_vector_elem(elem)
+    }
+
+    fn find_vector_elem(&self, elem: Type) -> Option<usize> {
+        (0..self.types.vector_elem_count()).find(|&id| self.types.vector_elem(id) == elem)
     }
 
     fn vector_elem(&self, id: usize) -> Type {
@@ -193,12 +221,6 @@ impl TypeDisplay for Type {
             Type::Unit => "()".to_owned(),
             Type::String => "string".to_owned(),
             Type::StrView => "string view".to_owned(),
-            Type::Vec => "vec".to_owned(),
-            Type::StrVec => "vec[string]".to_owned(),
-            Type::VecF => "vec[f64]".to_owned(),
-            Type::VecRef => "&vec".to_owned(),
-            Type::StrVecRef => "&vec[string]".to_owned(),
-            Type::VecFRef => "&vec[f64]".to_owned(),
             // Generic containers (ADR-0235): one spelling from the interned
             // element type, whatever it is.
             Type::Vector(id) => format!("vec[{}]", ctx.vector_elem(id).name(ctx)),
@@ -254,9 +276,11 @@ impl TypeDisplay for Type {
             Type::Float(FloatTy::F64) => "double ".to_owned(),
             Type::String => "ae_string ".to_owned(),
             Type::StrView => "ae_strview ".to_owned(),
-            Type::Vec => "ae_vec ".to_owned(),
-            Type::StrVec => "ae_strvec ".to_owned(),
-            Type::VecF => "ae_f64vec ".to_owned(),
+            Type::Vector(id) => match ctx.vector_elem(id) {
+                Type::String => "ae_strvec ".to_owned(),
+                Type::Float(FloatTy::F64) => "ae_f64vec ".to_owned(),
+                _ => "ae_vec ".to_owned(),
+            },
             Type::Map => "ae_map ".to_owned(),
             Type::MapF => "ae_mapf ".to_owned(),
             Type::Struct(k) => format!("ae_t{k} "),
@@ -347,7 +371,7 @@ pub(super) fn prelude_result_families() -> [(&'static str, [Type; 2]); 8] {
     [
         ("ReadResult", [Type::String, Type::String]),
         ("IntResult", [Type::Int(IntTy::I64), Type::String]),
-        ("DirResult", [Type::StrVec, Type::String]),
+        ("DirResult", [Type::Vector(PRELUDE_STR_VEC_ELEM_ID), Type::String]),
         ("FileResult", [Type::Struct(0), Type::String]),
         ("StatusResult", [Type::Unit, Type::String]),
         ("BoolResult", [Type::Bool, Type::String]),
@@ -729,7 +753,7 @@ pub(super) fn is_copy_type(ty: Type, structs: &[StructDef], enums: &[EnumDef]) -
     match ty {
         Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char | Type::Unit => true,
         Type::Ptr(_) | Type::PtrMut(_) => true,
-        Type::StructRef(_) | Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StrView => true,
+        Type::StructRef(_) | Type::VectorRef(_) | Type::StrView => true,
         Type::Fn(_) => true,
         Type::Atomic | Type::Shared(_) => true,
         Type::Struct(sid) => structs.get(sid).is_some_and(|defn| defn.is_copy),
@@ -809,7 +833,9 @@ impl Bound {
 // only reject a declaration; it never lets unchecked code through.
 const AUDIT_TYPES: &[Type] = &[
     Type::Int(IntTy::I64), Type::Bool, Type::Float(FloatTy::F64), Type::String, Type::StrView,
-    Type::Vec, Type::StrVec, Type::VecF, Type::VecRef, Type::StrVecRef, Type::VecFRef, Type::Map, Type::MapF,
+    Type::Vector(PRELUDE_I64_VEC_ELEM_ID), Type::Vector(PRELUDE_STR_VEC_ELEM_ID), Type::Vector(PRELUDE_F64_VEC_ELEM_ID),
+    Type::VectorRef(PRELUDE_I64_VEC_ELEM_ID), Type::VectorRef(PRELUDE_STR_VEC_ELEM_ID), Type::VectorRef(PRELUDE_F64_VEC_ELEM_ID),
+    Type::Map, Type::MapF,
     Type::Array(0), Type::Struct(0), Type::StructRef(0), Type::StructMut(0), Type::Enum("audit", 0),
 ];
 

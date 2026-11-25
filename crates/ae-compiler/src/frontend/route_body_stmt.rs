@@ -82,7 +82,7 @@ pub(super) fn iterator_constructor(expression: &ae_syntax::expression::Expressio
     let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind else { return None };
     match (name.as_str(), arguments.len()) {
         ("tokenize", 2) => Some(Type::Tokens),
-        ("strvec_new", 0) | ("lines", 1) | ("split", 2) => Some(Type::StrVec),
+        ("strvec_new", 0) | ("lines", 1) | ("split", 2) => Some(Type::Vector(PRELUDE_STR_VEC_ELEM_ID)),
         _ => None,
     }
 }

@@ -133,7 +133,7 @@ impl Parser<'_> {
                     // how the capture is classified, and closure/pointer
                     // values have no byte layout to package; owned scalars,
                     // strings, vectors, maps, structs, and enums move.
-                    if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
+                    if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vector(_) | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
                         return Err(self.fail("spawn moves its captures into the thread; this capture's storage cannot cross"));
                     }
                     if self.moved.contains(outer_id) {

@@ -306,19 +306,19 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
             lower_operand(index, bindings, lowering),
             lower_operand(value, bindings, lowering),
         ]),
-        Statement::VecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, Type::Vec)), lower_operand(value, bindings, lowering)]),
-        Statement::StrVecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec)), lower_operand(value, bindings, lowering)]),
-        Statement::VecFPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, Type::VecF)), lower_operand(value, bindings, lowering)]),
-        Statement::VecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, Type::Vec))]),
-        Statement::StrVecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec))]),
-        Statement::VecFPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, Type::VecF))]),
-        Statement::VecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, Type::Vec)), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
-        Statement::StrVecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec)), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
-        Statement::VecFStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, Type::VecF)), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::VecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Int(IntTy::I64), false))), lower_operand(value, bindings, lowering)]),
+        Statement::StrVecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(value, bindings, lowering)]),
+        Statement::VecFPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Float(FloatTy::F64), false))), lower_operand(value, bindings, lowering)]),
+        Statement::VecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Int(IntTy::I64), false)))]),
+        Statement::StrVecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false)))]),
+        Statement::VecFPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Float(FloatTy::F64), false)))]),
+        Statement::VecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Int(IntTy::I64), false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::StrVecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::VecFStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::Float(FloatTy::F64), false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         // The flag is the parser's sort-as-strings bit (vec[string] sorts by
         // bytes), so it names the intrinsic instead of posing as a direction.
-        Statement::Sort(id, strings, ..) => (if *strings { "sort_strings" } else { "sort" }, vec![MirOperand::Place(MirPlace::Local(*id, if *strings { Type::StrVec } else { Type::Vec }))]),
-        Statement::Reverse(id, strings, ..) => (if *strings { "reverse_strings" } else { "reverse" }, vec![MirOperand::Place(MirPlace::Local(*id, if *strings { Type::StrVec } else { Type::Vec }))]),
+        Statement::Sort(id, strings, ..) => (if *strings { "sort_strings" } else { "sort" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),
+        Statement::Reverse(id, strings, ..) => (if *strings { "reverse_strings" } else { "reverse" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),
         Statement::MapPut(place, key, value, ..) => ("put", vec![map_place_operand(place), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Statement::Assert(condition, ..) => ("assert", vec![lower_operand(condition, bindings, lowering)]),
         Statement::Print(Printed::Text(text)) => ("print", vec![MirOperand::Str(Rc::from(text.as_str()), 0, 0)]),
@@ -402,19 +402,14 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             lower_operand(index, bindings, lowering),
         ]),
         Expr::VecIndex(id, index, _, _, borrowed, element) => {
-            let vector = match (*element, *borrowed) {
-                (Type::Float(FloatTy::F64), false) => Type::VecF,
-                (Type::Float(FloatTy::F64), true) => Type::VecFRef,
-                (_, false) => Type::Vec,
-                (_, true) => Type::VecRef,
-            };
+            let vector = vector_type(lowering.ctx, *element, *borrowed);
             ("index", vec![MirOperand::Place(MirPlace::Local(*id, vector)), lower_operand(index, bindings, lowering)])
         }
         Expr::StrVecIndex(id, index, _, _, borrowed) => {
-            let vector = if *borrowed { Type::StrVecRef } else { Type::StrVec };
+            let vector = vector_type(lowering.ctx, Type::String, *borrowed);
             ("index", vec![MirOperand::Place(MirPlace::Local(*id, vector)), lower_operand(index, bindings, lowering)])
         }
-        Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec)), lower_operand(sep, bindings, lowering)]),
+        Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(sep, bindings, lowering)]),
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
         Expr::ReadFile(path, ..) => ("read_file", vec![lower_operand(path, bindings, lowering)]),
@@ -429,7 +424,7 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::FloatToString(e, ..) => ("float_to_string", vec![lower_operand(e, bindings, lowering)]),
         Expr::StrEq(a, b, ..) => ("str_eq", vec![lower_operand(a, bindings, lowering), lower_operand(b, bindings, lowering)]),
         Expr::MapKeys(place, ..) => ("keys", vec![map_place_operand(place)]),
-        Expr::RunCommand(program, vid, ..) => ("run_command", vec![lower_operand(program, bindings, lowering), MirOperand::Place(MirPlace::Local(*vid, Type::StrVec))]),
+        Expr::RunCommand(program, vid, ..) => ("run_command", vec![lower_operand(program, bindings, lowering), MirOperand::Place(MirPlace::Local(*vid, vector_type(lowering.ctx, Type::String, false)))]),
         Expr::ToString(e, ..) => ("to_string", vec![lower_operand(e, bindings, lowering)]),
         Expr::Lines(e, ..) => ("lines", vec![lower_operand(e, bindings, lowering)]),
         Expr::CountLinesWith(text, pattern, ..) => ("count_lines_with", vec![lower_operand(text, bindings, lowering), lower_operand(pattern, bindings, lowering)]),
@@ -495,6 +490,11 @@ fn string_base_operand(id: usize, field: &Option<String>) -> MirOperand {
     }
 }
 
+fn vector_type(ctx: &CompileContext, elem: Type, borrowed: bool) -> Type {
+    let id = ctx.find_vector_elem(elem).unwrap_or(0);
+    if borrowed { Type::VectorRef(id) } else { Type::Vector(id) }
+}
+
 pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
     match expr {
         Expr::Spawn(_, _, tid, ..) => Type::Thread(*tid),
@@ -532,15 +532,15 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         | Expr::Slice(..) | Expr::FloatToString(..) | Expr::ToString(..)
         | Expr::PathJoin(..) | Expr::PathName(..) | Expr::PathParent(..)
         | Expr::Utf8Prefix(..) => Type::String,
-        Expr::Bytes(..) => Type::Vec,
+        Expr::Bytes(..) => vector_type(ctx, Type::Int(IntTy::I64), false),
         Expr::Neg(value, ..) => expr_type(value, ctx),
         Expr::ClosureLit(id) => Type::Closure(*id),
         Expr::MapInc(place, ..) if place.f64_value() => Type::Float(FloatTy::F64),
         Expr::MapHas(..) | Expr::MapRemove(..) => Type::Bool,
         Expr::SliceView(..) => Type::StrView,
         Expr::Tokens(..) => Type::Tokens,
-        Expr::Split(..) | Expr::Args(..) | Expr::Lines(..) | Expr::StrVecNew(..) | Expr::MapKeys(..) => Type::StrVec,
-        Expr::F64VecNew(..) => Type::VecF,
+        Expr::Split(..) | Expr::Args(..) | Expr::Lines(..) | Expr::StrVecNew(..) | Expr::MapKeys(..) => vector_type(ctx, Type::String, false),
+        Expr::F64VecNew(..) => vector_type(ctx, Type::Float(FloatTy::F64), false),
         Expr::MapNew(_, _, MapKind::Float) => Type::MapF,
         Expr::MapNew(..) => Type::Map,
         // Math calls return f64 by definition (ADR-60).

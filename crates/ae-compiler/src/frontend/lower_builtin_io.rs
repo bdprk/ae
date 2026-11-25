@@ -63,7 +63,8 @@ impl<'a> Parser<'a> {
                     }
                     let (arguments_value, arguments_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
                     let vector = match (&arguments_value, arguments_ty) {
-                        (Expr::Variable(id, Type::StrVec, ..), Type::StrVec) => *id,
+                        (Expr::Variable(id, Type::Vector(vid), ..), Type::Vector(tid))
+                            if *vid == tid && self.ctx.vector_elem(tid) == Type::String => *id,
                         _ => {
                             self.seek_scalar_offset(arguments[1].range.end);
                             return Err(self.fail("run_command expects a bare vec[string] variable for its arguments"));
@@ -79,9 +80,11 @@ impl<'a> Parser<'a> {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
                     self.seek_scalar_offset(expression.range.end);
                     Ok(if name == "f64vec_new" {
-                        (Expr::F64VecNew(line, column), Type::VecF)
+                        let ty = Type::Vector(self.ctx.intern_vector_elem(Type::Float(FloatTy::F64)));
+                        (Expr::F64VecNew(line, column), ty)
                     } else {
-                        (Expr::StrVecNew(line, column), Type::StrVec)
+                        let ty = Type::Vector(self.ctx.intern_vector_elem(Type::String));
+                        (Expr::StrVecNew(line, column), ty)
                     })
                 }
                 "lines" => {
@@ -92,14 +95,16 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("lines expects a string or string view"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::Lines(Box::new(text), line, column), Type::StrVec))
+                    let ty = Type::Vector(self.ctx.intern_vector_elem(Type::String));
+                    Ok((Expr::Lines(Box::new(text), line, column), ty))
                 }
                 "join" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
                     // join borrows a bare string-vector variable.
                     let (parts, parts_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
                     let vid = match (&parts, parts_ty) {
-                        (Expr::Variable(id, Type::StrVec, ..), Type::StrVec) => *id,
+                        (Expr::Variable(id, Type::Vector(vid), ..), Type::Vector(tid))
+                            if *vid == tid && self.ctx.vector_elem(tid) == Type::String => *id,
                         _ => {
                             self.seek_scalar_offset(arguments[0].range.end);
                             return Err(self.fail("join expects a bare vec[string] variable"));

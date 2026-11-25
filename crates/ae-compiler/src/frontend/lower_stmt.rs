@@ -101,7 +101,8 @@ impl<'a> Parser<'a> {
                         element_type = Some(self.check_numeric_vector_element(element_type, ty)?);
                         values.push(value);
                     }
-                    let ty = if element_type == Some(Type::Float(FloatTy::F64)) { Type::VecF } else { Type::Vec };
+                    let elem = element_type.unwrap_or(Type::Int(IntTy::I64));
+                    let ty = Type::Vector(self.ctx.intern_vector_elem(elem));
                     (Statement::Declare(slot, Expr::VecLit(values, ty, line, column)), ty)
                 } else {
                     let (value, ty) = if let ae_syntax::expression::ExpressionKind::Closure { .. } = &initializer.kind {
@@ -301,7 +302,8 @@ impl<'a> Parser<'a> {
                         };
                         return Ok(Statement::MapPut(place, key, stored, line, column));
                     }
-                    if matches!(ty, Type::Vec | Type::StrVec | Type::VecF) {
+                    if let Type::Vector(vec_id) = ty {
+                        let elem_ty = self.ctx.vector_elem(vec_id);
                         if field_place.is_some() {
                             return Err(self.error_at(base.range.start, "an element store into a vector field is not supported by the body route yet"));
                         }
@@ -325,14 +327,14 @@ impl<'a> Parser<'a> {
                             return Err(self.fail("vector index must be an integer"));
                         }
                         let (stored, value_ty) = self.lower_scalar_body_expression(value, slots)?;
-                        let expected = match ty {
-                            Type::StrVec => "string",
-                            Type::VecF => "f64",
+                        let expected = match elem_ty {
+                            Type::String => "string",
+                            Type::Float(FloatTy::F64) => "f64",
                             _ => "i64",
                         };
-                        let matches_element = match ty {
-                            Type::StrVec => matches!(value_ty, Type::String | Type::StrView),
-                            Type::VecF => value_ty == Type::Float(FloatTy::F64),
+                        let matches_element = match elem_ty {
+                            Type::String => matches!(value_ty, Type::String | Type::StrView),
+                            Type::Float(FloatTy::F64) => value_ty == Type::Float(FloatTy::F64),
                             _ => value_ty == Type::Int(IntTy::I64),
                         };
                         if !matches_element {
@@ -347,9 +349,9 @@ impl<'a> Parser<'a> {
                             }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
-                        return Ok(match ty {
-                            Type::StrVec => Statement::StrVecStore(slot, element_index, stored, line, column, value_ty == Type::StrView),
-                            Type::VecF => Statement::VecFStore(slot, element_index, stored, line, column),
+                        return Ok(match elem_ty {
+                            Type::String => Statement::StrVecStore(slot, element_index, stored, line, column, value_ty == Type::StrView),
+                            Type::Float(FloatTy::F64) => Statement::VecFStore(slot, element_index, stored, line, column),
                             _ => Statement::VecStore(slot, element_index, stored, line, column),
                         });
                     }

@@ -107,15 +107,19 @@ impl Parser<'_> {
                 // `vec` alone is the i64 vector; `vec[string]` and `vec[f64]`
                 // (ADR-61) name the others, so a type annotation can say which
                 // it means instead of leaving owned vectors unnameable.
-                if *self.current() != Kind::LBracket { return Ok(Type::Vec); }
+                if *self.current() != Kind::LBracket {
+                    let elem = self.ctx.intern_vector_elem(Type::Int(IntTy::I64));
+                    return Ok(Type::Vector(elem));
+                }
                 self.pos += 1;
                 let element = self.identifier()?;
                 self.take(Kind::RBracket)?;
-                match element.as_str() {
-                    "string" => Ok(Type::StrVec),
-                    "f64" => Ok(Type::VecF),
-                    _ => Err(self.fail("only vec[string] and vec[f64] name an element type; vector elements are i64 by default")),
-                }
+                let elem_ty = match element.as_str() {
+                    "string" => Type::String,
+                    "f64" => Type::Float(FloatTy::F64),
+                    _ => return Err(self.fail("only vec[string] and vec[f64] name an element type; vector elements are i64 by default")),
+                };
+                Ok(Type::Vector(self.ctx.intern_vector_elem(elem_ty)))
             }
             "map" => {
                 // Two shapes exist (ADR-65); the shape is spelled out so the
@@ -379,7 +383,7 @@ impl Parser<'_> {
         let fty = self.named_type()?;
         // Payloads stay flat: a variant may carry scalars, strings or a vector,
         // but not a struct or another enum (no layout recursion).
-        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_)) {
+        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vector(_) | Type::Fn(_)) {
             return Err(self.fail("enum variant payloads must be i64, bool, f64, string, vec, vec[string], or a type parameter"));
         }
         Ok(Payload::Concrete(fty))
@@ -462,18 +466,18 @@ impl Parser<'_> {
                 [Token { kind: Kind::Ident(name), .. }] => {
                     let ty = self.subst.get(name).copied().or_else(|| match name.as_str() {
                         "string" => Some(Type::String),
-                        "vec" => Some(Type::Vec),
+                        "vec" => Some(Type::Vector(PRELUDE_I64_VEC_ELEM_ID)),
                         _ => scalar_type(name),
                     })?;
-                    matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vec | Type::StrVec | Type::VecF).then_some(ty)
+                    matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vector(_)).then_some(ty)
                 }
                 // `()` as a type argument: the unit payload of `Result[(), string]`.
                 [Token { kind: Kind::LParen, .. }, Token { kind: Kind::RParen, .. }] => Some(Type::Unit),
                 [Token { kind: Kind::Ident(name), .. }, Token { kind: Kind::LBracket, .. },
                  Token { kind: Kind::Ident(element), .. }, Token { kind: Kind::RBracket, .. }]
                     if name == "vec" && !self.subst.contains_key(name) => match element.as_str() {
-                        "string" => Some(Type::StrVec),
-                        "f64" => Some(Type::VecF),
+                        "string" => Some(Type::Vector(PRELUDE_STR_VEC_ELEM_ID)),
+                        "f64" => Some(Type::Vector(PRELUDE_F64_VEC_ELEM_ID)),
                         _ => None,
                     },
                 _ => None,
@@ -522,9 +526,9 @@ impl Parser<'_> {
                 arguments.push(self.shape_argument(piece_start, end - 1)?);
                 if name == "vec" && arguments.len() == 1 {
                     return match arguments.as_slice() {
-                        [ShapeArg::Value(Type::String)] => Some(ShapeArg::Value(Type::StrVec)),
-                        [ShapeArg::Value(Type::Float(FloatTy::F64))] => Some(ShapeArg::Value(Type::VecF)),
-                        [ShapeArg::Value(Type::Int(IntTy::I64))] => Some(ShapeArg::Value(Type::Vec)),
+                        [ShapeArg::Value(Type::String)] => Some(ShapeArg::Value(Type::Vector(PRELUDE_STR_VEC_ELEM_ID))),
+                        [ShapeArg::Value(Type::Float(FloatTy::F64))] => Some(ShapeArg::Value(Type::Vector(PRELUDE_F64_VEC_ELEM_ID))),
+                        [ShapeArg::Value(Type::Int(IntTy::I64))] => Some(ShapeArg::Value(Type::Vector(PRELUDE_I64_VEC_ELEM_ID))),
                         _ => None,
                     };
                 }
@@ -541,7 +545,7 @@ impl Parser<'_> {
         }
         match name {
             "string" => Some(ShapeArg::Value(Type::String)),
-            "vec" => Some(ShapeArg::Value(Type::Vec)),
+            "vec" => Some(ShapeArg::Value(Type::Vector(PRELUDE_I64_VEC_ELEM_ID))),
             _ => scalar_type(name)
                 .map(ShapeArg::Value)
                 .or_else(|| self.struct_names.get(name).copied().map(|sid| ShapeArg::Value(Type::Struct(sid))))
@@ -553,7 +557,7 @@ impl Parser<'_> {
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let ty = self.named_type()?;
-        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Fn(_)) {
+        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Fn(_)) {
             return Err(self.fail("type arguments must be i64, bool, f64, char, string, vec, vec[string], fn(...), or ()"));
         }
         Ok(ty)
@@ -818,7 +822,7 @@ impl Parser<'_> {
             return self.named_type();
         }
         let ty = self.parameter_type()?;
-        if matches!(ty, Type::StrView | Type::VecRef | Type::StrVecRef | Type::VecFRef | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
+        if matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::Array(_)) {
             Ok(ty)
         } else {
             Err(self.fail("unsupported borrowed parameter type for a callable"))
@@ -849,9 +853,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 return match concrete {
                     Type::String => Ok(Type::StrView),
-                    Type::Vec => Ok(Type::VecRef),
-                    Type::StrVec => Ok(Type::StrVecRef),
-                    Type::VecF => Ok(Type::VecFRef),
+                    Type::Vector(id) => Ok(Type::VectorRef(id)),
                     Type::Struct(sid) => Ok(Type::StructRef(sid)),
                     _ => Err(self.error_at(amp_offset, &format!(
                         "'&{name}' is '{}' here, which has no read-only borrow; only string, vec, vec[string] and vec[f64] can be borrowed",
@@ -872,13 +874,14 @@ impl Parser<'_> {
                     self.pos += 1;
                     let element = self.identifier()?;
                     self.take(Kind::RBracket)?;
-                    match element.as_str() {
-                        "string" => return Ok(Type::StrVecRef),
-                        "f64" => return Ok(Type::VecFRef),
+                    let elem_ty = match element.as_str() {
+                        "string" => Type::String,
+                        "f64" => Type::Float(FloatTy::F64),
                         _ => return Err(self.fail("only &vec[string] and &vec[f64] are supported; vector elements are i64 by default")),
-                    }
+                    };
+                    return Ok(Type::VectorRef(self.ctx.intern_vector_elem(elem_ty)));
                 }
-                return Ok(Type::VecRef);
+                return Ok(Type::VectorRef(self.ctx.intern_vector_elem(Type::Int(IntTy::I64))));
             }
             // `&mut Type` (ADR-0185) is the exclusive mutable borrow of a
             // user struct: the callee may write fields through the pointer,

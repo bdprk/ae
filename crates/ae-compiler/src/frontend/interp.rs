@@ -1103,20 +1103,23 @@ fn eval_expr(
         }
         Expr::VecLit(values, ty, _, _) => {
             match ty {
-                Type::Vec => {
-                    let mut out = Vec::with_capacity(values.len());
-                    for v in values {
-                        if let Val::Int(n) = eval_expr(env, v, locals, caller_locals, false)? { out.push(n); }
+                Type::Vector(id) => match env.program.ctx.vector_elem(*id) {
+                    Type::Int(IntTy::I64) => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for v in values {
+                            if let Val::Int(n) = eval_expr(env, v, locals, caller_locals, false)? { out.push(n); }
+                        }
+                        Ok(Val::VecI(out))
                     }
-                    Ok(Val::VecI(out))
-                }
-                Type::VecF => {
-                    let mut out = Vec::with_capacity(values.len());
-                    for v in values {
-                        if let Val::Float(x) = eval_expr(env, v, locals, caller_locals, false)? { out.push(x); }
+                    Type::Float(FloatTy::F64) => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for v in values {
+                            if let Val::Float(x) = eval_expr(env, v, locals, caller_locals, false)? { out.push(x); }
+                        }
+                        Ok(Val::VecF(out))
                     }
-                    Ok(Val::VecF(out))
-                }
+                    _ => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
+                },
                 _ => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
             }
         }
@@ -2139,7 +2142,7 @@ fn eval_expr(
                     for (outer_id, hidden) in env.program.ctx.closure_borrow_captures(*cid) {
                         match hidden {
                             Type::StrView => args.push(Argument::View(Expr::Variable(outer_id, Type::String, 0, 0))),
-                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VecRef | Type::StrVecRef | Type::VecFRef))),
+                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VectorRef(_)))),
                         }
                     }
                     invoke_call(env, env.program.ctx.closure_fn_id(*cid), &args, locals, caller_locals)
@@ -2148,7 +2151,7 @@ fn eval_expr(
                     for (outer_id, hidden) in env.program.ctx.closure_borrow_captures(*cid) {
                         match hidden {
                             Type::StrView => args.push(Argument::View(Expr::Variable(outer_id, Type::String, 0, 0))),
-                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VecRef | Type::StrVecRef | Type::VecFRef))),
+                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VectorRef(_)))),
                         }
                     }
                     invoke_call(env, env.program.ctx.closure_fn_id(*cid), &args, locals, caller_locals)

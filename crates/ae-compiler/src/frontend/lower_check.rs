@@ -19,7 +19,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn check_borrowed_binding(&self, ty: Type) -> Result<(), ae_span::Diagnostic> {
-        if matches!(ty, Type::VecRef | Type::StrVecRef) {
+        if matches!(ty, Type::VectorRef(_)) {
             return Err(self.fail("cannot store a borrowed vector in a variable; pass it directly to a parameter that borrows"));
         }
         if matches!(ty, Type::StructRef(_) | Type::StructMut(_)) {

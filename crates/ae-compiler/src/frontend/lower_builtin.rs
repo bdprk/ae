@@ -48,7 +48,7 @@ impl<'a> Parser<'a> {
                                     self.seek_scalar_offset(expression.range.end);
                                     return Ok((Expr::Number(n as i64), Type::Int(IntTy::I64)));
                                 }
-                                if matches!(ty, Type::Vec | Type::StrVec | Type::VecRef | Type::StrVecRef | Type::Map) {
+                                if matches!(ty, Type::Vector(_) | Type::VectorRef(_) | Type::Map) {
                                     // The typed fast path stamps the operand with
                                     // the `len` call's position, not the variable's.
                                     let value = Expr::Variable(slot, ty, line, column);
@@ -63,7 +63,7 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(expression.range.end);
                         return Err(self.fail("a token cursor has no len: counting would consume the stream, so use split(text, sep) when the count is needed"));
                     }
-                    if !matches!(ty, Type::String | Type::StrView | Type::Vec | Type::StrVec | Type::StrVecRef | Type::VecF | Type::VecRef | Type::VecFRef | Type::Map | Type::MapF) {
+                    if !matches!(ty, Type::String | Type::StrView | Type::Vector(_) | Type::VectorRef(_) | Type::Map | Type::MapF) {
                         self.seek_scalar_offset(expression.range.end);
                         return Err(self.fail("len expects a string, vec, map, or array variable"));
                     }
@@ -145,7 +145,8 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("split expects a string or string view separator"));
                     }
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::Split(Box::new(first), Box::new(second), line, column), Type::StrVec))
+                    let ty = Type::Vector(self.ctx.intern_vector_elem(Type::String));
+                    Ok((Expr::Split(Box::new(first), Box::new(second), line, column), ty))
                 }
                 "contains" | "starts_with" | "ends_with" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
@@ -201,7 +202,8 @@ impl<'a> Parser<'a> {
                     }
                     if matches!(name, "keys") {
                         self.seek_scalar_offset(expression.range.end);
-                        return Ok((Expr::MapKeys(place, line, column), Type::StrVec));
+                        let ty = Type::Vector(self.ctx.intern_vector_elem(Type::String));
+                        return Ok((Expr::MapKeys(place, line, column), ty));
                     }
                     let (key, key_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
                     if !matches!(key_ty, Type::String | Type::StrView) {
@@ -465,7 +467,8 @@ impl<'a> Parser<'a> {
                 "args" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
                     self.seek_scalar_offset(expression.range.end);
-                    Ok((Expr::Args(line, column), Type::StrVec))
+                    let ty = Type::Vector(self.ctx.intern_vector_elem(Type::String));
+                    Ok((Expr::Args(line, column), ty))
                 }
                 "read_stdin" | "cwd" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;

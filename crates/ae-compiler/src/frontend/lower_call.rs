@@ -58,7 +58,7 @@ impl<'a> Parser<'a> {
                     return Err(self.fail("task_spawn moves its captures into the task; borrow captures are not allowed"));
                 }
                 for (outer_id, ty) in &def.value_captures {
-                    if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vec | Type::StrVec | Type::VecF | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
+                    if !matches!(ty, Type::Int(IntTy::I64) | Type::Bool | Type::Float(FloatTy::F64) | Type::String | Type::Vector(_) | Type::Map | Type::MapF | Type::Struct(_) | Type::Enum(..) | Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool) {
                         return Err(self.fail("task_spawn moves its captures into the task; this capture's storage cannot cross"));
                     }
                     if self.moved.contains(outer_id) {

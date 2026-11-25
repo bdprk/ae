@@ -231,9 +231,12 @@ impl<'a> Parser<'a> {
                 let index = Box::new(index);
                 match ty {
                     Type::Array(len) => Some((Expr::Index(slot, len, index, line, column), Type::Int(IntTy::I64))),
-                    Type::Vec | Type::VecRef | Type::VecF | Type::VecFRef => {
-                        let borrowed = matches!(ty, Type::VecRef | Type::VecFRef);
-                        let element = if matches!(ty, Type::VecF | Type::VecFRef) { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) };
+                    Type::Vector(id) | Type::VectorRef(id) => {
+                        let element = self.ctx.vector_elem(id);
+                        if element == Type::String {
+                            return None;
+                        }
+                        let borrowed = matches!(ty, Type::VectorRef(_));
                         Some((Expr::VecIndex(slot, index, line, column, borrowed, element), element))
                     }
                     _ => None,
@@ -258,22 +261,21 @@ impl<'a> Parser<'a> {
             ExpressionKind::Vector(elements) => {
                 let token = self.tokens.get(self.tokens.partition_point(|token| token.offset < expression.range.start))?;
                 let (line, column) = (token.line, token.column);
-                let mut vector_type = None;
+                let mut elem_ty = None;
                 let mut values = Vec::new();
                 for element in elements {
                     let (value, element_type) = self.lower_shared_expression(element, remaining, nodes_left, effects)?;
-                    let ty = match element_type {
-                        Type::Int(IntTy::I64) => Type::Vec,
-                        Type::Float(FloatTy::F64) => Type::VecF,
-                        _ => return None,
-                    };
-                    if vector_type.is_some_and(|previous| previous != ty) {
+                    if !matches!(element_type, Type::Int(IntTy::I64) | Type::Float(FloatTy::F64)) {
                         return None;
                     }
-                    vector_type = Some(ty);
+                    if elem_ty.is_some_and(|previous| previous != element_type) {
+                        return None;
+                    }
+                    elem_ty = Some(element_type);
                     values.push(value);
                 }
-                let ty = vector_type.unwrap_or(Type::Vec);
+                let elem = elem_ty.unwrap_or(Type::Int(IntTy::I64));
+                let ty = Type::Vector(self.ctx.intern_vector_elem(elem));
                 Some((Expr::VecLit(values, ty, line, column), ty))
             }
             ExpressionKind::AddressCast { binding, binding_range, mutable, pointee } => {
@@ -350,9 +352,9 @@ impl<'a> Parser<'a> {
                 if self.ctx.is_unsafe_fn(id) || arguments.len() != params.len() || arguments.len() > 64
                     || !params.iter().all(|ty| {
                         matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::StrView
-                            | Type::Vec | Type::VecF | Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
+                            | Type::Vector(_) | Type::VectorRef(_) | Type::Array(_) | Type::Struct(_) | Type::Enum(..) | Type::StructRef(_) | Type::StructMut(_))
                     })
-                    || !matches!(ret, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vec | Type::VecF | Type::Struct(_) | Type::Enum(..))
+                    || !matches!(ret, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Struct(_) | Type::Enum(..))
                 {
                     return None;
                 }
@@ -427,7 +429,7 @@ impl<'a> Parser<'a> {
         use ae_syntax::expression::ExpressionKind;
         let mut args = Vec::with_capacity(arguments.len());
         for (argument, expected) in arguments.iter().zip(params.iter().copied()) {
-            if matches!(expected, Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
+            if matches!(expected, Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_) | Type::StructMut(_)) {
                 let ExpressionKind::BorrowArgument { name, name_range, mutable } = &argument.kind else {
                     return None;
                 };

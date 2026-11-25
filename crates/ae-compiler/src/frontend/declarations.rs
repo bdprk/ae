@@ -14,9 +14,8 @@ pub(super) enum CallBorrow {
 impl CallBorrow {
     pub(super) fn classify(expected: Type, actual: Type) -> Option<Self> {
         match (expected, actual) {
-            (Type::VecRef, Type::Vec) | (Type::VecFRef, Type::VecF) |
-            (Type::StrVecRef, Type::StrVec) => Some(Self::Address),
-            (Type::VecRef | Type::VecFRef | Type::StrVecRef | Type::Array(_) | Type::StructRef(_), actual)
+            (Type::VectorRef(wanted), Type::Vector(found)) if wanted == found => Some(Self::Address),
+            (Type::VectorRef(_) | Type::Array(_) | Type::StructRef(_), actual)
                 if expected == actual => Some(Self::Forward),
             (Type::StructRef(wanted) | Type::StructMut(wanted), Type::Struct(found) | Type::StructMut(found))
                 if wanted == found => Some(Self::Struct { address: matches!(actual, Type::Struct(_)) }),

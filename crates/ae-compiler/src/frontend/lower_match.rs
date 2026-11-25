@@ -156,9 +156,7 @@ impl<'a> Parser<'a> {
                 // way — the enum keeps ownership for its release.
                 let bty = match field {
                     Type::String => Type::StrView,
-                    Type::Vec => Type::VecRef,
-                    Type::StrVec => Type::StrVecRef,
-                    Type::VecF => Type::VecFRef,
+                    Type::Vector(id) => Type::VectorRef(id),
                     Type::Struct(k) => Type::StructRef(k),
                     other => other,
                 };

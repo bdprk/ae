@@ -18,14 +18,7 @@ pub enum TyKind {
     Unit,
     String,
     StrView,
-    Vec,
-    StrVec,
-    VecF,
-    VecRef,
-    StrVecRef,
-    VecFRef,
-    /// A generic vector whose element type is interned (ADR-0235). The three
-    /// legacy variants above are the pre-generic spellings during migration.
+    /// A generic vector whose element type is interned (ADR-0235).
     Vector(usize),
     /// A read-only borrow of a generic vector.
     VectorRef(usize),
@@ -72,7 +65,7 @@ impl TyKind {
     /// slots, which may hold strings. A raw pointer is a plain value: copying
     /// it moves nothing, so it neither moves nor releases.
     pub fn owned(self) -> bool {
-        matches!(self, TyKind::String | TyKind::Vec | TyKind::StrVec | TyKind::VecF | TyKind::Vector(_) | TyKind::Map | TyKind::MapF | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
+        matches!(self, TyKind::String | TyKind::Vector(_) | TyKind::Map | TyKind::MapF | TyKind::Struct(_) | TyKind::Enum(..) | TyKind::Thread(_) | TyKind::Guard | TyKind::TaskScope)
     }
 }
 
@@ -132,6 +125,6 @@ mod tests {
         assert!(!accepts_value(TyKind::Int(IntTy::I64), TyKind::Bool, None));
         assert!(accepts_value(TyKind::String, TyKind::String, None));
         assert!(!accepts_value(TyKind::String, TyKind::StrView, None));
-        assert!(!accepts_value(TyKind::Vec, TyKind::StrVec, None));
+        assert!(!accepts_value(TyKind::Vector(0), TyKind::Vector(1), None));
     }
 }

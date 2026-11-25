@@ -152,7 +152,8 @@ use super::*;
             if matches!(inner.as_slice(), [Statement::PtrStore(slot, Expr::Number(7), ..), Statement::Return(Expr::DerefPtr(..), _)] if slot == pointer)));
         parser.next_var = next_var;
         let start = source.find("vector_arg:").unwrap();
-        parser.names.insert("vector_arg".into(), (87, false, Type::VecFRef));
+        let vec_f64_ref = Type::VectorRef(parser.ctx.intern_vector_elem(Type::Float(FloatTy::F64)));
+        parser.names.insert("vector_arg".into(), (87, false, vec_f64_ref));
         parser.binding_ranges.insert(87, start..start + "vector_arg".len());
         parser.return_type = Type::Float(FloatTy::F64);
         parser.seek_scalar_offset(source.find("{ var total = 0.0").unwrap());
@@ -164,8 +165,9 @@ use super::*;
         parser.binding_ranges.remove(&87);
         parser.seek_scalar_offset(source.find("{ let empty_vec =").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved owning vector loop").unwrap();
-        assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::VecLit(values, Type::Vec, ..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
-            if values.is_empty() && owned.contains(&(*vector, Type::Vec))
+        let vec_i64 = Type::Vector(parser.ctx.intern_vector_elem(Type::Int(IntTy::I64)));
+        assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::VecLit(values, ty, ..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
+            if *ty == vec_i64 && values.is_empty() && owned.contains(&(*vector, vec_i64))
                 && matches!(inner.first(), Some(Statement::Declare(_, Expr::VecIndex(source, _, _, _, false, Type::Int(IntTy::I64)))) if source == vector)));
         parser.seek_scalar_offset(source.find("{ spawn(").unwrap());
         // A spawn statement still keeps the body on the typed route; the
@@ -175,7 +177,8 @@ use super::*;
         let error = parser.lower_resolved_scalar_body().expect("resolved spawn statement").err().unwrap();
         assert!(error.message.contains("must end with '?'"), "{}", error.message);
         let start = source.find("words: &vec[string]").unwrap();
-        parser.names.insert("words".into(), (88, false, Type::StrVecRef));
+        let vec_str_ref = Type::VectorRef(parser.ctx.intern_vector_elem(Type::String));
+        parser.names.insert("words".into(), (88, false, vec_str_ref));
         parser.binding_ranges.insert(88, start..start + "words".len());
         parser.seek_scalar_offset(source.find("{ for word in words").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved string vector loop").unwrap();
@@ -192,8 +195,9 @@ use super::*;
         assert!(parser.borrows.is_empty());
         parser.seek_scalar_offset(source.find("{ let pieces = split").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local string vector loop").unwrap();
+        let vec_str = Type::Vector(parser.ctx.intern_vector_elem(Type::String));
         assert!(matches!(body.as_slice(), [Statement::Declare(vector, Expr::Split(..)), _, _, Statement::For(_, _, inner, ..), Statement::Return(_, owned), Statement::Frees(_)]
-            if owned.contains(&(*vector, Type::StrVec))
+            if owned.contains(&(*vector, vec_str))
                 && matches!(inner.first(), Some(Statement::Declare(_, Expr::StrVecIndex(source, _, _, _, false))) if source == vector)));
         parser.next_var = next_var;
         parser.next_label = 0;
@@ -322,7 +326,9 @@ use super::*;
         parser.names.remove("keep");
         let numbers_start = source.find("let numbers = vec[10, 20]").unwrap() + 4;
         let vector_body = source.find("{ print(numbers[1])").unwrap();
-        for (capture_type, element) in [(Type::VecRef, Type::Int(IntTy::I64)), (Type::VecFRef, Type::Float(FloatTy::F64))] {
+        let vec_i64_ref = Type::VectorRef(parser.ctx.intern_vector_elem(Type::Int(IntTy::I64)));
+        let vec_f64_ref = Type::VectorRef(parser.ctx.intern_vector_elem(Type::Float(FloatTy::F64)));
+        for (capture_type, element) in [(vec_i64_ref, Type::Int(IntTy::I64)), (vec_f64_ref, Type::Float(FloatTy::F64))] {
             parser.names.insert("numbers".into(), (82, false, capture_type));
             parser.seek_scalar_offset(vector_body);
             let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
@@ -334,7 +340,8 @@ use super::*;
         // An owning value capture moves the vector into the closure's slot;
         // the element read is a borrowed index into that slot, and the
         // body's own Frees releases the slot after the call (FnOnce).
-        parser.names.insert("numbers".into(), (82, false, Type::Vec));
+        let vec_i64 = Type::Vector(parser.ctx.intern_vector_elem(Type::Int(IntTy::I64)));
+        parser.names.insert("numbers".into(), (82, false, vec_i64));
         parser.seek_scalar_offset(vector_body);
         let closure = parser.lower_resolved_body_with_captures(&[(82, numbers_start)])
             .expect("resolved owning numeric vector-capture closure body").unwrap();
@@ -344,7 +351,8 @@ use super::*;
         parser.names.remove("numbers");
         // A borrowed string-vector capture: its element read is a view.
         let labels_start = source.find("let labels = vec[").unwrap() + 4;
-        parser.names.insert("labels".into(), (83, false, Type::StrVecRef));
+        let vec_str_ref = Type::VectorRef(parser.ctx.intern_vector_elem(Type::String));
+        parser.names.insert("labels".into(), (83, false, vec_str_ref));
         parser.seek_scalar_offset(source.find("{ print(labels[0])").unwrap());
         let closure = parser.lower_resolved_body_with_captures(&[(83, labels_start)])
             .expect("resolved borrowed string-vector capture").unwrap();
@@ -356,7 +364,8 @@ use super::*;
         // closure's own slot (by_ref=false). The caller (closure_body)
         // appends the scope's Frees, which releases the vector and its
         // elements after the call.
-        parser.names.insert("labels".into(), (84, false, Type::StrVec));
+        let vec_str = Type::Vector(parser.ctx.intern_vector_elem(Type::String));
+        parser.names.insert("labels".into(), (84, false, vec_str));
         parser.seek_scalar_offset(source.find("{ print(labels[0])").unwrap());
         let closure = parser.lower_resolved_body_with_captures(&[(84, labels_start)])
             .expect("resolved owning string-vector capture").unwrap();
@@ -820,9 +829,10 @@ use super::*;
 
         let vector_offset = source.find("vec[1.0").unwrap();
         parser.pos = parser.tokens.partition_point(|token| token.offset < vector_offset);
+        let vec_f64 = Type::Vector(parser.ctx.intern_vector_elem(Type::Float(FloatTy::F64)));
         assert!(matches!(
             parser.lower_shared_value(Some(Kind::Semi), true),
-            Some((Expr::VecLit(values, Type::VecF, _, _), Type::VecF)) if values.len() == 2
+            Some((Expr::VecLit(values, ty, _, _), ret_ty)) if ty == vec_f64 && ret_ty == vec_f64 && values.len() == 2
         ));
         let binding = source.find("var value").unwrap() + 4;
         parser.names.insert("value".into(), (12, true, Type::Bool));
