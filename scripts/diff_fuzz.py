@@ -12,7 +12,8 @@ field chains (`box.cells`, `outer.box.cells`), indexed place borrows
 (`&v[i]`), typed local bindings (P2.4/P2.5), and `&[T]` slices built at
 call sites from vectors, arrays and forwarded parameters, and sub-slice
 windows (`&v[0..0]`, `&v[3..3]`, `&arr[2..3]`, string/owned/nested element
-windows) (ADR-0236 rungs 1/3), structs, enums,
+windows), and place borrows of one slice element (`&v[0]` to a `&Struct`/
+`&vec` parameter) (ADR-0236 rungs 1/2/3), structs, enums,
 matches with payload bindings, counted loops with `continue`, and the
 borrow surface (M2.5): a Doc struct with a `&mut self` method and a free
 `&mut` function, field views born and read inside one statement group,
@@ -580,10 +581,12 @@ class Gen:
                 f"print(fuzz_slice_tag0(&{tags}));",
                 f"print(fuzz_slice_tags(&{tags}[0..1]));",
                 f"print(fuzz_slice_tag0(&{tags}[1..2]));",
+                f"print(fuzz_slice_borrow_tag(&{tags}));",
                 f"print({tags}[0].n);",
                 f"var {rows} = vec[vec[{value()}, {value()}], vec[{value()}]];",
                 f"print(fuzz_slice_rows(&{rows}));",
                 f"print(fuzz_slice_rows(&{rows}[1..2]));",
+                f"print(fuzz_slice_borrow_row(&{rows}));",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
         name = self.fresh("s")
@@ -616,6 +619,9 @@ class Gen:
             "fn fuzz_slice_tags(v: &[FuzzTag]) -> i64 { var t = 0; for x in v { t += x.n; } return t; }",
             "fn fuzz_slice_tag0(v: &[FuzzTag]) -> i64 { return v[0].n; }",
             "fn fuzz_slice_rows(v: &[vec]) -> i64 { var t = 0; for r in v { t += len(r); } return t; }",
+            "fn fuzz_slice_borrow_tag(v: &[FuzzTag]) -> i64 { return fuzz_tag_n(&v[0]); }",
+            "fn fuzz_vec_len(v: &vec) -> i64 { return len(v); }",
+            "fn fuzz_slice_borrow_row(v: &[vec]) -> i64 { return fuzz_vec_len(&v[0]); }",
             "fn eat(t: string) -> i64 { return len(t); }",
             "impl Doc {",
             "    fn rename(&mut self, to: string) -> i64 {",
