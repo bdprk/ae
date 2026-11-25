@@ -442,7 +442,7 @@ fn float_vectors_move_release_and_borrow_like_other_owned_types() {
 fn float_vector_misuse_is_rejected() {
     for (source, expected) in [
         ("fn main() { let v = vec[1, 2.0]; }", "does not convert implicitly"),
-        ("fn main() { let v = vec[\"a\"]; }", "vector elements must be i64 or f64"),
+        ("fn main() { let v = vec[\"a\"]; }", "vector literal elements must be a Copy non-borrow type"),
         ("fn main() { var v = vec[1.0]; push(v, 2); }", "vector elements must be f64"),
         ("fn main() { var v = vec[1.0]; sort(v); }", "not supported for vec[f64]"),
         ("fn main() { var v = vec[1.0]; reverse(v); }", "not supported for vec[f64]"),
@@ -1088,7 +1088,7 @@ fn vector_misuse_is_rejected_at_compile_time() {
         "fn main() { let v = vec[1]; push(v, 2); }",
         "fn main() { var v = vec[1]; let w = v; push(v, 2); }",
         "fn main() { var v = vec[1]; let w = v; print(len(v)); }",
-        "fn main() { let v = vec[true]; }",
+        "fn main() { let v = vec[\"hi\"]; }",
         "fn main() { print(vec[1, 2]); }",
         "fn push(v: vec) -> i64 { return 1; } fn main() {}",
         "fn main() { var len = 1; }",
@@ -9711,6 +9711,130 @@ fn main() {
     ] {
         let bad_path = std::env::temp_dir().join(format!(
             "ae-generic-arrays-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&bad_path, bad_source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&bad_path)
+            .output()
+            .unwrap();
+        fs::remove_file(&bad_path).unwrap();
+        assert!(!result.status.success(), "expected failure for: {bad_source}");
+    }
+}
+
+/// ADR-0235 Slice 3b: generic `vec[T]` (`ae_gvec`) for Copy non-borrow,
+/// non-unit types (`bool`, `i32`, `u8`, `char`, `f32`, `#[derive(Copy)]`
+/// structs) compiles, runs, and matches `--interp`, while mixed or non-Copy
+/// element vectors are rejected.
+#[test]
+fn generic_copy_vectors_compile_run_and_match_interpreter() {
+    let source = r#"
+#[derive(Copy)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn sum_points(pts: &vec[Point]) -> i64 {
+    var total = 0;
+    for pt in pts {
+        total += pt.x + pt.y;
+    }
+    return total;
+}
+
+fn take_points(pts: vec[Point]) -> i64 {
+    let p = pts[0];
+    return p.x + len(pts);
+}
+
+fn main() {
+    var flags = vec[true, false];
+    push(flags, true);
+    flags[1] = true;
+    print(flags[0]);
+    print(flags[1]);
+    print(len(flags));
+    pop(flags);
+    print(len(flags));
+    for f in flags {
+        print(f);
+    }
+
+    var i32s = vec[10 as i32, 20 as i32];
+    push(i32s, 30 as i32);
+    i32s[1] = 25 as i32;
+    print(i32s[1]);
+    print(len(i32s));
+    pop(i32s);
+    print(len(i32s));
+
+    var octets = vec[1 as u8, 2 as u8];
+    push(octets, 3 as u8);
+    octets[0] = 9 as u8;
+    print(octets[0]);
+    print(len(octets));
+
+    var chars = vec['a', 'b'];
+    push(chars, 'c');
+    chars[1] = 'z';
+    print(chars[1]);
+    print(len(chars));
+
+    var f32s = vec[1.5 as f32, 2.5 as f32];
+    push(f32s, 3.5 as f32);
+    f32s[0] = 4.5 as f32;
+    print(f32s[0]);
+    print(len(f32s));
+
+    var pts = vec[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    push(pts, Point { x: 5, y: 6 });
+    pts[1] = Point { x: 10, y: 20 };
+    let p1 = pts[1];
+    print(p1.x);
+    print(sum_points(&pts));
+    pop(pts);
+    print(take_points(pts));
+}
+"#;
+    let path = std::env::temp_dir().join(format!(
+        "ae-generic-vectors-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, source).unwrap();
+
+    let mut outputs = Vec::new();
+    for (label, extra) in [("compiled", vec![]), ("interp", vec!["--interp"])] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        outputs.push(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"));
+    }
+    fs::remove_file(&path).unwrap();
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(
+        outputs[0],
+        "true\ntrue\n3\n2\ntrue\ntrue\n25\n3\n2\n9\n3\nz\n3\n4.5\n3\n10\n44\n3\n"
+    );
+
+    for bad_source in [
+        "fn main() { let v = vec[true, 1]; }",
+        "struct OwnedStruct { name: string } fn main() { let v = vec[OwnedStruct { name: \"a\" }]; }",
+    ] {
+        let bad_path = std::env::temp_dir().join(format!(
+            "ae-generic-vectors-bad-{}-{}.ae",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

@@ -274,9 +274,9 @@ pub(super) fn walk_statement(statement: &Statement, moved: &mut dyn MoveTracker)
             if let Some(violation) = walk_expr(value, moved) { return Some(violation); }
             None
         }
-        Statement::VecPush(_, value, ..) | Statement::StrVecPush(_, value, ..) | Statement::VecFPush(_, value, ..) => walk_expr(value, moved),
-        Statement::Sort(..) | Statement::Reverse(..) | Statement::VecPop(..) | Statement::StrVecPop(..) | Statement::VecFPop(..) => None,
-        Statement::VecStore(_, index, value, ..) | Statement::StrVecStore(_, index, value, ..) | Statement::VecFStore(_, index, value, ..) => {
+        Statement::VecPush(_, value, ..) | Statement::StrVecPush(_, value, ..) | Statement::VecFPush(_, value, ..) | Statement::GVecPush(_, value, ..) => walk_expr(value, moved),
+        Statement::Sort(..) | Statement::Reverse(..) | Statement::VecPop(..) | Statement::StrVecPop(..) | Statement::VecFPop(..) | Statement::GVecPop(..) => None,
+        Statement::VecStore(_, index, value, ..) | Statement::StrVecStore(_, index, value, ..) | Statement::VecFStore(_, index, value, ..) | Statement::GVecStore(_, index, value, ..) => {
             if let Some(violation) = walk_expr(index, moved) { return Some(violation); }
             if let Some(violation) = walk_expr(value, moved) { return Some(violation); }
             None

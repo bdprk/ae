@@ -5,9 +5,10 @@ use super::*;
 /// currently carries it. Later slices extend this to arbitrary element kinds.
 pub(super) fn vector_family(ctx: &CompileContext, elem: usize) -> &'static str {
     match ctx.vector_elem(elem) {
+        Type::Int(IntTy::I64) => "ae_vec",
         Type::String => "ae_strvec",
         Type::Float(FloatTy::F64) => "ae_f64vec",
-        _ => "ae_vec",
+        _ => "ae_gvec",
     }
 }
 /// ADR-0235 migration: a generic map's key/value pair maps onto the C family

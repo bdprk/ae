@@ -344,18 +344,14 @@ impl<'a> Parser<'a> {
                             return Err(self.fail("vector index must be an integer"));
                         }
                         let (stored, value_ty) = self.lower_scalar_body_expression(value, slots)?;
-                        let expected = match elem_ty {
-                            Type::String => "string",
-                            Type::Float(FloatTy::F64) => "f64",
-                            _ => "i64",
-                        };
-                        let matches_element = match elem_ty {
-                            Type::String => matches!(value_ty, Type::String | Type::StrView),
-                            Type::Float(FloatTy::F64) => value_ty == Type::Float(FloatTy::F64),
-                            _ => value_ty == Type::Int(IntTy::I64),
+                        let matches_element = if elem_ty == Type::String {
+                            matches!(value_ty, Type::String | Type::StrView)
+                        } else {
+                            value_ty == elem_ty
                         };
                         if !matches_element {
                             self.seek_scalar_offset(value.range.end);
+                            let expected = elem_ty.name(self.ctx);
                             return Err(self.fail(&format!("vector elements must be {expected}")));
                         }
                         // A value store moves an owned string into the slot;
@@ -369,7 +365,8 @@ impl<'a> Parser<'a> {
                         return Ok(match elem_ty {
                             Type::String => Statement::StrVecStore(slot, element_index, stored, line, column, value_ty == Type::StrView),
                             Type::Float(FloatTy::F64) => Statement::VecFStore(slot, element_index, stored, line, column),
-                            _ => Statement::VecStore(slot, element_index, stored, line, column),
+                            Type::Int(IntTy::I64) => Statement::VecStore(slot, element_index, stored, line, column),
+                            _ => Statement::GVecStore(slot, element_index, stored, elem_ty, line, column),
                         });
                     }
                     let Type::ArrayOf(elem_id, len) = ty else {

@@ -122,6 +122,10 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(arguments[0].range.end);
                 return Err(self.fail(&format!("{builtin} is not supported for vec[f64]; NaN has no total order")));
             }
+            if !matches!(elem_ty, Type::Int(IntTy::I64) | Type::String) {
+                self.seek_scalar_offset(arguments[0].range.end);
+                return Err(self.fail(&format!("{builtin} is not supported for vec[{}]", elem_ty.name(self.ctx))));
+            }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
             let strings = elem_ty == Type::String;
@@ -136,25 +140,22 @@ impl<'a> Parser<'a> {
                     self.fail(&format!("cannot modify immutable variable '{target}'")).with_code("E0103"), slot));
             }
             let (lowered, value_ty) = self.lower_scalar_body_expression(value, slots)?;
-            let ok = match elem_ty {
-                Type::Int(IntTy::I64) => value_ty == Type::Int(IntTy::I64),
-                Type::Float(FloatTy::F64) => value_ty == Type::Float(FloatTy::F64),
-                _ => matches!(value_ty, Type::String | Type::StrView),
+            let ok = if elem_ty == Type::String {
+                matches!(value_ty, Type::String | Type::StrView)
+            } else {
+                value_ty == elem_ty
             };
             if !ok {
                 self.seek_scalar_offset(value.range.end);
-                return Err(self.fail(&format!("vector elements must be {}", match elem_ty {
-                    Type::Int(IntTy::I64) => "i64",
-                    Type::Float(FloatTy::F64) => "f64",
-                    _ => "string",
-                })));
+                return Err(self.fail(&format!("vector elements must be {}", elem_ty.name(self.ctx))));
             }
             self.seek_scalar_offset(call.range.end);
             self.take(Kind::Semi)?;
             return Ok(match elem_ty {
+                Type::Int(IntTy::I64) => Statement::VecPush(slot, lowered, line, column),
                 Type::String => Statement::StrVecPush(slot, lowered, line, column, value_ty == Type::StrView),
                 Type::Float(FloatTy::F64) => Statement::VecFPush(slot, lowered, line, column),
-                _ => Statement::VecPush(slot, lowered, line, column),
+                _ => Statement::GVecPush(slot, lowered, elem_ty, line, column),
             });
         }
         if !self.names[target].1 {
@@ -165,9 +166,10 @@ impl<'a> Parser<'a> {
         self.seek_scalar_offset(call.range.end);
         self.take(Kind::Semi)?;
         Ok(match elem_ty {
+            Type::Int(IntTy::I64) => Statement::VecPop(slot, line, column),
             Type::String => Statement::StrVecPop(slot, line, column),
             Type::Float(FloatTy::F64) => Statement::VecFPop(slot, line, column),
-            _ => Statement::VecPop(slot, line, column),
+            _ => Statement::GVecPop(slot, elem_ty, line, column),
         })
     }
 

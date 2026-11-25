@@ -104,21 +104,13 @@ impl Parser<'_> {
                 Ok(Type::Shared(self.ctx.intern_shared(elem)))
             }
             "vec" => {
-                // `vec` alone is the i64 vector; `vec[string]` and `vec[f64]`
-                // (ADR-61) name the others, so a type annotation can say which
-                // it means instead of leaving owned vectors unnameable.
+                // `vec` alone is the i64 vector; `vec[T]` names any
+                // supported element type (string or a Copy non-borrow type).
                 if *self.current() != Kind::LBracket {
                     let elem = self.ctx.intern_vector_elem(Type::Int(IntTy::I64));
                     return Ok(Type::Vector(elem));
                 }
-                self.pos += 1;
-                let element = self.identifier()?;
-                self.take(Kind::RBracket)?;
-                let elem_ty = match element.as_str() {
-                    "string" => Type::String,
-                    "f64" => Type::Float(FloatTy::F64),
-                    _ => return Err(self.fail("only vec[string] and vec[f64] name an element type; vector elements are i64 by default")),
-                };
+                let elem_ty = self.parse_vector_element_type()?;
                 Ok(Type::Vector(self.ctx.intern_vector_elem(elem_ty)))
             }
             "map" => {
@@ -817,6 +809,16 @@ impl Parser<'_> {
         Ok((mutable, self.named_type()?))
     }
 
+    fn parse_vector_element_type(&mut self) -> Result<Type, ae_span::Diagnostic> {
+        self.pos += 1;
+        let elem_ty = self.named_type()?;
+        self.take(Kind::RBracket)?;
+        if elem_ty != Type::String && !self.is_array_element_type(elem_ty) {
+            return Err(self.fail("vec[T] element type must be string or a Copy non-borrow type"));
+        }
+        Ok(elem_ty)
+    }
+
     pub(super) fn is_array_element_type(&self, ty: Type) -> bool {
         match ty {
             Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char
@@ -879,17 +881,8 @@ impl Parser<'_> {
             }
             if matches!(self.current(), Kind::Ident(name) if name == "vec") {
                 self.pos += 1;
-                // &vec[string] and &vec[f64] (ADR-61) borrow those vectors
-                // read-only.
                 if *self.current() == Kind::LBracket {
-                    self.pos += 1;
-                    let element = self.identifier()?;
-                    self.take(Kind::RBracket)?;
-                    let elem_ty = match element.as_str() {
-                        "string" => Type::String,
-                        "f64" => Type::Float(FloatTy::F64),
-                        _ => return Err(self.fail("only &vec[string] and &vec[f64] are supported; vector elements are i64 by default")),
-                    };
+                    let elem_ty = self.parse_vector_element_type()?;
                     return Ok(Type::VectorRef(self.ctx.intern_vector_elem(elem_ty)));
                 }
                 return Ok(Type::VectorRef(self.ctx.intern_vector_elem(Type::Int(IntTy::I64))));

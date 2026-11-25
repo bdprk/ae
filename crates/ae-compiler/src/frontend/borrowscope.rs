@@ -733,9 +733,9 @@ fn writes_slot(statement: &Statement) -> Option<usize> {
     match statement {
         Statement::Assign(id, ..) => Some(*id),
         Statement::FieldStore(id, ..) => Some(*id),
-        Statement::VecPush(id, ..) | Statement::StrVecPush(id, ..) | Statement::VecFPush(id, ..) => Some(*id),
-        Statement::VecPop(id, ..) | Statement::StrVecPop(id, ..) | Statement::VecFPop(id, ..) => Some(*id),
-        Statement::VecStore(id, ..) | Statement::StrVecStore(id, ..) | Statement::VecFStore(id, ..) => Some(*id),
+        Statement::VecPush(id, ..) | Statement::StrVecPush(id, ..) | Statement::VecFPush(id, ..) | Statement::GVecPush(id, ..) => Some(*id),
+        Statement::VecPop(id, ..) | Statement::StrVecPop(id, ..) | Statement::VecFPop(id, ..) | Statement::GVecPop(id, ..) => Some(*id),
+        Statement::VecStore(id, ..) | Statement::StrVecStore(id, ..) | Statement::VecFStore(id, ..) | Statement::GVecStore(id, ..) => Some(*id),
         Statement::Sort(id, ..) | Statement::Reverse(id, ..) => Some(*id),
         Statement::MapPut(place, ..) => Some(place.slot()),
         _ => None,

@@ -310,11 +310,7 @@ impl TypeDisplay for Type {
             Type::Float(FloatTy::F64) => "double ".to_owned(),
             Type::String => "ae_string ".to_owned(),
             Type::StrView => "ae_strview ".to_owned(),
-            Type::Vector(id) => match ctx.vector_elem(id) {
-                Type::String => "ae_strvec ".to_owned(),
-                Type::Float(FloatTy::F64) => "ae_f64vec ".to_owned(),
-                _ => "ae_vec ".to_owned(),
-            },
+            Type::Vector(id) => format!("{} ", c_output::vector_family(ctx, id)),
             Type::MapOf(id) => format!("{} ", c_output::map_family(ctx, id)),
             Type::Struct(k) => format!("ae_t{k} "),
             // A borrow has no storage of its own, so a temporary of these
@@ -651,7 +647,7 @@ enum Printed { Expr(Expr), Text(String) }
 // top of the arm's block, so the MIR backend can emit them from the block
 // graph. The parser never produces one; the tree form of a match keeps its
 // bindings on the `MatchArm`.
-enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), VecPush(usize, Expr, usize, usize), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), VecPop(usize, usize, usize), VecStore(usize, Expr, Expr, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), VecFPush(usize, Expr, usize, usize), VecFPop(usize, usize, usize), VecFStore(usize, Expr, Expr, usize, usize), FieldStore(usize, String, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize) }
+enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), VecPush(usize, Expr, usize, usize), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), VecPop(usize, usize, usize), VecStore(usize, Expr, Expr, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), VecFPush(usize, Expr, usize, usize), VecFPop(usize, usize, usize), VecFStore(usize, Expr, Expr, usize, usize), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, String, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize) }
 #[derive(Debug)]
 #[derive(Clone)]
 struct Function { id: usize, params: Vec<(usize, Type)>, body: Vec<Statement>, is_main: bool, returns: Type }
@@ -1367,6 +1363,11 @@ mod tests {
         assert_eq!(view.name(&ctx), "&vec[string]");
         assert_eq!(c_output::c_type_field(view, &ctx), "const ae_strvec *");
         assert!(!view.owned(), "a borrow owns nothing");
+        let bool_id = ctx.intern_vector_elem(Type::Bool);
+        let bool_vec = Type::Vector(bool_id);
+        assert_eq!(bool_vec.name(&ctx), "vec[bool]");
+        assert_eq!(c_output::vector_family(&ctx, bool_id), "ae_gvec");
+        assert_eq!(bool_vec.c_temp(&ctx), "ae_gvec ");
     }
 
     // ADR-0235 slice 2: generic map and array constructors name their

@@ -35,6 +35,7 @@ enum Val {
     VecI(Vec<i64>),
     VecS(Vec<String>),
     VecF(Vec<f64>),
+    VecG(Vec<Val>),
     Map(HashMap<String, i64>),
     MapF(HashMap<String, f64>),
     Tokens { base: Rc<str>, sep: Rc<str> },
@@ -609,7 +610,18 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: f64vec push on non-vec".to_owned()),
                 }
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) => {
+            Statement::GVecPush(id, val_expr, _, line, col) => {
+                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
+                    Ok(v) => v,
+                    Err(f) => return f,
+                };
+                match locals.get_mut(id) {
+                    Some(Val::VecG(v)) => v.push(val),
+                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: gvec push on non-vec".to_owned()),
+                }
+            }
+            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
                 match locals.get_mut(id) {
                     Some(Val::VecI(v)) => {
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
@@ -618,6 +630,9 @@ fn eval_stmts(
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
                     }
                     Some(Val::VecF(v)) => {
+                        if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
+                    }
+                    Some(Val::VecG(v)) => {
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
                     }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
@@ -753,6 +768,25 @@ fn eval_stmts(
                     }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
                     _ => return Flow::Trap("internal: f64vec store on non-vec".to_owned()),
+                }
+            }
+            Statement::GVecStore(id, idx_expr, val_expr, _, line, col) => {
+                let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
+                    Ok(Val::Int(n)) => n,
+                    Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
+                    Err(f) => return f,
+                };
+                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
+                    Ok(v) => v,
+                    Err(f) => return f,
+                };
+                match locals.get_mut(id) {
+                    Some(Val::VecG(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        v[idx as usize] = val;
+                    }
+                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: gvec store on non-vec".to_owned()),
                 }
             }
             Statement::Sort(id, is_str, line, col) => {
@@ -1116,7 +1150,14 @@ fn eval_expr(
                         }
                         Ok(Val::VecF(out))
                     }
-                    _ => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
+                    Type::String => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
+                    _ => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for v in values {
+                            out.push(eval_expr(env, v, locals, caller_locals, false)?);
+                        }
+                        Ok(Val::VecG(out))
+                    }
                 },
                 _ => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
             }
@@ -1149,6 +1190,10 @@ fn eval_expr(
                 Val::VecF(v) => {
                     if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
                     Ok(Val::Float(v[idx as usize]))
+                }
+                Val::VecG(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(v[idx as usize].clone())
                 }
                 _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
             }
@@ -1265,6 +1310,7 @@ fn eval_expr(
                 Val::VecI(v) => Ok(Val::Int(v.len() as i64)),
                 Val::VecS(v) => Ok(Val::Int(v.len() as i64)),
                 Val::VecF(v) => Ok(Val::Int(v.len() as i64)),
+                Val::VecG(v) => Ok(Val::Int(v.len() as i64)),
                 Val::Array(v) => Ok(Val::Int(v.len() as i64)),
                 Val::Map(m) => Ok(Val::Int(m.len() as i64)),
                 Val::MapF(m) => Ok(Val::Int(m.len() as i64)),

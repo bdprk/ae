@@ -406,9 +406,9 @@ fn walk_statements(statements: &[Statement], used: &mut std::collections::HashSe
             Statement::Array(_, values, _) => for v in values { walk_expr(v, used, mutated); },
             Statement::Assign(id, expr, _) => { mutated.insert(*id); walk_expr(expr, used, mutated); }
             Statement::Store(id, _, index, value, _, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
-            Statement::VecPush(id, value, _, _) | Statement::StrVecPush(id, value, _, _, _) | Statement::VecFPush(id, value, _, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
-            Statement::Sort(id, ..) | Statement::Reverse(id, ..) | Statement::VecPop(id, ..) | Statement::StrVecPop(id, ..) | Statement::VecFPop(id, ..) => { mutated.insert(*id); }
-            Statement::VecStore(id, index, value, _, _) | Statement::StrVecStore(id, index, value, _, _, _) | Statement::VecFStore(id, index, value, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
+            Statement::VecPush(id, value, _, _) | Statement::StrVecPush(id, value, _, _, _) | Statement::VecFPush(id, value, _, _) | Statement::GVecPush(id, value, _, _, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
+            Statement::Sort(id, ..) | Statement::Reverse(id, ..) | Statement::VecPop(id, ..) | Statement::StrVecPop(id, ..) | Statement::VecFPop(id, ..) | Statement::GVecPop(id, ..) => { mutated.insert(*id); }
+            Statement::VecStore(id, index, value, _, _) | Statement::StrVecStore(id, index, value, _, _, _) | Statement::VecFStore(id, index, value, _, _) | Statement::GVecStore(id, index, value, _, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
             Statement::FieldStore(id, _, _, value, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
             Statement::Print(printed) => if let Printed::Expr(expr) = printed { walk_expr(expr, used, mutated); },
             Statement::Assert(expr, _, _) => walk_expr(expr, used, mutated),

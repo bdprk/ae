@@ -167,14 +167,14 @@ impl<'a> TreePrinter<'a> {
                 let value_text = self.expression_text(value);
                 self.line(&format!("push v{} <- {}{} @ {}:{}", id, if *is_view { "view " } else { "" }, value_text, line, col));
             }
-            Statement::VecFPush(id, value, line, col) => {
+            Statement::VecFPush(id, value, line, col) | Statement::GVecPush(id, value, _, line, col) => {
                 let value_text = self.expression_text(value);
                 self.line(&format!("push v{} <- {} @ {}:{}", id, value_text, line, col));
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) => {
+            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
                 self.line(&format!("pop v{} @ {}:{}", id, line, col));
             }
-            Statement::VecStore(id, index, value, line, col) | Statement::StrVecStore(id, index, value, line, col, _) | Statement::VecFStore(id, index, value, line, col) => {
+            Statement::VecStore(id, index, value, line, col) | Statement::StrVecStore(id, index, value, line, col, _) | Statement::VecFStore(id, index, value, line, col) | Statement::GVecStore(id, index, value, _, line, col) => {
                 let index_text = self.expression_text(index);
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} @ {}:{}", id, index_text, value_text, line, col));

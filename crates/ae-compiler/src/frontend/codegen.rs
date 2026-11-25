@@ -476,15 +476,33 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         }
         Expr::VecLit(values, vector_ty, line, column) => {
             let t = *next; *next += 1;
-            let (c_ty, new_fn, push_fn) = match *vector_ty {
-                Type::Vector(id) if ctx.vector_elem(id) == Type::Float(FloatTy::F64) => ("ae_f64vec", "ae_f64vec_new", "ae_f64vec_push"),
-                _ => ("ae_vec", "ae_vec_new", "ae_vec_push"),
+            let elem_ty = match *vector_ty {
+                Type::Vector(id) => ctx.vector_elem(id),
+                _ => Type::Int(IntTy::I64),
             };
-            out.push_str(&format!("    {c_ty} t{t} = {new_fn}({line}, {column});\n"));
-            for value in values {
-                let element = emit_expr(value, out, next, false, ctx);
-                out.push_str(&format!("    {push_fn}(&t{t}, {}, {line}, {column});\n", element.text));
-                null_moves(out, &element.moves, ctx);
+            let is_gvec = matches!(*vector_ty, Type::Vector(id) if c_output::vector_family(ctx, id) == "ae_gvec");
+            if is_gvec {
+                let c_elem = c_output::c_type_field(elem_ty, ctx);
+                out.push_str(&format!("    ae_gvec t{t} = ae_gvec_new((int64_t)sizeof({c_elem}), {line}, {column});\n"));
+                for value in values {
+                    let element = emit_expr(value, out, next, false, ctx);
+                    let e = *next; *next += 1;
+                    out.push_str(&format!("    {c_elem} t{e} = {};\n", element.text));
+                    out.push_str(&format!("    ae_gvec_push(&t{t}, &t{e}, {line}, {column});\n"));
+                    null_moves(out, &element.moves, ctx);
+                }
+            } else {
+                let (c_ty, new_fn, push_fn) = if elem_ty == Type::Float(FloatTy::F64) {
+                    ("ae_f64vec", "ae_f64vec_new", "ae_f64vec_push")
+                } else {
+                    ("ae_vec", "ae_vec_new", "ae_vec_push")
+                };
+                out.push_str(&format!("    {c_ty} t{t} = {new_fn}({line}, {column});\n"));
+                for value in values {
+                    let element = emit_expr(value, out, next, false, ctx);
+                    out.push_str(&format!("    {push_fn}(&t{t}, {}, {line}, {column});\n", element.text));
+                    null_moves(out, &element.moves, ctx);
+                }
             }
             Emitted { text: format!("t{t}"), ty: *vector_ty, owned: true, moves: Vec::new(), materialized: true }
         }
@@ -496,10 +514,14 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             out.push_str(&format!("    {check}\n"));
             let i = emit_expr(index, out, next, false, ctx);
-            let get = if *elem_ty == Type::Float(FloatTy::F64) {
-                format!("ae_f64vec_get({receiver}, {}, {line}, {col})", i.text)
-            } else {
-                format!("ae_vec_get({receiver}, {}, {line}, {col})", i.text)
+            let get = match *elem_ty {
+                Type::Int(IntTy::I64) => format!("ae_vec_get({receiver}, {}, {line}, {col})", i.text),
+                Type::Float(FloatTy::F64) => format!("ae_f64vec_get({receiver}, {}, {line}, {col})", i.text),
+                _ => {
+                    let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                    let ptr_recv = if *by_ref { format!("v{id}") } else { format!("&v{id}") };
+                    format!("(*((const {c_elem} *)ae_gvec_at({ptr_recv}, {}, {line}, {col})))", i.text)
+                }
             };
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: false }
         }
@@ -1525,6 +1547,31 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 out.push_str(&format!("    int64_t t{checked} = ae_vec_index({}, v{id}.len, {line}, {col});\n", i.text));
                 let value = emit_expr(value, out, next, false, ctx);
                 out.push_str(&format!("    v{id}.data[t{checked}] = {};\n", value.text));
+            }
+            Statement::GVecPush(id, value, elem_ty, line, col) => {
+                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                let value = emit_expr(value, out, next, false, ctx);
+                let tmp = *next; *next += 1;
+                let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                out.push_str(&format!("    {c_elem} t{tmp} = {};\n", value.text));
+                out.push_str(&format!("    ae_gvec_push(&v{id}, &t{tmp}, {line}, {col});\n"));
+                null_moves(out, &value.moves, ctx);
+            }
+            Statement::GVecPop(id, _, line, col) => {
+                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                out.push_str(&format!("    ae_gvec_pop(&v{id}, {line}, {col});\n"));
+            }
+            Statement::GVecStore(id, index, value, elem_ty, line, col) => {
+                out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));
+                let i = emit_expr(index, out, next, false, ctx);
+                let idx_tmp = *next; *next += 1;
+                out.push_str(&format!("    int64_t t{idx_tmp} = {};\n", i.text));
+                let value = emit_expr(value, out, next, false, ctx);
+                let val_tmp = *next; *next += 1;
+                let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));
+                out.push_str(&format!("    ae_gvec_set(&v{id}, t{idx_tmp}, &t{val_tmp}, {line}, {col});\n"));
+                null_moves(out, &value.moves, ctx);
             }
             Statement::StrVecPush(id, value, line, col, borrowed) => {
                 out.push_str(&format!("    if (!v{id}.data) ae_fail(\"use of moved vector\", {line}, {col});\n"));

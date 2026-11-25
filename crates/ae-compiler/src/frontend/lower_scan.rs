@@ -61,7 +61,7 @@ impl<'a> Parser<'a> {
                             spelling => spelling.as_ref(),
                         };
                         if let Some(TypeSpelling::Composite { family: "vec", arguments }) = spelling
-                            && matches!(arguments.as_slice(), [] | [TypeSpelling::Primitive("i64" | "f64" | "string")]) {
+                            && arguments.len() <= 1 {
                                 expressions.vector_definitions.insert(definition.id);
                                 if matches!(definition.inferred, Some(TypeSpelling::Composite { .. })) {
                                     expressions.owned_vectors.insert(definition.id);
@@ -234,6 +234,11 @@ impl<'a> Parser<'a> {
                                 }
                             }
                         }
+                    }
+                    if let StatementKind::ForIn { binding_range, .. } = &statement.kind
+                        && let Some(&id) = expressions.scalar_definitions.get(&binding_range.start)
+                    {
+                        expressions.generic_call_bindings.insert(id);
                     }
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind {
                         use ae_syntax::expression::ExpressionKind;

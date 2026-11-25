@@ -1287,6 +1287,58 @@ static void ae_f64vec_forfeit(ae_f64vec *v) {
     v->cap = 0;
 }
 
+typedef struct { void *data; int64_t len; int64_t cap; int64_t elem_size; } ae_gvec; // ADR-0235
+static ae_gvec ae_gvec_new(int64_t elem_size, size_t line, size_t column) {
+    ae_gvec v;
+    v.len = 0;
+    v.cap = 4;
+    v.elem_size = elem_size > 0 ? elem_size : 1;
+    if ((size_t)v.cap > SIZE_MAX / (size_t)v.elem_size) ae_fail("vector too large", line, column);
+    v.data = ae_alloc((size_t)v.cap * (size_t)v.elem_size, line, column);
+    return v;
+}
+static void ae_gvec_push(ae_gvec *v, const void *elem, size_t line, size_t column) {
+    if (v->len == v->cap) {
+        if (v->cap > INT64_MAX / 2) ae_fail("vector too large", line, column);
+        int64_t ncap = v->cap * 2;
+        if ((size_t)ncap > SIZE_MAX / (size_t)v->elem_size) ae_fail("vector too large", line, column);
+        void *nd = ae_alloc_resize(v->data, (size_t)ncap * (size_t)v->elem_size, line, column);
+        v->data = nd;
+        v->cap = ncap;
+    }
+    memcpy((char *)v->data + (size_t)v->len * (size_t)v->elem_size, elem, (size_t)v->elem_size);
+    v->len = v->len + 1;
+}
+static void ae_gvec_pop(ae_gvec *v, size_t line, size_t column) {
+    if (v->len == 0) ae_fail("pop from empty vector", line, column);
+    v->len = v->len - 1;
+}
+static int64_t ae_gvec_len(ae_gvec v, size_t line, size_t column) {
+    (void)line; (void)column;
+    return v.len;
+}
+static const void *ae_gvec_at(const ae_gvec *v, int64_t index, size_t line, size_t column) {
+    ae_vec_index(index, v->len, line, column);
+    return (const char *)v->data + (size_t)index * (size_t)v->elem_size;
+}
+static void ae_gvec_set(ae_gvec *v, int64_t index, const void *elem, size_t line, size_t column) {
+    ae_vec_index(index, v->len, line, column);
+    memcpy((char *)v->data + (size_t)index * (size_t)v->elem_size, elem, (size_t)v->elem_size);
+}
+static void ae_gvec_release(ae_gvec *v) {
+    ae_free(v->data);
+    v->data = NULL;
+    v->len = 0;
+    v->cap = 0;
+    v->elem_size = 0;
+}
+static void ae_gvec_forfeit(ae_gvec *v) {
+    v->data = NULL;
+    v->len = 0;
+    v->cap = 0;
+    v->elem_size = 0;
+}
+
 // In-place orderings for i64 vectors. qsort is the C library's introsort and
 // the comparator is a plain function, so no allocation and no closure state is
 // involved; vectors are at most INT64_MAX/8 elements, which qsort accepts as a
