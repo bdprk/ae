@@ -145,9 +145,9 @@ impl<'a> TreePrinter<'a> {
                 let value = self.expression_text(expr);
                 self.line(&format!("v{}: {} = {}", id, ty, value));
             }
-            Statement::Array(id, values) => {
+            Statement::Array(id, values, elem_ty) => {
                 let items = self.expressions_text(values);
-                self.line(&format!("v{}: &[i64; {}] = [{}]", id, values.len(), items));
+                self.line(&format!("v{}: &[{}; {}] = [{}]", id, elem_ty.name(self.ctx), values.len(), items));
             }
             Statement::Assign(id, expr, releases) => {
                 let value = self.expression_text(expr);
@@ -473,7 +473,7 @@ impl<'a> TreePrinter<'a> {
                 }
                 out.push_str(&format!("] ({}) @ {}:{}", ty.name(self.ctx), line, col));
             }
-            Expr::Index(id, len, index, line, col) => {
+            Expr::Index(id, len, index, line, col, _) => {
                 out.push_str(&format!("v{}[", id));
                 self.expression(index, out);
                 out.push_str(&format!("] (len {} @ {}:{})", len, line, col));

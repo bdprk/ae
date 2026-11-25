@@ -299,6 +299,9 @@ impl<'a> Parser<'a> {
                                 {
                                     expressions.generic_call_bindings.insert(id);
                                 }
+                            if matches!(initializer.kind, ExpressionKind::Index { .. }) {
+                                expressions.generic_call_bindings.insert(id);
+                            }
                             match &initializer.kind {
                                 ExpressionKind::Vector(_) => {
                                     expressions.vector_definitions.insert(id);

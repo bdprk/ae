@@ -950,7 +950,10 @@ impl<'a> Parser<'a> {
                             self.seek_scalar_offset(base.range.end);
                             let (line, column) = self.position();
                             lowered = Some(match ty {
-                                Type::ArrayOf(_, len) => (Expr::Index(slot, len, Box::new(index_value), line, column), Type::Int(IntTy::I64)),
+                                Type::ArrayOf(elem_id, len) => {
+                                    let elem_ty = self.ctx.array_elem(elem_id);
+                                    (Expr::Index(slot, len, Box::new(index_value), line, column, elem_ty), elem_ty)
+                                }
                                 Type::Vector(id) | Type::VectorRef(id) => {
                                     let element = self.ctx.vector_elem(id);
                                     let borrowed = matches!(ty, Type::VectorRef(_));
@@ -984,9 +987,10 @@ impl<'a> Parser<'a> {
                 self.seek_scalar_offset(base.range.end);
                 let (line, column) = self.position();
                 match ty {
-                    Type::ArrayOf(_, len) => {
+                    Type::ArrayOf(elem_id, len) => {
+                        let elem_ty = self.ctx.array_elem(elem_id);
                         let value = self.lower_scalar_array_index(index, slots)?;
-                        (Expr::Index(slot, len, Box::new(value), line, column), Type::Int(IntTy::I64))
+                        (Expr::Index(slot, len, Box::new(value), line, column, elem_ty), elem_ty)
                     }
                     Type::Vector(id) | Type::VectorRef(id) => {
                         let element = self.ctx.vector_elem(id);

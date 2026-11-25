@@ -299,7 +299,7 @@ impl<'a> Parser<'a> {
             Expr::EnumLit(_, _, _, values) => { for v in values { self.record_borrow_bases(v); } }
             Expr::Binary(a, _, b, _, _, _) => { self.record_borrow_bases(a); self.record_borrow_bases(b); }
             Expr::Neg(a, _, _) | Expr::Not(a) | Expr::Len(a, _, _) => self.record_borrow_bases(a),
-            Expr::Index(_, _, a, _, _) => self.record_borrow_bases(a),
+            Expr::Index(_, _, a, _, _, _) => self.record_borrow_bases(a),
             Expr::VecIndex(_, a, _, _, _, _) => self.record_borrow_bases(a),
             Expr::Call(_, args, _) => {
                 for arg in args {

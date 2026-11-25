@@ -73,20 +73,36 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("array must contain at least one element"));
                     }
                     let mut values = Vec::with_capacity(elements.len());
+                    let mut elem_ty = None;
                     for (index, element) in elements.iter().enumerate() {
                         if index == 4096 {
                             self.seek_scalar_offset(element.range.start);
                             return Err(self.fail("array element limit exceeded (4096)"));
                         }
                         let (value, ty) = self.lower_scalar_body_expression(element, slots)?;
-                        if ty != Type::Int(IntTy::I64) {
-                            self.seek_scalar_offset(element.range.end);
-                            return Err(self.fail("array elements must be i64"));
+                        match elem_ty {
+                            None => {
+                                if !self.is_array_element_type(ty) {
+                                    self.seek_scalar_offset(element.range.end);
+                                    return Err(self.fail("array elements must be a Copy non-borrow type"));
+                                }
+                                elem_ty = Some(ty);
+                            }
+                            Some(expected) if ty != expected => {
+                                self.seek_scalar_offset(element.range.end);
+                                return Err(self.fail(&format!(
+                                    "array elements must have the same type: expected {}, found {}",
+                                    expected.name(self.ctx),
+                                    ty.name(self.ctx)
+                                )));
+                            }
+                            _ => {}
                         }
                         values.push(value);
                     }
-                    let ty = Type::ArrayOf(self.ctx.intern_array_elem(Type::Int(IntTy::I64)), elements.len());
-                    (Statement::Array(slot, values), ty)
+                    let elem_ty = elem_ty.expect("non-empty array literal");
+                    let ty = Type::ArrayOf(self.ctx.intern_array_elem(elem_ty), elements.len());
+                    (Statement::Array(slot, values, elem_ty), ty)
                 } else if let ae_syntax::expression::ExpressionKind::Vector(elements) = &initializer.kind {
                     self.seek_scalar_offset(initializer.range.start);
                     let (line, column) = self.position();
@@ -356,9 +372,10 @@ impl<'a> Parser<'a> {
                             _ => Statement::VecStore(slot, element_index, stored, line, column),
                         });
                     }
-                    let Type::ArrayOf(_, len) = ty else {
+                    let Type::ArrayOf(elem_id, len) = ty else {
                         unreachable!("resolved array store");
                     };
+                    let expected_ty = self.ctx.array_elem(elem_id);
                     if !self.names[&root_name].1 {
                         self.seek_scalar_offset(base.range.start);
                         let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
@@ -369,12 +386,16 @@ impl<'a> Parser<'a> {
                     let element_index = self.lower_scalar_array_index(index, slots)?;
                     self.seek_scalar_offset(value.range.start);
                     let (element, element_ty) = self.lower_scalar_body_expression(value, slots)?;
-                    if element_ty != Type::Int(IntTy::I64) {
+                    if element_ty != expected_ty {
                         self.seek_scalar_offset(value.range.end);
-                        return Err(self.fail("array elements must be i64"));
+                        return Err(self.fail(&format!(
+                            "array element type mismatch: expected {}, found {}",
+                            expected_ty.name(self.ctx),
+                            element_ty.name(self.ctx)
+                        )));
                     }
                     self.seek_scalar_offset(statement.range.end);
-                    return Ok(Statement::Store(slot, len, element_index, element, line, column));
+                    return Ok(Statement::Store(slot, len, element_index, element, line, column, expected_ty));
                 }
                 let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) = &target.kind else {
                     unreachable!("scalar assignment eligibility");

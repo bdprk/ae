@@ -296,13 +296,13 @@ fn lower_args(args: &[Argument], bindings: &mut Vec<MirBinding>, lowering: &mut 
 // rvalues the program computes.
 fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lowering: &mut MirLowering) -> (&'static str, Vec<MirOperand>) {
     match statement {
-        Statement::Array(id, values) => {
-            let mut operands = vec![MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(Type::Int(IntTy::I64)).unwrap_or(0), values.len())))];
+        Statement::Array(id, values, elem_ty) => {
+            let mut operands = vec![MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(*elem_ty).unwrap_or(0), values.len())))];
             operands.extend(values.iter().map(|v| lower_operand(v, bindings, lowering)));
             ("array", operands)
         }
-        Statement::Store(id, len, index, value, ..) => ("store", vec![
-            MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(Type::Int(IntTy::I64)).unwrap_or(0), *len))),
+        Statement::Store(id, len, index, value, _, _, elem_ty) => ("store", vec![
+            MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(*elem_ty).unwrap_or(0), *len))),
             lower_operand(index, bindings, lowering),
             lower_operand(value, bindings, lowering),
         ]),
@@ -398,8 +398,8 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::PtrDropInPlace(e, ..) => ("ptr_drop_in_place", vec![lower_operand(e, bindings, lowering)]),
         Expr::PtrWrite(p, v, ..) => ("ptr_write", vec![lower_operand(p, bindings, lowering), lower_operand(v, bindings, lowering)]),
         Expr::Len(e, ..) => ("len", vec![lower_operand(e, bindings, lowering)]),
-        Expr::Index(id, len, index, ..) => ("index", vec![
-            MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(Type::Int(IntTy::I64)).unwrap_or(0), *len))),
+        Expr::Index(id, len, index, _, _, elem_ty) => ("index", vec![
+            MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(*elem_ty).unwrap_or(0), *len))),
             lower_operand(index, bindings, lowering),
         ]),
         Expr::VecIndex(id, index, _, _, borrowed, element) => {
@@ -513,7 +513,8 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::ExecNew => Type::Exec,
         Expr::ScopeNew => Type::TaskScope,
         Expr::PoolNew(..) => Type::Pool,
-        Expr::Number(..) | Expr::Index(..) | Expr::Len(..) => Type::Int(IntTy::I64),
+        Expr::Number(..) | Expr::Len(..) => Type::Int(IntTy::I64),
+        Expr::Index(.., elem_ty) => *elem_ty,
         Expr::VecIndex(_, _, _, _, _, ty) => *ty,
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,

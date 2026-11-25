@@ -817,6 +817,16 @@ impl Parser<'_> {
         Ok((mutable, self.named_type()?))
     }
 
+    pub(super) fn is_array_element_type(&self, ty: Type) -> bool {
+        match ty {
+            Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char
+            | Type::Fn(_) | Type::Ptr(_) | Type::PtrMut(_) => true,
+            Type::Struct(sid) => self.structs[sid].is_copy,
+            Type::Enum(_, eid) => self.enums[eid].is_copy,
+            _ => false,
+        }
+    }
+
     // Arrays are borrowed read-only; strings and scalars pass by value.
     pub(super) fn callable_parameter_type(&mut self) -> Result<Type, ae_span::Diagnostic> {
         if *self.current() != Kind::Amp {
@@ -965,14 +975,17 @@ impl Parser<'_> {
                     "unsupported borrow type; write &string, &vec, &vec[string], &vec[f64], &Struct, &[i64; N], or &T inside a generic function"));
             }
             self.take(Kind::LBracket)?;
-            if self.identifier()? != "i64" { return Err(self.fail("array element type must be i64")); }
+            let elem_ty = self.named_type()?;
+            if !self.is_array_element_type(elem_ty) {
+                return Err(self.fail("array elements must be a Copy non-borrow type"));
+            }
             self.take(Kind::Semi)?;
             let len = match self.current() {
                 Kind::Number(n) if *n >= 1 && *n <= 4096 => *n as usize,
                 _ => return Err(self.fail("array parameter length must be between 1 and 4096")),
             };
             self.pos += 1; self.take(Kind::RBracket)?;
-            Ok(Type::ArrayOf(self.ctx.intern_array_elem(Type::Int(IntTy::I64)), len))
+            Ok(Type::ArrayOf(self.ctx.intern_array_elem(elem_ty), len))
         } else {
             self.named_type()
         }

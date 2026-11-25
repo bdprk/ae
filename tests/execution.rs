@@ -9618,3 +9618,109 @@ fn p2_4_preset_result_unit_alias_parity() {
         );
     }
 }
+
+/// ADR-0235 Slice 3a: generic fixed-size arrays `[T; N]` for Copy non-borrow,
+/// non-unit types (`f64`, `bool`, `i32`, `char`, `#[derive(Copy)]` structs)
+/// compile, run, and match `--interp`, while heterogeneous or non-Copy arrays
+/// are rejected.
+#[test]
+fn generic_copy_arrays_compile_run_and_match_interpreter() {
+    let source = r#"
+#[derive(Copy)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn sum_floats(xs: &[f64; 3]) -> f64 {
+    return xs[0] + xs[1] + xs[2];
+}
+
+fn second_point_x(pts: &[Point; 2]) -> i64 {
+    let p = pts[1];
+    return p.x + p.y;
+}
+
+fn main() {
+    var floats = [1.5, 2.5, 3.0];
+    floats[1] = 4.25;
+    print(floats[0]);
+    print(floats[1]);
+    print(len(floats));
+    print(sum_floats(&floats));
+
+    var flags = [true, false];
+    flags[1] = true;
+    print(flags[0]);
+    print(flags[1]);
+    print(len(flags));
+
+    var ints = [10 as i32, 20 as i32, 30 as i32];
+    ints[2] = 42 as i32;
+    print(ints[0]);
+    print(ints[2]);
+    print(len(ints));
+
+    var chars = ['a', 'z'];
+    chars[0] = 'q';
+    print(chars[0]);
+    print(chars[1]);
+    print(len(chars));
+
+    var pts = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    pts[1] = Point { x: 10, y: 20 };
+    let p0 = pts[0];
+    print(p0.x);
+    print(second_point_x(&pts));
+    print(len(pts));
+}
+"#;
+    let path = std::env::temp_dir().join(format!(
+        "ae-generic-arrays-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, source).unwrap();
+
+    let mut outputs = Vec::new();
+    for (label, extra) in [("compiled", vec![]), ("interp", vec!["--interp"])] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        outputs.push(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"));
+    }
+    fs::remove_file(&path).unwrap();
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(
+        outputs[0],
+        "1.5\n4.25\n3\n8.75\ntrue\ntrue\n2\n10\n42\n3\nq\nz\n2\n1\n30\n2\n"
+    );
+
+    for bad_source in [
+        "fn main() { let a = [1, 2.5]; }",
+        "fn main() { let a = [\"a\", \"b\"]; }",
+        "fn f(a: &[string; 2]) -> i64 { return len(a); } fn main() {}",
+    ] {
+        let bad_path = std::env::temp_dir().join(format!(
+            "ae-generic-arrays-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&bad_path, bad_source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&bad_path)
+            .output()
+            .unwrap();
+        fs::remove_file(&bad_path).unwrap();
+        assert!(!result.status.success(), "expected failure for: {bad_source}");
+    }
+}

@@ -31,7 +31,7 @@ enum Val {
     Char(char),
     Unit,
     Str(String),
-    Array(Vec<i64>),
+    Array(Vec<Val>),
     VecI(Vec<i64>),
     VecS(Vec<String>),
     VecF(Vec<f64>),
@@ -518,26 +518,24 @@ fn eval_stmts(
                     && let Some(old) = old
                         && let Err(f) = release_val_inferred(env, old) { return f; }
             }
-            Statement::Array(id, exprs) => {
+            Statement::Array(id, exprs, _) => {
                 let mut items = Vec::with_capacity(exprs.len());
                 for e in exprs {
                     match eval_expr(env, e, locals, caller_locals, false) {
-                        Ok(Val::Int(n)) => items.push(n),
-                        Ok(_) => return Flow::Trap("internal: array element not i64".to_owned()),
+                        Ok(val) => items.push(val),
                         Err(f) => return f,
                     }
                 }
                 locals.insert(*id, Val::Array(items));
             }
-            Statement::Store(id, len, idx_expr, val_expr, line, col) => {
+            Statement::Store(id, len, idx_expr, val_expr, line, col, _) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
                     Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
                     Err(f) => return f,
                 };
                 let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: array store value not i64".to_owned()),
+                    Ok(v) => v,
                     Err(f) => return f,
                 };
                 if idx < 0 || (idx as usize) >= *len {
@@ -1125,7 +1123,7 @@ fn eval_expr(
         }
         Expr::StrVecNew(_, _) => Ok(Val::VecS(Vec::new())),
         Expr::F64VecNew(_, _) => Ok(Val::VecF(Vec::new())),
-        Expr::Index(id, len, idx_expr, line, col) => {
+        Expr::Index(id, len, idx_expr, line, col, _) => {
             let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
                 Val::Int(n) => n,
                 _ => return Err(Flow::Trap("internal: index type".to_owned())),
@@ -1134,7 +1132,7 @@ fn eval_expr(
                 return Err(trap("array index out of bounds", *line, *col));
             }
             match read_var(locals, caller_locals, *id, *line, *col)? {
-                Val::Array(arr) => Ok(Val::Int(arr[idx as usize])),
+                Val::Array(arr) => Ok(arr[idx as usize].clone()),
                 _ => Err(Flow::Trap("internal: array index on non-array".to_owned())),
             }
         }

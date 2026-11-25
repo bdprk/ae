@@ -230,7 +230,10 @@ impl<'a> Parser<'a> {
                 };
                 let index = Box::new(index);
                 match ty {
-                    Type::ArrayOf(_, len) => Some((Expr::Index(slot, len, index, line, column), Type::Int(IntTy::I64))),
+                    Type::ArrayOf(elem_id, len) => {
+                        let elem_ty = self.ctx.array_elem(elem_id);
+                        Some((Expr::Index(slot, len, index, line, column, elem_ty), elem_ty))
+                    }
                     Type::Vector(id) | Type::VectorRef(id) => {
                         let element = self.ctx.vector_elem(id);
                         if element == Type::String {

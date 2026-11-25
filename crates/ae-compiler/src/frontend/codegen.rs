@@ -503,20 +503,20 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: false }
         }
-        Expr::Index(id, len, index, line, col) => {
+        Expr::Index(id, len, index, line, col, elem_ty) => {
             // A constant index inside the array's compile-time length is
             // provably in bounds: the check elides (M2.10). An out-of-range
             // constant keeps the runtime check and its trap.
             if let Expr::Number(n) = &**index {
                 if *n >= 0 && (*n as usize) < *len {
-                    Emitted { text: format!("v{id}[{n}]"), ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: false }
+                    Emitted { text: format!("v{id}[{n}]"), ty: *elem_ty, owned: false, moves: Vec::new(), materialized: false }
                 } else {
                     let i = emit_expr(index, out, next, false, ctx);
-                    Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: Type::Int(IntTy::I64), owned: false, moves: i.moves, materialized: false }
+                    Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: *elem_ty, owned: false, moves: i.moves, materialized: false }
                 }
             } else {
                 let i = emit_expr(index, out, next, false, ctx);
-                Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: Type::Int(IntTy::I64), owned: false, moves: i.moves, materialized: false }
+                Emitted { text: format!("v{id}[ae_index({}, {len}, {line}, {col})]", i.text), ty: *elem_ty, owned: false, moves: i.moves, materialized: false }
             }
         }
         Expr::Len(e, line, col) => {
@@ -1458,13 +1458,13 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                     null_moves(out, &t.moves, ctx);
                 }
             }
-            Statement::Array(id, values) => {
+            Statement::Array(id, values, elem_ty) => {
                 let items: Vec<_> = values.iter().map(|e| emit_expr(e, out, next, false, ctx).text).collect();
-                out.push_str(&format!("    int64_t v{id}[{}] = {{", items.len()));
+                out.push_str(&format!("    {} v{id}[{}] = {{", c_output::c_type_field(*elem_ty, ctx), items.len()));
                 for item in items { out.push_str(&format!("{item},")); }
                 out.push_str("};\n");
             }
-            Statement::Store(id, len, index, value, line, col) => {
+            Statement::Store(id, len, index, value, line, col, _) => {
                 // The same constant-index proof the read uses (M2.10):
                 // in range, the check elides; out of range, it stays and
                 // traps at the same site.

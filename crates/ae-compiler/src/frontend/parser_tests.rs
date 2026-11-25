@@ -612,7 +612,7 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[1]").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved local array").unwrap();
-        assert!(matches!(body.as_slice(), [Statement::Array(slot, values), Statement::Return(Expr::Index(read, 2, index, ..), _)]
+        assert!(matches!(body.as_slice(), [Statement::Array(slot, values, Type::Int(IntTy::I64)), Statement::Return(Expr::Index(read, 2, index, .., Type::Int(IntTy::I64)), _)]
             if slot == read && values.len() == 2 && matches!(**index, Expr::Number(1))));
         parser.seek_scalar_offset(source.find("{ let a = [4, 5]; return a[false]").unwrap());
         let error = parser.lower_resolved_scalar_body().expect("resolved array error").err().unwrap();
@@ -622,7 +622,7 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[1] = 9").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved array store").unwrap();
-        assert!(matches!(body.as_slice(), [Statement::Array(slot, values), Statement::Store(read, 2, store_index, element, ..), Statement::Return(Expr::Index(read_back, 2, back_index, ..), _)]
+        assert!(matches!(body.as_slice(), [Statement::Array(slot, values, Type::Int(IntTy::I64)), Statement::Store(read, 2, store_index, element, .., Type::Int(IntTy::I64)), Statement::Return(Expr::Index(read_back, 2, back_index, .., Type::Int(IntTy::I64)), _)]
             if slot == read && read == read_back && values.len() == 2
                 && matches!(store_index, Expr::Number(1)) && matches!(element, Expr::Number(9))
                 && matches!(**back_index, Expr::Number(1))));
@@ -642,7 +642,7 @@ use super::*;
 
         parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] = false").unwrap());
         let error = parser.lower_resolved_scalar_body().expect("resolved store value error").err().unwrap();
-        assert_eq!(error.message, "array elements must be i64");
+        assert_eq!(error.message, "array element type mismatch: expected i64, found bool");
         parser.names.remove("a");
 
         parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] += 1").unwrap());
@@ -654,7 +654,7 @@ use super::*;
         parser.binding_ranges.insert(0, param_offset..param_offset + 1);
         parser.seek_scalar_offset(source.find("{ return a[1]").unwrap());
         let body = parser.lower_resolved_scalar_body().expect("resolved array param").unwrap();
-        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Index(slot, 2, index, ..), _)]
+        assert!(matches!(body.as_slice(), [Statement::Return(Expr::Index(slot, 2, index, .., Type::Int(IntTy::I64)), _)]
             if *slot == 0 && matches!(**index, Expr::Number(1))));
         let store_param_offset = source[param_offset + 1..].find("(a: &[i64; 2]").unwrap() + param_offset + 2;
         parser.binding_ranges.insert(0, store_param_offset..store_param_offset + 1);

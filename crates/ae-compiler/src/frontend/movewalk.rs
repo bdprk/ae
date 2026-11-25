@@ -259,7 +259,7 @@ pub(super) fn walk_statement(statement: &Statement, moved: &mut dyn MoveTracker)
             moved.revive(*id);
             None
         }
-        Statement::Array(id, values) => {
+        Statement::Array(id, values, _) => {
             // Every element walks even after a clean one: `?` here would
             // abandon the rest of the list on the first None.
             let mut violation = None;
@@ -652,7 +652,7 @@ mod tests {
     fn indexed_access_reads_container_and_index() {
         let index = || Box::new(Expr::Variable(2, Type::Int(IntTy::I64), 0, 0));
         let expressions = [
-            Expr::Index(1, 3, index(), 0, 0),
+            Expr::Index(1, 3, index(), 0, 0, Type::Int(IntTy::I64)),
             Expr::VecIndex(1, index(), 0, 0, false, Type::Int(IntTy::I64)),
             Expr::StrVecIndex(1, index(), 0, 0, false),
         ];
