@@ -90,11 +90,13 @@ mutable borrow for the statement. The callee reads through the usual
 `ae_slice_mut_at` (bounds check, then the element's address through the
 exclusive borrow) and the interpreter models the parameter as
 `Val::SliceMutRef { owner, start, len }`, writing back into the owner's slot
-in the calling frame. This rung writes Copy elements only; owned-element
-stores, windows (`&mut v[0..1]`), field receivers (`&mut r.cells`),
-forwarding, local bindings and returns are rejected with pointed
-diagnostics. `tests/run/slice_mut.ae` pins i64/f64/Copy-struct stores and
-read-back across the four backends. `&mut [T; N]` stays out of scope: a
+in the calling frame. This rung writes Copy elements only and accepts
+windows (`&mut v[start..end]`, both bounds i64 and checked at the call
+site; the interpreter builds the owner window after validating them).
+Owned-element stores, field receivers (`&mut r.cells`), forwarding, local
+bindings and returns are rejected with pointed diagnostics.
+`tests/run/slice_mut.ae` pins i64/f64/Copy-struct/bool/char stores, a
+window store, and read-back across the four backends. `&mut [T; N]` stays out of scope: a
 fixed array is a value, not a place.
 
 ### Rung 2 (landed): element place borrows
