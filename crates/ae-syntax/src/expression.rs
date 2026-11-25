@@ -781,6 +781,31 @@ mod tests {
     }
 
     #[test]
+    fn sub_slice_ranges_split_at_the_top_level() {
+        let source = "call(&v[1..3], &a[start..end], &w[i])";
+        let tokens = crate::lex_diagnostic(source).unwrap();
+        let parsed = parse_operator_expression("case.ae", source).unwrap();
+        let ExpressionKind::Call { arguments, .. } = parsed.kind else {
+            panic!("expected a call");
+        };
+        let bounds = |argument: &Expression| {
+            let ExpressionKind::BorrowArgument { index, .. } = &argument.kind else {
+                panic!("expected a borrow argument");
+            };
+            split_range_argument(&tokens, index.as_ref().unwrap())
+        };
+        // Closed bounds on a vector and on an array.
+        let (start, end) = bounds(&arguments[0]).unwrap();
+        assert_eq!(&source[start], "1");
+        assert_eq!(&source[end], "3");
+        let (start, end) = bounds(&arguments[1]).unwrap();
+        assert_eq!(&source[start], "start");
+        assert_eq!(&source[end], "end");
+        // A single element index has no top-level `..`.
+        assert!(bounds(&arguments[2]).is_none());
+    }
+
+    #[test]
     fn pointer_cast_groups_before_method_call() {
         let source = "ptr as *mut Boxed[i64].deref()";
         let parsed = parse_operator_expression("case.ae", source).unwrap();
