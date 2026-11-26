@@ -137,6 +137,17 @@ impl ModuleTypes {
             for (map_id, pair) in &body.map_types {
                 types.map_types.entry(*map_id).or_insert(*pair);
             }
+            // Declared field layouts are authoritative; the fixed-point pass
+            // below only fills shapes the body never spelled out.
+            for (sid, fields) in &body.struct_layouts {
+                let slots = types.structs.entry(*sid).or_default();
+                if slots.len() < fields.len() {
+                    slots.resize(fields.len(), None);
+                }
+                for (slot, ty) in slots.iter_mut().zip(fields) {
+                    *slot = Some(*ty);
+                }
+            }
         }
 
         // Fixed-point pass (up to 4 iterations) to propagate field/element types

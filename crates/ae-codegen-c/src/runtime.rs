@@ -19,7 +19,8 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stdio.h>\n\
          #include <stdlib.h>\n\
          #include <string.h>\n\
-         #include <sys/stat.h>\n\n\
+         #include <sys/stat.h>\n\
+         #include <time.h>\n\n\
          typedef struct { uint8_t _unused; } ae_unit_t;\n\n\
          // The positioned failure sink is defined with the concurrency runtime\n\
          // (a child thread records a failure instead of ending the process).\n\
@@ -632,10 +633,10 @@ static inline ae_vec ae_args_value(void) {
     return out;
 }
 typedef struct { int64_t status; ae_str text; ae_str error; } ae_read_result;
-static inline ae_str ae_io_error(const char *prefix) {
-    char buffer[512];
-    snprintf(buffer, sizeof buffer, "%s: %s", prefix, strerror(errno));
-    return ae_str_alloc_copy(buffer, (int64_t)strlen(buffer));
+static inline ae_str ae_io_error(void) {
+    const char *text = strerror(errno);
+    if (!text) text = "I/O error";
+    return ae_str_alloc_copy(text, (int64_t)strlen(text));
 }
 static inline ae_read_result ae_try_read_file_value(ae_str path) {
     ae_read_result out;
@@ -645,20 +646,20 @@ static inline ae_read_result ae_try_read_file_value(ae_str path) {
     FILE *file = fopen(path.ptr, "rb");
     if (!file) {
         out.status = 1;
-        out.error = ae_io_error("cannot read file");
+        out.error = ae_io_error();
         return out;
     }
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
         out.status = 1;
-        out.error = ae_io_error("cannot read file");
+        out.error = ae_io_error();
         return out;
     }
     const long size = ftell(file);
     if (size < 0) {
         fclose(file);
         out.status = 1;
-        out.error = ae_io_error("cannot read file");
+        out.error = ae_io_error();
         return out;
     }
     rewind(file);
@@ -668,7 +669,7 @@ static inline ae_read_result ae_try_read_file_value(ae_str path) {
     if (got != (size_t)size) {
         free(buffer);
         out.status = 1;
-        out.error = ae_io_error("cannot read file");
+        out.error = ae_io_error();
         return out;
     }
     buffer[size] = 0;
@@ -701,7 +702,7 @@ static inline ae_read_result ae_try_read_stdin_value(void) {
                 free(buffer);
                 out.status = 1;
                 out.text = ae_str_from_parts("", 0, false);
-                out.error = ae_io_error("cannot read standard input");
+                out.error = ae_io_error();
                 return out;
             }
             break;
@@ -714,9 +715,9 @@ static inline ae_read_result ae_try_read_stdin_value(void) {
 static inline ae_str ae_read_file_value(ae_str path, size_t line, size_t column) {
     ae_read_result out = ae_try_read_file_value(path);
     if (out.status != 0) {
-        ae_str result = out.error;
         ae_str_release(&out.text);
-        ae_fail_at(result.ptr, line, column);
+        ae_str_release(&out.error);
+        ae_fail_at("cannot read file", line, column);
     }
     ae_str_release(&out.error);
     return out.text;
@@ -740,13 +741,13 @@ static inline ae_write_result ae_try_write_file_value(ae_str path, ae_str conten
     FILE *file = fopen(path.ptr, "wb");
     if (!file) {
         out.status = 1;
-        out.error = ae_io_error("cannot write file");
+        out.error = ae_io_error();
         return out;
     }
     const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
     if (fclose(file) != 0 || written != (size_t)content.len) {
         out.status = 1;
-        out.error = ae_io_error("cannot write file");
+        out.error = ae_io_error();
         return out;
     }
     out.written = (int64_t)written;
@@ -803,6 +804,281 @@ static inline bool ae_path_is_dir_value(ae_str path) {
 #else
     return S_ISDIR(info.st_mode);
 #endif
+}
+
+// Directory listing, metadata and the mutation family. Results use small
+// status structs so the emitter can build DirResult/FileResult/StatusResult.
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#else
+#include <dirent.h>
+#include <unistd.h>
+#endif
+static inline int ae_name_compare(const void *a, const void *b) {
+    const ae_str x = *(const ae_str *)a;
+    const ae_str y = *(const ae_str *)b;
+    const int64_t common = x.len < y.len ? x.len : y.len;
+    const int order = common > 0 ? memcmp(x.ptr, y.ptr, (size_t)common) : 0;
+    if (order != 0) return order;
+    return (x.len > y.len) - (x.len < y.len);
+}
+typedef struct { int64_t status; ae_vec names; ae_str error; } ae_dir_result;
+static inline ae_dir_result ae_try_list_dir_value(ae_str path) {
+    ae_dir_result out;
+    out.status = 0;
+    out.error = ae_str_from_parts("", 0, false);
+    out.names = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
+    ae_str pattern = ae_path_join_value(path, ae_str_from_parts("*", 1, false));
+#ifdef _WIN32
+    struct _finddata_t entry;
+    intptr_t walk = _findfirst(pattern.ptr, &entry);
+    if (walk == -1) {
+        out.status = 1;
+        out.error = ae_io_error();
+        ae_str_release(&pattern);
+        return out;
+    }
+    do {
+        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0) continue;
+        ae_str name = ae_str_alloc_copy(entry.name, (int64_t)strlen(entry.name));
+        ae_vec_push(&out.names, &name);
+    } while (_findnext(walk, &entry) == 0);
+    _findclose(walk);
+#else
+    DIR *walk = opendir(path.ptr);
+    if (!walk) {
+        out.status = 1;
+        out.error = ae_io_error();
+        ae_str_release(&pattern);
+        return out;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(walk)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        ae_str name = ae_str_alloc_copy(entry->d_name, (int64_t)strlen(entry->d_name));
+        ae_vec_push(&out.names, &name);
+    }
+    closedir(walk);
+#endif
+    ae_str_release(&pattern);
+    if (out.names.len > 1) {
+        qsort(out.names.data, (size_t)out.names.len, sizeof(ae_str), ae_name_compare);
+    }
+    return out;
+}
+typedef struct {
+    int64_t status;
+    int64_t size;
+    int64_t mtime;
+    bool is_dir;
+    ae_str error;
+} ae_file_info_result;
+static inline ae_file_info_result ae_try_file_info_value(ae_str path) {
+    ae_file_info_result out;
+    out.status = 0;
+    out.size = 0;
+    out.mtime = 0;
+    out.is_dir = false;
+    out.error = ae_str_from_parts("", 0, false);
+    errno = 0;
+    struct stat info;
+    if (stat(path.ptr, &info) != 0) {
+        out.status = 1;
+        out.error = ae_io_error();
+        return out;
+    }
+    out.size = (int64_t)info.st_size;
+    out.mtime = (int64_t)info.st_mtime;
+#ifdef _WIN32
+    out.is_dir = (info.st_mode & _S_IFDIR) != 0;
+#else
+    out.is_dir = S_ISDIR(info.st_mode);
+#endif
+    return out;
+}
+typedef struct { int64_t status; ae_str error; } ae_status_result;
+static inline ae_status_result ae_status_ok_value(void) {
+    ae_status_result out;
+    out.status = 0;
+    out.error = ae_str_from_parts("", 0, false);
+    return out;
+}
+static inline ae_status_result ae_status_fail_value(ae_str error) {
+    ae_status_result out;
+    out.status = 1;
+    out.error = error;
+    return out;
+}
+static inline ae_status_result ae_try_copy_file_value(ae_str from, ae_str to) {
+    errno = 0;
+    FILE *source = fopen(from.ptr, "rb");
+    if (!source) return ae_status_fail_value(ae_io_error());
+    FILE *target = fopen(to.ptr, "wb");
+    if (!target) {
+        fclose(source);
+        return ae_status_fail_value(ae_io_error());
+    }
+    bool failed = false;
+    char buffer[65536];
+    size_t read = 0;
+    while ((read = fread(buffer, 1, sizeof buffer, source)) > 0) {
+        if (fwrite(buffer, 1, read, target) != read) {
+            failed = true;
+            break;
+        }
+    }
+    if (!failed && ferror(source)) failed = true;
+    if (fclose(source) != 0 && !failed) failed = true;
+    if (fclose(target) != 0 && !failed) failed = true;
+    if (failed) return ae_status_fail_value(ae_io_error());
+    return ae_status_ok_value();
+}
+static inline ae_status_result ae_try_append_file_value(ae_str path, ae_str content) {
+    errno = 0;
+    FILE *file = fopen(path.ptr, "ab");
+    if (!file) return ae_status_fail_value(ae_io_error());
+    const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
+    if (fclose(file) != 0 || written != (size_t)content.len) {
+        return ae_status_fail_value(ae_io_error());
+    }
+    return ae_status_ok_value();
+}
+static inline ae_status_result ae_try_rename_path_value(ae_str from, ae_str to) {
+    errno = 0;
+    if (rename(from.ptr, to.ptr) != 0) return ae_status_fail_value(ae_io_error());
+    return ae_status_ok_value();
+}
+static inline ae_status_result ae_try_remove_file_value(ae_str path) {
+    if (ae_path_is_dir_value(path)) {
+        return ae_status_fail_value(ae_str_alloc_copy(
+            "cannot remove a directory with try_remove_file",
+            (int64_t)strlen("cannot remove a directory with try_remove_file")
+        ));
+    }
+    errno = 0;
+    if (remove(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
+    return ae_status_ok_value();
+}
+static inline ae_status_result ae_try_remove_dir_value(ae_str path) {
+    errno = 0;
+#ifdef _WIN32
+    if (_rmdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
+#else
+    if (rmdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
+#endif
+    return ae_status_ok_value();
+}
+static inline ae_read_result ae_try_env_value(ae_str name) {
+    ae_read_result out;
+    out.status = 0;
+    out.text = ae_str_from_parts("", 0, false);
+    out.error = ae_str_from_parts("", 0, false);
+    const char *value = getenv(name.ptr);
+    if (!value) {
+        out.status = 1;
+        out.error = ae_str_alloc_copy("variable not set", (int64_t)strlen("variable not set"));
+        return out;
+    }
+    out.text = ae_str_alloc_copy(value, (int64_t)strlen(value));
+    return out;
+}
+static inline ae_read_result ae_try_cwd_value(void) {
+    ae_read_result out;
+    out.status = 0;
+    out.error = ae_str_from_parts("", 0, false);
+    size_t capacity = 256;
+    char *buffer = (char *)malloc(capacity);
+    if (!buffer) ae_trap("out of memory");
+    for (;;) {
+#ifdef _WIN32
+        const char *got = _getcwd(buffer, (int)capacity);
+#else
+        const char *got = getcwd(buffer, capacity);
+#endif
+        if (got) break;
+        if (errno != ERANGE || capacity > ((size_t)-1) / 2) {
+            free(buffer);
+            out.status = 1;
+            out.text = ae_str_from_parts("", 0, false);
+            out.error = ae_io_error();
+            return out;
+        }
+        capacity *= 2;
+        char *grown = (char *)realloc(buffer, capacity);
+        if (!grown) {
+            free(buffer);
+            ae_trap("out of memory");
+        }
+        buffer = grown;
+    }
+    const int64_t length = (int64_t)strlen(buffer);
+    for (int64_t i = 0; i < length; i++) {
+        if (buffer[i] == '\\') buffer[i] = '/';
+    }
+    out.text = ae_str_from_parts(buffer, length, true);
+    return out;
+}
+static inline int64_t ae_now_s(void) { return (int64_t)time(NULL); }
+static inline int64_t ae_now_ms(void) {
+#ifdef _WIN32
+    struct { unsigned long low; unsigned long high; } file_time;
+    extern void GetSystemTimeAsFileTime(void *);
+    GetSystemTimeAsFileTime(&file_time);
+    const uint64_t ticks = ((uint64_t)file_time.high << 32) | (uint64_t)file_time.low;
+    return (int64_t)(ticks / UINT64_C(10000) - UINT64_C(11644473600000));
+#else
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+static inline ae_status_result ae_try_create_dir_value(ae_str path) {
+    if (path.len == 0) {
+        return ae_status_fail_value(ae_str_alloc_copy("empty path", (int64_t)strlen("empty path")));
+    }
+    errno = 0;
+    char *buffer = ae_str_alloc(path.len);
+    memcpy(buffer, path.ptr, (size_t)path.len);
+    buffer[path.len] = 0;
+    ae_status_result out = ae_status_ok_value();
+    for (int64_t at = 1; at <= path.len; at++) {
+        if (at < path.len && !ae_is_separator(buffer[at])) continue;
+        const char saved = buffer[at];
+        buffer[at] = 0;
+#ifdef _WIN32
+        const bool skip = (at == 2 && buffer[1] == ':');
+#else
+        const bool skip = false;
+#endif
+        if (!skip) {
+            if (!ae_path_is_dir_value(ae_str_from_parts(buffer, at, false))) {
+#ifdef _WIN32
+                if (_mkdir(buffer) != 0) {
+#else
+                if (mkdir(buffer, 0777) != 0) {
+#endif
+                    if (errno != EEXIST) {
+                        out = ae_status_fail_value(ae_io_error());
+                        buffer[at] = saved;
+                        break;
+                    }
+                }
+            }
+        }
+        buffer[at] = saved;
+    }
+    free(buffer);
+    return out;
+}
+static inline ae_status_result ae_try_set_cwd_value(ae_str path) {
+    errno = 0;
+#ifdef _WIN32
+    if (_chdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
+#else
+    if (chdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
+#endif
+    return ae_status_ok_value();
 }
 
 // ---- Hash maps: string keys, i64-bit values --------------------------------

@@ -79,6 +79,10 @@ pub struct Body {
     /// Map interner id -> (key type, value type), so a standalone backend can
     /// lay out one map family and type its reads.
     pub map_types: BTreeMap<usize, (TyKind, TyKind)>,
+    /// Struct id -> declared field types, so a backend that constructs a
+    /// runtime-built payload (FileInfo, CommandOutput) knows its layout
+    /// without inferring it from field accesses.
+    pub struct_layouts: BTreeMap<usize, Vec<TyKind>>,
     pub span: Option<Span>,
 }
 
@@ -101,6 +105,7 @@ impl Body {
             vector_elems: BTreeMap::new(),
             slice_elems: BTreeMap::new(),
             map_types: BTreeMap::new(),
+            struct_layouts: BTreeMap::new(),
             span: None,
         }
     }

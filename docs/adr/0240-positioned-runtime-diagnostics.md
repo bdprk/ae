@@ -43,7 +43,8 @@ so the missing piece was the position.
    `shift count out of range`).
 4. **The gate compares traps.** A non-zero exit with a `.stderr`/`.exit`
    fixture is a real comparison now: the exit status, stderr and stdout must
-   all match. Layout probes remain excluded until P6.1.
+   all match. The layout probes joined the gate at slice 16, so every accepted
+   fixture is compared.
 5. **The fuzzer compares trapped seeds in five modes.** The pure mode no
    longer skips trap seeds; the trap position, message and exit status join
    the agreement contract (the interp's `ae: ` spacing is normalized away).

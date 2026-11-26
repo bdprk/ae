@@ -472,6 +472,12 @@ impl<'a> PureMirBuilder<'a> {
         for (sig, signature) in &self.fn_sigs_seen {
             fn_sigs.entry(*sig).or_insert_with(|| signature.clone());
         }
+        let struct_layouts: BTreeMap<usize, Vec<TyKind>> = self
+            .structs
+            .iter()
+            .enumerate()
+            .map(|(id, def)| (id, def.fields.iter().map(|(_, ty)| *ty).collect()))
+            .collect();
         Body {
             name: self.name,
             def: self.def,
@@ -489,6 +495,7 @@ impl<'a> PureMirBuilder<'a> {
             vector_elems,
             slice_elems,
             map_types,
+            struct_layouts,
             span: None,
         }
     }
@@ -571,26 +578,23 @@ impl<'a> PureMirBuilder<'a> {
             Statement::TakePropagationPayload(subject, ty, _fields, binding) => {
                 let (subj_local, _) = self.ensure_var(*subject, *ty);
                 if let Some((bid, pty)) = binding {
-                    // A propagation extracts the success payload from a temporary
-                    // result: the binding is the payload value (a string
-                    // binds as a view of the temporary, as before).
+                    // A propagation extracts the success payload from a
+                    // temporary result. Moving the payload into the binding
+                    // hands the buffer (or vector/struct fields) to a binding
+                    // the enclosing scope releases; the subject enum keeps a
+                    // zeroed payload, so its own release stays a no-op.
                     let (dest_local, _) = self.ensure_var(*bid, *pty);
                     let src_place = Place::from_local(subj_local)
                         .project(ProjectionElem::Downcast(0))
                         .project(ProjectionElem::Field(0));
-                    let rvalue = if *pty == TyKind::String {
-                        let view = self.emit_intrinsic_call(
-                            "string_view",
-                            vec![Operand::Copy(src_place)],
-                            TyKind::String,
-                        );
-                        Rvalue::Use(Operand::Copy(Place::from_local(view)))
+                    let operand = if pty.owned() && !self.is_copy_ty(*pty) {
+                        Operand::Move(src_place)
                     } else {
-                        Rvalue::Use(Operand::Copy(src_place))
+                        Operand::Copy(src_place)
                     };
                     self.push_stmt(StatementKind::Assign(
                         Place::from_local(dest_local),
-                        rvalue,
+                        Rvalue::Use(operand),
                     ));
                 }
             }
@@ -828,6 +832,7 @@ impl<'a> PureMirBuilder<'a> {
                 self.emit_intrinsic_call("chan_close", vec![h], TyKind::Unit);
             }
             Statement::TaskSpawn(ex, slots, callable, ..) => {
+                self.reject_borrowed_spawn(callable);
                 let mut ops = vec![self.lower_operand(ex), self.lower_operand(callable)];
                 ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
                 self.emit_intrinsic_call("task_spawn", ops, TyKind::Unit);
@@ -836,11 +841,13 @@ impl<'a> PureMirBuilder<'a> {
                 self.emit_intrinsic_call("task_yield", Vec::new(), TyKind::Unit);
             }
             Statement::ScopeSpawn(sc, slots, callable, ..) => {
+                self.reject_borrowed_spawn(callable);
                 let mut ops = vec![self.lower_operand(sc), self.lower_operand(callable)];
                 ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
                 self.emit_intrinsic_call("scope_spawn", ops, TyKind::Unit);
             }
             Statement::PoolSpawn(p, slots, callable, ..) => {
+                self.reject_borrowed_spawn(callable);
                 let mut ops = vec![self.lower_operand(p), self.lower_operand(callable)];
                 ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
                 self.emit_intrinsic_call("pool_spawn", ops, TyKind::Unit);
@@ -1144,8 +1151,25 @@ impl<'a> PureMirBuilder<'a> {
                 Rvalue::Aggregate(AggregateKind::Enum(*eid, *vidx), ops)
             }
             Expr::Len(inner, ..) => {
-                let place = self.lower_place(inner);
-                Rvalue::Len(place)
+                let (operand, owned_temp) = self.lower_readonly_operand(inner);
+                let place = match operand {
+                    Operand::Copy(place) | Operand::Move(place) => place,
+                    Operand::Constant(value) => {
+                        let temp = self.assign_to_temp(
+                            expr_type(inner, self.ctx),
+                            Rvalue::Use(Operand::Constant(value)),
+                        );
+                        Place::from_local(temp)
+                    }
+                };
+                let Some(temp) = owned_temp else {
+                    return Rvalue::Len(place);
+                };
+                // The temporary the lowering materialized is released after
+                // the length is read; the length itself is a plain scalar.
+                let length = self.assign_to_temp(TyKind::Int(IntTy::I64), Rvalue::Len(place));
+                self.push_stmt(StatementKind::Drop(Place::from_local(temp)));
+                Rvalue::Use(Operand::Copy(Place::from_local(length)))
             }
             Expr::BorrowAs(inner, mutable, ..) => {
                 let place = self.lower_place(inner);
@@ -1193,7 +1217,7 @@ impl<'a> PureMirBuilder<'a> {
                 if let Some(name) = self.ctx.extern_name(*fn_id) {
                     self.externs.insert(DefId(*fn_id as u32), name);
                 }
-                let arg_ops = self.lower_args(args);
+                let (arg_ops, arg_drops) = self.lower_args(args);
                 let dest = self.fresh_temp(*ret);
                 let next_bb = self.new_block();
                 self.set_terminator(TerminatorKind::Call {
@@ -1206,13 +1230,16 @@ impl<'a> PureMirBuilder<'a> {
                     target: Some(next_bb),
                 });
                 self.cur_bb = next_bb;
+                for temp in arg_drops {
+                    self.push_stmt(StatementKind::Drop(Place::from_local(temp)));
+                }
                 Rvalue::Use(Operand::Copy(Place::from_local(dest)))
             }
             // A call through a function-typed binding: the slot holds the
             // pointer, so the terminator takes the local as its callee.
             Expr::FnCall(slot, args, ret, _) => {
                 let (local, _) = self.ensure_var(*slot, TyKind::Fn(0));
-                let arg_ops = self.lower_args(args);
+                let (arg_ops, arg_drops) = self.lower_args(args);
                 let dest = self.fresh_temp(*ret);
                 let next_bb = self.new_block();
                 self.set_terminator(TerminatorKind::Call {
@@ -1222,11 +1249,14 @@ impl<'a> PureMirBuilder<'a> {
                     target: Some(next_bb),
                 });
                 self.cur_bb = next_bb;
+                for temp in arg_drops {
+                    self.push_stmt(StatementKind::Drop(Place::from_local(temp)));
+                }
                 Rvalue::Use(Operand::Copy(Place::from_local(dest)))
             }
             Expr::FnExprCall(callee, args, ret, _) => {
                 let callee_op = self.lower_operand(callee);
-                let arg_ops = self.lower_args(args);
+                let (arg_ops, arg_drops) = self.lower_args(args);
                 let dest = self.fresh_temp(*ret);
                 let next_bb = self.new_block();
                 self.set_terminator(TerminatorKind::Call {
@@ -1236,6 +1266,9 @@ impl<'a> PureMirBuilder<'a> {
                     target: Some(next_bb),
                 });
                 self.cur_bb = next_bb;
+                for temp in arg_drops {
+                    self.push_stmt(StatementKind::Drop(Place::from_local(temp)));
+                }
                 Rvalue::Use(Operand::Copy(Place::from_local(dest)))
             }
             other => {
@@ -1274,11 +1307,22 @@ impl<'a> PureMirBuilder<'a> {
                 let (local, _) = self.ensure_var(*id, *ty);
                 Operand::Copy(Place::from_local(local))
             }
+            // A field or dereference read borrows the place itself. Reading
+            // through a materialized shallow copy would hand one buffer to a
+            // release helper twice (once for the copy, once for the owner).
+            Expr::Field(..) | Expr::DerefPtr(..) => Operand::Copy(self.lower_place(expr)),
             other => {
                 let ty = expr_type(other, self.ctx);
-                let rvalue = self.lower_expr(other);
-                let temp = self.assign_to_temp(ty, rvalue);
-                Operand::Copy(Place::from_local(temp))
+                match self.lower_expr(other) {
+                    // The lowerer already parked a call or intrinsic result
+                    // in a temporary; using it directly avoids a second
+                    // shallow copy of an owned buffer.
+                    Rvalue::Use(operand) => operand,
+                    rvalue => {
+                        let temp = self.assign_to_temp(ty, rvalue);
+                        Operand::Copy(Place::from_local(temp))
+                    }
+                }
             }
         }
     }
@@ -1305,13 +1349,25 @@ impl<'a> PureMirBuilder<'a> {
             | Expr::DerefPtr(..) => self.lower_operand(expr),
             other => {
                 let ty = expr_type(other, self.ctx);
-                let rvalue = self.lower_expr(other);
-                let temp = self.assign_to_temp(ty, rvalue);
-                let place = Place::from_local(temp);
-                if ty.owned() && !self.is_copy_ty(ty) {
-                    Operand::Move(place)
-                } else {
-                    Operand::Copy(place)
+                match self.lower_expr(other) {
+                    // A call or intrinsic result lives in its own temporary.
+                    // A moving consumer takes that temporary's ownership
+                    // instead of cloning a second copy of the buffer.
+                    Rvalue::Use(Operand::Copy(place))
+                        if ty.owned() && !self.is_copy_ty(ty) =>
+                    {
+                        Operand::Move(place)
+                    }
+                    Rvalue::Use(operand) => operand,
+                    rvalue => {
+                        let temp = self.assign_to_temp(ty, rvalue);
+                        let place = Place::from_local(temp);
+                        if ty.owned() && !self.is_copy_ty(ty) {
+                            Operand::Move(place)
+                        } else {
+                            Operand::Copy(place)
+                        }
+                    }
                 }
             }
         }
@@ -1347,6 +1403,18 @@ impl<'a> PureMirBuilder<'a> {
             return (self.lower_operand(expr), None);
         }
         let rvalue = self.lower_expr(expr);
+        // A call or intrinsic result already sits in its own temporary, which
+        // is the owner the consumer must release; a second shallow copy would
+        // just duplicate the header.
+        if let Rvalue::Use(operand @ Operand::Copy(place)) = &rvalue
+            && place.projection.is_empty()
+            && self
+                .locals
+                .get(place.local.index())
+                .is_some_and(|decl| decl.kind == LocalKind::Temp)
+        {
+            return (operand.clone(), Some(place.local));
+        }
         let temp = self.assign_to_temp(ty, rvalue);
         (Operand::Copy(Place::from_local(temp)), Some(temp))
     }
@@ -1482,18 +1550,43 @@ impl<'a> PureMirBuilder<'a> {
         }
     }
 
-    fn lower_args(&mut self, args: &[Argument]) -> Vec<Operand> {
-        args.iter()
-            .map(|arg| match arg {
+    /// A spawned closure that also reads parent storage (a borrow capture)
+    /// needs the parent to pass a view through the thread context. The pure
+    /// backend packages only the moved value captures, so fail closed instead
+    /// of emitting a trampoline with the wrong arity.
+    fn reject_borrowed_spawn(&mut self, callable: &Expr) {
+        let Expr::ClosureLit(cid) = callable else {
+            return;
+        };
+        if self.ctx.closure_borrow_captures(*cid).is_empty() {
+            return;
+        }
+        let message = "spawn of a closure that borrows parent storage is not supported by the pure MIR pipeline yet";
+        if !self.unsupported.iter().any(|existing| existing == message) {
+            self.unsupported.push(message.to_owned());
+        }
+    }
+
+    fn lower_args(&mut self, args: &[Argument]) -> (Vec<Operand>, Vec<LocalId>) {
+        let mut ops = Vec::with_capacity(args.len());
+        let mut drops = Vec::new();
+        for arg in args {
+            match arg {
                 // A by-value argument is a moving position: the callee owns it.
-                Argument::Value(e) => self.lower_operand_moving(e),
+                Argument::Value(e) => ops.push(self.lower_operand_moving(e)),
                 Argument::View(e) => {
-                    let op = self.lower_operand(e);
+                    let (op, owned_temp) = self.lower_readonly_operand(e);
+                    // A view of a materialized owned temporary keeps that
+                    // temporary alive only for the call; the caller releases
+                    // it once the call returns.
+                    if let Some(temp) = owned_temp {
+                        drops.push(temp);
+                    }
                     if expr_type(e, self.ctx) == TyKind::StrView {
-                        op
+                        ops.push(op);
                     } else {
                         let temp = self.emit_intrinsic_call("string_view", vec![op], TyKind::StrView);
-                        Operand::Copy(Place::from_local(temp))
+                        ops.push(Operand::Copy(Place::from_local(temp)));
                     }
                 }
                 Argument::Borrow(slot, take_address) => {
@@ -1504,7 +1597,7 @@ impl<'a> PureMirBuilder<'a> {
                         .unwrap_or(TyKind::Int(IntTy::I64));
                     let (local, _) = self.ensure_var(*slot, ty);
                     let place = Place::from_local(local);
-                    if *take_address {
+                    let op = if *take_address {
                         let ptr_ty = self
                             .ctx
                             .find_pointee(ty)
@@ -1520,17 +1613,19 @@ impl<'a> PureMirBuilder<'a> {
                         Operand::Copy(Place::from_local(temp))
                     } else {
                         Operand::Copy(place)
-                    }
+                    };
+                    ops.push(op);
                 }
                 Argument::FnPtr(id, sig) => {
                     self.record_fn_sig(*sig);
-                    Operand::Constant(Constant::new(
+                    ops.push(Operand::Constant(Constant::new(
                         TyKind::Fn(*sig),
                         ConstValue::FnDef(DefId(*id as u32)),
-                    ))
+                    )));
                 }
-            })
-            .collect()
+            }
+        }
+        (ops, drops)
     }
 
     fn lower_map_place(&mut self, place: &MapPlace) -> Operand {
@@ -1841,6 +1936,7 @@ impl<'a> PureMirBuilder<'a> {
                 (kind.mir_name(), ops)
             }
             Expr::Spawn(slots, callable, ..) => {
+                self.reject_borrowed_spawn(callable);
                 let mut ops: Vec<Operand> = slots
                     .iter()
                     .map(|s| self.lower_operand_moving(s))

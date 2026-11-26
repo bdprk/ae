@@ -417,6 +417,9 @@ fn emit_intrinsic(
             let dest_ty = types.infer_place_ty(body, destination);
             let dest_expr = emit_place(body, destination, types, dest_ty)?;
             let _ = writeln!(out, "    {dest_expr} = (ae_unit_t){{ 0 }};");
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -427,6 +430,9 @@ fn emit_intrinsic(
         "exit" => {
             let expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let _ = writeln!(out, "    ae_exit((int)({expr}));");
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             }
@@ -558,6 +564,9 @@ fn emit_intrinsic(
                     out,
                     "    {{ {c_elem} _tmp = {value}; ae_vec_push(&{dest_expr}, &_tmp); }}"
                 );
+            }
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
             }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
@@ -900,6 +909,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ int64_t _at = ae_str_find({a}, {b}); if (_at >= 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -950,6 +962,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ ae_f64_to_i64_result _parsed = ae_f64_to_i64_checked((double)({value}));\n      if (_parsed.status == 0) {{ {dest_expr} = {ok}; }}\n      else {{ const char *_message = _parsed.status == 1 ? \"f64 value is not finite\" : (_parsed.status == 2 ? \"f64 value is outside the i64 range\" : \"f64 value is not an exact integer\"); {dest_expr} = {err}; }} }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1000,6 +1015,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ ae_parse_i64_result _parsed = ae_parse_i64({text});\n      if (_parsed.status == 0) {{ {dest_expr} = {ok}; }}\n      else {{ const char *_message = _parsed.status == 1 ? \"empty or sign-only integer\" : (_parsed.status == 2 ? \"not a base-10 integer\" : \"integer out of i64 range\"); {dest_expr} = {err}; }} }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1092,6 +1110,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ {c_w} _opt = 0; if ({call}) {{ {dest_expr} = {some}; }} else {{ {dest_expr} = {none}; }} }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1248,6 +1269,12 @@ fn emit_intrinsic(
             let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             finish_value(out, body, types, destination, target, &format!("ae_chan_select({a}, {b})"))
         }
+        "now_s" => {
+            finish_value(out, body, types, destination, target, "ae_now_s()")
+        }
+        "now_ms" => {
+            finish_value(out, body, types, destination, target, "ae_now_ms()")
+        }
         "args" => {
             match types.infer_place_ty(body, destination) {
                 Some(TyKind::Vector(id)) if types.vector_elem(id) == Some(TyKind::String) => {
@@ -1283,7 +1310,10 @@ fn emit_intrinsic(
                         out,
                         "    {{ ae_read_result _read = ae_try_read_file_value({path});\n      if (_read.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
                     );
-                    if let Some(next_bb) = target {
+                    for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
                         let _ = writeln!(out, "    goto bb{};", next_bb.0);
                     } else {
                         out.push_str("    ae_trap(\"diverging call returned\");\n");
@@ -1311,7 +1341,10 @@ fn emit_intrinsic(
                         out,
                         "    {{ ae_read_result _read = ae_try_read_stdin_value();\n      if (_read.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
                     );
-                    if let Some(next_bb) = target {
+                    for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
                         let _ = writeln!(out, "    goto bb{};", next_bb.0);
                     } else {
                         out.push_str("    ae_trap(\"diverging call returned\");\n");
@@ -1329,13 +1362,14 @@ fn emit_intrinsic(
             let content = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             let dest_ty = types.infer_place_ty(body, destination);
             match dest_ty {
-                Some(TyKind::Int(_)) => finish_value(
+                Some(TyKind::Int(_)) => finish_value_releasing(
                     out,
                     body,
                     types,
                     destination,
                     target,
                     &format!("ae_write_file_value({path}, {content}, (size_t){line}, (size_t){column})"),
+                    &string_temp_releases(body, args),
                 ),
                 Some(TyKind::Enum(_, eid)) => {
                     let dest_expr = emit_place(body, destination, types, dest_ty)?;
@@ -1349,7 +1383,10 @@ fn emit_intrinsic(
                         out,
                         "    {{ ae_write_result _write = ae_try_write_file_value({path}, {content});\n      if (_write.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
                     );
-                    if let Some(next_bb) = target {
+                    for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
                         let _ = writeln!(out, "    goto bb{};", next_bb.0);
                     } else {
                         out.push_str("    ae_trap(\"diverging call returned\");\n");
@@ -1365,15 +1402,15 @@ fn emit_intrinsic(
         "path_join" => {
             let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
-            finish_value(out, body, types, destination, target, &format!("ae_path_join_value({a}, {b})"))
+            finish_value_releasing(out, body, types, destination, target, &format!("ae_path_join_value({a}, {b})"), &string_temp_releases(body, args))
         }
         "path_name" => {
             let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
-            finish_value(out, body, types, destination, target, &format!("ae_path_name_value({a})"))
+            finish_value_releasing(out, body, types, destination, target, &format!("ae_path_name_value({a})"), &string_temp_releases(body, args))
         }
         "path_parent" => {
             let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
-            finish_value(out, body, types, destination, target, &format!("ae_path_parent_value({a})"))
+            finish_value_releasing(out, body, types, destination, target, &format!("ae_path_parent_value({a})"), &string_temp_releases(body, args))
         }
         "path_exists" => {
             let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
@@ -1382,6 +1419,212 @@ fn emit_intrinsic(
         "path_is_dir" => {
             let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
             finish_value(out, body, types, destination, target, &format!("ae_path_is_dir_value({a})"))
+        }
+        "list_dir" => {
+            let path_expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("list_dir result is {other:?}, not a DirResult enum"),
+                    });
+                }
+            };
+            let layouts = body.enum_layouts.get(&eid).ok_or_else(|| {
+                CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("enum layout for id {eid} is not carried on the body"),
+                }
+            })?;
+            let ok_variant = layouts
+                .iter()
+                .position(|fields| matches!(fields.as_slice(), [TyKind::Vector(_)]))
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("list_dir result enum {eid} has no vector Ok variant"),
+                })?;
+            let err_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::String])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("list_dir result enum {eid} has no string Err variant"),
+                })?;
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let ok = format!(
+                "((ae_enum_{eid}){{ .tag = {ok_variant}, .u = {{ .v{ok_variant} = {{ .f0 = _dir.names }} }} }})"
+            );
+            let err = format!(
+                "((ae_enum_{eid}){{ .tag = {err_variant}, .u = {{ .v{err_variant} = {{ .f0 = _dir.error }} }} }})"
+            );
+            let _ = writeln!(
+                out,
+                "    {{ ae_dir_result _dir = ae_try_list_dir_value({path_expr});\n      if (_dir.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+            );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "file_info" => {
+            let path_expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("file_info result is {other:?}, not a FileResult enum"),
+                    });
+                }
+            };
+            let layouts = body.enum_layouts.get(&eid).ok_or_else(|| {
+                CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("enum layout for id {eid} is not carried on the body"),
+                }
+            })?;
+            let ok_variant = layouts
+                .iter()
+                .position(|fields| matches!(fields.as_slice(), [TyKind::Struct(_)]))
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("file_info result enum {eid} has no struct Ok variant"),
+                })?;
+            let sid = match layouts.get(ok_variant).and_then(|fields| fields.first()) {
+                Some(TyKind::Struct(sid)) => *sid,
+                _ => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("file_info Ok payload of enum {eid} is not a struct"),
+                    });
+                }
+            };
+            let err_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::String])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("file_info result enum {eid} has no string Err variant"),
+                })?;
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let ok = format!(
+                "((ae_enum_{eid}){{ .tag = {ok_variant}, .u = {{ .v{ok_variant} = {{ .f0 = ((ae_struct_{sid}){{ .f0 = _info.size, .f1 = _info.mtime, .f2 = _info.is_dir }}) }} }} }})"
+            );
+            let err = format!(
+                "((ae_enum_{eid}){{ .tag = {err_variant}, .u = {{ .v{err_variant} = {{ .f0 = _info.error }} }} }})"
+            );
+            let _ = writeln!(
+                out,
+                "    {{ ae_file_info_result _info = ae_try_file_info_value({path_expr});\n      if (_info.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+            );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "copy_file" | "rename_path" | "remove_file" | "remove_dir" | "create_dir"
+        | "append_file" | "set_cwd" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let call = match name {
+                "copy_file" => format!("ae_try_copy_file_value({a}, {b})"),
+                "rename_path" => format!("ae_try_rename_path_value({a}, {b})"),
+                "remove_file" => format!("ae_try_remove_file_value({a})"),
+                "remove_dir" => format!("ae_try_remove_dir_value({a})"),
+                "create_dir" => format!("ae_try_create_dir_value({a})"),
+                "append_file" => format!("ae_try_append_file_value({a}, {b})"),
+                _ => format!("ae_try_set_cwd_value({a})"),
+            };
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("{name} result is {other:?}, not a StatusResult enum"),
+                    });
+                }
+            };
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(
+                out,
+                "    {{ ae_status_result _status = {call};\n      if (_status.status == 0) {{ {dest_expr} = ((ae_enum_{eid}){{ .tag = 0 }}); }} else {{ {dest_expr} = ((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _status.error }} }} }}); }} }}"
+            );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "env" => {
+            let name_expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("env result is {other:?}, not a ReadResult enum"),
+                    });
+                }
+            };
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(
+                out,
+                "    {{ ae_read_result _read = ae_try_env_value({name_expr});\n      if (_read.status == 0) {{ {dest_expr} = ((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _read.text }} }} }}); }} else {{ {dest_expr} = ((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _read.error }} }} }}); }} }}"
+            );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "cwd" => {
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("cwd result is {other:?}, not a ReadResult enum"),
+                    });
+                }
+            };
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(
+                out,
+                "    {{ ae_read_result _read = ae_try_cwd_value();\n      if (_read.status == 0) {{ {dest_expr} = ((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _read.text }} }} }}); }} else {{ {dest_expr} = ((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _read.error }} }} }}); }} }}"
+            );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
         }
         "map_new" | "f64map_new" => {
             finish_value(out, body, types, destination, target, "ae_map_new()")
@@ -1480,6 +1723,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ {prefix} if (ae_map_lookup(&{map}, {key}, &_bits)) {{ {prepare}{dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1550,6 +1796,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ {c_ty} _tmp = {value}; {dest_expr} = ae_shared_new(&_tmp, sizeof({c_ty})); }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1563,6 +1812,9 @@ fn emit_intrinsic(
             let c_ty = c_type_name(dest_ty.unwrap_or(TyKind::Int(IntTy::I64)));
             let dest_expr = emit_place(body, destination, types, dest_ty)?;
             let _ = writeln!(out, "    {dest_expr} = (*(({c_ty} *)(({handle}).box)));");
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1726,6 +1978,9 @@ fn emit_intrinsic(
                 "      {dest_expr} = ae_thread_spawn_ctx({entry}, (void *)_ctx);\n      if (!{dest_expr}) ae_trap(\"out of memory\"); }}"
             ));
             let _ = writeln!(out, "{text}");
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1748,6 +2003,9 @@ fn emit_intrinsic(
                 out,
                 "    {{ ae_thread_slot *_slot = {handle};\n      if (!_slot) ae_trap(\"use of a moved thread handle\");\n      if (!ae_thread_join(_slot->native)) ae_trap(\"thread join failed\");\n      {dest_expr} = *(({ret_c} *)_slot->ctx);\n      free(_slot->ctx);\n      free(_slot); }}"
             );
+            for release in string_temp_releases(body, args) {
+                let _ = writeln!(out, "    {release};");
+            }
             if let Some(next_bb) = target {
                 let _ = writeln!(out, "    goto bb{};", next_bb.0);
             } else {
@@ -1940,6 +2198,49 @@ fn finish_value(
 /// declaration naming anything else still fails closed.
 fn runtime_extern(symbol: &str) -> bool {
     matches!(symbol, "ae_std_alloc" | "ae_std_free" | "ae_extern_probe")
+}
+
+/// String operands the lowering materialized as private temporaries are the
+/// sole owner of their buffer; a read-only intrinsic does not take them, so
+/// they are released right after the call. A zeroed (moved) slot is a no-op.
+fn string_temp_releases(body: &Body, args: &[Operand]) -> Vec<String> {
+    let mut releases = Vec::new();
+    for op in args {
+        if let Operand::Copy(place) = op
+            && place.projection.is_empty()
+            && let Some(decl) = body.local_decl(place.local)
+            && decl.kind == ae_mir::LocalKind::Temp
+            && matches!(decl.ty, TyKind::String | TyKind::StrView)
+        {
+            releases.push(format!("ae_str_release(&(_{}))", place.local.0));
+        }
+    }
+    releases
+}
+
+/// Like [`finish_value`], but releases the given temporaries after the
+/// result is stored and before the branch.
+fn finish_value_releasing(
+    out: &mut String,
+    body: &Body,
+    types: &ModuleTypes,
+    destination: &Place,
+    target: Option<ae_mir::BasicBlockId>,
+    value: &str,
+    releases: &[String],
+) -> Result<(), CodegenError> {
+    let dest_ty = types.infer_place_ty(body, destination);
+    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+    let _ = writeln!(out, "    {dest_expr} = {value};");
+    for release in releases {
+        let _ = writeln!(out, "    {release};");
+    }
+    if let Some(next_bb) = target {
+        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+    } else {
+        out.push_str("    ae_trap(\"diverging call returned\");\n");
+    }
+    Ok(())
 }
 
 fn format_assert_message(msg: &AssertMessage) -> String {
