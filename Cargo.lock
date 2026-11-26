@@ -32,6 +32,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-mir"
+version = "0.1.1"
+dependencies = [
+ "ae-span",
+ "ae-ty",
+]
+
+[[package]]
 name = "ae-resolve"
 version = "0.1.1"
 dependencies = [
