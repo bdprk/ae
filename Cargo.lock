@@ -48,6 +48,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-query"
+version = "0.1.1"
+dependencies = [
+ "ae-span",
+ "ae-syntax",
+]
+
+[[package]]
 name = "ae-resolve"
 version = "0.1.1"
 dependencies = [
