@@ -429,3 +429,5 @@
 - 2026-11-27 00:05 (+08:00): **P3.2 diagnostics: extern callees are named.** Body.externs carries declared symbols; the pure backend reports "extern 'ae_std_alloc' is not linked ... yet" instead of an unresolved DefId(0). Five fixtures move to a named gap; gate 97/161, suite 683/0 (2 ignored), clippy clean.
 
 - 2026-11-27 00:40 (+08:00): **P3.2 tooling: `ae emit-pure-c`.** The CLI exposes the pure pipeline end to end (lower -> optimize -> validate -> borrow-check -> C11) and prints a runnable translation unit; unsupported shapes stay named fail-closed. A CLI test compiles+runs the output and pins the vec/push rejection. Suite 684/0 (2 ignored), clippy clean.
+
+- 2026-11-27 01:10 (+08:00): **P3.2 differential coverage: pure C as the fuzzer's fifth mode.** diff_fuzz can run ae emit-pure-c alongside the four legacy modes; seeds outside the backend's supported surface skip (summary reports compared/skipped). --pure-subset restricts the grammar, making the mode real: 300/300 subset seeds agree across five modes (0 failures, 121.3s); default 60/60 seeds unchanged with the pure mode skipped. Trap text parity (source position) remains a pure-backend gap.

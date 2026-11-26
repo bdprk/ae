@@ -23,7 +23,12 @@ read-then-release shape left-to-right evaluation keeps legal; compiles each sour
 with every backend and optimization level — the MIR block-graph backend (the
 -O0 default, M2.3) and the structured tree emitter (`AE_CODEGEN=tree`),
 both at -O0, plus the optimized build; runs every binary; and asserts that
-all runs produce identical output. A runtime trap is agreement too (the
+all runs produce identical output. `--pure-subset` draws only the pure-MIR C
+backend's supported surface (arithmetic, branches, loops, structs, enums),
+and `ae emit-pure-c` joins as a fifth mode; a seed whose program uses a
+shape the pure backend has not implemented yet skips that comparison (the
+summary reports how many were compared and skipped). A runtime trap is
+agreement too (the
 generator can produce overflowing arithmetic; seed 1762): every mode must
 exit with the same code, print the same stdout up to the trap, and trap at
 the same position with the same message. The parser's own move/borrow/type
@@ -32,7 +37,7 @@ generator bug and fails the run), so each seed doubles as a regression test
 of compile-or-die determinism.
 
 Usage: python scripts/diff_fuzz.py [--seeds N] [--start SEED] [--jobs N]
-                                   [--save-corpus DIR]
+                                   [--save-corpus DIR] [--pure-subset]
 
 Seeds run through a worker pool (--jobs, default min(cpu, 8)); each worker
 owns its files and its own content cache, so parallel seeds never share
@@ -91,6 +96,11 @@ class Gen:
         # one per-program counter instead of a random suffix, so two
         # statements can never declare the same variable twice.
         self.name_seq = 0
+        # `--pure-subset` keeps the generated program inside the pure-MIR C
+        # backend's supported surface (arithmetic/control/structs/enums),
+        # so the fifth differential mode compares instead of skipping on an
+        # unsupported intrinsic.
+        self.pure_subset = False
 
     def rnd(self) -> int:
         self.state ^= (self.state << 13) & 0xFFFFFFFF
@@ -149,6 +159,10 @@ class Gen:
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
         kind = self.rnd() % 31
+        if self.pure_subset:
+            # Kinds 0/1/3/4/5 are arithmetic, branches, loops and prints;
+            # 8 is a two-field struct; 9 is a fully covered enum match.
+            kind = self.pick([0, 1, 3, 4, 5, 8, 9])
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -621,6 +635,18 @@ class Gen:
         # `main` cannot `return` in this language; its exit is implicit. The
         # struct Pt and its two scalar fields are fixed: field reads borrow.
         # The Op enum exercises match dispatch and payload bindings.
+        if self.pure_subset:
+            lines = [
+                "struct Pt { a: i64, b: i64 }",
+                "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
+                "fn main() {",
+            ]
+            vars = ["seed0"]
+            lines.append("    var seed0 = 7;")
+            body = self.statement(vars, 0, [], [])
+            lines.extend("    " + line for line in body)
+            lines.append("}")
+            return "\n".join(lines)
         lines = [
             "struct Pt { a: i64, b: i64 }",
             "struct Doc { name: string, note: string }",
@@ -741,6 +767,52 @@ def maybe_trim_cache(cache_dir: Path, state: dict) -> None:
         cache_dir.mkdir(parents=True, exist_ok=True)
 
 
+def compile_pure(source: str, workdir: Path, tag: str, timeout: int):
+    """Compile one seed through the pure-MIR C pipeline (`ae emit-pure-c`).
+
+    Returns the binary path when the program is inside the backend's
+    supported subset, or None when the pipeline fails closed with a named
+    unsupported-shape diagnostic (a tracked skip, not a divergence). A
+    successful emission that the host C compiler rejects is a real backend
+    bug and raises.
+    """
+    src = workdir / f"prog_{tag}_pure.ae"
+    src.write_text(source, encoding="utf-8")
+    emitted = subprocess.run(
+        [str(EXE), "emit-pure-c", str(src)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if emitted.returncode != 0:
+        detail = emitted.stderr
+        markers = (
+            "is not supported by the pure C backend",
+            "not linked by the pure C backend",
+            "cannot handle",
+            "unsupported type:",
+            "unsupported feature:",
+        )
+        if any(marker in detail for marker in markers):
+            return None
+        raise RuntimeError(f"emit-pure-c ({tag}) failed: {detail}")
+    c_path = workdir / f"prog_{tag}_pure.c"
+    c_path.write_text(emitted.stdout, encoding="utf-8")
+    exe = workdir / f"prog_{tag}_pure"
+    if os.name == "nt":
+        exe = exe.with_suffix(".exe")
+    cc = os.environ.get("AE_CC") or "gcc"
+    build = subprocess.run(
+        [cc, "-std=c11", "-O0", str(c_path), "-o", str(exe), "-lm"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(f"pure C compile ({tag}) failed: {build.stderr}")
+    return exe
+
+
 def run_seed(seed: int, workdir: Path, cache_dir: Path, compile_timeout: int) -> dict:
     """One seed's four-way differential, fully isolated.
 
@@ -763,10 +835,14 @@ def run_seed(seed: int, workdir: Path, cache_dir: Path, compile_timeout: int) ->
     return result
 
 
+PURE_SUBSET = False
+
+
 def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: int) -> dict:
     started = time.perf_counter()
     result = {"seed": seed, "ok": None, "detail": "", "lines": 0, "source": ""}
     gen = Gen(seed)
+    gen.pure_subset = PURE_SUBSET
     source = gen.program()
     result["source"] = source
     seed_dir = workdir / f"s{seed}"
@@ -786,6 +862,18 @@ def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: in
             timeout=30,
         )
         runs.append(("interp", interp_run))
+        # ADR-0238: the pure-MIR C backend joins as a fifth mode when the
+        # program stays inside its supported subset and the legacy modes do
+        # not trap (the pure runtime's trap text has no source position yet).
+        legacy_codes = {run.returncode for _, run in runs}
+        result["pure"] = "skip"
+        if legacy_codes == {0}:
+            pure_bin = compile_pure(source, seed_dir, "d", compile_timeout)
+            if pure_bin is not None:
+                runs.append(("pure", subprocess.run([str(pure_bin)], capture_output=True, text=True, timeout=30)))
+                result["pure"] = "ran"
+        else:
+            result["pure"] = "trap-skip"
         # A runtime trap is part of the language's observable behavior, so
         # agreement includes traps (seed 1762's overflow): every mode must
         # exit with the same code, print the same stdout up to the trap, and
@@ -849,12 +937,16 @@ def main() -> int:
                         help="seconds before one compile is abandoned (and fails that seed)")
     parser.add_argument("--save-corpus", metavar="DIR",
                         help="write every generated program as DIR/seed_N.ae")
+    parser.add_argument("--pure-subset", action="store_true",
+                        help="generate only the pure-MIR C backend's supported surface")
     parser.add_argument("--duration", type=float, default=0,
                         help="run for this many hours instead of --seeds seeds "
                              "(the M2.13 24h acceptance mode); the seed stream "
                              "continues past any count and the summary reports "
                              "the seeds actually run")
     args = parser.parse_args()
+    global PURE_SUBSET
+    PURE_SUBSET = args.pure_subset
     if args.stop_before is not None and args.stop_before <= args.start:
         parser.error("--stop-before must exceed --start")
 
@@ -938,6 +1030,9 @@ def main() -> int:
     rate = len(results) / elapsed if elapsed > 0 else 0.0
     suffix = f", {len(env_seeds)} environmental" if env_seeds else ""
     print(f"\n{len(results)} seeds, {len(failed_seeds)} failures{suffix}, {elapsed:.1f}s ({rate:.2f} seeds/s, {jobs} jobs)")
+    pure_ran = sum(1 for r in results.values() if r.get("pure") == "ran")
+    pure_skipped = sum(1 for r in results.values() if r.get("pure") in ("skip", "trap-skip"))
+    print(f"pure-MIR C fifth mode: {pure_ran} compared, {pure_skipped} skipped (unsupported subset or trap text)")
     if failed_seeds:
         print(f"failed seeds: {failed_seeds}")
     if env_seeds:
