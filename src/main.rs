@@ -396,6 +396,10 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if !COMMANDS.contains(&cmd.as_str()) {
         return Err(Failure::usage(format!("unknown command: {cmd}\n{USAGE}")));
     }
+    let mut args = args;
+    if matches!(cmd.as_str(), "check" | "build" | "run" | "test") {
+        args.retain(|arg| arg.to_str() != Some("--offline"));
+    }
     if cmd == "lsp" {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
@@ -602,7 +606,6 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
             }
         }
     }
-    let mut args = args;
     let first = args.get(1).and_then(|arg| arg.to_str());
     let implicit_project = match cmd.as_str() {
         "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" => args.len() == 1,
