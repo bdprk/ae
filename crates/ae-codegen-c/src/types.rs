@@ -48,9 +48,11 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         // A function value is a typed function pointer (typedef emitted per
         // signature), never an opaque `void *`.
         TyKind::Fn(sig) => format!("ae_fn_t{sig}"),
-        TyKind::Vector(_)
-        | TyKind::VectorRef(_)
-        | TyKind::MapOf(_)
+        TyKind::Vector(_) => "ae_vec".to_owned(),
+        // A borrowed vector is a pointer to the owner's header; indexing and
+        // length reads go through the pointer.
+        TyKind::VectorRef(_) => "ae_vec *".to_owned(),
+        TyKind::MapOf(_)
         | TyKind::Slice(_)
         | TyKind::SliceMut(_)
         | TyKind::StructRef(_)
@@ -93,6 +95,8 @@ pub(crate) struct ModuleTypes {
     pub fn_sigs: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
     /// Struct id -> (user drop function, its return type, live-flag member).
     pub drop_fns: BTreeMap<usize, (DefId, TyKind, String)>,
+    /// Vector element interner id -> element type, carried on each body.
+    pub vector_elems: BTreeMap<usize, TyKind>,
 }
 
 impl ModuleTypes {
@@ -112,6 +116,9 @@ impl ModuleTypes {
             }
             for (sid, drop) in &body.drop_fns {
                 types.drop_fns.entry(*sid).or_insert_with(|| drop.clone());
+            }
+            for (elem_id, elem_ty) in &body.vector_elems {
+                types.vector_elems.entry(*elem_id).or_insert(*elem_ty);
             }
         }
 
@@ -317,6 +324,48 @@ impl ModuleTypes {
         }
     }
 
+    /// The element type of a vector interner id, when the body carried it.
+    pub fn vector_elem(&self, id: usize) -> Option<TyKind> {
+        self.vector_elems.get(&id).copied()
+    }
+
+    /// The C expression naming a per-element drop thunk (`NULL` for a Copy
+    /// element kind). The thunks release the value in place so the vector can
+    /// drop every element it owns.
+    pub fn elem_drop_expr(&self, ty: TyKind) -> String {
+        match ty {
+            TyKind::String => "ae_str_release_elem".to_owned(),
+            TyKind::Struct(id) if self.structs.contains_key(&id) => {
+                format!("ae_rel_struct_elem_{id}")
+            }
+            TyKind::Enum(_, id) if self.enums.contains_key(&id) => {
+                format!("ae_rel_enum_elem_{id}")
+            }
+            TyKind::Vector(_) => "ae_vec_release_elem".to_owned(),
+            _ => "NULL".to_owned(),
+        }
+    }
+
+    /// Element kinds whose storage the vector runtime can release. Containers
+    /// that need their own model (maps) and inline arrays fail closed until
+    /// their stage lands.
+    pub fn elem_supported(&self, ty: TyKind) -> bool {
+        !matches!(
+            ty,
+            TyKind::MapOf(_)
+                | TyKind::ArrayOf(_, _)
+                | TyKind::Thread(_)
+                | TyKind::Guard
+                | TyKind::TaskScope
+                | TyKind::Shared(_)
+                | TyKind::Mutex
+                | TyKind::Chan
+                | TyKind::Exec
+                | TyKind::Pool
+                | TyKind::Atomic
+        )
+    }
+
     pub fn infer_operand_ty(&self, body: &Body, op: &Operand) -> Option<TyKind> {
         match op {
             Operand::Copy(place) | Operand::Move(place) => self.infer_place_ty(body, place),
@@ -478,12 +527,24 @@ impl ModuleTypes {
             TypeDefKey::Struct(id) => {
                 let fields = self.structs.get(&id).map(Vec::as_slice).unwrap_or(&[]);
                 self.emit_record_helpers(out, "struct", id, fields, def_map);
+                // Element thunk: lets a vector of this struct release one
+                // element in place through the same helper.
+                let _ = writeln!(
+                    out,
+                    "static inline void ae_rel_struct_elem_{id}(void *p) {{ ae_rel_struct_{id}((ae_struct_{id} *)p); }}"
+                );
             }
             TypeDefKey::Closure(id) => {
                 let fields = self.closures.get(&id).map(Vec::as_slice).unwrap_or(&[]);
                 self.emit_record_helpers(out, "closure", id, fields, def_map);
             }
-            TypeDefKey::Enum(id) => self.emit_enum_helpers(out, id),
+            TypeDefKey::Enum(id) => {
+                self.emit_enum_helpers(out, id);
+                let _ = writeln!(
+                    out,
+                    "static inline void ae_rel_enum_elem_{id}(void *p) {{ ae_rel_enum_{id}((ae_enum_{id} *)p); }}"
+                );
+            }
             // Arrays are Copy-shaped in the pure backend for now; owned
             // element arrays arrive with the container stage.
             TypeDefKey::Array(_, _) | TypeDefKey::FnSig(_) => {}
@@ -570,10 +631,13 @@ impl ModuleTypes {
             TyKind::Enum(_, id) if self.enums.contains_key(&id) => {
                 let _ = writeln!(out, "    ae_rel_enum_{id}(&{accessor});");
             }
-            // Owned containers land with the vector/map stage; a field that
-            // is still unregistered is a non-owning scalar shape.
-            TyKind::Vector(_) | TyKind::MapOf(_) => {
-                let _ = writeln!(out, "    /* {accessor}: container release pending */");
+            TyKind::Vector(_) => {
+                let _ = writeln!(out, "    ae_vec_release(&{accessor});");
+            }
+            // Maps land with their own stage; a field that is still
+            // unregistered is a non-owning scalar shape.
+            TyKind::MapOf(_) => {
+                let _ = writeln!(out, "    /* {accessor}: map release pending */");
             }
             _ => {}
         }

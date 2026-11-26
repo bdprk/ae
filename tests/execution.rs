@@ -11424,9 +11424,14 @@ fn emit_pure_c_outputs_runnable_c_and_fails_closed() {
     assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "42\n");
 
     // Shapes the pipeline does not support yet fail closed with a named
-    // diagnostic instead of emitting malformed C.
+    // diagnostic instead of emitting malformed C. Externs need the backend's
+    // own runtime unit (ADR-0238 stage 3), so they are still rejected.
     let unsupported = dir.join("unsupported.ae");
-    fs::write(&unsupported, "fn main() { var v = vec[1]; push(v, 2); }").unwrap();
+    fs::write(
+        &unsupported,
+        "extern \"C\" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;\nfn main() { unsafe { let p = ae_std_alloc(8, 1, 1); } }\n",
+    )
+    .unwrap();
     let rejected = Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("emit-pure-c")
         .arg(&unsupported)
@@ -11436,6 +11441,7 @@ fn emit_pure_c_outputs_runnable_c_and_fails_closed() {
     let message = String::from_utf8_lossy(&rejected.stderr);
     assert!(
         message.contains("is not supported by the pure C backend")
+            || message.contains("is not linked by the pure C backend")
             || message.contains("cannot handle"),
         "{message}"
     );
@@ -11512,6 +11518,95 @@ fn main() {
     // Every allocation above is released exactly once. Linux CI runs the
     // same binary under ASan+UBSan; MinGW has no sanitizers, so the plain
     // run is the Windows evidence.
+    #[cfg(target_os = "linux")]
+    {
+        let asan_path = dir.join("program_asan");
+        let build = Command::new(&cc)
+            .args([
+                "-std=c11",
+                "-O0",
+                "-g",
+                "-fsanitize=address,undefined",
+                &c_path.to_string_lossy(),
+                "-o",
+                &asan_path.to_string_lossy(),
+                "-lm",
+            ])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let run = Command::new(&asan_path).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{stderr}");
+        assert!(
+            !stderr.contains("LeakSanitizer") && !stderr.contains("AddressSanitizer"),
+            "{stderr}"
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+// Appended test: vectors (ADR-0238 stage 2) grow, store, iterate, nest and
+// release their element storage.
+#[test]
+fn emit_pure_c_owns_and_releases_vectors() {
+    let dir = unique_temp_dir("emit_pure_c_vectors");
+    let source = dir.join("program.ae");
+    fs::write(
+        &source,
+        r#"fn main() {
+    var v = vec[1, 2];
+    push(v, 3);
+    print(len(v));
+    print(v[0]);
+    v[0] = 9;
+    print(v[0]);
+    pop(v);
+    print(len(v));
+
+    var words = vec["a", "b"];
+    push(words, "c");
+    for w in words {
+        print(w);
+    }
+
+    var rows = vec[vec[1, 2], vec[3]];
+    let p = vec[4, 4];
+    push(rows, p);
+    print(len(rows));
+    print(len(rows[2]));
+}
+"#,
+    )
+    .unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(text.contains("typedef struct {\n    void *data;\n    int64_t len;\n    int64_t cap;\n    int64_t elem_size;\n    void (*drop)(void *);\n} ae_vec;"), "{text}");
+    assert!(text.contains("ae_vec_push("), "{text}");
+    assert!(text.contains("ae_vec_at("), "{text}");
+    assert!(text.contains("ae_vec_release(&"), "{text}");
+
+    let c_path = dir.join("program.c");
+    let exe_path = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    fs::write(&c_path, &emitted.stdout).unwrap();
+    let cc = std::env::var_os("AE_CC").unwrap_or_else(|| "gcc".into());
+    let build = Command::new(&cc)
+        .args(["-std=c11", "-O0", &c_path.to_string_lossy(), "-o", &exe_path.to_string_lossy(), "-lm"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe_path).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "3\n1\n9\n2\na\nb\nc\n3\n2\n"
+    );
+
     #[cfg(target_os = "linux")]
     {
         let asan_path = dir.join("program_asan");

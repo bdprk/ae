@@ -1,6 +1,6 @@
 # ADR-0238: Owned strings and containers in the pure MIR C backend
 
-- Status: Accepted — stage 1 (owned strings) implemented 2026-11-27; stage 2 (vectors) pending
+- Status: Accepted — stage 1 (owned strings) and stage 2 (vectors) implemented; stage 3 (extern runtime unit) pending
 - Date: 2026-11-26
 - Associated Milestone: P3.2 (pure MIR C backend parity), P4.1 (stdlib containers)
 
@@ -117,6 +117,35 @@ fixtures with byte-identical stdout and zero tolerated mismatches. An
 ASan+UBSan sweep over every one of the 116 emit-capable fixtures in WSL
 passes 115 with no leaks or invalid accesses (`divide_by_zero` traps by
 design). Workspace suite 685 passed / 0 failed (2 ignored), clippy clean.
+
+## Stage 2 evidence (2026-11-27)
+
+Vectors landed as the next coherent slice:
+
+- `Body.vector_elems` carries each interner id's element type; the C type of a
+  vector is `ae_vec` and of a borrowed vector `ae_vec *`.
+- `vec_new`/`strvec_new`/`f64vec_new` build the header in the destination and
+  push every literal operand through a block-scoped temp (a compound literal
+  `(T){value}` would initialize the first member, not copy a struct value).
+  `vec_push`/`vec_pop`/`vec_store`/`vec_index`/`vec_index_of` and `Rvalue::Len`
+  cover growth, bounds-checked reads, overwrite (releasing the old element)
+  and length; `bytes(s)` fills an i64 vector.
+- Per-element drop thunks: `ae_str_release_elem`, `ae_vec_release_elem`, and
+  generated `ae_rel_struct_elem_{id}`/`ae_rel_enum_elem_{id}`. A vector's
+  `Drop`/move-take releases or empties its header; a struct field of vector
+  type releases through the struct helper.
+- Element reads are views where ownership must stay with the vector: a string
+  element is an `ae_str_view`, a struct element is a pointer for field chains
+  (the frontend rejects binding an owned aggregate element), a nested vector
+  is a header copy used by read-only consumers. A field-vector overwrite
+  releases the old field before storing the new value (the legacy contract),
+  skipping only a literal self-assignment.
+
+Evidence: end-to-end gate 113 → **126 of 161** with zero output mismatches;
+ASan+UBSan sweep: 128 of 130 emit-capable fixtures clean, the two intended
+traps (`divide_by_zero`, `vector_out_of_bounds`) abort by design. Workspace
+suite **686 passed / 0 failed** (2 ignored), clippy clean, calibration gate
+unchanged.
 
 ## Consequences
 

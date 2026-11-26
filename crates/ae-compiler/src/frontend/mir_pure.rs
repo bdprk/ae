@@ -402,6 +402,7 @@ impl<'a> PureMirBuilder<'a> {
         // standalone backend can type a dereference and an indirect call.
         let mut pointees = BTreeMap::new();
         let mut fn_sigs = BTreeMap::new();
+        let mut vector_elems = BTreeMap::new();
         let mut visited_structs = BTreeSet::new();
         for decl in &self.locals {
             collect_pointees(
@@ -419,6 +420,14 @@ impl<'a> PureMirBuilder<'a> {
                 self.ctx,
                 &mut BTreeSet::new(),
                 &mut fn_sigs,
+            );
+            collect_vector_elems(
+                decl.ty,
+                self.structs,
+                self.enum_layouts,
+                self.ctx,
+                &mut BTreeSet::new(),
+                &mut vector_elems,
             );
         }
         for (sig, signature) in &self.fn_sigs_seen {
@@ -438,6 +447,7 @@ impl<'a> PureMirBuilder<'a> {
             drop_fns: self.drop_fns.clone(),
             copy_structs: self.copy_structs.clone(),
             copy_enums: self.copy_enums.clone(),
+            vector_elems,
             span: None,
         }
     }
@@ -481,10 +491,22 @@ impl<'a> PureMirBuilder<'a> {
                 let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
             }
-            Statement::FieldStore(id, path, _fty, value, base_ty) => {
+            Statement::FieldStore(id, path, fty, value, base_ty) => {
                 let (local, _) = self.ensure_var(*id, *base_ty);
                 let place = self.build_field_path_place(local, *base_ty, path);
                 let val_op = self.lower_operand_moving(value);
+                // Overwriting an owned field releases the old value first
+                // (the legacy field-store contract). The right side has
+                // already been materialized, so the release cannot read it;
+                // a literal self-assignment is the one alias that would
+                // dangle, and it skips the release instead.
+                let self_assign = matches!(
+                    &val_op,
+                    Operand::Copy(p) if p.local == place.local && p.projection == place.projection
+                );
+                if fty.owned() && !self_assign {
+                    self.push_stmt(StatementKind::Drop(place.clone()));
+                }
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
             }
             Statement::BindPayload(bid, subject, path, pty) => {
@@ -576,7 +598,7 @@ impl<'a> PureMirBuilder<'a> {
             Statement::StrVecPush(id, value, ..) => {
                 let vec_ty = vector_ty(self.ctx, Type::String, false);
                 let (local, _) = self.ensure_var(*id, vec_ty);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_push",
                     vec![Operand::Copy(Place::from_local(local)), val_op],
@@ -586,7 +608,7 @@ impl<'a> PureMirBuilder<'a> {
             Statement::GVecPush(id, value, elem_ty, ..) => {
                 let vec_ty = vector_ty(self.ctx, *elem_ty, false);
                 let (local, _) = self.ensure_var(*id, vec_ty);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_push",
                     vec![Operand::Copy(Place::from_local(local)), val_op],
@@ -615,7 +637,7 @@ impl<'a> PureMirBuilder<'a> {
                 let vec_ty = vector_ty(self.ctx, Type::String, false);
                 let (local, _) = self.ensure_var(*id, vec_ty);
                 let idx_op = self.lower_operand(index);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_store",
                     vec![Operand::Copy(Place::from_local(local)), idx_op, val_op],
@@ -626,7 +648,7 @@ impl<'a> PureMirBuilder<'a> {
                 let vec_ty = vector_ty(self.ctx, *elem_ty, false);
                 let (local, _) = self.ensure_var(*id, vec_ty);
                 let idx_op = self.lower_operand(index);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_store",
                     vec![Operand::Copy(Place::from_local(local)), idx_op, val_op],
@@ -663,7 +685,7 @@ impl<'a> PureMirBuilder<'a> {
             }
             Statement::VecPushField(id, path, base_ty, value, elem_ty, ..) => {
                 let recv = self.field_vector_place(*id, path, *base_ty, *elem_ty);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call("vec_push", vec![Operand::Copy(recv), val_op], TyKind::Unit);
             }
             Statement::VecPopField(id, path, base_ty, elem_ty, ..) => {
@@ -673,7 +695,7 @@ impl<'a> PureMirBuilder<'a> {
             Statement::VecStoreField(id, path, base_ty, index, value, elem_ty, ..) => {
                 let recv = self.field_vector_place(*id, path, *base_ty, *elem_ty);
                 let idx_op = self.lower_operand(index);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_store",
                     vec![Operand::Copy(recv), idx_op, val_op],
@@ -1845,6 +1867,61 @@ fn collect_pointees(
                 for fields in variants {
                     for field in fields {
                         collect_pointees(*field, structs, enum_layouts, ctx, visited_structs, out);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk `ty` for vector types and record each element type
+/// (`elem id -> type`), so a standalone backend can size the storage, type an
+/// index, and choose a per-element drop thunk.
+fn collect_vector_elems(
+    ty: TyKind,
+    structs: &[StructDef],
+    enum_layouts: &BTreeMap<usize, Vec<Vec<TyKind>>>,
+    ctx: &CompileContext,
+    visited_structs: &mut BTreeSet<usize>,
+    out: &mut BTreeMap<usize, TyKind>,
+) {
+    match ty {
+        TyKind::Vector(id) | TyKind::VectorRef(id) => {
+            if id < ctx.vector_elem_count() {
+                let elem = ctx.vector_elem(id);
+                out.entry(id).or_insert(elem);
+                collect_vector_elems(elem, structs, enum_layouts, ctx, visited_structs, out);
+            }
+        }
+        TyKind::Ptr(id) | TyKind::PtrMut(id) => {
+            if let Some(pointee) = ctx.pointee_checked(id) {
+                collect_vector_elems(pointee, structs, enum_layouts, ctx, visited_structs, out);
+            }
+        }
+        TyKind::Slice(id) | TyKind::SliceMut(id) => {
+            collect_vector_elems(ctx.slice_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::ArrayOf(id, _) => {
+            collect_vector_elems(ctx.array_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::MapOf(id) => {
+            let (key, value) = ctx.map_types(id);
+            collect_vector_elems(key, structs, enum_layouts, ctx, visited_structs, out);
+            collect_vector_elems(value, structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::Struct(sid) | TyKind::StructRef(sid) | TyKind::StructMut(sid) => {
+            if visited_structs.insert(sid) {
+                for (_, field) in &structs[sid].fields {
+                    collect_vector_elems(*field, structs, enum_layouts, ctx, visited_structs, out);
+                }
+            }
+        }
+        TyKind::Enum(_, eid) => {
+            if let Some(variants) = enum_layouts.get(&eid) {
+                for fields in variants {
+                    for field in fields {
+                        collect_vector_elems(*field, structs, enum_layouts, ctx, visited_structs, out);
                     }
                 }
             }

@@ -255,6 +255,92 @@ static inline ae_str ae_str_from_f64(double value) {
     const size_t length = ae_f64_text(value, buffer, sizeof buffer);
     return ae_str_alloc_copy(buffer, (int64_t)length);
 }
+
+// Generic vectors (ADR-0238 stage 2): element bytes plus, for owned element
+// kinds, the thunk that releases one element in place. Copy elements pass
+// NULL and the vector only moves bytes and frees its buffer. Pop, overwrite
+// and scope release run each element's own release exactly once.
+typedef struct {
+    void *data;
+    int64_t len;
+    int64_t cap;
+    int64_t elem_size;
+    void (*drop)(void *);
+} ae_vec;
+
+static inline ae_vec ae_vec_new(int64_t elem_size, void (*drop)(void *)) {
+    ae_vec value;
+    value.data = NULL;
+    value.len = 0;
+    value.cap = 0;
+    value.elem_size = elem_size > 0 ? elem_size : 1;
+    value.drop = drop;
+    return value;
+}
+static inline void ae_vec_reserve(ae_vec *v, int64_t want) {
+    if (want <= v->cap) return;
+    int64_t cap = v->cap > 0 ? v->cap : 4;
+    while (cap < want) {
+        if (cap > INT64_MAX / 2) ae_trap("vector too large");
+        cap *= 2;
+    }
+    if ((size_t)cap > SIZE_MAX / (size_t)v->elem_size) ae_trap("vector too large");
+    void *data = realloc(v->data, (size_t)cap * (size_t)v->elem_size);
+    if (!data) ae_trap("out of memory");
+    v->data = data;
+    v->cap = cap;
+}
+static inline void *ae_vec_at(ae_vec *v, int64_t index) {
+    if (index < 0 || index >= v->len) ae_trap("array index out of bounds");
+    return (char *)v->data + (size_t)index * (size_t)v->elem_size;
+}
+static inline void ae_vec_push(ae_vec *v, const void *elem) {
+    ae_vec_reserve(v, v->len + 1);
+    memcpy((char *)v->data + (size_t)v->len * (size_t)v->elem_size, elem, (size_t)v->elem_size);
+    v->len += 1;
+}
+static inline void ae_vec_store(ae_vec *v, int64_t index, const void *elem) {
+    void *slot = ae_vec_at(v, index);
+    if (v->drop) v->drop(slot);
+    memcpy(slot, elem, (size_t)v->elem_size);
+}
+static inline void ae_vec_pop(ae_vec *v) {
+    if (v->len == 0) ae_trap("pop from empty vector");
+    v->len -= 1;
+    if (v->drop) v->drop((char *)v->data + (size_t)v->len * (size_t)v->elem_size);
+}
+static inline void ae_vec_release(ae_vec *v) {
+    if (v->drop) {
+        for (int64_t i = 0; i < v->len; i++) {
+            v->drop((char *)v->data + (size_t)i * (size_t)v->elem_size);
+        }
+    }
+    free(v->data);
+    v->data = NULL;
+    v->len = 0;
+    v->cap = 0;
+}
+static inline ae_vec ae_vec_take(ae_vec *v) {
+    ae_vec value = *v;
+    v->data = NULL;
+    v->len = 0;
+    v->cap = 0;
+    v->drop = NULL;
+    return value;
+}
+static inline int64_t ae_vec_len(const ae_vec *v) { return v->len; }
+static inline void ae_str_release_elem(void *p) { ae_str_release((ae_str *)p); }
+static inline void ae_vec_release_elem(void *p) { ae_vec_release((ae_vec *)p); }
+// `bytes(s)`: one i64 element per byte, so the values print as numbers.
+static inline ae_vec ae_vec_bytes(ae_str s) {
+    ae_vec v = ae_vec_new((int64_t)sizeof(int64_t), NULL);
+    ae_vec_reserve(&v, s.len);
+    for (int64_t i = 0; i < s.len; i++) {
+        int64_t byte = (int64_t)(unsigned char)s.ptr[i];
+        ae_vec_push(&v, &byte);
+    }
+    return v;
+}
 "#);
 
     let int_tys = [

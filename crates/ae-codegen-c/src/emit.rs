@@ -430,8 +430,8 @@ fn emit_intrinsic(
                     detail: "str_concat needs two string operands".to_owned(),
                 });
             }
-            let a = emit_concat_operand(body, &args[0], types, def_map)?;
-            let b = emit_concat_operand(body, &args[1], types, def_map)?;
+            let a = emit_owned_operand(body, &args[0], types, def_map)?;
+            let b = emit_owned_operand(body, &args[1], types, def_map)?;
             finish_value(out, body, types, destination, target, &format!("ae_str_concat({a}, {b})"))
         }
         "str_eq" | "str_ne" => {
@@ -513,6 +513,188 @@ fn emit_intrinsic(
             };
             finish_value(out, body, types, destination, target, &call)
         }
+        "vec_new" | "strvec_new" | "f64vec_new" => {
+            // A vector literal (or an empty constructor) builds its header
+            // in the destination and pushes every operand in source order.
+            let dest_ty = types.infer_place_ty(body, destination);
+            let id = match dest_ty {
+                Some(TyKind::Vector(id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("cannot build a vector into {other:?}"),
+                    });
+                }
+            };
+            let elem = types.vector_elem(id).ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("vector element type for id {id} is not carried on the body"),
+            })?;
+            if !types.elem_supported(elem) {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("vector elements of {elem:?} are not supported by the pure C backend yet"),
+                });
+            }
+            let c_elem = c_type_name(elem);
+            let drop = types.elem_drop_expr(elem);
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(out, "    {dest_expr} = ae_vec_new((int64_t)sizeof({c_elem}), {drop});");
+            for op in args {
+                let value = emit_owned_operand(body, op, types, def_map)?;
+                // A block-scoped temp carries the value: a compound literal
+                // `(T){ value }` would initialize the first member instead of
+                // copying a whole struct value.
+                let _ = writeln!(
+                    out,
+                    "    {{ {c_elem} _tmp = {value}; ae_vec_push(&{dest_expr}, &_tmp); }}"
+                );
+            }
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "vec_push" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "vec_push needs a vector and a value".to_owned(),
+                });
+            }
+            let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
+            let c_elem = c_type_name(elem);
+            let value = emit_owned_operand(body, &args[1], types, def_map)?;
+            let _ = writeln!(
+                out,
+                "    {{ {c_elem} _tmp = {value}; ae_vec_push({ptr}, &_tmp); }}"
+            );
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "vec_pop" => {
+            let (ptr, _elem) = vector_operand(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "vec_pop needs a vector".to_owned(),
+                })?,
+                types,
+                def_map,
+            )?;
+            let _ = writeln!(out, "    ae_vec_pop({ptr});");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "vec_store" => {
+            if args.len() != 3 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "vec_store needs a vector, an index and a value".to_owned(),
+                });
+            }
+            let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
+            let c_elem = c_type_name(elem);
+            let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let value = emit_owned_operand(body, &args[2], types, def_map)?;
+            let _ = writeln!(
+                out,
+                "    {{ {c_elem} _tmp = {value}; ae_vec_store({ptr}, (int64_t)({index}), &_tmp); }}"
+            );
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "vec_index" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "vec_index needs a vector and an index".to_owned(),
+                });
+            }
+            let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
+            let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let access = format!("ae_vec_at({ptr}, (int64_t)({index}))");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let value = match (dest_ty, elem) {
+                // An owned element read is a view: the vector keeps the
+                // storage and its release stays the only one.
+                (Some(TyKind::String | TyKind::StrView), TyKind::String) => {
+                    format!("ae_str_view(*(ae_str *){access})")
+                }
+                (Some(TyKind::StructRef(_) | TyKind::StructMut(_)), _) => {
+                    format!("((void *){access})")
+                }
+                (Some(TyKind::VectorRef(_)), _) => format!("((ae_vec *){access})"),
+                // A by-value read of a nested vector is a header copy used
+                // by a read-only consumer (len/slice); the outer vector keeps
+                // the storage and its release stays the only one.
+                (Some(TyKind::Vector(_)), TyKind::Vector(_)) => {
+                    format!("(*((ae_vec *){access}))")
+                }
+                // A by-value read of an element (a scalar, or a temporary aggregate used
+// for a field chain) is a copy; the frontend rejects binding an owned
+// aggregate element, so this copy never becomes a second owner.
+                (Some(dest), _) if dest == elem => {
+                    format!("(*(({} *){access}))", c_type_name(dest))
+                }
+                (other, _) => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!(
+                            "vector element read as {other:?} from {elem:?} elements is not supported yet"
+                        ),
+                    });
+                }
+            };
+            finish_value(out, body, types, destination, target, &value)
+        }
+        "vec_index_of" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "vec_index_of needs a vector and an index".to_owned(),
+                });
+            }
+            let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
+            let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let access = format!("ae_vec_at({ptr}, (int64_t)({index}))");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let value = match dest_ty {
+                Some(TyKind::VectorRef(_)) => format!("((ae_vec *){access})"),
+                Some(TyKind::StructRef(_) | TyKind::StructMut(_)) => format!("((void *){access})"),
+                Some(TyKind::Ptr(_) | TyKind::PtrMut(_)) => format!("((void *){access})"),
+                Some(TyKind::StrView) if elem == TyKind::String => {
+                    format!("ae_str_view(*(ae_str *){access})")
+                }
+                // `vec_index_of` also types a field-receiver read
+                // (`w.cells[i]`) as the element itself; that temporary is
+                // read (or field-projected) and never released.
+                Some(TyKind::Vector(_)) => format!("(*((ae_vec *){access}))"),
+                Some(dest) if dest == elem => {
+                    format!("(*(({} *){access}))", c_type_name(dest))
+                }
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("borrowed vector element as {other:?} is not supported yet"),
+                    });
+                }
+            };
+            finish_value(out, body, types, destination, target, &value)
+        }
+        "bytes" => {
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            match types.infer_place_ty(body, destination) {
+                Some(TyKind::Vector(id))
+                    if types.vector_elem(id) == Some(TyKind::Int(IntTy::I64)) =>
+                {
+                    finish_value(out, body, types, destination, target, &format!("ae_vec_bytes({value})"))
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("bytes() into {other:?} is not supported yet"),
+                }),
+            }
+        }
         other => Err(CodegenError::UnsupportedFeature {
             body_name: body.name.clone(),
             detail: format!("intrinsic '{other}' is not supported by the pure C backend yet"),
@@ -539,6 +721,9 @@ fn emit_drop(
         }
         Some(TyKind::Enum(_, id)) if types.enums.contains_key(&id) => {
             let _ = writeln!(out, "    ae_rel_enum_{id}(&{place_expr});");
+        }
+        Some(TyKind::Vector(_)) => {
+            let _ = writeln!(out, "    ae_vec_release(&{place_expr});");
         }
         Some(other) if other.owned() => {
             // Fail closed: a drop we cannot emit would silently leak.
@@ -677,11 +862,12 @@ fn emit_place(
     Ok(expr)
 }
 
-/// Renders one `str_concat` operand. A moved value transfers ownership into
-/// the concatenation; a borrowed read (field, element, view) is copied into a
-/// fresh owned buffer so the concatenation can consume it without touching
-/// the owner's bytes. A literal is static and needs neither.
-fn emit_concat_operand(
+/// Renders an operand that a consuming operation (concatenation, vector
+/// element store) takes ownership of. A moved value transfers ownership; a
+/// borrowed read (field, element, view) is copied into a fresh owned buffer
+/// for strings so the consumer never touches the owner's bytes; a literal is
+/// static and needs neither.
+fn emit_owned_operand(
     body: &Body,
     op: &Operand,
     types: &ModuleTypes,
@@ -703,6 +889,54 @@ fn emit_concat_operand(
         }
         _ => emit_operand(body, op, types, def_map),
     }
+}
+
+/// Resolves the vector behind an operand: the C expression that points at its
+/// header (`ae_vec *`) and its element type.
+fn vector_operand(
+    body: &Body,
+    op: &Operand,
+    types: &ModuleTypes,
+    _def_map: &BTreeMap<DefId, String>,
+) -> Result<(String, TyKind), CodegenError> {
+    let place = match op {
+        Operand::Copy(place) | Operand::Move(place) => place,
+        Operand::Constant(c) => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("vector operand cannot be a constant {:?}", c.value),
+            });
+        }
+    };
+    let vec_ty = types.infer_place_ty(body, place).ok_or_else(|| {
+        CodegenError::UnsupportedFeature {
+            body_name: body.name.clone(),
+            detail: "vector operand has no inferable type".to_owned(),
+        }
+    })?;
+    let (id, borrowed) = match vec_ty {
+        TyKind::Vector(id) => (id, false),
+        TyKind::VectorRef(id) => (id, true),
+        other => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("expected a vector operand, found {other:?}"),
+            });
+        }
+    };
+    let elem = types.vector_elem(id).ok_or_else(|| CodegenError::UnsupportedFeature {
+        body_name: body.name.clone(),
+        detail: format!("vector element type for id {id} is not carried on the body"),
+    })?;
+    if !types.elem_supported(elem) {
+        return Err(CodegenError::UnsupportedFeature {
+            body_name: body.name.clone(),
+            detail: format!("vector elements of {elem:?} are not supported by the pure C backend yet"),
+        });
+    }
+    let expr = emit_place(body, place, types, Some(vec_ty))?;
+    let ptr = if borrowed { expr } else { format!("(&{expr})") };
+    Ok((ptr, elem))
 }
 
 fn emit_operand(
@@ -729,6 +963,7 @@ fn emit_operand(
                 Some(TyKind::Enum(_, id)) if types.enums.contains_key(&id) => {
                     Ok(format!("ae_take_enum_{id}(&{expr})"))
                 }
+                Some(TyKind::Vector(_)) => Ok(format!("ae_vec_take(&{expr})")),
                 Some(other) if other.owned() => Err(CodegenError::UnsupportedFeature {
                     body_name: body.name.clone(),
                     detail: format!("moving a {other:?} value is not supported yet"),
@@ -955,6 +1190,14 @@ fn emit_rvalue(
                 Some(TyKind::String | TyKind::StrView) => {
                     let place_expr = emit_place(body, place, types, None)?;
                     Ok(format!("((uintptr_t)ae_str_len({place_expr}))"))
+                }
+                Some(TyKind::Vector(_)) => {
+                    let place_expr = emit_place(body, place, types, None)?;
+                    Ok(format!("((uintptr_t)ae_vec_len(&{place_expr}))"))
+                }
+                Some(TyKind::VectorRef(_)) => {
+                    let place_expr = emit_place(body, place, types, None)?;
+                    Ok(format!("((uintptr_t)ae_vec_len({place_expr}))"))
                 }
                 _ => Err(CodegenError::UnsupportedType {
                     body_name: body.name.clone(),
