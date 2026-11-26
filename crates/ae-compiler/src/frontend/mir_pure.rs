@@ -13,6 +13,7 @@ use ae_mir::{
     ProjectionElem, Rvalue, Statement as MirStatement, StatementKind, SwitchTargets, Terminator,
     TerminatorKind, UnOp, format_body, validate,
 };
+use ae_span::Span;
 use ae_ty::{DefId, FloatTy, IntTy, TyKind};
 
 use super::cfg::{CfgFunction, CfgTerminator, build_cfg};
@@ -220,6 +221,9 @@ struct PureMirBuilder<'a> {
     /// a non-empty list turns the whole lowering into an error (fail closed)
     /// instead of emitting ill-formed MIR.
     unsupported: Vec<String>,
+    /// Source position of the trap-capable expression being lowered; the
+    /// next statement or terminator consumes it.
+    pending_span: Option<Span>,
 }
 
 impl<'a> PureMirBuilder<'a> {
@@ -288,6 +292,7 @@ impl<'a> PureMirBuilder<'a> {
             copy_structs,
             copy_enums,
             unsupported: Vec::new(),
+            pending_span: None,
         }
     }
 
@@ -332,13 +337,29 @@ impl<'a> PureMirBuilder<'a> {
     }
 
     fn push_stmt(&mut self, kind: StatementKind) {
-        self.blocks[self.cur_bb.index()]
-            .statements
-            .push(MirStatement::new(kind));
+        let statement = match self.pending_span.take() {
+            Some(span) => MirStatement::with_span(kind, span),
+            None => MirStatement::new(kind),
+        };
+        self.blocks[self.cur_bb.index()].statements.push(statement);
     }
 
     fn set_terminator(&mut self, kind: TerminatorKind) {
-        self.blocks[self.cur_bb.index()].terminator = Some(Terminator::new(kind));
+        let terminator = match self.pending_span.take() {
+            Some(span) => Terminator::with_span(kind, span),
+            None => Terminator::new(kind),
+        };
+        self.blocks[self.cur_bb.index()].terminator = Some(terminator);
+    }
+
+    /// Source position for a trap site: the runtime prints `ae:line:column`.
+    fn span_at(&self, line: usize, column: usize) -> Span {
+        Span {
+            file: None,
+            range: 0..0,
+            line,
+            column,
+        }
     }
 
     fn assign_to_temp(&mut self, ty: TyKind, rvalue: Rvalue) -> LocalId {
@@ -665,13 +686,17 @@ impl<'a> PureMirBuilder<'a> {
                     TyKind::Unit,
                 );
             }
-            Statement::SliceStore(id, index, value, elem_ty, ..) => {
+            Statement::SliceStore(id, index, value, elem_ty, line, column) => {
                 let slice_ty = TyKind::SliceMut(self.ctx.find_slice_elem(*elem_ty).unwrap_or(0));
                 let (local, _) = self.ensure_var(*id, slice_ty);
-                let idx_local = self.lower_index_local(index);
+                let idx_op = self.lower_operand(index);
                 let val_op = self.lower_operand_moving(value);
-                let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
-                self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
+                self.pending_span = Some(self.span_at(*line, *column));
+                self.emit_intrinsic_call(
+                    "slice_store",
+                    vec![Operand::Copy(Place::from_local(local)), idx_op, val_op],
+                    TyKind::Unit,
+                );
             }
             Statement::Sort(id, is_str, ..) => {
                 let elem = if *is_str { Type::String } else { Type::Int(IntTy::I64) };
@@ -1051,11 +1076,12 @@ impl<'a> PureMirBuilder<'a> {
                 }
                 Rvalue::Use(Operand::Copy(Place::from_local(dest)))
             }
-            Expr::Binary(lhs, op, rhs, _, _, ty) => {
+            Expr::Binary(lhs, op, rhs, line, column, ty) => {
                 if *ty == TyKind::String && matches!(op, Kind::Plus) {
                     // Concatenation is a moving position for owned operands.
                     let lhs_op = self.lower_operand_moving(lhs);
                     let rhs_op = self.lower_operand_moving(rhs);
+                    self.pending_span = Some(self.span_at(*line, *column));
                     let res = self.emit_intrinsic_call(
                         "str_concat",
                         vec![lhs_op, rhs_op],
@@ -1066,6 +1092,7 @@ impl<'a> PureMirBuilder<'a> {
                 let lhs_op = self.lower_operand(lhs);
                 let rhs_op = self.lower_operand(rhs);
                 let bin_op = map_bin_op(op);
+                self.pending_span = Some(self.span_at(*line, *column));
                 Rvalue::BinaryOp(bin_op, lhs_op, rhs_op)
             }
             Expr::Neg(inner, ..) => {
@@ -1539,21 +1566,24 @@ impl<'a> PureMirBuilder<'a> {
                     .collect();
                 ("vec_new", ops)
             }
-            Expr::VecIndex(id, index, _, _, borrowed, elem) => {
+            Expr::VecIndex(id, index, line, column, borrowed, elem) => {
                 let vec_ty = vector_ty(self.ctx, *elem, *borrowed);
                 let (local, _) = self.ensure_var(*id, vec_ty);
                 let idx_op = self.lower_operand(index);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("vec_index", vec![Operand::Copy(Place::from_local(local)), idx_op])
             }
-            Expr::StrVecIndex(id, index, _, _, borrowed) => {
+            Expr::StrVecIndex(id, index, line, column, borrowed) => {
                 let vec_ty = vector_ty(self.ctx, Type::String, *borrowed);
                 let (local, _) = self.ensure_var(*id, vec_ty);
                 let idx_op = self.lower_operand(index);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("vec_index", vec![Operand::Copy(Place::from_local(local)), idx_op])
             }
-            Expr::VecIndexOf(base, index, ..) => {
+            Expr::VecIndexOf(base, index, line, column, _) => {
                 let b = self.lower_operand(base);
                 let i = self.lower_operand(index);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("vec_index_of", vec![b, i])
             }
             Expr::SliceOf(slot, source, elem, ..) => {
@@ -1564,13 +1594,14 @@ impl<'a> PureMirBuilder<'a> {
                 let (local, _) = self.ensure_var(*slot, ty);
                 ("slice_of", vec![Operand::Copy(Place::from_local(local))])
             }
-            Expr::SliceIndex(slot, index, _, _, elem) => {
+            Expr::SliceIndex(slot, index, line, column, elem) => {
                 let ty = TyKind::Slice(self.ctx.find_slice_elem(*elem).unwrap_or(0));
                 let (local, _) = self.ensure_var(*slot, ty);
                 let idx_op = self.lower_operand(index);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("slice_index", vec![Operand::Copy(Place::from_local(local)), idx_op])
             }
-            Expr::SliceRange(slot, source, elem, start, end, ..) => {
+            Expr::SliceRange(slot, source, elem, start, end, line, column) => {
                 let ty = match *source {
                     Type::Slice(_) => TyKind::Slice(self.ctx.find_slice_elem(*elem).unwrap_or(0)),
                     other => other,
@@ -1578,12 +1609,14 @@ impl<'a> PureMirBuilder<'a> {
                 let (local, _) = self.ensure_var(*slot, ty);
                 let s = self.lower_operand(start);
                 let e = self.lower_operand(end);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("slice_range", vec![Operand::Copy(Place::from_local(local)), s, e])
             }
-            Expr::SliceView(id, field, start, end, ..) => {
+            Expr::SliceView(id, field, start, end, line, column) => {
                 let base = self.string_base_operand(*id, field);
                 let s = self.lower_operand(start);
                 let e = self.lower_operand(end);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("slice_view", vec![base, s, e])
             }
             Expr::Tokens(id, field, sep, ..) => {
@@ -1615,10 +1648,11 @@ impl<'a> PureMirBuilder<'a> {
                 let n_op = self.lower_operand(n);
                 ("contains", vec![h_op, n_op])
             }
-            Expr::Slice(b, s, e, ..) => {
+            Expr::Slice(b, s, e, line, column) => {
                 let b_op = self.lower_operand(b);
                 let s_op = self.lower_operand(s);
                 let e_op = self.lower_operand(e);
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("slice", vec![b_op, s_op, e_op])
             }
             Expr::FloatToString(e, ..) => ("float_to_string", vec![self.lower_operand(e)]),

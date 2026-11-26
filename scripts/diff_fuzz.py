@@ -862,18 +862,16 @@ def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: in
             timeout=30,
         )
         runs.append(("interp", interp_run))
-        # ADR-0238: the pure-MIR C backend joins as a fifth mode when the
-        # program stays inside its supported subset and the legacy modes do
-        # not trap (the pure runtime's trap text has no source position yet).
-        legacy_codes = {run.returncode for _, run in runs}
+        # ADR-0238/0240: the pure-MIR C backend joins as a fifth mode when
+        # the program stays inside its supported subset. Traps join too: the
+        # pure runtime prints the same positioned ae:<line>:<col>: <msg> line
+        # and exits with the same status, so trap seeds compare all five
+        # modes instead of skipping the fifth.
         result["pure"] = "skip"
-        if legacy_codes == {0}:
-            pure_bin = compile_pure(source, seed_dir, "d", compile_timeout)
-            if pure_bin is not None:
-                runs.append(("pure", subprocess.run([str(pure_bin)], capture_output=True, text=True, timeout=30)))
-                result["pure"] = "ran"
-        else:
-            result["pure"] = "trap-skip"
+        pure_bin = compile_pure(source, seed_dir, "d", compile_timeout)
+        if pure_bin is not None:
+            runs.append(("pure", subprocess.run([str(pure_bin)], capture_output=True, text=True, timeout=30)))
+            result["pure"] = "ran"
         # A runtime trap is part of the language's observable behavior, so
         # agreement includes traps (seed 1762's overflow): every mode must
         # exit with the same code, print the same stdout up to the trap, and
@@ -1031,8 +1029,8 @@ def main() -> int:
     suffix = f", {len(env_seeds)} environmental" if env_seeds else ""
     print(f"\n{len(results)} seeds, {len(failed_seeds)} failures{suffix}, {elapsed:.1f}s ({rate:.2f} seeds/s, {jobs} jobs)")
     pure_ran = sum(1 for r in results.values() if r.get("pure") == "ran")
-    pure_skipped = sum(1 for r in results.values() if r.get("pure") in ("skip", "trap-skip"))
-    print(f"pure-MIR C fifth mode: {pure_ran} compared, {pure_skipped} skipped (unsupported subset or trap text)")
+    pure_skipped = sum(1 for r in results.values() if r.get("pure") == "skip")
+    print(f"pure-MIR C fifth mode: {pure_ran} compared, {pure_skipped} skipped (unsupported subset)")
     if failed_seeds:
         print(f"failed seeds: {failed_seeds}")
     if env_seeds:

@@ -2,7 +2,7 @@
 //! run every accepted `tests/run` fixture whose shapes it claims to support,
 //! and the program output must match the fixture's `.stdout` byte-for-byte.
 //!
-//! The floor (`passed >= 155` of 161 accepted fixtures at this slice) is a
+//! The floor (`passed >= 159` of 161 accepted fixtures at this slice) is a
 //! ratchet: it grows as the backend gains containers/strings/threads, and a
 //! drop below the floor is a regression. Emission failures are grouped by
 //! reason in the assertion message so the remaining gaps stay visible.
@@ -21,7 +21,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Fixtures the pipeline can emit, compile and run with matching output at
 /// this slice. Raise when coverage grows; never lower without a ledger entry.
-const PASS_FLOOR: usize = 155;
+const PASS_FLOOR: usize = 159;
 
 fn repo_path(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -100,22 +100,57 @@ fn pure_mir_c11_pipeline_matches_fixture_output() {
             continue;
         }
         let run = Command::new(&exe_path).output().expect("run generated binary");
-        if !run.status.success() {
-            let stderr = String::from_utf8_lossy(&run.stderr);
-            note("RUN", format!("{label}: {stderr}"));
-            continue;
-        }
         // Layout probes compare the pure backend's own layout with the
         // legacy `#[repr(C)]` tables; those agree only once P6.1's
         // `ae-layout` drives this backend, so they run but are not compared.
         let source = fs::read_to_string(path).unwrap_or_default();
-        if ["c_size_of", "c_align_of", "c_offset_of"].iter().any(|builtin| source.contains(builtin)) {
-            continue;
-        }
+        let layout_probe = ["c_size_of", "c_align_of", "c_offset_of"]
+            .iter()
+            .any(|builtin| source.contains(builtin));
         let expected = fs::read_to_string(path.with_extension("stdout")).unwrap_or_default();
         let expected = expected.replace("\r\n", "\n");
         let actual = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
-        if actual.trim_end() != expected.trim_end() {
+        let stdout_matches = actual.trim_end() == expected.trim_end();
+
+        if !run.status.success() {
+            // An expected trap: the language makes the exit status and the
+            // positioned stderr line observable, so both join the comparison.
+            let expected_err = fs::read_to_string(path.with_extension("stderr"))
+                .unwrap_or_default()
+                .replace("\r\n", "\n");
+            let expected_exit = fs::read_to_string(path.with_extension("exit"))
+                .unwrap_or_default()
+                .trim()
+                .parse::<i32>()
+                .unwrap_or(1);
+            let actual_err = String::from_utf8_lossy(&run.stderr).replace("\r\n", "\n");
+            let code = run.status.code().unwrap_or(-1);
+            if !expected_err.is_empty()
+                && code == expected_exit
+                && actual_err.trim_end() == expected_err.trim_end()
+                && stdout_matches
+            {
+                if layout_probe {
+                    continue;
+                }
+                passed += 1;
+            } else {
+                note(
+                    "RUN",
+                    format!(
+                        "{label}: exit {code} (want {expected_exit}), stderr {:?} (want {:?})",
+                        actual_err.trim_end(),
+                        expected_err.trim_end()
+                    ),
+                );
+            }
+            continue;
+        }
+
+        if layout_probe {
+            continue;
+        }
+        if !stdout_matches {
             // Output parity for a fixture that ran is a hard requirement.
             failures.push(format!(
                 "{label}: output mismatch\n--- expected ---\n{}\n--- actual ---\n{}",

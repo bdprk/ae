@@ -139,8 +139,8 @@ fn assert_c_traps(body: &Body, name: &str) {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ae trap:"),
-        "expected 'ae trap:' in stderr for {name}, got: {stderr}"
+        stderr.contains("ae:") && !stderr.contains("ae trap:"),
+        "expected a positioned runtime diagnostic for {name}, got: {stderr}"
     );
 }
 

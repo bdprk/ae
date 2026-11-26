@@ -19,12 +19,11 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stdlib.h>\n\
          #include <string.h>\n\n\
          typedef struct { uint8_t _unused; } ae_unit_t;\n\n\
-         // The trap sink is defined with the concurrency runtime (a child\n\
-         // thread records a failure instead of ending the process); the\n\
-         // wrapper keeps the declaration order free.\n\
-         static _Noreturn void ae_fail_sink(const char *msg);\n\
+         // The positioned failure sink is defined with the concurrency runtime\n\
+         // (a child thread records a failure instead of ending the process).\n\
+         static _Noreturn void ae_fail_at(const char *msg, size_t line, size_t column);\n\
          _Noreturn static inline void ae_trap(const char *msg) {\n\
-             ae_fail_sink(msg);\n\
+             ae_fail_at(msg, 0, 0);\n\
          }\n\n",
     );
 
@@ -150,11 +149,9 @@ _Noreturn static inline void ae_exit(int64_t code) { exit((int)code); }
 // a compile-time diagnostic rather than a link error.
 static inline int64_t ae_extern_probe(int64_t v) { return v * 2 + 1; }
 static inline int64_t *ae_std_alloc(int64_t size, int64_t line, int64_t column) {
-    (void)line;
-    (void)column;
-    if (size < 0) ae_trap("allocation failed");
+    if (size < 0) ae_fail_at("out of memory", (size_t)line, (size_t)column);
     void *out = malloc((size_t)size + 1u);
-    if (!out) ae_trap("allocation failed");
+    if (!out) ae_fail_at("out of memory", (size_t)line, (size_t)column);
     return (int64_t *)out;
 }
 static inline int64_t *ae_std_free(int64_t *block) {
@@ -246,19 +243,19 @@ static inline void ae_print_str(ae_str value) {
 static inline bool ae_utf8_continue_byte(unsigned char byte) { return (byte & 0xC0) == 0x80; }
 // Same rule as the main runtime: len/slice count bytes, but a slice may not
 // end in the middle of a character. Malformed input bytes are left alone.
-static inline void ae_str_check_bounds(ae_str value, int64_t start, int64_t end) {
-    if (start < 0 || end < start || end > value.len) ae_trap("string index out of bounds");
+static inline void ae_str_check_bounds(ae_str value, int64_t start, int64_t end, size_t line, size_t column) {
+    if (start < 0 || end < start || end > value.len) ae_fail_at("string index out of bounds", line, column);
     if ((start > 0 && start < value.len && ae_utf8_continue_byte((unsigned char)value.ptr[start]))
         || (end > 0 && end < value.len && ae_utf8_continue_byte((unsigned char)value.ptr[end]))) {
-        ae_trap("string index splits a UTF-8 character");
+        ae_fail_at("string index splits a UTF-8 character", line, column);
     }
 }
-static inline ae_str ae_str_slice_view(ae_str value, int64_t start, int64_t end) {
-    ae_str_check_bounds(value, start, end);
+static inline ae_str ae_str_slice_view(ae_str value, int64_t start, int64_t end, size_t line, size_t column) {
+    ae_str_check_bounds(value, start, end, line, column);
     return ae_str_from_parts(value.ptr + start, end - start, false);
 }
-static inline ae_str ae_str_slice(ae_str value, int64_t start, int64_t end) {
-    ae_str_check_bounds(value, start, end);
+static inline ae_str ae_str_slice(ae_str value, int64_t start, int64_t end, size_t line, size_t column) {
+    ae_str_check_bounds(value, start, end, line, column);
     return ae_str_alloc_copy(value.ptr + start, end - start);
 }
 static inline ae_str ae_str_from_i64(int64_t value) {
@@ -316,8 +313,8 @@ static inline void ae_vec_reserve(ae_vec *v, int64_t want) {
     v->data = data;
     v->cap = cap;
 }
-static inline void *ae_vec_at(ae_vec *v, int64_t index) {
-    if (index < 0 || index >= v->len) ae_trap("array index out of bounds");
+static inline void *ae_vec_at(ae_vec *v, int64_t index, size_t line, size_t column) {
+    if (index < 0 || index >= v->len) ae_fail_at("array index out of bounds", line, column);
     return (char *)v->data + (size_t)index * (size_t)v->elem_size;
 }
 static inline void ae_vec_push(ae_vec *v, const void *elem) {
@@ -325,13 +322,13 @@ static inline void ae_vec_push(ae_vec *v, const void *elem) {
     memcpy((char *)v->data + (size_t)v->len * (size_t)v->elem_size, elem, (size_t)v->elem_size);
     v->len += 1;
 }
-static inline void ae_vec_store(ae_vec *v, int64_t index, const void *elem) {
-    void *slot = ae_vec_at(v, index);
+static inline void ae_vec_store(ae_vec *v, int64_t index, const void *elem, size_t line, size_t column) {
+    void *slot = ae_vec_at(v, index, line, column);
     if (v->drop) v->drop(slot);
     memcpy(slot, elem, (size_t)v->elem_size);
 }
-static inline void ae_vec_pop(ae_vec *v) {
-    if (v->len == 0) ae_trap("pop from empty vector");
+static inline void ae_vec_pop(ae_vec *v, size_t line, size_t column) {
+    if (v->len == 0) ae_fail_at("pop from empty vector", line, column);
     v->len -= 1;
     if (v->drop) v->drop((char *)v->data + (size_t)v->len * (size_t)v->elem_size);
 }
@@ -386,16 +383,16 @@ static inline ae_slice ae_slice_view(void *data, int64_t len, int64_t elem_size)
     return value;
 }
 static inline int64_t ae_slice_len(ae_slice s) { return s.len; }
-static inline void *ae_slice_at(ae_slice s, int64_t index) {
-    if (index < 0 || index >= s.len) ae_trap("array index out of bounds");
+static inline void *ae_slice_at(ae_slice s, int64_t index, size_t line, size_t column) {
+    if (index < 0 || index >= s.len) ae_fail_at("array index out of bounds", line, column);
     return (char *)s.data + (size_t)index * (size_t)s.elem_size;
 }
-static inline void *ae_slice_at_mut(ae_slice *s, int64_t index) {
-    if (index < 0 || index >= s->len) ae_trap("array index out of bounds");
+static inline void *ae_slice_at_mut(ae_slice *s, int64_t index, size_t line, size_t column) {
+    if (index < 0 || index >= s->len) ae_fail_at("array index out of bounds", line, column);
     return (char *)s->data + (size_t)index * (size_t)s->elem_size;
 }
-static inline ae_slice ae_slice_range(ae_slice s, int64_t start, int64_t end) {
-    if (start < 0 || end < start || end > s.len) ae_trap("array index out of bounds");
+static inline ae_slice ae_slice_range(ae_slice s, int64_t start, int64_t end, size_t line, size_t column) {
+    if (start < 0 || end < start || end > s.len) ae_fail_at("array index out of bounds", line, column);
     return ae_slice_view(
         (char *)s.data + (size_t)start * (size_t)s.elem_size,
         end - start,
@@ -867,11 +864,11 @@ static inline int64_t ae_exec_run(ae_exec ex) {
 // process; the first join that observes it reports and exits, matching an
 // immediate abort at the observation point.
 typedef void (*ae_thread_entry_fn)(void *);
-typedef struct { int failed; const char *message; } ae_thread_failure;
+typedef struct { int failed; const char *message; size_t line; size_t column; } ae_thread_failure;
 typedef struct { ae_thread_entry_fn fn; void *ctx; ae_thread_failure *failure; } ae_thread_job;
 typedef struct { void *native; void *ctx; } ae_thread_slot;
 static _Thread_local ae_thread_failure *ae_thread_current_failure = NULL;
-static ae_thread_failure ae_thread_latched = { 0, NULL };
+static ae_thread_failure ae_thread_latched = { 0, NULL, 0, 0 };
 static int ae_thread_hook_installed = 0;
 #ifdef _WIN32
 typedef struct { void *native; ae_thread_failure failure; } ae_thread_handle;
@@ -900,7 +897,7 @@ static int ae_thread_body(void *raw) {
 }
 #endif
 static void ae_thread_report_failure(const ae_thread_failure *failure) {
-    fprintf(stderr, "ae: %s\n", failure->message);
+    fprintf(stderr, "ae:%zu:%zu: %s\n", failure->line, failure->column, failure->message);
     fflush(stdout);
     _Exit(1);
 }
@@ -912,6 +909,8 @@ static inline ae_thread_slot *ae_thread_spawn_ctx(ae_thread_entry_fn entry, void
     if (!handle) return NULL;
     handle->failure.failed = 0;
     handle->failure.message = NULL;
+    handle->failure.line = 0;
+    handle->failure.column = 0;
     ae_thread_job *job = (ae_thread_job *)malloc(sizeof(ae_thread_job));
     if (!job) {
         free(handle);
@@ -972,10 +971,12 @@ static inline ae_thread_slot *ae_thread_take(ae_thread_slot **slot) {
     *slot = NULL;
     return value;
 }
-static _Noreturn void ae_fail_sink(const char *msg) {
+static _Noreturn void ae_fail_at(const char *msg, size_t line, size_t column) {
     if (ae_thread_current_failure) {
         ae_thread_current_failure->failed = 1;
         ae_thread_current_failure->message = msg;
+        ae_thread_current_failure->line = line;
+        ae_thread_current_failure->column = column;
         ae_thread_latched = *ae_thread_current_failure;
 #ifdef _WIN32
         ExitThread(1);
@@ -983,9 +984,9 @@ static _Noreturn void ae_fail_sink(const char *msg) {
         thrd_exit(1);
 #endif
     }
-    fprintf(stderr, "ae trap: %s\n", msg);
+    fprintf(stderr, "ae:%zu:%zu: %s\n", line, column, msg);
     fflush(stdout);
-    abort();
+    exit(1);
 }
 
 // Shared boxes: a process-lifetime allocation behind a copy-semantics handle.
@@ -1440,55 +1441,55 @@ fn emit_int_helpers(out: &mut String, ity: IntTy) {
     if ity.signed() {
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_add_{name}({c_ty} a, {c_ty} b) {{\n\
+            "static inline {c_ty} ae_add_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
                  if ((b > 0 && a > {max_expr} - b) || (b < 0 && a < {min_expr} - b)) {{\n\
-                     ae_trap(\"integer addition overflow\");\n\
+                     ae_fail_at(\"integer overflow\", line, column);\n\
                  }}\n\
                  return ({c_ty})((uint64_t)a + (uint64_t)b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_sub_{name}({c_ty} a, {c_ty} b) {{\n\
+            "static inline {c_ty} ae_sub_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
                  if ((b < 0 && a > {max_expr} + b) || (b > 0 && a < {min_expr} + b)) {{\n\
-                     ae_trap(\"integer subtraction overflow\");\n\
+                     ae_fail_at(\"integer overflow\", line, column);\n\
                  }}\n\
                  return ({c_ty})((uint64_t)a - (uint64_t)b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_mul_{name}({c_ty} a, {c_ty} b) {{\n\
+            "static inline {c_ty} ae_mul_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
                  if (a > 0) {{\n\
-                     if (b > 0 && a > {max_expr} / b) {{ ae_trap(\"integer multiplication overflow\"); }}\n\
-                     if (b < 0 && b < {min_expr} / a) {{ ae_trap(\"integer multiplication overflow\"); }}\n\
+                     if (b > 0 && a > {max_expr} / b) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
+                     if (b < 0 && b < {min_expr} / a) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  }} else if (a < 0) {{\n\
-                     if (b > 0 && a < {min_expr} / b) {{ ae_trap(\"integer multiplication overflow\"); }}\n\
-                     if (b < 0 && b < {max_expr} / a) {{ ae_trap(\"integer multiplication overflow\"); }}\n\
+                     if (b > 0 && a < {min_expr} / b) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
+                     if (b < 0 && b < {max_expr} / a) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  }}\n\
                  return ({c_ty})((int64_t)a * (int64_t)b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_div_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b == 0) {{ ae_trap(\"division by zero\"); }}\n\
-                 if (a == {min_expr} && b == -1) {{ ae_trap(\"integer division overflow\"); }}\n\
+            "static inline {c_ty} ae_div_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b == 0) {{ ae_fail_at(\"division by zero\", line, column); }}\n\
+                 if (a == {min_expr} && b == -1) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  return ({c_ty})(a / b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_rem_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b == 0) {{ ae_trap(\"remainder by zero\"); }}\n\
-                 if (a == {min_expr} && b == -1) {{ ae_trap(\"integer remainder overflow\"); }}\n\
+            "static inline {c_ty} ae_rem_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b == 0) {{ ae_fail_at(\"division by zero\", line, column); }}\n\
+                 if (a == {min_expr} && b == -1) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  return ({c_ty})(a % b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_shl_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b < 0 || b >= {bits}) {{ ae_trap(\"shift left overflow\"); }}\n\
+            "static inline {c_ty} ae_shl_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b < 0 || b >= {bits}) {{ ae_fail_at(\"shift count out of range\", line, column); }}\n\
                  uint64_t raw = ((uint64_t)(int64_t)a) << (unsigned)b;\n\
                  uint64_t mask = {mask_expr};\n\
                  raw &= mask;\n\
@@ -1501,8 +1502,8 @@ fn emit_int_helpers(out: &mut String, ity: IntTy) {
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_shr_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b < 0 || b >= {bits}) {{ ae_trap(\"shift right overflow\"); }}\n\
+            "static inline {c_ty} ae_shr_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b < 0 || b >= {bits}) {{ ae_fail_at(\"shift count out of range\", line, column); }}\n\
                  if (a >= 0) {{\n\
                      return ({c_ty})((uint64_t)a >> (unsigned)b);\n\
                  }}\n\
@@ -1511,51 +1512,51 @@ fn emit_int_helpers(out: &mut String, ity: IntTy) {
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_neg_{name}({c_ty} a) {{\n\
-                 if (a == {min_expr}) {{ ae_trap(\"integer negation overflow\"); }}\n\
+            "static inline {c_ty} ae_neg_{name}({c_ty} a, size_t line, size_t column) {{\n\
+                 if (a == {min_expr}) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  return ({c_ty})(-(uint64_t)(int64_t)a);\n\
              }}\n"
         );
     } else {
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_add_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (a > {max_expr} - b) {{ ae_trap(\"integer addition overflow\"); }}\n\
+            "static inline {c_ty} ae_add_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (a > {max_expr} - b) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  return ({c_ty})(a + b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_sub_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (a < b) {{ ae_trap(\"integer subtraction overflow\"); }}\n\
+            "static inline {c_ty} ae_sub_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (a < b) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  return ({c_ty})(a - b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_mul_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b != 0 && a > {max_expr} / b) {{ ae_trap(\"integer multiplication overflow\"); }}\n\
+            "static inline {c_ty} ae_mul_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b != 0 && a > {max_expr} / b) {{ ae_fail_at(\"integer overflow\", line, column); }}\n\
                  return ({c_ty})(a * b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_div_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b == 0) {{ ae_trap(\"division by zero\"); }}\n\
+            "static inline {c_ty} ae_div_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b == 0) {{ ae_fail_at(\"division by zero\", line, column); }}\n\
                  return ({c_ty})(a / b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_rem_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b == 0) {{ ae_trap(\"remainder by zero\"); }}\n\
+            "static inline {c_ty} ae_rem_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b == 0) {{ ae_fail_at(\"division by zero\", line, column); }}\n\
                  return ({c_ty})(a % b);\n\
              }}"
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_shl_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b >= {bits}) {{ ae_trap(\"shift left overflow\"); }}\n\
+            "static inline {c_ty} ae_shl_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b >= {bits}) {{ ae_fail_at(\"shift count out of range\", line, column); }}\n\
                  uint64_t raw = ((uint64_t)a) << (unsigned)b;\n\
                  uint64_t mask = {mask_expr};\n\
                  return ({c_ty})(raw & mask);\n\
@@ -1563,8 +1564,8 @@ fn emit_int_helpers(out: &mut String, ity: IntTy) {
         );
         let _ = writeln!(
             out,
-            "static inline {c_ty} ae_shr_{name}({c_ty} a, {c_ty} b) {{\n\
-                 if (b >= {bits}) {{ ae_trap(\"shift right overflow\"); }}\n\
+            "static inline {c_ty} ae_shr_{name}({c_ty} a, {c_ty} b, size_t line, size_t column) {{\n\
+                 if (b >= {bits}) {{ ae_fail_at(\"shift count out of range\", line, column); }}\n\
                  return ({c_ty})(a >> (unsigned)b);\n\
              }}\n"
         );

@@ -113,11 +113,11 @@ pub(crate) fn emit_fn_body(
         let _ = writeln!(out, "bb{bb_idx}: ;");
 
         for stmt in &bb.statements {
-            emit_statement(out, body, &stmt.kind, types, def_map)?;
+            emit_statement(out, body, stmt, types, def_map)?;
         }
 
         if let Some(term) = &bb.terminator {
-            emit_terminator(out, body, &term.kind, types, def_map)?;
+            emit_terminator(out, body, term, types, def_map)?;
         } else {
             return Err(CodegenError::UnsupportedFeature {
                 body_name: body.name.clone(),
@@ -184,17 +184,17 @@ pub(crate) fn emit_main_wrapper(
 fn emit_statement(
     out: &mut String,
     body: &Body,
-    kind: &StatementKind,
+    stmt: &ae_mir::Statement,
     types: &ModuleTypes,
     def_map: &BTreeMap<DefId, String>,
 ) -> Result<(), CodegenError> {
-    match kind {
+    match &stmt.kind {
         StatementKind::Assign(place, rvalue) => {
             let rhs_ty = types.infer_rvalue_ty(body, rvalue);
             let lhs_ty = types.infer_place_ty(body, place);
             let pointee_ty = rhs_ty.or(lhs_ty);
             let place_expr = emit_place(body, place, types, pointee_ty)?;
-            let rhs_expr = emit_rvalue(body, rvalue, lhs_ty, types, def_map)?;
+            let rhs_expr = emit_rvalue(body, rvalue, lhs_ty, types, def_map, stmt.span.clone())?;
             let _ = writeln!(out, "    {place_expr} = {rhs_expr};");
         }
         StatementKind::StorageLive(local) => {
@@ -223,11 +223,11 @@ fn emit_statement(
 fn emit_terminator(
     out: &mut String,
     body: &Body,
-    kind: &TerminatorKind,
+    term: &ae_mir::Terminator,
     types: &ModuleTypes,
     def_map: &BTreeMap<DefId, String>,
 ) -> Result<(), CodegenError> {
-    match kind {
+    match &term.kind {
         TerminatorKind::Goto { target } => {
             let _ = writeln!(out, "    goto bb{};", target.0);
         }
@@ -272,6 +272,7 @@ fn emit_terminator(
                         destination,
                         target: *target,
                         def_map,
+                        span: term.span.clone(),
                     },
                     types,
                     out,
@@ -370,6 +371,7 @@ struct IntrinsicCall<'a> {
     destination: &'a Place,
     target: Option<ae_mir::BasicBlockId>,
     def_map: &'a BTreeMap<DefId, String>,
+    span: Option<ae_span::Span>,
 }
 
 fn emit_intrinsic(
@@ -377,7 +379,8 @@ fn emit_intrinsic(
     types: &ModuleTypes,
     out: &mut String,
 ) -> Result<(), CodegenError> {
-    let IntrinsicCall { body, name, args, arg_exprs, destination, target, def_map } = call;
+    let IntrinsicCall { body, name, args, arg_exprs, destination, target, def_map, span } = call;
+    let (line, column) = span.map(|s| (s.line, s.column)).unwrap_or((0, 0));
     match name {
         "print" => {
             let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
@@ -473,7 +476,7 @@ fn emit_intrinsic(
             let start = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             let end = arg_exprs.get(2).map(String::as_str).unwrap_or("0");
             let helper = if name == "slice" { "ae_str_slice" } else { "ae_str_slice_view" };
-            let call = format!("{helper}({base}, (int64_t)({start}), (int64_t)({end}))");
+            let call = format!("{helper}({base}, (int64_t)({start}), (int64_t)({end}), (size_t){line}, (size_t){column})");
             finish_value(out, body, types, destination, target, &call)
         }
         "to_string" => {
@@ -587,7 +590,7 @@ fn emit_intrinsic(
                 types,
                 def_map,
             )?;
-            let _ = writeln!(out, "    ae_vec_pop({ptr});");
+            let _ = writeln!(out, "    ae_vec_pop({ptr}, (size_t){line}, (size_t){column});");
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
         "vec_store" => {
@@ -603,7 +606,7 @@ fn emit_intrinsic(
             let value = emit_owned_operand(body, &args[2], types, def_map)?;
             let _ = writeln!(
                 out,
-                "    {{ {c_elem} _tmp = {value}; ae_vec_store({ptr}, (int64_t)({index}), &_tmp); }}"
+                "    {{ {c_elem} _tmp = {value}; ae_vec_store({ptr}, (int64_t)({index}), &_tmp, (size_t){line}, (size_t){column}); }}"
             );
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
@@ -616,7 +619,7 @@ fn emit_intrinsic(
             }
             let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
             let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
-            let access = format!("ae_vec_at({ptr}, (int64_t)({index}))");
+            let access = format!("ae_vec_at({ptr}, (int64_t)({index}), (size_t){line}, (size_t){column})");
             let dest_ty = types.infer_place_ty(body, destination);
             let value = match (dest_ty, elem) {
                 // An owned element read is a view: the vector keeps the
@@ -660,7 +663,7 @@ fn emit_intrinsic(
             }
             let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
             let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
-            let access = format!("ae_vec_at({ptr}, (int64_t)({index}))");
+            let access = format!("ae_vec_at({ptr}, (int64_t)({index}), (size_t){line}, (size_t){column})");
             let dest_ty = types.infer_place_ty(body, destination);
             let value = match dest_ty {
                 Some(TyKind::VectorRef(_)) => format!("((ae_vec *){access})"),
@@ -711,7 +714,7 @@ fn emit_intrinsic(
             }
             let (slice_expr, elem) = slice_operand(body, &args[0], types, def_map)?;
             let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
-            let access = format!("ae_slice_at({slice_expr}, (int64_t)({index}))");
+            let access = format!("ae_slice_at({slice_expr}, (int64_t)({index}), (size_t){line}, (size_t){column})");
             let dest_ty = types.infer_place_ty(body, destination);
             let value = match (dest_ty, elem) {
                 (Some(TyKind::String | TyKind::StrView), TyKind::String) => {
@@ -748,8 +751,25 @@ fn emit_intrinsic(
             let (slice_expr, _elem) = slice_operand(body, &args[0], types, def_map)?;
             let start = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             let end = arg_exprs.get(2).map(String::as_str).unwrap_or("0");
-            let call = format!("ae_slice_range({slice_expr}, (int64_t)({start}), (int64_t)({end}))");
+            let call = format!("ae_slice_range({slice_expr}, (int64_t)({start}), (int64_t)({end}), (size_t){line}, (size_t){column})");
             finish_value(out, body, types, destination, target, &call)
+        }
+        "slice_store" => {
+            if args.len() != 3 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "slice_store needs a slice, an index and a value".to_owned(),
+                });
+            }
+            let (slice_expr, elem) = slice_operand(body, &args[0], types, def_map)?;
+            let c_elem = c_type_name(elem);
+            let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let value = emit_owned_operand(body, &args[2], types, def_map)?;
+            let _ = writeln!(
+                out,
+                "    {{ {c_elem} _tmp = {value}; *(({c_elem} *)ae_slice_at_mut(&{slice_expr}, (int64_t)({index}), (size_t){line}, (size_t){column})) = _tmp; }}"
+            );
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
         "bytes" => {
             let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
@@ -1596,7 +1616,7 @@ fn emit_place(
                             })?;
                     let c_ty = c_type_name(elem);
                     expr = format!(
-                        "(*(({c_ty} *)ae_slice_at_mut(&{expr}, (int64_t)_{})))",
+                        "(*(({c_ty} *)ae_slice_at_mut(&{expr}, (int64_t)_{}, (size_t)0, (size_t)0)))",
                         idx_local.0
                     );
                     cur_ty = Some(elem);
@@ -1946,6 +1966,7 @@ fn emit_rvalue(
     expected_ty: Option<TyKind>,
     types: &ModuleTypes,
     def_map: &BTreeMap<DefId, String>,
+    span: Option<ae_span::Span>,
 ) -> Result<String, CodegenError> {
     match rvalue {
         Rvalue::Use(op) => emit_operand(body, op, types, def_map),
@@ -1963,7 +1984,8 @@ fn emit_rvalue(
                     Ok(format!("(({c_ty})(~({expr})))"))
                 }
                 (UnOp::Neg, Some(TyKind::Int(ity))) if ity.signed() => {
-                    Ok(format!("ae_neg_{}({expr})", ity.name()))
+                    let (line, column) = span.map(|s| (s.line, s.column)).unwrap_or((0, 0));
+                    Ok(format!("ae_neg_{}({expr}, (size_t){line}, (size_t){column})", ity.name()))
                 }
                 (UnOp::Neg, Some(TyKind::Float(_))) => Ok(format!("(-({expr}))")),
                 _ => Err(CodegenError::UnsupportedType {
@@ -1976,7 +1998,7 @@ fn emit_rvalue(
             let l_expr = emit_operand(body, lhs, types, def_map)?;
             let r_expr = emit_operand(body, rhs, types, def_map)?;
             let ty = types.infer_operand_ty(body, lhs);
-            emit_binary(body, *op, ty, &l_expr, &r_expr)
+            emit_binary(body, *op, ty, &l_expr, &r_expr, span)
         }
         Rvalue::Cast(kind, operand, target_ty) => {
             let expr = emit_operand(body, operand, types, def_map)?;
@@ -2101,7 +2123,9 @@ fn emit_binary(
     ty: Option<TyKind>,
     l: &str,
     r: &str,
+    span: Option<ae_span::Span>,
 ) -> Result<String, CodegenError> {
+    let (line, column) = span.map(|s| (s.line, s.column)).unwrap_or((0, 0));
     if op.is_comparison() {
         let cmp = match op {
             BinOp::Eq => "==",
@@ -2120,13 +2144,13 @@ fn emit_binary(
             let name = ity.name();
             let c_ty = ity.c_name();
             match op {
-                BinOp::Add => Ok(format!("ae_add_{name}(({l}), ({r}))")),
-                BinOp::Sub => Ok(format!("ae_sub_{name}(({l}), ({r}))")),
-                BinOp::Mul => Ok(format!("ae_mul_{name}(({l}), ({r}))")),
-                BinOp::Div => Ok(format!("ae_div_{name}(({l}), ({r}))")),
-                BinOp::Rem => Ok(format!("ae_rem_{name}(({l}), ({r}))")),
-                BinOp::Shl => Ok(format!("ae_shl_{name}(({l}), ({r}))")),
-                BinOp::Shr => Ok(format!("ae_shr_{name}(({l}), ({r}))")),
+                BinOp::Add => Ok(format!("ae_add_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
+                BinOp::Sub => Ok(format!("ae_sub_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
+                BinOp::Mul => Ok(format!("ae_mul_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
+                BinOp::Div => Ok(format!("ae_div_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
+                BinOp::Rem => Ok(format!("ae_rem_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
+                BinOp::Shl => Ok(format!("ae_shl_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
+                BinOp::Shr => Ok(format!("ae_shr_{name}(({l}), ({r}), (size_t){line}, (size_t){column})")),
                 BinOp::BitAnd => Ok(format!("(({c_ty})(({l}) & ({r})))")),
                 BinOp::BitOr => Ok(format!("(({c_ty})(({l}) | ({r})))")),
                 BinOp::BitXor => Ok(format!("(({c_ty})(({l}) ^ ({r})))")),
