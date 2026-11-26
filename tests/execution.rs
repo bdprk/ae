@@ -546,6 +546,95 @@ fn array_for_matches_across_backends() {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+/// A fixed array is a Copy value: copy initialization, whole-array
+/// assignment and compound element stores copy element by element, and a
+/// compound store evaluates its index once.
+#[test]
+fn array_copy_and_store_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("array_copy.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "compound store on a let array",
+            "fn main() { let a = [1, 2]; a[0] += 1; }",
+            "cannot assign to immutable variable 'a'",
+        ),
+        (
+            "whole assignment on a let array",
+            "fn main() { let a = [1, 2]; a = [3, 4]; }",
+            "cannot assign to immutable variable 'a'",
+        ),
+        (
+            "assignment inside the loop that borrows it",
+            "fn main() { var a = [1, 2]; for x in a { a = [3, 4]; print(x); } }",
+            "cannot modify 'a' while it is borrowed",
+        ),
+        (
+            "length mismatch",
+            "fn main() { var a = [1, 2, 3]; a = [1, 2]; }",
+            "array length mismatch: expected 3, found 2",
+        ),
+        (
+            "literal element mismatch",
+            "fn main() { var a = [1, 2]; a = [1.5, 2.5]; }",
+            "array element type mismatch: expected i64, found f64",
+        ),
+        (
+            "binding type mismatch",
+            "fn main() { var a = [1, 2]; let b = [1.5, 2.5]; a = b; }",
+            "array type mismatch",
+        ),
+        (
+            "compound store on bool elements",
+            "fn main() { var a = [true, false]; a[0] += true; }",
+            "compound assignment is not supported for type 'bool'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-array-copy-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
 #[test]
 fn generated_integer_program_matches_independent_reference_in_both_modes() {
     // Bounded operands avoid reference overflow, while exercising signed arithmetic,

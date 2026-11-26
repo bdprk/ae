@@ -655,6 +655,10 @@ impl<'a> Parser<'a> {
                     self.lower_scalar_range(statement, slots, &mut statements)?;
                 } else if matches!(statement.kind, StatementKind::ForIn { .. }) {
                     self.lower_scalar_for_in(statement, slots, &mut statements)?;
+                } else if let Some(expanded) = self.lower_array_assignment(statement, slots)? {
+                    // A fixed-array copy or compound element store expands to
+                    // element-wise statements (hidden index/element locals).
+                    statements.extend(expanded);
                 } else {
                     let statement = self.lower_scalar_statement(statement, slots)?;
                     if matches!(statement, Statement::Break | Statement::Continue(_)) {

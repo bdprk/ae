@@ -115,6 +115,22 @@ impl<'a> Parser<'a> {
                     let elem_ty = elem_ty.expect("non-empty array literal");
                     let ty = Type::ArrayOf(self.ctx.intern_array_elem(elem_ty), elements.len());
                     (Statement::Array(slot, values, elem_ty), ty)
+                } else if let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) = &initializer.kind
+                    && let Some(&(source_slot, Type::ArrayOf(elem_id, len))) = self.resolved_expressions()
+                        .scalar_reads.get(&initializer.range.start)
+                        .and_then(|def| slots.get(def))
+                {
+                    // `let copy = array;` copies a fixed array: the elements
+                    // are Copy values, so the new array's initializer reads
+                    // each one from the source binding.
+                    self.seek_scalar_offset(initializer.range.start);
+                    let (line, column) = self.position();
+                    let elem_ty = self.ctx.array_elem(elem_id);
+                    let values = (0..len)
+                        .map(|index| Expr::Index(source_slot, len, Box::new(Expr::Number(index as i64)), line, column, elem_ty))
+                        .collect();
+                    self.seek_scalar_offset(initializer.range.end);
+                    (Statement::Array(slot, values, elem_ty), Type::ArrayOf(elem_id, len))
                 } else if let ae_syntax::expression::ExpressionKind::Vector(elements) = &initializer.kind {
                     self.seek_scalar_offset(initializer.range.start);
                     let (line, column) = self.position();
@@ -807,6 +823,145 @@ impl<'a> Parser<'a> {
         };
         self.seek_scalar_offset(statement.range.end);
         Ok(lowered)
+    }
+
+    /// A fixed array is a Copy value: `a = b;` and `a = [..];` copy it
+    /// element by element, and `a[i] += v;` is a read-modify-write with the
+    /// index evaluated once. Returning `None` leaves the statement to the
+    /// ordinary scalar path.
+    pub(super) fn lower_array_assignment(
+        &mut self,
+        statement: &ae_syntax::statement::Statement,
+        slots: &mut HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<Option<Vec<Statement>>, ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+        use ae_syntax::statement::StatementKind;
+        let StatementKind::Assign { target, operator, value } = &statement.kind else { return Ok(None) };
+        if let ExpressionKind::Atom(Kind::Ident(name)) = &target.kind {
+            let Some(&(slot, ty)) = self.resolved_expressions().scalar_writes.get(&target.range.start)
+                .and_then(|def| slots.get(def)) else { return Ok(None) };
+            let Type::ArrayOf(elem_id, len) = ty else { return Ok(None) };
+            if !self.names.get(name).is_some_and(|&(_, mutable, _)| mutable) {
+                self.seek_scalar_offset(target.range.start);
+                let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+                return Err(self.immutable_binding_error(diagnostic, slot));
+            }
+            if self.is_borrowed(slot) {
+                self.seek_scalar_offset(target.range.end);
+                return Err(self.fail(&format!("cannot modify '{name}' while it is borrowed")));
+            }
+            let elem_ty = self.ctx.array_elem(elem_id);
+            self.seek_scalar_offset(value.range.start);
+            let (line, column) = self.position();
+            let mut statements = Vec::with_capacity(len + 1);
+            let mut stores = Vec::with_capacity(len);
+            match &value.kind {
+                ExpressionKind::Atom(Kind::Ident(_)) => {
+                    let Some(&(source_slot, source_ty)) = self.resolved_expressions().scalar_reads.get(&value.range.start)
+                        .and_then(|def| slots.get(def)) else { return Ok(None) };
+                    let Type::ArrayOf(source_elem, source_len) = source_ty else {
+                        self.seek_scalar_offset(value.range.start);
+                        return Err(self.fail(&format!("cannot assign {} to an array", source_ty.name(self.ctx))));
+                    };
+                    if source_elem != elem_id || source_len != len {
+                        self.seek_scalar_offset(value.range.start);
+                        return Err(self.fail(&format!(
+                            "array type mismatch: expected {}, found {}",
+                            ty.name(self.ctx),
+                            source_ty.name(self.ctx)
+                        )));
+                    }
+                    for index in 0..len {
+                        stores.push(Statement::Store(
+                            slot, len, Expr::Number(index as i64),
+                            Expr::Index(source_slot, len, Box::new(Expr::Number(index as i64)), line, column, elem_ty),
+                            line, column, elem_ty,
+                        ));
+                    }
+                }
+                ExpressionKind::Array(elements) => {
+                    if elements.len() != len {
+                        self.seek_scalar_offset(value.range.start);
+                        return Err(self.fail(&format!("array length mismatch: expected {len}, found {}", elements.len())));
+                    }
+                    // Evaluate every element before the first store:
+                    // `a = [a[1], a[0]]` must not observe a half-written array.
+                    let mut temps = Vec::with_capacity(elements.len());
+                    for element in elements {
+                        let end = element.range.end;
+                        let (element, element_ty) = self.lower_scalar_body_expression(element, slots)?;
+                        if element_ty != elem_ty {
+                            self.seek_scalar_offset(end);
+                            return Err(self.fail(&format!(
+                                "array element type mismatch: expected {}, found {}",
+                                elem_ty.name(self.ctx),
+                                element_ty.name(self.ctx)
+                            )));
+                        }
+                        let temp = self.next_var;
+                        self.next_var += 1;
+                        statements.push(Statement::Declare(temp, element));
+                        temps.push(temp);
+                    }
+                    for (index, temp) in temps.into_iter().enumerate() {
+                        stores.push(Statement::Store(
+                            slot, len, Expr::Number(index as i64),
+                            Expr::Variable(temp, elem_ty, line, column),
+                            line, column, elem_ty,
+                        ));
+                    }
+                }
+                _ => return Ok(None),
+            }
+            statements.extend(stores);
+            self.seek_scalar_offset(statement.range.end);
+            return Ok(Some(statements));
+        }
+        let ExpressionKind::Index { base, index } = &target.kind else { return Ok(None) };
+        let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else { return Ok(None) };
+        let Some(op) = compound_assignment_operator(operator) else { return Ok(None) };
+        let Some(&(slot, ty)) = self.resolved_expressions().scalar_writes.get(&base.range.start)
+            .and_then(|def| slots.get(def)) else { return Ok(None) };
+        let Type::ArrayOf(elem_id, len) = ty else { return Ok(None) };
+        if !self.names.get(name).is_some_and(|&(_, mutable, _)| mutable) {
+            self.seek_scalar_offset(base.range.start);
+            let diagnostic = self.fail(&format!("cannot assign to immutable variable '{name}'")).with_code("E0103");
+            return Err(self.immutable_binding_error(diagnostic, slot));
+        }
+        if self.moved.contains(&slot) {
+            return Err(moved_value_hint(self.binding_label(
+                self.fail(&format!("cannot use '{name}' because it was moved")).with_code("E0102"), slot)));
+        }
+        if self.is_borrowed(slot) {
+            self.seek_scalar_offset(base.range.end);
+            return Err(self.fail(&format!("cannot modify '{name}' while it is borrowed")));
+        }
+        self.seek_scalar_offset(base.range.end);
+        self.check_compound_assignment(self.ctx.array_elem(elem_id), &op)?;
+        let elem_ty = self.ctx.array_elem(elem_id);
+        let index_expr = self.lower_scalar_array_index(index, slots)?;
+        self.seek_scalar_offset(value.range.start);
+        let (line, column) = self.position();
+        let (value_expr, value_ty) = self.lower_scalar_body_expression(value, slots)?;
+        if value_ty != elem_ty {
+            self.seek_scalar_offset(value.range.end);
+            return Err(self.fail(&format!(
+                "array element type mismatch: expected {}, found {}",
+                elem_ty.name(self.ctx),
+                value_ty.name(self.ctx)
+            )));
+        }
+        // The index is lowered once into a hidden local, so the read and the
+        // store observe the same position even when the index has effects.
+        let index_slot = self.next_var;
+        self.next_var += 1;
+        let read = Expr::Index(slot, len, Box::new(Expr::Variable(index_slot, Type::Int(IntTy::I64), line, column)), line, column, elem_ty);
+        let combined = Expr::Binary(Box::new(read), op, Box::new(value_expr), line, column, elem_ty);
+        self.seek_scalar_offset(statement.range.end);
+        Ok(Some(vec![
+            Statement::Declare(index_slot, index_expr),
+            Statement::Store(slot, len, Expr::Variable(index_slot, Type::Int(IntTy::I64), line, column), combined, line, column, elem_ty),
+        ]))
     }
 
     pub(super) fn field_ty_checked(&self, sid: usize, name: &str) -> Result<Type, ae_span::Diagnostic> {

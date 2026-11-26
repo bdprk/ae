@@ -212,7 +212,12 @@ impl<'a> Parser<'a> {
                 ae_syntax::statement::visit_statements(statement, &mut |statement| {
                     use ae_syntax::statement::StatementKind;
                     if let StatementKind::Binding { name_range, initializer, .. } = &statement.kind
-                        && matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Array(_))
+                        && (matches!(initializer.kind, ae_syntax::expression::ExpressionKind::Array(_))
+                            // `let copy = array;` copies another fixed array:
+                            // the new binding is an array too.
+                            || matches!(&initializer.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name))
+                                if name != "self" && expressions.scalar_reads.get(&initializer.range.start)
+                                    .is_some_and(|id| expressions.array_definitions.contains(id))))
                             && let Some(def) = expressions.scalar_definitions.get(&name_range.start) {
                                 expressions.array_definitions.insert(*def);
                             }

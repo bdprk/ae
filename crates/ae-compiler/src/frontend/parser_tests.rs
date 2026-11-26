@@ -646,7 +646,14 @@ use super::*;
         parser.names.remove("a");
 
         parser.seek_scalar_offset(source.find("{ var a = [4, 5]; a[0] += 1").unwrap());
-        assert!(parser.lower_resolved_scalar_body().is_none(), "compound store stays typed");
+        let body = parser.lower_resolved_scalar_body().expect("resolved compound store").unwrap();
+        let [Statement::Array(slot, values, Type::Int(IntTy::I64)), Statement::Declare(temp, Expr::Number(0)), Statement::Store(read, 2, store_index, element, .., Type::Int(IntTy::I64)), Statement::Return(..)] = body.as_slice() else {
+            panic!("expected array, index temp, compound store and return");
+        };
+        assert_eq!(slot, read);
+        assert!(matches!(store_index, Expr::Variable(index, ..) if index == temp));
+        assert!(matches!(element, Expr::Binary(..)));
+        assert_eq!(values.len(), 2);
 
         let param_offset = source.find("(a: &[i64; 2]").unwrap() + 1;
         let i64_array = Type::ArrayOf(parser.ctx.intern_array_elem(Type::Int(IntTy::I64)), 2);

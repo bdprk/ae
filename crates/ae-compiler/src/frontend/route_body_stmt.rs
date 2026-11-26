@@ -144,16 +144,31 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                                     || resolved.owned_struct_bindings.contains(id)
                                     // `let y = x;` moves an owned enum, which
                                     // the lowering records like any owned move.
-                                    || resolved.enum_bindings.contains(id))),
+                                    // An array read copies the fixed array
+                                    // element by element.
+                                    || resolved.enum_bindings.contains(id)
+                                    || resolved.array_definitions.contains(id))),
                 }
         }
         StatementKind::Assign { target, operator, value } => {
             match &target.kind {
                 ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) if name != "self" => {
                     resolved.scalar_writes.get(&target.range.start).is_some_and(|&id| {
-                        if resolved.array_definitions.contains(&id)
-                            || resolved.token_cursor_definitions.contains(&id)
-                        {
+                        if resolved.array_definitions.contains(&id) {
+                            // `a = b;` / `a = [..];` re-initializes a fixed
+                            // array: the lowering copies it element by element
+                            // and checks the length and element type.
+                            return match &value.kind {
+                                ae_syntax::expression::ExpressionKind::Array(elements) => elements.iter()
+                                    .all(|element| scalar_body_expression(element, resolved, supports_call, supports_field)
+                                        || resolved.struct_field_views.contains(&element.range.start)),
+                                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(name)) => name != "self"
+                                    && resolved.scalar_reads.get(&value.range.start)
+                                        .is_some_and(|other| resolved.array_definitions.contains(other)),
+                                _ => false,
+                            };
+                        }
+                        if resolved.token_cursor_definitions.contains(&id) {
                             return false;
                         }
                         // Reassigning an enum releases the old payload first;
@@ -206,31 +221,34 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                             || matches!(&value.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)))
                     })
                 }
-                // `a[i] = v` stores through a resolved array binding. Only
-                // the plain operator: a compound store stays on the typed
-                // route, which rejects it for arrays.
-                ae_syntax::expression::ExpressionKind::Index { base, index }
-                    if *operator == Kind::Equal =>
-                {
+                // `a[i] = v` stores through a resolved array binding. A
+                // compound store (`a[i] += 1`) is admitted for a fixed array
+                // only; vectors, maps and slices keep the plain form.
+                ae_syntax::expression::ExpressionKind::Index { base, index } => {
                     // A named container, or a field of a name (`p.table[k]`):
                     // the field's declared type comes from the struct table, so
                     // a field base needs no container mark on the root.
                     let field_base = matches!(base.kind, ae_syntax::expression::ExpressionKind::Field { .. })
                         && field_chain_root(base).is_some();
+                    let base_def = resolved.scalar_writes.get(&base.range.start)
+                        .or_else(|| resolved.scalar_reads.get(&base.range.start))
+                        .copied();
+                    let base_is_array = !field_base && base_def.is_some_and(|id| resolved.array_definitions.contains(&id));
+                    if *operator != Kind::Equal && !base_is_array {
+                        return false;
+                    }
                     (matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))) || field_base)
                         && (field_base
-                            || resolved.scalar_writes.get(&base.range.start)
-                                .or_else(|| resolved.scalar_reads.get(&base.range.start))
-                                .is_some_and(|id| resolved.array_definitions.contains(id)
-                                    || resolved.map_definitions.contains(id)
+                            || base_def.is_some_and(|id| resolved.array_definitions.contains(&id)
+                                    || resolved.map_definitions.contains(&id)
                                     // A vector store (`v[i] = x`): the lowering
                                     // checks mutability, the element type, and the
                                     // string move for a view/value store.
-                                    || resolved.vector_definitions.contains(id)
+                                    || resolved.vector_definitions.contains(&id)
                                     // A store through a mutable slice (`m[i] = x`,
                                     // ADR-0236 rung 4): the lowering checks the
                                     // element and rejects a read-only slice.
-                                    || resolved.slice_definitions.contains(id)))
+                                    || resolved.slice_definitions.contains(&id)))
                         // A map key is a string value or view; array indices
                         // are scalars.
                         && (scalar_body_expression(index, resolved, supports_call, supports_field)
