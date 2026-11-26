@@ -76,6 +76,9 @@ pub struct Body {
     pub vector_elems: BTreeMap<usize, TyKind>,
     /// Slice element interner id -> element type, for the same reasons.
     pub slice_elems: BTreeMap<usize, TyKind>,
+    /// Map interner id -> (key type, value type), so a standalone backend can
+    /// lay out one map family and type its reads.
+    pub map_types: BTreeMap<usize, (TyKind, TyKind)>,
     pub span: Option<Span>,
 }
 
@@ -97,6 +100,7 @@ impl Body {
             copy_enums: BTreeSet::new(),
             vector_elems: BTreeMap::new(),
             slice_elems: BTreeMap::new(),
+            map_types: BTreeMap::new(),
             span: None,
         }
     }

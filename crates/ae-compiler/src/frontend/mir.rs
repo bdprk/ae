@@ -668,8 +668,16 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         // to_i64 is fallible: its type is the IntResult enum the parser
         // attached, not a plain i64.
         Expr::ToI64(_, ty, ..) => *ty,
+        // map_inc's result is the map's value kind: i64 or f64.
+        Expr::MapInc(place, ..) => {
+            if place.f64_value() {
+                Type::Float(FloatTy::F64)
+            } else {
+                Type::Int(IntTy::I64)
+            }
+        }
         Expr::WriteFile(..) | Expr::CountLinesWith(..) | Expr::Utf8Len(..)
-        | Expr::MapInc(..) | Expr::NowMs | Expr::NowS => Type::Int(IntTy::I64),
+        | Expr::NowMs | Expr::NowS => Type::Int(IntTy::I64),
     }
 }
 

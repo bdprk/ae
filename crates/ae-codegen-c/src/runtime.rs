@@ -15,9 +15,11 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stddef.h>\n\
          #include <stdint.h>\n\
          #include <stdatomic.h>\n\
+         #include <errno.h>\n\
          #include <stdio.h>\n\
          #include <stdlib.h>\n\
-         #include <string.h>\n\n\
+         #include <string.h>\n\
+         #include <sys/stat.h>\n\n\
          typedef struct { uint8_t _unused; } ae_unit_t;\n\n\
          // The positioned failure sink is defined with the concurrency runtime\n\
          // (a child thread records a failure instead of ending the process).\n\
@@ -522,6 +524,488 @@ static inline int64_t ae_str_find(ae_str haystack, ae_str needle) {
         i += 1;
     }
     return -1;
+}
+
+// String splitting, line splitting and UTF-8 helpers. Each token is its own
+// owned string (the pure backend's vector stores ae_str elements), so the
+// result vector releases them through its element thunk.
+static inline int64_t ae_find_sep(const char *base, int64_t from, int64_t len, ae_str sep) {
+    if (from >= len || sep.len > len - from) return -1;
+    if (sep.len == 1) {
+        const char *hit = (const char *)memchr(base + from, sep.ptr[0], (size_t)(len - from));
+        return hit == NULL ? -1 : (int64_t)(hit - base);
+    }
+    const char first = sep.ptr[0];
+    for (int64_t i = from; i + sep.len <= len; ) {
+        const char *hit = (const char *)memchr(base + i, first, (size_t)(len - sep.len - i + 1));
+        if (!hit) return -1;
+        i = (int64_t)(hit - base);
+        if (memcmp(hit, sep.ptr, (size_t)sep.len) == 0) return i;
+        i += 1;
+    }
+    return -1;
+}
+static inline ae_vec ae_vec_split(ae_str s, ae_str sep, size_t line, size_t column) {
+    if (sep.len == 0) ae_fail_at("empty separator", line, column);
+    ae_vec out = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
+    int64_t start = 0;
+    for (;;) {
+        const int64_t at = ae_find_sep(s.ptr, start, s.len, sep);
+        if (at < 0) {
+            ae_str token = ae_str_alloc_copy(s.ptr + start, s.len - start);
+            ae_vec_push(&out, &token);
+            break;
+        }
+        ae_str token = ae_str_alloc_copy(s.ptr + start, at - start);
+        ae_vec_push(&out, &token);
+        start = at + sep.len;
+    }
+    return out;
+}
+static inline ae_vec ae_vec_lines(ae_str s) {
+    ae_vec out = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
+    int64_t start = 0;
+    while (start < s.len) {
+        const char *nl = (const char *)memchr(s.ptr + start, '\n', (size_t)(s.len - start));
+        const int64_t end = nl ? (int64_t)(nl - s.ptr) : s.len;
+        ae_str token = ae_str_alloc_copy(s.ptr + start, end - start);
+        ae_vec_push(&out, &token);
+        if (!nl) break;
+        start = end + 1;
+    }
+    return out;
+}
+static inline int64_t ae_utf8_len(ae_str s) {
+    int64_t count = 0;
+    for (int64_t i = 0; i < s.len; i++) {
+        if (!ae_utf8_continue_byte((unsigned char)s.ptr[i])) count += 1;
+    }
+    return count;
+}
+static inline ae_str ae_utf8_prefix(ae_str s, int64_t n, size_t line, size_t column) {
+    if (n < 0) ae_fail_at("character index out of bounds", line, column);
+    int64_t at = 0;
+    int64_t seen = 0;
+    while (at < s.len && seen < n) {
+        at += 1;
+        while (at < s.len && ae_utf8_continue_byte((unsigned char)s.ptr[at])) at += 1;
+        seen += 1;
+    }
+    return ae_str_alloc_copy(s.ptr, at);
+}
+static inline bool ae_is_space(unsigned char byte) {
+    return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r' || byte == '\v' || byte == '\f';
+}
+static inline ae_str ae_str_trim(ae_str s) {
+    int64_t start = 0;
+    int64_t end = s.len;
+    while (start < end && ae_is_space((unsigned char)s.ptr[start])) start += 1;
+    while (end > start && ae_is_space((unsigned char)s.ptr[end - 1])) end -= 1;
+    return ae_str_alloc_copy(s.ptr + start, end - start);
+}
+static inline double ae_f64_min(double a, double b) {
+    if (isnan(a)) return b;
+    if (isnan(b)) return a;
+    if (a == 0.0 && b == 0.0) return (signbit(a) && !signbit(b)) ? a : b;
+    return a < b ? a : b;
+}
+static inline double ae_f64_max(double a, double b) {
+    if (isnan(a)) return b;
+    if (isnan(b)) return a;
+    if (a == 0.0 && b == 0.0) return (signbit(a) && !signbit(b)) ? b : a;
+    return a > b ? a : b;
+}
+
+// Program arguments, stdin/file reads, and portable path helpers. A read
+// returns a small status struct so the emitter can build the language's
+// ReadResult/WriteResult enums; the trapping forms reuse the same helpers and
+// call ae_fail_at with their own position.
+static int64_t ae_argc_g = 0;
+static char **ae_argv_g = NULL;
+static inline ae_vec ae_args_value(void) {
+    ae_vec out = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
+    for (int64_t i = 0; i < ae_argc_g; i++) {
+        const char *arg = ae_argv_g[i] ? ae_argv_g[i] : "";
+        ae_str value = ae_str_alloc_copy(arg, (int64_t)strlen(arg));
+        ae_vec_push(&out, &value);
+    }
+    return out;
+}
+typedef struct { int64_t status; ae_str text; ae_str error; } ae_read_result;
+static inline ae_str ae_io_error(const char *prefix) {
+    char buffer[512];
+    snprintf(buffer, sizeof buffer, "%s: %s", prefix, strerror(errno));
+    return ae_str_alloc_copy(buffer, (int64_t)strlen(buffer));
+}
+static inline ae_read_result ae_try_read_file_value(ae_str path) {
+    ae_read_result out;
+    out.status = 0;
+    out.text = ae_str_from_parts("", 0, false);
+    out.error = ae_str_from_parts("", 0, false);
+    FILE *file = fopen(path.ptr, "rb");
+    if (!file) {
+        out.status = 1;
+        out.error = ae_io_error("cannot read file");
+        return out;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        out.status = 1;
+        out.error = ae_io_error("cannot read file");
+        return out;
+    }
+    const long size = ftell(file);
+    if (size < 0) {
+        fclose(file);
+        out.status = 1;
+        out.error = ae_io_error("cannot read file");
+        return out;
+    }
+    rewind(file);
+    char *buffer = ae_str_alloc((int64_t)size);
+    const size_t got = fread(buffer, 1, (size_t)size, file);
+    fclose(file);
+    if (got != (size_t)size) {
+        free(buffer);
+        out.status = 1;
+        out.error = ae_io_error("cannot read file");
+        return out;
+    }
+    buffer[size] = 0;
+    out.text = ae_str_from_parts(buffer, (int64_t)size, true);
+    return out;
+}
+static inline ae_read_result ae_try_read_stdin_value(void) {
+    ae_read_result out;
+    out.status = 0;
+    out.error = ae_str_from_parts("", 0, false);
+    size_t capacity = 8192;
+    size_t length = 0;
+    char *buffer = (char *)malloc(capacity);
+    if (!buffer) ae_trap("out of memory");
+    errno = 0;
+    for (;;) {
+        if (length == capacity) {
+            capacity *= 2;
+            char *grown = (char *)realloc(buffer, capacity);
+            if (!grown) {
+                free(buffer);
+                ae_trap("out of memory");
+            }
+            buffer = grown;
+        }
+        const size_t got = fread(buffer + length, 1, capacity - length, stdin);
+        length += got;
+        if (got == 0) {
+            if (ferror(stdin)) {
+                free(buffer);
+                out.status = 1;
+                out.text = ae_str_from_parts("", 0, false);
+                out.error = ae_io_error("cannot read standard input");
+                return out;
+            }
+            break;
+        }
+    }
+    buffer[length] = 0;
+    out.text = ae_str_from_parts(buffer, (int64_t)length, true);
+    return out;
+}
+static inline ae_str ae_read_file_value(ae_str path, size_t line, size_t column) {
+    ae_read_result out = ae_try_read_file_value(path);
+    if (out.status != 0) {
+        ae_str result = out.error;
+        ae_str_release(&out.text);
+        ae_fail_at(result.ptr, line, column);
+    }
+    ae_str_release(&out.error);
+    return out.text;
+}
+static inline int64_t ae_write_file_value(ae_str path, ae_str content, size_t line, size_t column) {
+    FILE *file = fopen(path.ptr, "wb");
+    if (!file) ae_fail_at("cannot write file", line, column);
+    const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
+    if (fclose(file) != 0 || written != (size_t)content.len) {
+        ae_fail_at("cannot write file", line, column);
+    }
+    return (int64_t)written;
+}
+static inline bool ae_is_separator(char c) { return c == '/' || c == '\\'; }
+typedef struct { int64_t status; int64_t written; ae_str error; } ae_write_result;
+static inline ae_write_result ae_try_write_file_value(ae_str path, ae_str content) {
+    ae_write_result out;
+    out.status = 0;
+    out.written = 0;
+    out.error = ae_str_from_parts("", 0, false);
+    FILE *file = fopen(path.ptr, "wb");
+    if (!file) {
+        out.status = 1;
+        out.error = ae_io_error("cannot write file");
+        return out;
+    }
+    const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
+    if (fclose(file) != 0 || written != (size_t)content.len) {
+        out.status = 1;
+        out.error = ae_io_error("cannot write file");
+        return out;
+    }
+    out.written = (int64_t)written;
+    return out;
+}
+static inline bool ae_path_is_absolute(ae_str path) {
+    if (path.len == 0) return false;
+    if (ae_is_separator(path.ptr[0])) return true;
+    return path.len >= 2 && path.ptr[1] == ':';
+}
+static inline ae_str ae_path_join_value(ae_str dir, ae_str name) {
+    if (name.len == 0) return ae_str_alloc_copy(dir.ptr, dir.len);
+    if (dir.len == 0) return ae_str_alloc_copy(name.ptr, name.len);
+    if (ae_path_is_absolute(name)) return ae_str_alloc_copy(name.ptr, name.len);
+    const bool separated = ae_is_separator(dir.ptr[dir.len - 1]);
+    const int64_t total = dir.len + name.len + (separated ? 0 : 1);
+    char *buffer = ae_str_alloc(total);
+    memcpy(buffer, dir.ptr, (size_t)dir.len);
+    int64_t at = dir.len;
+    if (!separated) buffer[at++] = '/';
+    memcpy(buffer + at, name.ptr, (size_t)name.len);
+    buffer[total] = 0;
+    return ae_str_from_parts(buffer, total, true);
+}
+static inline ae_str ae_path_name_value(ae_str path) {
+    int64_t end = path.len;
+    while (end > 1 && ae_is_separator(path.ptr[end - 1])) end--;
+    int64_t start = end;
+    while (start > 0 && !ae_is_separator(path.ptr[start - 1])) start--;
+    if (start == end) return ae_str_alloc_copy(path.ptr, end);
+    return ae_str_alloc_copy(path.ptr + start, end - start);
+}
+static inline ae_str ae_path_parent_value(ae_str path) {
+    int64_t end = path.len;
+    while (end > 1 && ae_is_separator(path.ptr[end - 1])) end--;
+    int64_t at = end;
+    while (at > 0 && !ae_is_separator(path.ptr[at - 1])) at--;
+    if (at == 0) return ae_str_alloc_copy("", 0);
+    int64_t stop = at;
+    while (stop > 1 && ae_is_separator(path.ptr[stop - 1])) stop--;
+    if (stop == 2 && path.ptr[1] == ':' && at > stop) stop = at;
+    if (stop == 1 && ae_is_separator(path.ptr[0])) stop = 1;
+    return ae_str_alloc_copy(path.ptr, stop);
+}
+static inline bool ae_path_exists_value(ae_str path) {
+    struct stat info;
+    return stat(path.ptr, &info) == 0;
+}
+static inline bool ae_path_is_dir_value(ae_str path) {
+    struct stat info;
+    if (stat(path.ptr, &info) != 0) return false;
+#ifdef _WIN32
+    return (info.st_mode & _S_IFDIR) != 0;
+#else
+    return S_ISDIR(info.st_mode);
+#endif
+}
+
+// ---- Hash maps: string keys, i64-bit values --------------------------------
+// Open addressing with linear probing. The value slot stores i64 bits, so the
+// same table serves map[string, i64] and map[string, f64] (the emitter
+// bit-casts the value); a parallel state array keeps slots packed. A deleted
+// slot keeps probing alive until the next rehash.
+typedef struct { ae_str key; int64_t value; } ae_map_slot;
+typedef struct {
+    ae_map_slot *slots;
+    unsigned char *states;
+    int64_t cap;
+    int64_t len;
+    int64_t used;
+} ae_map;
+#define AE_MAP_EMPTY 0
+#define AE_MAP_FULL 1
+#define AE_MAP_DELETED 2
+static inline ae_map ae_map_new(void) {
+    ae_map m;
+    m.slots = NULL;
+    m.states = NULL;
+    m.cap = 0;
+    m.len = 0;
+    m.used = 0;
+    return m;
+}
+static inline uint64_t ae_map_hash(ae_str key) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (int64_t i = 0; i < key.len; i++) {
+        hash ^= (uint64_t)(unsigned char)key.ptr[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+static inline int64_t ae_map_slot_of(ae_str key, int64_t cap) {
+    return (int64_t)(ae_map_hash(key) & (uint64_t)(cap - 1));
+}
+static inline int64_t ae_map_find(const ae_map *m, ae_str key) {
+    if (m->cap == 0) return -1;
+    int64_t at = ae_map_slot_of(key, m->cap);
+    for (int64_t probes = 0; probes < m->cap; probes++) {
+        const unsigned char state = m->states[at];
+        if (state == AE_MAP_EMPTY) return -1;
+        if (state == AE_MAP_FULL && ae_str_eq(m->slots[at].key, key)) return at;
+        at = (at + 1) & (m->cap - 1);
+    }
+    return -1;
+}
+static inline void ae_map_grow(ae_map *m) {
+    int64_t cap = m->cap == 0 ? 8 : m->cap;
+    while ((m->len + 1) * 2 >= cap) {
+        if (cap > INT64_MAX / 4) ae_trap("map too large");
+        cap = cap * 2;
+    }
+    if (cap == m->cap && m->used == m->len) return;
+    ae_map_slot *slots = (ae_map_slot *)malloc((size_t)cap * sizeof(ae_map_slot));
+    unsigned char *states = (unsigned char *)malloc((size_t)cap);
+    if (!slots || !states) ae_trap("out of memory");
+    memset(states, AE_MAP_EMPTY, (size_t)cap);
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->states[i] != AE_MAP_FULL) continue;
+        int64_t at = ae_map_slot_of(m->slots[i].key, cap);
+        while (states[at] == AE_MAP_FULL) at = (at + 1) & (cap - 1);
+        slots[at] = m->slots[i];
+        states[at] = AE_MAP_FULL;
+    }
+    free(m->slots);
+    free(m->states);
+    m->slots = slots;
+    m->states = states;
+    m->cap = cap;
+    m->used = m->len;
+}
+static inline void ae_map_put(ae_map *m, ae_str key, int64_t value) {
+    ae_map_grow(m);
+    int64_t at = ae_map_slot_of(key, m->cap);
+    int64_t reuse = -1;
+    for (;;) {
+        const unsigned char state = m->states[at];
+        if (state == AE_MAP_EMPTY) break;
+        if (state == AE_MAP_DELETED) {
+            if (reuse < 0) reuse = at;
+        } else if (ae_str_eq(m->slots[at].key, key)) {
+            m->slots[at].value = value;
+            return;
+        }
+        at = (at + 1) & (m->cap - 1);
+    }
+    if (reuse >= 0) at = reuse;
+    else m->used += 1;
+    m->slots[at].key = ae_str_alloc_copy(key.ptr, key.len);
+    m->slots[at].value = value;
+    m->states[at] = AE_MAP_FULL;
+    m->len += 1;
+}
+static inline int64_t ae_map_inc(ae_map *m, ae_str key, int64_t delta) {
+    ae_map_grow(m);
+    int64_t at = ae_map_slot_of(key, m->cap);
+    int64_t reuse = -1;
+    for (;;) {
+        const unsigned char state = m->states[at];
+        if (state == AE_MAP_EMPTY) break;
+        if (state == AE_MAP_DELETED) {
+            if (reuse < 0) reuse = at;
+        } else if (ae_str_eq(m->slots[at].key, key)) {
+            m->slots[at].value += delta;
+            return m->slots[at].value;
+        }
+        at = (at + 1) & (m->cap - 1);
+    }
+    if (reuse >= 0) at = reuse;
+    else m->used += 1;
+    m->slots[at].key = ae_str_alloc_copy(key.ptr, key.len);
+    m->slots[at].value = delta;
+    m->states[at] = AE_MAP_FULL;
+    m->len += 1;
+    return delta;
+}
+static inline double ae_map_inc_f64(ae_map *m, ae_str key, double delta) {
+    ae_map_grow(m);
+    int64_t at = ae_map_slot_of(key, m->cap);
+    int64_t reuse = -1;
+    for (;;) {
+        const unsigned char state = m->states[at];
+        if (state == AE_MAP_EMPTY) break;
+        if (state == AE_MAP_DELETED) {
+            if (reuse < 0) reuse = at;
+        } else if (ae_str_eq(m->slots[at].key, key)) {
+            double current;
+            memcpy(&current, &m->slots[at].value, sizeof current);
+            current += delta;
+            memcpy(&m->slots[at].value, &current, sizeof current);
+            return current;
+        }
+        at = (at + 1) & (m->cap - 1);
+    }
+    if (reuse >= 0) at = reuse;
+    else m->used += 1;
+    m->slots[at].key = ae_str_alloc_copy(key.ptr, key.len);
+    memcpy(&m->slots[at].value, &delta, sizeof delta);
+    m->states[at] = AE_MAP_FULL;
+    m->len += 1;
+    return delta;
+}
+static inline bool ae_map_lookup(const ae_map *m, ae_str key, int64_t *out) {
+    const int64_t at = ae_map_find(m, key);
+    if (at < 0) return false;
+    if (out) *out = m->slots[at].value;
+    return true;
+}
+static inline bool ae_map_has(const ae_map *m, ae_str key) {
+    return ae_map_find(m, key) >= 0;
+}
+static inline bool ae_map_remove(ae_map *m, ae_str key) {
+    const int64_t at = ae_map_find(m, key);
+    if (at < 0) return false;
+    ae_str_release(&m->slots[at].key);
+    m->slots[at].value = 0;
+    m->states[at] = AE_MAP_DELETED;
+    m->len -= 1;
+    return true;
+}
+static inline int64_t ae_map_len(const ae_map *m) { return m->len; }
+static inline int ae_map_cmp_key(const void *a, const void *b) {
+    const ae_str x = *(const ae_str *)a;
+    const ae_str y = *(const ae_str *)b;
+    const int64_t common = x.len < y.len ? x.len : y.len;
+    const int order = common > 0 ? memcmp(x.ptr, y.ptr, (size_t)common) : 0;
+    if (order != 0) return order;
+    return (x.len > y.len) - (x.len < y.len);
+}
+static inline ae_vec ae_map_keys(const ae_map *m) {
+    ae_vec out = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->states[i] != AE_MAP_FULL) continue;
+        ae_str key = ae_str_alloc_copy(m->slots[i].key.ptr, m->slots[i].key.len);
+        ae_vec_push(&out, &key);
+    }
+    // keys() is byte-order sorted, like the main runtime.
+    if (out.len > 1) qsort(out.data, (size_t)out.len, sizeof(ae_str), ae_map_cmp_key);
+    return out;
+}
+static inline void ae_map_release(ae_map *m) {
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->states[i] == AE_MAP_FULL) ae_str_release(&m->slots[i].key);
+    }
+    free(m->slots);
+    free(m->states);
+    m->slots = NULL;
+    m->states = NULL;
+    m->cap = 0;
+    m->len = 0;
+    m->used = 0;
+}
+static inline ae_map ae_map_take(ae_map *m) {
+    ae_map out = *m;
+    m->slots = NULL;
+    m->states = NULL;
+    m->cap = 0;
+    m->len = 0;
+    m->used = 0;
+    return out;
 }
 
 // Wrapping/saturating/checked integer helpers (the `wrapping_*`,

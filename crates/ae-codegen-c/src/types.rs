@@ -58,6 +58,7 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Slice(_) | TyKind::SliceMut(_) => "ae_slice".to_owned(),
         TyKind::Tokens => "ae_tokens".to_owned(),
         TyKind::Atomic => "ae_atomic".to_owned(),
+        TyKind::MapOf(_) => "ae_map".to_owned(),
         TyKind::Exec => "ae_exec".to_owned(),
         TyKind::Thread(_) => "ae_thread_slot *".to_owned(),
         TyKind::Shared(_) => "ae_shared".to_owned(),
@@ -66,8 +67,7 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Chan => "ae_chan".to_owned(),
         TyKind::TaskScope => "ae_task_scope".to_owned(),
         TyKind::Pool => "ae_pool".to_owned(),
-        TyKind::MapOf(_)
-        | TyKind::StructRef(_)
+        TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::Ptr(_)
         | TyKind::PtrMut(_) => "void *".to_owned(),
@@ -101,6 +101,8 @@ pub(crate) struct ModuleTypes {
     pub vector_elems: BTreeMap<usize, TyKind>,
     /// Slice element interner id -> element type, carried on each body.
     pub slice_elems: BTreeMap<usize, TyKind>,
+    /// Map interner id -> (key type, value type), carried on each body.
+    pub map_types: BTreeMap<usize, (TyKind, TyKind)>,
     /// Closure/function DefId -> captured slot types, for spawn entry
     /// trampolines (the lifted function's parameters are those slots).
     pub task_spawns: BTreeMap<DefId, Vec<TyKind>>,
@@ -131,6 +133,9 @@ impl ModuleTypes {
             }
             for (elem_id, elem_ty) in &body.slice_elems {
                 types.slice_elems.entry(*elem_id).or_insert(*elem_ty);
+            }
+            for (map_id, pair) in &body.map_types {
+                types.map_types.entry(*map_id).or_insert(*pair);
             }
         }
 
@@ -402,6 +407,12 @@ impl ModuleTypes {
     /// The element type of a slice interner id, when the body carried it.
     pub fn slice_elem(&self, id: usize) -> Option<TyKind> {
         self.slice_elems.get(&id).copied()
+    }
+
+    /// The (key, value) types of a map interner id, when the body carried
+    /// them.
+    pub fn map_types(&self, id: usize) -> Option<(TyKind, TyKind)> {
+        self.map_types.get(&id).copied()
     }
 
     /// The C expression naming a per-element drop thunk (`NULL` for a Copy
@@ -779,10 +790,8 @@ impl ModuleTypes {
             TyKind::Vector(_) => {
                 let _ = writeln!(out, "    ae_vec_release(&{accessor});");
             }
-            // Maps land with their own stage; a field that is still
-            // unregistered is a non-owning scalar shape.
             TyKind::MapOf(_) => {
-                let _ = writeln!(out, "    /* {accessor}: map release pending */");
+                let _ = writeln!(out, "    ae_map_release(&{accessor});");
             }
             _ => {}
         }

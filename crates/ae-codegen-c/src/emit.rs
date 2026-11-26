@@ -164,7 +164,9 @@ pub(crate) fn emit_main_wrapper(
         .map(|l| l.ty)
         .unwrap_or(TyKind::Unit);
 
-    out.push_str("int main(void) {\n");
+    out.push_str(
+        "int main(int argc, char **argv) {\n    ae_argc_g = argc;\n    ae_argv_g = argv;\n",
+    );
     match ret_ty {
         TyKind::Int(_) | TyKind::Char => {
             let _ = writeln!(out, "    return (int){entry_c_name}();");
@@ -1246,6 +1248,289 @@ fn emit_intrinsic(
             let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             finish_value(out, body, types, destination, target, &format!("ae_chan_select({a}, {b})"))
         }
+        "args" => {
+            match types.infer_place_ty(body, destination) {
+                Some(TyKind::Vector(id)) if types.vector_elem(id) == Some(TyKind::String) => {
+                    finish_value(out, body, types, destination, target, "ae_args_value()")
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("args() into {other:?} is not supported yet"),
+                }),
+            }
+        }
+        "read_file" => {
+            let path = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            match dest_ty {
+                Some(TyKind::String) => finish_value(
+                    out,
+                    body,
+                    types,
+                    destination,
+                    target,
+                    &format!("ae_read_file_value({path}, (size_t){line}, (size_t){column})"),
+                ),
+                Some(TyKind::Enum(_, eid)) => {
+                    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+                    let ok = format!(
+                        "((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _read.text }} }} }})"
+                    );
+                    let err = format!(
+                        "((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _read.error }} }} }})"
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    {{ ae_read_result _read = ae_try_read_file_value({path});\n      if (_read.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+                    );
+                    if let Some(next_bb) = target {
+                        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+                    } else {
+                        out.push_str("    ae_trap(\"diverging call returned\");\n");
+                    }
+                    Ok(())
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("read_file into {other:?} is not supported yet"),
+                }),
+            }
+        }
+        "read_stdin" => {
+            let dest_ty = types.infer_place_ty(body, destination);
+            match dest_ty {
+                Some(TyKind::Enum(_, eid)) => {
+                    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+                    let ok = format!(
+                        "((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _read.text }} }} }})"
+                    );
+                    let err = format!(
+                        "((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _read.error }} }} }})"
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    {{ ae_read_result _read = ae_try_read_stdin_value();\n      if (_read.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+                    );
+                    if let Some(next_bb) = target {
+                        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+                    } else {
+                        out.push_str("    ae_trap(\"diverging call returned\");\n");
+                    }
+                    Ok(())
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("read_stdin into {other:?} is not supported yet"),
+                }),
+            }
+        }
+        "write_file" => {
+            let path = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let content = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            match dest_ty {
+                Some(TyKind::Int(_)) => finish_value(
+                    out,
+                    body,
+                    types,
+                    destination,
+                    target,
+                    &format!("ae_write_file_value({path}, {content}, (size_t){line}, (size_t){column})"),
+                ),
+                Some(TyKind::Enum(_, eid)) => {
+                    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+                    let ok = format!(
+                        "((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _write.written }} }} }})"
+                    );
+                    let err = format!(
+                        "((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _write.error }} }} }})"
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    {{ ae_write_result _write = ae_try_write_file_value({path}, {content});\n      if (_write.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+                    );
+                    if let Some(next_bb) = target {
+                        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+                    } else {
+                        out.push_str("    ae_trap(\"diverging call returned\");\n");
+                    }
+                    Ok(())
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("write_file into {other:?} is not supported yet"),
+                }),
+            }
+        }
+        "path_join" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_path_join_value({a}, {b})"))
+        }
+        "path_name" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_path_name_value({a})"))
+        }
+        "path_parent" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_path_parent_value({a})"))
+        }
+        "path_exists" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_path_exists_value({a})"))
+        }
+        "path_is_dir" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_path_is_dir_value({a})"))
+        }
+        "map_new" | "f64map_new" => {
+            finish_value(out, body, types, destination, target, "ae_map_new()")
+        }
+        "map_put" => {
+            if args.len() != 3 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "map_put needs a map, a key and a value".to_owned(),
+                });
+            }
+            let (map, _key_ty, value_ty) = map_operand(body, &args[0], types, def_map)?;
+            let key = emit_operand(body, &args[1], types, def_map)?;
+            let value = emit_operand(body, &args[2], types, def_map)?;
+            match value_ty {
+                TyKind::Int(_) => {
+                    let _ = writeln!(out, "    ae_map_put(&{map}, {key}, (int64_t)({value}));");
+                }
+                TyKind::Float(FloatTy::F64) => {
+                    let _ = writeln!(
+                        out,
+                        "    {{ double _v = {value}; int64_t _bits; memcpy(&_bits, &_v, sizeof _bits); ae_map_put(&{map}, {key}, _bits); }}"
+                    );
+                }
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("map values of {other:?} are not supported yet"),
+                    });
+                }
+            }
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "map_get" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "map_get needs a map and a key".to_owned(),
+                });
+            }
+            let (map, _key_ty, value_ty) = map_operand(body, &args[0], types, def_map)?;
+            let key = emit_operand(body, &args[1], types, def_map)?;
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("map_get result is {other:?}, not a Result enum"),
+                    });
+                }
+            };
+            let layouts = body.enum_layouts.get(&eid).ok_or_else(|| {
+                CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("enum layout for id {eid} is not carried on the body"),
+                }
+            })?;
+            let ok_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [value_ty])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("map_get result enum {eid} has no {value_ty:?} Ok variant"),
+                })?;
+            let err_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::String])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("map_get result enum {eid} has no string Err variant"),
+                })?;
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let ok_value = match value_ty {
+                TyKind::Int(_) => "_bits".to_owned(),
+                TyKind::Float(FloatTy::F64) => "_value".to_owned(),
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("map values of {other:?} are not supported yet"),
+                    });
+                }
+            };
+            let ok = format!(
+                "((ae_enum_{eid}){{ .tag = {ok_variant}, .u = {{ .v{ok_variant} = {{ .f0 = {ok_value} }} }} }})"
+            );
+            let err = format!(
+                "((ae_enum_{eid}){{ .tag = {err_variant}, .u = {{ .v{err_variant} = {{ .f0 = ((ae_str){{ .ptr = \"key not found\", .len = (int64_t)(sizeof(\"key not found\") - 1), .owned = false }}) }} }} }})"
+            );
+            let (prefix, prepare) = if matches!(value_ty, TyKind::Float(_)) {
+                ("int64_t _bits = 0; double _value = 0.0;", "memcpy(&_value, &_bits, sizeof _value); ")
+            } else {
+                ("int64_t _bits = 0;", "")
+            };
+            let _ = writeln!(
+                out,
+                "    {{ {prefix} if (ae_map_lookup(&{map}, {key}, &_bits)) {{ {prepare}{dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "map_has" => {
+            let (map, _key_ty, _value_ty) = map_operand(body, &args[0], types, def_map)?;
+            let key = emit_operand(body, &args[1], types, def_map)?;
+            finish_value(out, body, types, destination, target, &format!("ae_map_has(&{map}, {key})"))
+        }
+        "map_remove" => {
+            let (map, _key_ty, _value_ty) = map_operand(body, &args[0], types, def_map)?;
+            let key = emit_operand(body, &args[1], types, def_map)?;
+            finish_value(out, body, types, destination, target, &format!("ae_map_remove(&{map}, {key})"))
+        }
+        "map_inc" => {
+            if args.len() != 3 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "map_inc needs a map, a key and a delta".to_owned(),
+                });
+            }
+            let (map, _key_ty, value_ty) = map_operand(body, &args[0], types, def_map)?;
+            let key = emit_operand(body, &args[1], types, def_map)?;
+            let delta = emit_operand(body, &args[2], types, def_map)?;
+            let call = match value_ty {
+                TyKind::Int(_) => format!("ae_map_inc(&{map}, {key}, (int64_t)({delta}))"),
+                TyKind::Float(FloatTy::F64) => {
+                    format!("ae_map_inc_f64(&{map}, {key}, (double)({delta}))")
+                }
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("map values of {other:?} are not supported yet"),
+                    });
+                }
+            };
+            finish_value(out, body, types, destination, target, &call)
+        }
+        "keys" | "map_keys" => {
+            let (map, key_ty, _value_ty) = map_operand(body, &args[0], types, def_map)?;
+            if key_ty != TyKind::String {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("map keys of {key_ty:?} are not supported yet"),
+                });
+            }
+            finish_value(out, body, types, destination, target, &format!("ae_map_keys(&{map})"))
+        }
         "shared_new" => {
             let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
                 body_name: body.name.clone(),
@@ -1470,6 +1755,78 @@ fn emit_intrinsic(
             }
             Ok(())
         }
+        "sqrt" | "floor" | "ceil" | "round" | "exp" | "log" | "sin" | "cos" | "abs" => {
+            let arg = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let symbol = if name == "abs" { "fabs" } else { name };
+            finish_value(out, body, types, destination, target, &format!("{symbol}((double)({arg}))"))
+        }
+        "pow" | "atan2" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let symbol = name;
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("(double)({symbol}((double)({a}), (double)({b})))"),
+            )
+        }
+        "min" | "max" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_f64_{name}((double)({a}), (double)({b}))"),
+            )
+        }
+        "split" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "split needs text and a separator".to_owned(),
+                });
+            }
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let sep = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_vec_split({text}, {sep}, (size_t){line}, (size_t){column})"),
+            )
+        }
+        "lines" => {
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_vec_lines({text})"))
+        }
+        "utf8_len" => {
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_utf8_len({text})"))
+        }
+        "utf8_prefix" => {
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let count = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_utf8_prefix({text}, (int64_t)({count}), (size_t){line}, (size_t){column})"),
+            )
+        }
+        "trim" => {
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_str_trim({text})"))
+        }
         "ptr_offset" | "byte_offset" => {
             if args.len() != 2 {
                 return Err(CodegenError::UnsupportedFeature {
@@ -1532,6 +1889,9 @@ fn emit_drop(
         }
         Some(TyKind::Vector(_)) => {
             let _ = writeln!(out, "    ae_vec_release(&{place_expr});");
+        }
+        Some(TyKind::MapOf(_)) => {
+            let _ = writeln!(out, "    ae_map_release(&{place_expr});");
         }
         Some(TyKind::Thread(_)) => {
             let _ = writeln!(out, "    ae_thread_release(&{place_expr});");
@@ -1885,6 +2245,46 @@ fn cursor_operand(
     }
 }
 
+/// Resolves the map behind an operand: the map expression, its key type and
+/// its value type.
+fn map_operand(
+    body: &Body,
+    op: &Operand,
+    types: &ModuleTypes,
+    _def_map: &BTreeMap<DefId, String>,
+) -> Result<(String, TyKind, TyKind), CodegenError> {
+    let place = match op {
+        Operand::Copy(place) | Operand::Move(place) => place,
+        Operand::Constant(c) => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("map operand cannot be a constant {:?}", c.value),
+            });
+        }
+    };
+    let ty = types.infer_place_ty(body, place).ok_or_else(|| {
+        CodegenError::UnsupportedFeature {
+            body_name: body.name.clone(),
+            detail: "map operand has no inferable type".to_owned(),
+        }
+    })?;
+    let id = match ty {
+        TyKind::MapOf(id) => id,
+        other => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("expected a map operand, found {other:?}"),
+            });
+        }
+    };
+    let (key, value) = types.map_types(id).ok_or_else(|| CodegenError::UnsupportedFeature {
+        body_name: body.name.clone(),
+        detail: format!("map types for id {id} are not carried on the body"),
+    })?;
+    let expr = emit_place(body, place, types, Some(ty))?;
+    Ok((expr, key, value))
+}
+
 fn emit_operand(
     body: &Body,
     op: &Operand,
@@ -1910,6 +2310,7 @@ fn emit_operand(
                     Ok(format!("ae_take_enum_{id}(&{expr})"))
                 }
                 Some(TyKind::Vector(_)) => Ok(format!("ae_vec_take(&{expr})")),
+                Some(TyKind::MapOf(_)) => Ok(format!("ae_map_take(&{expr})")),
                 Some(TyKind::Thread(_)) => Ok(format!("ae_thread_take(&{expr})")),
                 Some(TyKind::Guard) => Ok(format!("ae_guard_take(&{expr})")),
                 Some(TyKind::TaskScope) => Ok(format!("ae_task_scope_take(&{expr})")),
@@ -2149,6 +2550,10 @@ fn emit_rvalue(
                 Some(TyKind::VectorRef(_)) => {
                     let place_expr = emit_place(body, place, types, None)?;
                     Ok(format!("((uintptr_t)ae_vec_len({place_expr}))"))
+                }
+                Some(TyKind::MapOf(_)) => {
+                    let place_expr = emit_place(body, place, types, None)?;
+                    Ok(format!("((uintptr_t)ae_map_len(&{place_expr}))"))
                 }
                 Some(TyKind::Slice(_) | TyKind::SliceMut(_)) => {
                     let place_expr = emit_place(body, place, types, None)?;
