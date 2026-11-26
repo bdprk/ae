@@ -60,19 +60,21 @@ see).
    zeroed slot and its own conservative release stays a no-op. This replaces
    the earlier string-view binding, which left the enum owning the buffer
    and the view unable to free it.
-6. **A consumer that cannot pass a capture fails closed.** The thread
-   context packages moved value captures only. A spawned closure that also
-   borrows parent storage needs the parent to hand a view through that same
-   context; the pure lowering rejects it (`spawn of a closure that borrows
-   parent storage is not supported by the pure MIR pipeline yet`) instead of
-   emitting a trampoline whose arity does not match the lifted function.
-
 5. **Argument slots are not owners.** The frontend may hoist an owned
    argument into a CFG `Declare` slot. The lowering assigns the temporary
    into the slot without a second copy (`_22 = copy _21` disappeared when the
    operand started reusing `_21`); a read-only intrinsic that receives the
    slot's value releases it after the call. The slot itself is never treated
    as a long-lived owner, so a later move takes an already-zeroed slot.
+
+6. **A thread context carries borrow captures as views.** A spawned
+   closure whose body reads parent storage gets a view, vector reference or
+   struct reference of the parent slot in the same thread context, right
+   after the moved value captures; the join keeps that storage alive while
+   the thread reads it. Task/scope/pool spawns take no borrow captures by
+   language rule (the frontend rejects them: `task_spawn moves its captures
+   into the task; borrow captures are not allowed`), so every spawn the
+   pipeline accepts carries exactly the captures its context packages.
 
 ## Evidence
 
@@ -84,9 +86,10 @@ same sweep previously failed on `copy_notes`. The `tests/run` end-to-end gate
 stays **161 of 161** with zero output mismatches, `cargo test --workspace
 --locked` reports **686 passed / 0 failed**, clippy is clean, and
 `python scripts/verify_generated_c.py` passes **41/41**. The differential
-fuzzer compares the mixed mode at **300 seeds / 0 failures** (the 26
-borrow-capture spawns skip as an unsupported subset) and `--pure-subset` at
-**300/300 with 0 skipped**. The examples corpus emits **49 of 49** programs.
+fuzzer compares **300 seeds / 0 failures / 0 skipped** in both the mixed
+mode and `--pure-subset`; the seed that first exposed the arity mismatch
+(a spawned closure reading a parent string) matches the legacy backend and
+is AddressSanitizer-clean. The examples corpus emits **49 of 49** programs.
 
 ## Consequences
 

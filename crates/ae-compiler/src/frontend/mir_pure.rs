@@ -832,24 +832,24 @@ impl<'a> PureMirBuilder<'a> {
                 self.emit_intrinsic_call("chan_close", vec![h], TyKind::Unit);
             }
             Statement::TaskSpawn(ex, slots, callable, ..) => {
-                self.reject_borrowed_spawn(callable);
                 let mut ops = vec![self.lower_operand(ex), self.lower_operand(callable)];
                 ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
+                self.append_spawn_borrows(&mut ops, callable);
                 self.emit_intrinsic_call("task_spawn", ops, TyKind::Unit);
             }
             Statement::TaskYield => {
                 self.emit_intrinsic_call("task_yield", Vec::new(), TyKind::Unit);
             }
             Statement::ScopeSpawn(sc, slots, callable, ..) => {
-                self.reject_borrowed_spawn(callable);
                 let mut ops = vec![self.lower_operand(sc), self.lower_operand(callable)];
                 ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
+                self.append_spawn_borrows(&mut ops, callable);
                 self.emit_intrinsic_call("scope_spawn", ops, TyKind::Unit);
             }
             Statement::PoolSpawn(p, slots, callable, ..) => {
-                self.reject_borrowed_spawn(callable);
                 let mut ops = vec![self.lower_operand(p), self.lower_operand(callable)];
                 ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
+                self.append_spawn_borrows(&mut ops, callable);
                 self.emit_intrinsic_call("pool_spawn", ops, TyKind::Unit);
             }
             // Control-flow statements are already lowered by `cfg::build_cfg`.
@@ -1550,20 +1550,57 @@ impl<'a> PureMirBuilder<'a> {
         }
     }
 
-    /// A spawned closure that also reads parent storage (a borrow capture)
-    /// needs the parent to pass a view through the thread context. The pure
-    /// backend packages only the moved value captures, so fail closed instead
-    /// of emitting a trampoline with the wrong arity.
-    fn reject_borrowed_spawn(&mut self, callable: &Expr) {
+    /// Appends the context fields for a spawned closure's borrow captures, after
+    /// its moved value captures: the lifted function takes those views/refs in
+    /// the same order.
+    fn append_spawn_borrows(&mut self, ops: &mut Vec<Operand>, callable: &Expr) {
         let Expr::ClosureLit(cid) = callable else {
             return;
         };
-        if self.ctx.closure_borrow_captures(*cid).is_empty() {
-            return;
+        for (outer, hidden) in self.ctx.closure_borrow_captures(*cid) {
+            if let Some(op) = self.spawn_borrow_operand(outer, hidden) {
+                ops.push(op);
+            }
         }
-        let message = "spawn of a closure that borrows parent storage is not supported by the pure MIR pipeline yet";
-        if !self.unsupported.iter().any(|existing| existing == message) {
-            self.unsupported.push(message.to_owned());
+    }
+
+    /// The context field for one borrow capture of a spawned closure: a
+    /// string view, a vector reference or a struct reference of the parent's
+    /// slot, in the same form the lifted function's parameter carries.
+    fn spawn_borrow_operand(&mut self, outer: usize, hidden: TyKind) -> Option<Operand> {
+        match hidden {
+            TyKind::StrView => {
+                let (local, _) = self.ensure_var(outer, TyKind::String);
+                let view = self.emit_intrinsic_call(
+                    "string_view",
+                    vec![Operand::Copy(Place::from_local(local))],
+                    TyKind::StrView,
+                );
+                Some(Operand::Copy(Place::from_local(view)))
+            }
+            TyKind::VectorRef(id) => {
+                let (local, _) = self.ensure_var(outer, TyKind::Vector(id));
+                let temp = self.assign_to_temp(
+                    TyKind::VectorRef(id),
+                    Rvalue::Ref {
+                        borrow_kind: BorrowKind::Shared,
+                        place: Place::from_local(local),
+                    },
+                );
+                Some(Operand::Copy(Place::from_local(temp)))
+            }
+            TyKind::StructRef(sid) => {
+                let (local, _) = self.ensure_var(outer, TyKind::Struct(sid));
+                let temp = self.assign_to_temp(
+                    TyKind::StructRef(sid),
+                    Rvalue::Ref {
+                        borrow_kind: BorrowKind::Shared,
+                        place: Place::from_local(local),
+                    },
+                );
+                Some(Operand::Copy(Place::from_local(temp)))
+            }
+            _ => None,
         }
     }
 
@@ -1936,11 +1973,14 @@ impl<'a> PureMirBuilder<'a> {
                 (kind.mir_name(), ops)
             }
             Expr::Spawn(slots, callable, ..) => {
-                self.reject_borrowed_spawn(callable);
                 let mut ops: Vec<Operand> = slots
                     .iter()
                     .map(|s| self.lower_operand_moving(s))
                     .collect();
+                // A spawned closure may also read parent storage: its lifted
+                // function takes those borrow-capture views/refs after the
+                // moved captures, and the join keeps the storage alive.
+                self.append_spawn_borrows(&mut ops, callable);
                 ops.push(self.lower_operand(callable));
                 ("thread_spawn", ops)
             }
