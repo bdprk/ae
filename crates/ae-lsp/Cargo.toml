@@ -1,0 +1,10 @@
+[package]
+name = "ae-lsp"
+version = "0.1.1"
+edition = "2024"
+
+[dependencies]
+ae-span = { path = "../ae-span" }
+ae-syntax = { path = "../ae-syntax" }
+ae-resolve = { path = "../ae-resolve" }
+ae-query = { path = "../ae-query" }
