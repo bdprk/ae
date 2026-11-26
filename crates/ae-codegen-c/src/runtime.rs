@@ -1051,6 +1051,315 @@ static inline ae_guard ae_guard_take(ae_guard *g) {
     g->lock = NULL;
     return value;
 }
+
+// Channels (spec/concurrency.md §10): copy-semantics handle to a
+// process-lifetime bounded or rendezvous (cap == 0) i64 channel. Blocking
+// send/recv, draining after close, and blocked senders woken with false.
+#ifdef _WIN32
+struct _RTL_SRWLOCK;
+struct _RTL_CONDITION_VARIABLE;
+extern void InitializeSRWLock(struct _RTL_SRWLOCK *lock);
+extern void AcquireSRWLockExclusive(struct _RTL_SRWLOCK *lock);
+extern void ReleaseSRWLockExclusive(struct _RTL_SRWLOCK *lock);
+extern void InitializeConditionVariable(struct _RTL_CONDITION_VARIABLE *cv);
+extern int SleepConditionVariableSRW(struct _RTL_CONDITION_VARIABLE *cv, struct _RTL_SRWLOCK *lock, unsigned long ms, unsigned long flags);
+extern void WakeConditionVariable(struct _RTL_CONDITION_VARIABLE *cv);
+extern void WakeAllConditionVariable(struct _RTL_CONDITION_VARIABLE *cv);
+extern void Sleep(unsigned long ms);
+#else
+#include <pthread.h>
+#endif
+typedef struct {
+#ifdef _WIN32
+    void *lock_storage;
+    void *not_full_storage;
+    void *not_empty_storage;
+#else
+    pthread_mutex_t lock;
+    pthread_cond_t not_full;
+    pthread_cond_t not_empty;
+#endif
+    int64_t *buf;
+    int64_t cap;
+    int64_t head;
+    int64_t count;
+    int64_t slot;
+    int has_slot;
+    int closed;
+} ae_chan_state;
+typedef struct { ae_chan_state *state; } ae_chan;
+static inline ae_chan ae_chan_new(int64_t cap) {
+    if (cap < 0) ae_trap("chan_new capacity must be non-negative");
+    ae_chan_state *s = (ae_chan_state *)calloc(1, sizeof(ae_chan_state));
+    if (!s) ae_trap("out of memory");
+    s->cap = cap;
+    if (cap > 0) {
+        s->buf = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+        if (!s->buf) ae_trap("out of memory");
+    }
+#ifdef _WIN32
+    InitializeSRWLock((struct _RTL_SRWLOCK *)&s->lock_storage);
+    InitializeConditionVariable((struct _RTL_CONDITION_VARIABLE *)&s->not_full_storage);
+    InitializeConditionVariable((struct _RTL_CONDITION_VARIABLE *)&s->not_empty_storage);
+#else
+    pthread_mutex_init(&s->lock, NULL);
+    pthread_cond_init(&s->not_full, NULL);
+    pthread_cond_init(&s->not_empty, NULL);
+#endif
+    ae_chan value = { s };
+    return value;
+}
+#ifdef _WIN32
+#define _AE_CHAN_LOCK(s) AcquireSRWLockExclusive((struct _RTL_SRWLOCK *)&(s)->lock_storage)
+#define _AE_CHAN_UNLOCK(s) ReleaseSRWLockExclusive((struct _RTL_SRWLOCK *)&(s)->lock_storage)
+#define _AE_CHAN_WAIT(cv, s) SleepConditionVariableSRW((struct _RTL_CONDITION_VARIABLE *)&(s)->cv##_storage, (struct _RTL_SRWLOCK *)&(s)->lock_storage, 0xFFFFFFFFu, 0)
+#define _AE_CHAN_WAKE(cv, s) WakeConditionVariable((struct _RTL_CONDITION_VARIABLE *)&(s)->cv##_storage)
+#define _AE_CHAN_WAKE_ALL(cv, s) WakeAllConditionVariable((struct _RTL_CONDITION_VARIABLE *)&(s)->cv##_storage)
+#else
+#define _AE_CHAN_LOCK(s) pthread_mutex_lock(&(s)->lock)
+#define _AE_CHAN_UNLOCK(s) pthread_mutex_unlock(&(s)->lock)
+#define _AE_CHAN_WAIT(cv, s) pthread_cond_wait(&(s)->cv, &(s)->lock)
+#define _AE_CHAN_WAKE(cv, s) pthread_cond_signal(&(s)->cv)
+#define _AE_CHAN_WAKE_ALL(cv, s) pthread_cond_broadcast(&(s)->cv)
+#endif
+static inline bool ae_chan_send(ae_chan ch, int64_t value) {
+    ae_chan_state *s = ch.state;
+    _AE_CHAN_LOCK(s);
+    bool ok = false;
+    if (s->cap == 0) {
+        while (!s->closed && s->has_slot) _AE_CHAN_WAIT(not_full, s);
+        if (!s->closed) {
+            s->slot = value;
+            s->has_slot = 1;
+            _AE_CHAN_WAKE(not_empty, s);
+            while (!s->closed && s->has_slot) _AE_CHAN_WAIT(not_full, s);
+            if (!s->has_slot) {
+                ok = true;
+            } else {
+                s->has_slot = 0;
+                ok = false;
+            }
+        }
+    } else {
+        while (!s->closed && s->count == s->cap) _AE_CHAN_WAIT(not_full, s);
+        if (!s->closed) {
+            const int64_t tail = (s->head + s->count) % s->cap;
+            s->buf[tail] = value;
+            s->count += 1;
+            ok = true;
+            _AE_CHAN_WAKE(not_empty, s);
+        }
+    }
+    _AE_CHAN_UNLOCK(s);
+    return ok;
+}
+static inline int64_t ae_chan_recv(ae_chan ch) {
+    ae_chan_state *s = ch.state;
+    _AE_CHAN_LOCK(s);
+    int64_t value = 0;
+    if (s->cap == 0) {
+        while (!s->closed && !s->has_slot) _AE_CHAN_WAIT(not_empty, s);
+        if (s->has_slot) {
+            value = s->slot;
+            s->has_slot = 0;
+            _AE_CHAN_WAKE_ALL(not_full, s);
+        }
+    } else {
+        while (!s->closed && s->count == 0) _AE_CHAN_WAIT(not_empty, s);
+        if (s->count > 0) {
+            value = s->buf[s->head];
+            s->head = (s->head + 1) % s->cap;
+            s->count -= 1;
+            _AE_CHAN_WAKE(not_full, s);
+        }
+    }
+    _AE_CHAN_UNLOCK(s);
+    return value;
+}
+static inline void ae_chan_close(ae_chan ch) {
+    ae_chan_state *s = ch.state;
+    _AE_CHAN_LOCK(s);
+    s->closed = 1;
+    _AE_CHAN_WAKE_ALL(not_full, s);
+    _AE_CHAN_WAKE_ALL(not_empty, s);
+    _AE_CHAN_UNLOCK(s);
+}
+static inline bool ae_chan_try_send(ae_chan ch, int64_t value) {
+    ae_chan_state *s = ch.state;
+    _AE_CHAN_LOCK(s);
+    bool ok = false;
+    if (!s->closed && s->cap > 0 && s->count < s->cap) {
+        const int64_t tail = (s->head + s->count) % s->cap;
+        s->buf[tail] = value;
+        s->count += 1;
+        ok = true;
+        _AE_CHAN_WAKE(not_empty, s);
+    }
+    _AE_CHAN_UNLOCK(s);
+    return ok;
+}
+static inline bool ae_chan_is_ready(ae_chan ch) {
+    ae_chan_state *s = ch.state;
+    _AE_CHAN_LOCK(s);
+    const bool ready = s->closed || (s->cap == 0 ? s->has_slot != 0 : s->count > 0);
+    _AE_CHAN_UNLOCK(s);
+    return ready;
+}
+static inline bool ae_chan_is_closed(ae_chan ch) {
+    ae_chan_state *s = ch.state;
+    _AE_CHAN_LOCK(s);
+    const bool closed = s->closed != 0;
+    _AE_CHAN_UNLOCK(s);
+    return closed;
+}
+static inline int64_t ae_chan_select(ae_chan ch1, ae_chan ch2) {
+    for (;;) {
+        if (ae_chan_is_closed(ch1)) return 0;
+        if (ae_chan_is_closed(ch2)) return 1;
+        if (ae_chan_is_ready(ch1)) return 0;
+        if (ae_chan_is_ready(ch2)) return 1;
+#ifdef _WIN32
+        Sleep(1);
+#else
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 1000000;
+        thrd_sleep(&ts, NULL);
+#endif
+    }
+}
+
+// Task scopes: an executor whose release drains every spawned child, so an
+// early return still joins the work it started.
+typedef struct { void *state; } ae_task_scope;
+static inline ae_task_scope ae_scope_new(void) {
+    ae_exec ex = ae_exec_new();
+    ae_task_scope scope = { ex.state };
+    return scope;
+}
+static inline void ae_scope_spawn(ae_task_scope sc, ae_task_entry_fn entry, void *ctx) {
+    ae_exec ex = { sc.state };
+    ae_task_spawn(ex, entry, ctx);
+}
+static inline void ae_scope_release(ae_task_scope *sc) {
+    if (sc->state) {
+        ae_exec ex = { sc->state };
+        (void)ae_exec_run(ex);
+        sc->state = NULL;
+    }
+}
+static inline ae_task_scope ae_task_scope_take(ae_task_scope *sc) {
+    ae_task_scope value = *sc;
+    sc->state = NULL;
+    return value;
+}
+
+// Multi-worker work-stealing pool: spawn enqueues a task, join starts the
+// workers (up to 16), lets them drain and steal, then returns the completed
+// count. The pool handle itself is process-lifetime.
+typedef struct ae_pool_task {
+    ae_task_entry_fn entry;
+    void *ctx;
+    struct ae_pool_task *next;
+} ae_pool_task;
+typedef struct {
+    atomic_flag lock;
+    ae_pool_task *head;
+    ae_pool_task *tail;
+} ae_pool_queue;
+typedef struct {
+    int64_t workers;
+    int64_t next_q;
+    _Atomic int64_t completed;
+    ae_pool_queue queues[16];
+} ae_pool_state;
+typedef struct { ae_pool_state *state; } ae_pool;
+typedef struct {
+    ae_pool_state *pool;
+    int64_t id;
+} ae_pool_worker_arg;
+static inline void ae_pool_lock(atomic_flag *flag) {
+    while (atomic_flag_test_and_set_explicit(flag, memory_order_acquire)) {}
+}
+static inline void ae_pool_unlock(atomic_flag *flag) {
+    atomic_flag_clear_explicit(flag, memory_order_release);
+}
+static inline ae_pool_task *ae_pool_pop_one(ae_pool_queue *q) {
+    ae_pool_lock(&q->lock);
+    ae_pool_task *task = q->head;
+    if (task) {
+        q->head = task->next;
+        if (!q->head) q->tail = NULL;
+        task->next = NULL;
+    }
+    ae_pool_unlock(&q->lock);
+    return task;
+}
+static void ae_pool_worker_run(void *param) {
+    ae_pool_worker_arg *arg = (ae_pool_worker_arg *)param;
+    ae_pool_state *p = arg->pool;
+    const int64_t me = arg->id;
+    for (;;) {
+        ae_pool_task *task = ae_pool_pop_one(&p->queues[me]);
+        if (!task) {
+            for (int64_t off = 1; off < p->workers; off++) {
+                const int64_t victim = (me + off) % p->workers;
+                task = ae_pool_pop_one(&p->queues[victim]);
+                if (task) break;
+            }
+        }
+        if (!task) break;
+        task->entry(task->ctx);
+        free(task->ctx);
+        free(task);
+        atomic_fetch_add(&p->completed, 1);
+    }
+}
+static inline ae_pool ae_pool_new(int64_t workers) {
+    if (workers < 1) workers = 1;
+    if (workers > 16) workers = 16;
+    ae_pool_state *p = (ae_pool_state *)calloc(1, sizeof(ae_pool_state));
+    if (!p) ae_trap("out of memory");
+    p->workers = workers;
+    atomic_init(&p->completed, 0);
+    ae_pool value = { p };
+    return value;
+}
+static inline void ae_pool_spawn(ae_pool pool, ae_task_entry_fn entry, void *ctx) {
+    ae_pool_state *p = pool.state;
+    ae_pool_task *task = (ae_pool_task *)calloc(1, sizeof(ae_pool_task));
+    if (!task) ae_trap("out of memory");
+    task->entry = entry;
+    task->ctx = ctx;
+    const int64_t qid = p->next_q % p->workers;
+    p->next_q += 1;
+    ae_pool_queue *q = &p->queues[qid];
+    ae_pool_lock(&q->lock);
+    if (q->tail) {
+        q->tail->next = task;
+        q->tail = task;
+    } else {
+        q->head = q->tail = task;
+    }
+    ae_pool_unlock(&q->lock);
+}
+static inline int64_t ae_pool_join(ae_pool pool) {
+    ae_pool_state *p = pool.state;
+    atomic_store(&p->completed, 0);
+    ae_thread_slot *handles[16];
+    ae_pool_worker_arg args[16];
+    for (int64_t i = 0; i < p->workers; i++) {
+        args[i].pool = p;
+        args[i].id = i;
+        handles[i] = ae_thread_spawn_ctx(ae_pool_worker_run, &args[i]);
+        if (!handles[i]) ae_trap("out of memory");
+    }
+    for (int64_t i = 0; i < p->workers; i++) {
+        if (!ae_thread_join(handles[i]->native)) ae_trap("pool worker join failed");
+        free(handles[i]);
+    }
+    return atomic_load(&p->completed);
+}
 "#);
 
     let int_tys = [

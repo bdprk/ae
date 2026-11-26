@@ -63,14 +63,14 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Shared(_) => "ae_shared".to_owned(),
         TyKind::Mutex => "ae_mutex".to_owned(),
         TyKind::Guard => "ae_guard".to_owned(),
+        TyKind::Chan => "ae_chan".to_owned(),
+        TyKind::TaskScope => "ae_task_scope".to_owned(),
+        TyKind::Pool => "ae_pool".to_owned(),
         TyKind::MapOf(_)
         | TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::Ptr(_)
-        | TyKind::PtrMut(_)
-        | TyKind::Chan
-        | TyKind::TaskScope
-        | TyKind::Pool => "void *".to_owned(),
+        | TyKind::PtrMut(_) => "void *".to_owned(),
     }
 }
 

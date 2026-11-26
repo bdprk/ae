@@ -1134,6 +1134,48 @@ fn emit_intrinsic(
             let _ = writeln!(out, "    ae_cell_store({handle}, (int64_t)({value}));");
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
+        "chan_new" => {
+            let cap = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_chan_new((int64_t)({cap}))"))
+        }
+        "chan_send" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let value = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_chan_send({handle}, (int64_t)({value}))"),
+            )
+        }
+        "chan_try_send" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let value = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_chan_try_send({handle}, (int64_t)({value}))"),
+            )
+        }
+        "chan_recv" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_chan_recv({handle})"))
+        }
+        "chan_close" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let _ = writeln!(out, "    ae_chan_close({handle});");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "chan_select" => {
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_chan_select({a}, {b})"))
+        }
         "shared_new" => {
             let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
                 body_name: body.name.clone(),
@@ -1213,11 +1255,11 @@ fn emit_intrinsic(
             out.push_str("    ae_task_yield();\n");
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
-        "task_spawn" => {
+        "task_spawn" | "scope_spawn" | "pool_spawn" => {
             if args.len() < 2 {
                 return Err(CodegenError::UnsupportedFeature {
                     body_name: body.name.clone(),
-                    detail: "task_spawn needs an executor and a callable".to_owned(),
+                    detail: format!("{name} needs a handle and a callable"),
                 });
             }
             let callable = match &args[1] {
@@ -1226,14 +1268,14 @@ fn emit_intrinsic(
                     other => {
                         return Err(CodegenError::UnsupportedFeature {
                             body_name: body.name.clone(),
-                            detail: format!("task_spawn callable constant {other:?} is not supported"),
+                            detail: format!("{name} callable constant {other:?} is not supported"),
                         });
                     }
                 },
                 _ => {
                     return Err(CodegenError::UnsupportedFeature {
                         body_name: body.name.clone(),
-                        detail: "task_spawn needs a closure literal".to_owned(),
+                        detail: format!("{name} needs a closure literal"),
                     });
                 }
             };
@@ -1246,6 +1288,11 @@ fn emit_intrinsic(
             let id = callable.0;
             let ctx = format!("ae_task_ctx_{id}");
             let entry = format!("ae_task_entry_{id}");
+            let spawn_fn = match name {
+                "task_spawn" => "ae_task_spawn",
+                "scope_spawn" => "ae_scope_spawn",
+                _ => "ae_pool_spawn",
+            };
             let executor = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let mut text = format!(
                 "    {{ {ctx} *_ctx = ({ctx} *)malloc(sizeof * _ctx);\n"
@@ -1255,10 +1302,28 @@ fn emit_intrinsic(
                 text.push_str(&format!("      _ctx->f{index} = {value};\n"));
             }
             text.push_str(&format!(
-                "      ae_task_spawn({executor}, {entry}, (void *)_ctx); }}"
+                "      {spawn_fn}({executor}, {entry}, (void *)_ctx); }}"
             ));
             let _ = writeln!(out, "{text}");
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "scope_new" => {
+            finish_value(out, body, types, destination, target, "ae_scope_new()")
+        }
+        "pool_new" => {
+            let workers = arg_exprs.first().map(String::as_str).unwrap_or("1");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_pool_new((int64_t)({workers}))"),
+            )
+        }
+        "pool_join" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_pool_join({handle})"))
         }
         "thread_spawn" => {
             if args.is_empty() {
@@ -1403,6 +1468,9 @@ fn emit_drop(
         }
         Some(TyKind::Guard) => {
             let _ = writeln!(out, "    ae_mutex_unlock(&{place_expr});");
+        }
+        Some(TyKind::TaskScope) => {
+            let _ = writeln!(out, "    ae_scope_release(&{place_expr});");
         }
         Some(other) if other.owned() => {
             // Fail closed: a drop we cannot emit would silently leak.
@@ -1774,6 +1842,7 @@ fn emit_operand(
                 Some(TyKind::Vector(_)) => Ok(format!("ae_vec_take(&{expr})")),
                 Some(TyKind::Thread(_)) => Ok(format!("ae_thread_take(&{expr})")),
                 Some(TyKind::Guard) => Ok(format!("ae_guard_take(&{expr})")),
+                Some(TyKind::TaskScope) => Ok(format!("ae_task_scope_take(&{expr})")),
                 Some(other) if other.owned() => Err(CodegenError::UnsupportedFeature {
                     body_name: body.name.clone(),
                     detail: format!("moving a {other:?} value is not supported yet"),
