@@ -398,6 +398,97 @@ static inline ae_slice ae_slice_range(ae_slice s, int64_t start, int64_t end) {
         s.elem_size
     );
 }
+
+// ---- Vector ordering and string joins -------------------------------------
+// Only the element kinds the accepted corpus sorts get a comparator; a
+// vector of another element kind still fails closed in the emitter.
+static inline int ae_vec_cmp_i64(const void *a, const void *b) {
+    const int64_t x = *(const int64_t *)a;
+    const int64_t y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+static inline int ae_vec_cmp_f64(const void *a, const void *b) {
+    const double x = *(const double *)a;
+    const double y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+static inline int ae_vec_cmp_str(const void *a, const void *b) {
+    const ae_str x = *(const ae_str *)a;
+    const ae_str y = *(const ae_str *)b;
+    const int64_t common = x.len < y.len ? x.len : y.len;
+    const int order = common > 0 ? memcmp(x.ptr, y.ptr, (size_t)common) : 0;
+    if (order != 0) return order;
+    return (x.len > y.len) - (x.len < y.len);
+}
+static inline void ae_vec_sort_i64(ae_vec *v) { qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_i64); }
+static inline void ae_vec_sort_f64(ae_vec *v) { qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_f64); }
+static inline void ae_vec_sort_str(ae_vec *v) { qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_str); }
+static inline void ae_vec_reverse(ae_vec *v) {
+    if (v->len < 2) return;
+    char *tmp = (char *)malloc((size_t)v->elem_size);
+    if (!tmp) ae_trap("out of memory");
+    for (int64_t i = 0; i < v->len / 2; i++) {
+        char *a = (char *)v->data + (size_t)i * (size_t)v->elem_size;
+        char *b = (char *)v->data + (size_t)(v->len - 1 - i) * (size_t)v->elem_size;
+        memcpy(tmp, a, (size_t)v->elem_size);
+        memcpy(a, b, (size_t)v->elem_size);
+        memcpy(b, tmp, (size_t)v->elem_size);
+    }
+    free(tmp);
+}
+static inline ae_str ae_vec_join(const ae_vec *v, ae_str sep) {
+    if (v->len == 0) return ae_str_alloc_copy("", 0);
+    if (sep.len != 0 && v->len - 1 > INT64_MAX / sep.len) ae_trap("string too long");
+    int64_t total = sep.len * (v->len - 1);
+    const ae_str *items = (const ae_str *)v->data;
+    for (int64_t i = 0; i < v->len; i++) {
+        if (total > INT64_MAX - items[i].len) ae_trap("string too long");
+        total += items[i].len;
+    }
+    char *out = ae_str_alloc(total);
+    int64_t at = 0;
+    for (int64_t i = 0; i < v->len; i++) {
+        if (i > 0) {
+            if (sep.len > 0) memcpy(out + at, sep.ptr, (size_t)sep.len);
+            at += sep.len;
+        }
+        if (items[i].len > 0) memcpy(out + at, items[i].ptr, (size_t)items[i].len);
+        at += items[i].len;
+    }
+    out[at] = 0;
+    return ae_str_from_parts(out, total, true);
+}
+// count_lines_with(text, pattern): newline-delimited lines containing the
+// pattern. Single pass, no allocations.
+static inline int ae_line_contains(ae_str line, ae_str pattern) {
+    if (pattern.len == 0) return 1;
+    if (pattern.len > line.len) return 0;
+    const char first = pattern.ptr[0];
+    int64_t i = 0;
+    while (i + pattern.len <= line.len) {
+        const char *hit = memchr(line.ptr + i, first, (size_t)(line.len - i - pattern.len + 1));
+        if (!hit) return 0;
+        i = (int64_t)(hit - line.ptr);
+        if (memcmp(line.ptr + i, pattern.ptr, (size_t)pattern.len) == 0) return 1;
+        i += 1;
+    }
+    return 0;
+}
+static inline int64_t ae_count_lines_with(ae_str text, ae_str pattern) {
+    if (text.len == 0) return 0;
+    int64_t count = 0;
+    const char *p = text.ptr;
+    int64_t remain = text.len;
+    while (remain > 0) {
+        const char *nl = (const char *)memchr(p, 0x0a, (size_t)remain);
+        const int64_t line_len = nl ? (int64_t)(nl - p) : remain;
+        if (ae_line_contains(ae_str_from_parts(p, line_len, false), pattern)) count += 1;
+        if (!nl) break;
+        remain -= line_len + 1;
+        p += line_len + 1;
+    }
+    return count;
+}
 "#);
 
     let int_tys = [

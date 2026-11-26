@@ -765,6 +765,69 @@ fn emit_intrinsic(
                 }),
             }
         }
+        "sort" | "reverse" | "sort_field" | "reverse_field" => {
+            let (ptr, elem) = vector_operand(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs a vector"),
+                })?,
+                types,
+                def_map,
+            )?;
+            let call = if name.starts_with("reverse") {
+                format!("ae_vec_reverse({ptr})")
+            } else {
+                match elem {
+                    TyKind::Int(IntTy::I64) => format!("ae_vec_sort_i64({ptr})"),
+                    TyKind::Float(FloatTy::F64) => format!("ae_vec_sort_f64({ptr})"),
+                    TyKind::String => format!("ae_vec_sort_str({ptr})"),
+                    other => {
+                        return Err(CodegenError::UnsupportedFeature {
+                            body_name: body.name.clone(),
+                            detail: format!("sorting {other:?} elements is not supported yet"),
+                        });
+                    }
+                }
+            };
+            let _ = writeln!(out, "    {call};");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "join" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "join needs a string vector and a separator".to_owned(),
+                });
+            }
+            let (ptr, elem) = vector_operand(body, &args[0], types, def_map)?;
+            if elem != TyKind::String {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("join of {elem:?} elements is not supported yet"),
+                });
+            }
+            let sep = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_vec_join({ptr}, {sep})"))
+        }
+        "count_lines_with" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "count_lines_with needs text and a pattern".to_owned(),
+                });
+            }
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let pattern = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_count_lines_with({text}, {pattern})"),
+            )
+        }
         "ptr_offset" | "byte_offset" => {
             if args.len() != 2 {
                 return Err(CodegenError::UnsupportedFeature {
