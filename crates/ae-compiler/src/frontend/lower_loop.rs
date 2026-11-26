@@ -130,31 +130,40 @@ impl<'a> Parser<'a> {
         // immutable element declaration per iteration.
         // Borrowed string vectors iterate the same way, with
         // element access going through the pointer.
-        let (v_id, elem_ty, by_ref, storage_elem) = match (&first, first_ty) {
+        let (v_id, elem_ty, by_ref, storage_elem, array_len) = match (&first, first_ty) {
             (Expr::Variable(id, Type::Vector(vid), _, _), Type::Vector(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem)
+                (*id, loop_elem, false, elem, None)
             }
             (Expr::Variable(id, Type::VectorRef(vid), _, _), Type::VectorRef(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, elem == Type::String, elem)
+                (*id, loop_elem, elem == Type::String, elem, None)
             }
             // `for x in slice` iterates a `&[T]` parameter (ADR-0236).
             (Expr::Variable(id, Type::Slice(vid), _, _), Type::Slice(tid)) if *vid == tid => {
                 let elem = self.ctx.slice_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem)
+                (*id, loop_elem, false, elem, None)
             }
             // The same loop reads a mutable slice (`&mut [T]`, rung 4); the
             // loop variable is a copy/view, so iteration itself never writes.
             (Expr::Variable(id, Type::SliceMut(vid), _, _), Type::SliceMut(tid)) if *vid == tid => {
                 let elem = self.ctx.slice_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem)
+                (*id, loop_elem, false, elem, None)
             }
-            _ => return Err(self.fail("for-in needs a bare vec variable or an int range (start..end)")),
+            // A fixed array iterates too: the length is the type's constant,
+            // and the element is a Copy value read by index.
+            (Expr::Variable(id, Type::ArrayOf(aid, alen), _, _), Type::ArrayOf(tid, tlen))
+                if *aid == tid && *alen == tlen =>
+            {
+                let elem = self.ctx.array_elem(tid);
+                let loop_elem = self.loop_element_binding(elem);
+                (*id, loop_elem, false, elem, Some(*alen))
+            }
+            _ => return Err(self.fail("for-in needs a bare vec, slice or array variable or an int range (start..end)")),
         };
         if self.loop_depth >= 64 { return Err(self.fail("loop nesting limit exceeded (64)")); }
         let (line, col) = self.position();
@@ -184,6 +193,12 @@ impl<'a> Parser<'a> {
         self.close_loop_moves(base, moved_before, loop_offset)?;
         // Per-iteration element binding, then the user's body.
         let element = match elem_ty {
+            // A fixed-array element is a Copy value read by the loop counter;
+            // the length is the type's constant, not a runtime len().
+            _ if array_len.is_some() => {
+                let len = array_len.expect("an array loop carries its length");
+                Expr::Index(v_id, len, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, storage_elem)
+            }
             // A slice element reads through the fat pointer; the storage
             // element comes from the slice type, not the binding's view type.
             // An owned slice element binds through the same in-place address
@@ -213,7 +228,11 @@ impl<'a> Parser<'a> {
             _ => Expr::VecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, matches!(first_ty, Type::VectorRef(_)), elem_ty),
         };
         body.insert(0, Statement::Declare(var, element));
-        result.push(Statement::Declare(end_var, Expr::Len(Box::new(first), line, col)));
+        let end_init = match array_len {
+            Some(len) => Expr::Number(len as i64),
+            None => Expr::Len(Box::new(first), line, col),
+        };
+        result.push(Statement::Declare(end_var, end_init));
         result.push(Statement::Declare(counter, Expr::Number(0)));
         result.push(Statement::For(counter, end_var, body, label, line, col));
         Ok(())

@@ -443,6 +443,13 @@ impl<'a> Parser<'a> {
                         let diagnostic = self.fail(&format!("cannot assign to immutable variable '{root_name}'")).with_code("E0103");
                         return Err(self.immutable_binding_error(diagnostic, slot));
                     }
+                    // An array being iterated (`for x in a`) or borrowed for a
+                    // call is borrowed for the store's duration too: the same
+                    // rule the vector store applies.
+                    if self.is_borrowed(slot) {
+                        self.seek_scalar_offset(base.range.end);
+                        return Err(self.fail(&format!("cannot modify '{root_name}' while it is borrowed")));
+                    }
                     self.seek_scalar_offset(base.range.end);
                     let (line, column) = self.position();
                     let element_index = self.lower_scalar_array_index(index, slots)?;

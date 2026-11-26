@@ -1,0 +1,55 @@
+#[derive(Copy)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn total(values: &[i64; 3]) -> i64 {
+    var sum = 0;
+    for value in values {
+        sum += value;
+    }
+    return sum;
+}
+
+fn main() {
+    let primes = [2, 3, 5];
+    for prime in primes {
+        print(prime);
+    }
+    print(total(&primes));
+    // break and continue work inside an array loop.
+    var seen = 0;
+    for prime in primes {
+        if prime == 3 {
+            continue;
+        }
+        if prime == 5 {
+            break;
+        }
+        seen += 1;
+    }
+    print(seen);
+    // Nested array loops visit every pair.
+    let row = [1, 2];
+    let col = [10, 20, 30];
+    var pairs = 0;
+    for a in row {
+        for b in col {
+            pairs += 1;
+        }
+    }
+    print(pairs);
+    // Copy struct elements iterate by value; fields read directly.
+    let points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    var sum_x = 0;
+    for point in points {
+        sum_x += point.x;
+    }
+    print(sum_x);
+    // A single-element array iterates exactly once.
+    let one = [7];
+    for n in one {
+        print(n);
+    }
+}

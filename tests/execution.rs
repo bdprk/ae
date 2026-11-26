@@ -498,6 +498,54 @@ fn release_array_bounds_checks_remain_enabled() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("array index out of bounds"));
 }
+
+/// `for x in a` iterates a fixed array: the length is the type's constant,
+/// elements bind by value, and the array is borrowed for the loop's duration.
+#[test]
+fn array_for_matches_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("array_for.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    // The iterated array is borrowed for the whole loop, so an element store
+    // inside the body is rejected exactly like the vector case.
+    let path = std::env::temp_dir().join(format!(
+        "ae-array-for-bad-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, "fn main() { var a = [1, 2]; for x in a { a[0] = 9; print(x); } }").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(!result.status.success(), "an element store inside the array loop must be rejected");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("cannot modify 'a' while it is borrowed"),
+        "got {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
 #[test]
 fn generated_integer_program_matches_independent_reference_in_both_modes() {
     // Bounded operands avoid reference overflow, while exercising signed arithmetic,
