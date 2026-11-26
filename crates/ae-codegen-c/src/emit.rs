@@ -251,6 +251,26 @@ fn emit_terminator(
             destination,
             target,
         } => {
+            let intrinsic = match func {
+                Operand::Constant(c) => match &c.value {
+                    ConstValue::FnDef(def_id) => body.intrinsics.get(def_id).cloned(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = intrinsic {
+                // A builtin intrinsic: the backend emits it itself.
+                let mut arg_exprs = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_exprs.push(emit_operand(body, arg, types, def_map)?);
+                }
+                emit_intrinsic(
+                    IntrinsicCall { body, name: &name, args, arg_exprs: &arg_exprs, destination, target: *target },
+                    types,
+                    out,
+                )?;
+                return Ok(());
+            }
             let callee = match func {
                 Operand::Constant(c) => match &c.value {
                     ConstValue::FnDef(def_id) => {
@@ -319,6 +339,80 @@ fn emit_terminator(
         }
     }
     Ok(())
+}
+
+/// Emit a builtin intrinsic call (`print`, `exit`) that the pure C backend
+/// provides itself. Unknown intrinsics fail closed with a named error, so an
+/// unsupported builtin never turns into a link error.
+struct IntrinsicCall<'a> {
+    body: &'a Body,
+    name: &'a str,
+    args: &'a [Operand],
+    arg_exprs: &'a [String],
+    destination: &'a Place,
+    target: Option<ae_mir::BasicBlockId>,
+}
+
+fn emit_intrinsic(
+    call: IntrinsicCall<'_>,
+    types: &ModuleTypes,
+    out: &mut String,
+) -> Result<(), CodegenError> {
+    let IntrinsicCall { body, name, args, arg_exprs, destination, target } = call;
+    match name {
+        "print" => {
+            let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: "print needs one value".to_owned(),
+            })?;
+            let expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let (printer, rendered) = match types.infer_operand_ty(body, arg) {
+                Some(TyKind::Int(width)) if width.signed() => {
+                    ("ae_print_i64", format!("(int64_t)({expr})"))
+                }
+                Some(TyKind::Int(_)) => ("ae_print_u64", format!("(uint64_t)({expr})")),
+                Some(TyKind::Bool) => ("ae_print_bool", expr.to_owned()),
+                Some(TyKind::Char) => ("ae_print_char", expr.to_owned()),
+                Some(TyKind::Float(FloatTy::F32)) => ("ae_print_f64", format!("(double)({expr})")),
+                Some(TyKind::Float(FloatTy::F64)) => ("ae_print_f64", expr.to_owned()),
+                Some(TyKind::String | TyKind::StrView) => ("ae_print_cstr", expr.to_owned()),
+                Some(other) => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("print of {other:?} is not supported by the pure C backend yet"),
+                    });
+                }
+                None => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: "print operand has no inferable type".to_owned(),
+                    });
+                }
+            };
+            let _ = writeln!(out, "    {printer}({rendered});");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(out, "    {dest_expr} = (ae_unit_t){{ 0 }};");
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "exit" => {
+            let expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let _ = writeln!(out, "    ae_exit((int)({expr}));");
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            }
+            Ok(())
+        }
+        other => Err(CodegenError::UnsupportedFeature {
+            body_name: body.name.clone(),
+            detail: format!("intrinsic '{other}' is not supported by the pure C backend yet"),
+        }),
+    }
 }
 
 fn format_assert_message(msg: &AssertMessage) -> String {
@@ -401,11 +495,14 @@ fn emit_place(
                 }
             },
             ProjectionElem::Deref => {
-                let target_ty = if is_last {
-                    deref_pointee_ty
-                } else {
-                    None
+                // A reference deref knows its pointee from the type; a raw
+                // pointer uses the type the caller inferred for the place.
+                let reference_pointee = match cur_ty {
+                    Some(TyKind::StructRef(sid) | TyKind::StructMut(sid)) => Some(TyKind::Struct(sid)),
+                    Some(TyKind::VectorRef(id)) => Some(TyKind::Vector(id)),
+                    _ => None,
                 };
+                let target_ty = reference_pointee.or(if is_last { deref_pointee_ty } else { None });
                 let pointee = target_ty.ok_or_else(|| CodegenError::UnsupportedFeature {
                     body_name: body.name.clone(),
                     detail: "cannot dereference pointer without known pointee type".to_owned(),
@@ -448,7 +545,10 @@ fn emit_constant(
         (ConstValue::Int(v), TyKind::Int(ity)) => emit_int_constant(*v, ity, &body.name),
         (ConstValue::Float(f), TyKind::Float(fty)) => Ok(emit_float_constant(f.to_f64(), fty)),
         (ConstValue::String(s), TyKind::String | TyKind::StrView) => {
-            Ok(format!("\"{}\"", escape_c_string(s)))
+            // The literal body already uses C-compatible escapes (the lexer
+            // validates the AE set, which is a subset); emitting it raw is
+            // what the legacy backend does, so both produce the same bytes.
+            Ok(format!("\"{s}\""))
         }
         (ConstValue::FnDef(def_id), TyKind::Fn(_) | TyKind::Closure(_)) => {
             let name = def_map.get(def_id).ok_or_else(|| CodegenError::UnresolvedCall {

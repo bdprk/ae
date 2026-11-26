@@ -357,7 +357,15 @@ impl ModuleTypes {
                     }
                     _ => return None,
                 },
-                ProjectionElem::Deref => return None,
+                ProjectionElem::Deref => {
+                    // A reference deref names the borrowed type; a raw
+                    // pointer's pointee is not carried here yet.
+                    cur_ty = match cur_ty {
+                        TyKind::StructRef(sid) | TyKind::StructMut(sid) => TyKind::Struct(sid),
+                        TyKind::VectorRef(id) => TyKind::Vector(id),
+                        _ => return None,
+                    };
+                }
             }
         }
         Some(cur_ty)

@@ -64,3 +64,34 @@ checks 159 fixtures with two token-cursor skips.
 - Raw-pointer writes stay outside the borrow checker by design (`unsafe`
   is the unchecked operation); the loan skip is limited to address casts, so
   a real `&T`/`&mut T` still freezes its place.
+
+## Builtin intrinsics travel with the body
+
+Intrinsic calls are synthetic `FnDef` ids (a deterministic FNV-1a hash in the
+high-bit range), which a standalone backend cannot resolve through a source
+function map. `Body` now carries `intrinsics: BTreeMap<DefId, String>` filled
+by the lowering, and `ae-codegen-c` resolves those ids through it. `print`
+and `exit` are implemented in the backend: `print` selects the printer from
+the operand type (i64/u64/bool/char/string; the canonical f64 text formatter
+is ported from the legacy runtime so fixture stdout compares byte-for-byte)
+and `exit` calls a `_Noreturn ae_exit`. Every other intrinsic fails closed
+with `intrinsic '<name>' is not supported by the pure C backend yet`.
+
+Two supporting fixes made the corpus comparable: string constants are emitted
+raw into the C literal (the AE escape set is a subset of C's, and the legacy
+backend does the same, so both produce the same bytes), and `Deref` type
+inference maps `StructRef`/`StructMut`/`VectorRef` to the pointee, so field
+reads through `&Struct`/`&mut Struct` compile.
+
+## End-to-end corpus gate
+
+`tests/pure_e2e_corpus_gate.rs` emits, compiles with the host C compiler
+(`-std=c11`), runs and compares stdout for every accepted `tests/run` fixture
+whose emission succeeds. At this slice 90 of 161 fixtures match byte-for-byte;
+the floor is 85 and rises as coverage grows, and any output mismatch for a
+fixture that ran is a hard failure. Layout probes (`c_size_of`,
+`c_align_of`, `c_offset_of`) run but are excluded from the comparison until
+`ae-layout` (P6.1) drives this backend's layout; the remaining emission gaps
+are the unimplemented intrinsic families (vectors, strings, threads, channels,
+atomics) and five C-emission bugs (array element typing, enum variant naming,
+function-pointer casts).

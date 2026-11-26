@@ -3,6 +3,8 @@
 //! Pure control-flow graph representation independent of syntax and HIR.
 //! Types come exclusively from `ae-ty` and source positions from `ae-span`.
 
+use std::collections::BTreeMap;
+
 use ae_span::Span;
 use ae_ty::{DefId, TyKind};
 
@@ -40,6 +42,10 @@ pub struct Body {
     pub arg_count: usize,
     pub locals: Vec<LocalDecl>,
     pub basic_blocks: Vec<BasicBlockData>,
+    /// Synthetic `FnDef` ids of builtin intrinsic calls, mapped to their
+    /// names (`print`, `exit`, `vec_push`, ...). A backend emits these
+    /// itself; they are not source functions.
+    pub intrinsics: BTreeMap<DefId, String>,
     pub span: Option<Span>,
 }
 
@@ -51,6 +57,7 @@ impl Body {
             arg_count,
             locals: Vec::new(),
             basic_blocks: Vec::new(),
+            intrinsics: BTreeMap::new(),
             span: None,
         }
     }

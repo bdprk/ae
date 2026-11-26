@@ -4,7 +4,7 @@
 //! zero AST `Statement` or `Expr` nodes retained. Short-circuit `&&` and `||`
 //! expressions are lowered into explicit basic blocks and `SwitchInt` branches.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 
 use ae_mir::{
@@ -133,6 +133,9 @@ struct PureMirBuilder<'a> {
     cur_bb: BasicBlockId,
     structs: &'a [StructDef],
     ctx: &'a CompileContext,
+    /// Synthetic intrinsic `DefId`s registered while lowering, carried on
+    /// the body so a backend can emit the builtin itself.
+    intrinsics: BTreeMap<DefId, String>,
     /// Shapes this function uses that the pure pipeline cannot lower yet;
     /// a non-empty list turns the whole lowering into an error (fail closed)
     /// instead of emitting ill-formed MIR.
@@ -192,6 +195,7 @@ impl<'a> PureMirBuilder<'a> {
             cur_bb: BasicBlockId::ENTRY,
             structs,
             ctx,
+            intrinsics: BTreeMap::new(),
             unsupported: Vec::new(),
         }
     }
@@ -297,6 +301,7 @@ impl<'a> PureMirBuilder<'a> {
             arg_count: self.arg_count,
             locals: self.locals,
             basic_blocks: compact_blocks,
+            intrinsics: self.intrinsics,
             span: None,
         }
     }
@@ -656,8 +661,9 @@ impl<'a> PureMirBuilder<'a> {
             CfgTerminator::Exit(expr) => {
                 let code_op = self.lower_operand(expr);
                 let dest = self.fresh_temp(TyKind::Unit);
+                let func = self.intrinsic_fn("exit");
                 self.set_terminator(TerminatorKind::Call {
-                    func: intrinsic_fn("exit"),
+                    func,
                     args: vec![code_op],
                     destination: Place::from_local(dest),
                     target: None,
@@ -1130,8 +1136,9 @@ impl<'a> PureMirBuilder<'a> {
     ) -> LocalId {
         let dest = self.fresh_temp(ret_ty);
         let next_bb = self.new_block();
+        let func = self.intrinsic_fn(name);
         self.set_terminator(TerminatorKind::Call {
-            func: intrinsic_fn(name),
+            func,
             args,
             destination: Place::from_local(dest),
             target: Some(next_bb),
@@ -1478,15 +1485,20 @@ impl<'a> PureMirBuilder<'a> {
     }
 }
 
-fn intrinsic_fn(name: &str) -> Operand {
-    // Deterministic FNV-1a 32-bit hash in high-bit range so intrinsics never collide with source fn ids.
-    let mut hash: u32 = 0x811c_9dc5;
-    for &b in name.as_bytes() {
-        hash ^= b as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
+impl PureMirBuilder<'_> {
+    /// The call operand for a builtin intrinsic. The id is a deterministic
+    /// FNV-1a 32-bit hash in the high-bit range (never a source fn id); the
+    /// name is recorded on the body so a backend emits the builtin.
+    fn intrinsic_fn(&mut self, name: &str) -> Operand {
+        let mut hash: u32 = 0x811c_9dc5;
+        for &b in name.as_bytes() {
+            hash ^= b as u32;
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        let id = 0x8000_0000 | (hash & 0x7fff_ffff);
+        self.intrinsics.insert(DefId(id), name.to_owned());
+        Operand::Constant(Constant::new(TyKind::Fn(0), ConstValue::FnDef(DefId(id))))
     }
-    let id = 0x8000_0000 | (hash & 0x7fff_ffff);
-    Operand::Constant(Constant::new(TyKind::Fn(0), ConstValue::FnDef(DefId(id))))
 }
 
 fn vector_ty(ctx: &CompileContext, elem: Type, borrowed: bool) -> TyKind {

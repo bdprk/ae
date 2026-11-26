@@ -9,7 +9,8 @@ use crate::types::int_c_bounds;
 /// Emits standard C11 headers, `ae_unit_t`, `ae_trap`, and checked integer helpers.
 pub(crate) fn emit_preamble(out: &mut String) {
     out.push_str(
-        "#include <math.h>\n\
+        "#include <inttypes.h>\n\
+         #include <math.h>\n\
          #include <stdbool.h>\n\
          #include <stddef.h>\n\
          #include <stdint.h>\n\
@@ -22,6 +23,122 @@ pub(crate) fn emit_preamble(out: &mut String) {
              abort();\n\
          }\n\n",
     );
+
+    // Printers and process exit. The formats mirror the legacy runtime: one
+    // canonical spelling per value, so fixture stdout compares byte-for-byte
+    // with the main backend.
+    out.push_str(r#"static inline void ae_print_i64(int64_t value) { printf("%" PRId64, value); fputc(10, stdout); }
+static inline void ae_print_u64(uint64_t value) { printf("%" PRIu64, value); fputc(10, stdout); }
+static inline void ae_print_bool(bool value) { fputs(value ? "true" : "false", stdout); fputc(10, stdout); }
+static inline void ae_print_cstr(const char *text) { fputs(text, stdout); fputc(10, stdout); }
+
+static inline size_t ae_utf8_encode(uint32_t cp, char out[4]) {
+    if (cp <= 0x7Fu) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp <= 0x7FFu) {
+        out[0] = (char)(0xC0u | (cp >> 6));
+        out[1] = (char)(0x80u | (cp & 0x3Fu));
+        return 2;
+    } else if (cp <= 0xFFFFu) {
+        out[0] = (char)(0xE0u | (cp >> 12));
+        out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (cp & 0x3Fu));
+        return 3;
+    } else {
+        out[0] = (char)(0xF0u | (cp >> 18));
+        out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[3] = (char)(0x80u | (cp & 0x3Fu));
+        return 4;
+    }
+}
+static inline void ae_print_char(uint32_t value) {
+    char buffer[4];
+    const size_t length = ae_utf8_encode(value, buffer);
+    fwrite(buffer, 1, length, stdout);
+    fputc(10, stdout);
+}
+
+static inline size_t ae_f64_fixed(double value, char *out, size_t cap) {
+    for (int decimals = 0; decimals <= 17; decimals++) {
+        const int written = snprintf(out, cap, "%.*f", decimals, value);
+        if (written < 0 || (size_t)written >= cap) return 0;
+        if (strtod(out, NULL) != value) continue;
+        size_t length = (size_t)written;
+        char *dot = memchr(out, '.', length);
+        if (dot) {
+            char *end = out + length;
+            while (end > dot + 2 && end[-1] == '0') end -= 1;
+            length = (size_t)(end - out);
+        }
+        return length;
+    }
+    return 0;
+}
+static inline size_t ae_f64_scientific(double value, char *out, size_t cap) {
+    for (int digits = 1; digits <= 17; digits++) {
+        const int written = snprintf(out, cap, "%.*e", digits - 1, value);
+        if (written < 0 || (size_t)written >= cap) return 0;
+        if (strtod(out, NULL) == value) return (size_t)written;
+    }
+    return 0;
+}
+static inline size_t ae_f64_exponent_form(char *text, size_t length) {
+    char *marker = memchr(text, 'e', length);
+    if (!marker) marker = memchr(text, 'E', length);
+    if (!marker) return length;
+    const size_t mantissa = (size_t)(marker - text);
+    char sign = '+';
+    size_t at = mantissa + 1;
+    if (at < length && (text[at] == '+' || text[at] == '-')) { sign = text[at]; at += 1; }
+    while (at < length && text[at] == '0') at += 1;
+    size_t cursor = mantissa;
+    text[cursor++] = 'e';
+    text[cursor++] = sign;
+    if (at == length) {
+        text[cursor++] = '0';
+    } else {
+        while (at < length) text[cursor++] = text[at++];
+    }
+    return cursor;
+}
+static inline size_t ae_f64_text(double value, char *out, size_t cap) {
+    if (isnan(value)) { memcpy(out, "nan", 3); return 3; }
+    if (isinf(value)) {
+        const char *text = value < 0.0 ? "-inf" : "inf";
+        const size_t length = strlen(text);
+        memcpy(out, text, length);
+        return length;
+    }
+    char fixed[64];
+    char scientific[64];
+    const size_t fixed_length = (value > -1e17 && value < 1e17) ? ae_f64_fixed(value, fixed, sizeof fixed) : 0;
+    const size_t scientific_length = ae_f64_scientific(value, scientific, sizeof scientific);
+    char *chosen = fixed;
+    size_t length = fixed_length;
+    if (scientific_length > 0 && (fixed_length == 0 || scientific_length < fixed_length)) {
+        chosen = scientific;
+        length = scientific_length;
+    }
+    if (length == 0) { memcpy(out, "nan", 3); return 3; }
+    length = ae_f64_exponent_form(chosen, length);
+    const bool plain = !memchr(chosen, '.', length) && !memchr(chosen, 'e', length);
+    memcpy(out, chosen, length);
+    if (plain && length + 2 <= cap) {
+        out[length++] = '.';
+        out[length++] = '0';
+    }
+    return length;
+}
+static inline void ae_print_f64(double value) {
+    char buffer[96];
+    const size_t length = ae_f64_text(value, buffer, sizeof buffer);
+    fwrite(buffer, 1, length, stdout);
+    fputc(10, stdout);
+}
+_Noreturn static inline void ae_exit(int64_t code) { exit((int)code); }
+"#);
 
     let int_tys = [
         IntTy::I8,
