@@ -1045,6 +1045,54 @@ fn emit_intrinsic(
                 &format!("ae_count_lines_with({text}, {pattern})"),
             )
         }
+        "tokens" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "tokens needs the base text and a separator".to_owned(),
+                });
+            }
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let sep = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_tokens_new({text}, {sep})"))
+        }
+        "reset_tokens" => {
+            let expr = cursor_operand(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "reset_tokens needs a cursor".to_owned(),
+                })?,
+                types,
+                def_map,
+            )?;
+            let _ = writeln!(out, "    ae_tokens_reset(&{expr});");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "advance_tokens" => {
+            let expr = cursor_operand(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "advance_tokens needs a cursor".to_owned(),
+                })?,
+                types,
+                def_map,
+            )?;
+            finish_value(out, body, types, destination, target, &format!("ae_tokens_next(&{expr})"))
+        }
+        "tokens_current" => {
+            let expr = cursor_operand(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "tokens_current needs a cursor".to_owned(),
+                })?,
+                types,
+                def_map,
+            )?;
+            finish_value(out, body, types, destination, target, &format!("ae_tokens_current(&{expr})"))
+        }
         "ptr_offset" | "byte_offset" => {
             if args.len() != 2 {
                 return Err(CodegenError::UnsupportedFeature {
@@ -1424,6 +1472,31 @@ fn slice_operand(
         }
     };
     slice_view_of_place(body, place, types)
+}
+
+/// Resolves the token cursor behind an operand.
+fn cursor_operand(
+    body: &Body,
+    op: &Operand,
+    types: &ModuleTypes,
+    _def_map: &BTreeMap<DefId, String>,
+) -> Result<String, CodegenError> {
+    let place = match op {
+        Operand::Copy(place) | Operand::Move(place) => place,
+        Operand::Constant(c) => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("token cursor cannot be a constant {:?}", c.value),
+            });
+        }
+    };
+    match types.infer_place_ty(body, place) {
+        Some(TyKind::Tokens) => emit_place(body, place, types, Some(TyKind::Tokens)),
+        other => Err(CodegenError::UnsupportedFeature {
+            body_name: body.name.clone(),
+            detail: format!("expected a token cursor operand, found {other:?}"),
+        }),
+    }
 }
 
 fn emit_operand(

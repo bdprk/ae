@@ -580,6 +580,73 @@ static inline ae_parse_i64_result ae_parse_i64(ae_str text) {
     ae_parse_i64_result out = { 0, negative ? (int64_t)(0u - magnitude) : (int64_t)magnitude };
     return out;
 }
+
+// Token cursors (the `tokenize`/`for t in cursor` form): the cursor holds a
+// view of the base text and an inline copy of the separator, so a temporary
+// separator is safe and iterating allocates nothing. Boundaries match
+// `split`: a trailing separator yields a final empty token, and empty input
+// yields one empty token.
+#define AE_TOKENS_SEP_MAX 16
+typedef struct {
+    ae_str text;
+    char sep[AE_TOKENS_SEP_MAX];
+    int64_t sep_len;
+    int64_t pos;
+    bool done;
+    ae_str current;
+} ae_tokens;
+static inline ae_tokens ae_tokens_new(ae_str text, ae_str sep) {
+    if (sep.len <= 0) ae_trap("empty separator");
+    if (sep.len > AE_TOKENS_SEP_MAX) ae_trap("token separator longer than 16 bytes");
+    ae_tokens cursor;
+    cursor.text = text;
+    memcpy(cursor.sep, sep.ptr, (size_t)sep.len);
+    cursor.sep_len = sep.len;
+    cursor.pos = 0;
+    cursor.done = false;
+    cursor.current = ae_str_from_parts("", 0, false);
+    return cursor;
+}
+static inline void ae_tokens_reset(ae_tokens *cursor) {
+    cursor->pos = 0;
+    cursor->done = false;
+    cursor->current = ae_str_from_parts("", 0, false);
+}
+static inline bool ae_tokens_next(ae_tokens *cursor) {
+    if (cursor->done) return false;
+    const int64_t start = cursor->pos;
+    int64_t at = -1;
+    if (cursor->sep_len == 1) {
+        const char *hit = (const char *)memchr(cursor->text.ptr + start, cursor->sep[0], (size_t)(cursor->text.len - start));
+        if (hit) at = (int64_t)(hit - cursor->text.ptr);
+    } else {
+        const char first = cursor->sep[0];
+        for (int64_t i = start; i + cursor->sep_len <= cursor->text.len; ) {
+            const char *hit = (const char *)memchr(
+                cursor->text.ptr + i,
+                first,
+                (size_t)(cursor->text.len - cursor->sep_len - i + 1)
+            );
+            if (!hit) break;
+            i = (int64_t)(hit - cursor->text.ptr);
+            if (memcmp(hit, cursor->sep, (size_t)cursor->sep_len) == 0) {
+                at = i;
+                break;
+            }
+            i += 1;
+        }
+    }
+    if (at < 0) {
+        cursor->current = ae_str_from_parts(cursor->text.ptr + start, cursor->text.len - start, false);
+        cursor->pos = cursor->text.len;
+        cursor->done = true;
+    } else {
+        cursor->current = ae_str_from_parts(cursor->text.ptr + start, at - start, false);
+        cursor->pos = at + cursor->sep_len;
+    }
+    return true;
+}
+static inline ae_str ae_tokens_current(const ae_tokens *cursor) { return cursor->current; }
 "#);
 
     let int_tys = [

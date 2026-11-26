@@ -723,11 +723,50 @@ impl<'a> PureMirBuilder<'a> {
                 let val_op = self.lower_operand(value);
                 self.emit_intrinsic_call("map_put", vec![map_op, key_op, val_op], TyKind::Unit);
             }
-            // A token cursor needs a runtime cursor model (reset/advance) the pure
-            // pipeline does not implement yet. Fail closed: emitting the
-            // current best-effort shape leaves the iteration local
-            // uninitialized, which the borrow checker rightly rejects.
-            Statement::ForTokens(..) | Statement::ResetTokens(..) | Statement::AdvanceTokens(..) => {
+            // A token loop is expanded by the CFG into ResetTokens plus one
+            // AdvanceTokens per iteration over a private cursor copy. The
+            // cursor model is a runtime value; the token binding is a view
+            // into the base string.
+            Statement::ResetTokens(cursor, iteration) => {
+                let (src, _) = self.ensure_var(*cursor, TyKind::Tokens);
+                let (dst, _) = self.ensure_var(*iteration, TyKind::Tokens);
+                self.push_stmt(StatementKind::Assign(
+                    Place::from_local(dst),
+                    Rvalue::Use(Operand::Copy(Place::from_local(src))),
+                ));
+                self.emit_intrinsic_call(
+                    "reset_tokens",
+                    vec![Operand::Copy(Place::from_local(dst))],
+                    TyKind::Unit,
+                );
+            }
+            Statement::AdvanceTokens(_outer, iteration, element, advanced) => {
+                let (cur, _) = self.ensure_var(*iteration, TyKind::Tokens);
+                let (elem_local, _) = self.ensure_var(*element, TyKind::StrView);
+                let (adv_local, _) = self.ensure_var(*advanced, TyKind::Bool);
+                let adv = self.emit_intrinsic_call(
+                    "advance_tokens",
+                    vec![Operand::Copy(Place::from_local(cur))],
+                    TyKind::Bool,
+                );
+                let tok = self.emit_intrinsic_call(
+                    "tokens_current",
+                    vec![Operand::Copy(Place::from_local(cur))],
+                    TyKind::StrView,
+                );
+                self.push_stmt(StatementKind::Assign(
+                    Place::from_local(adv_local),
+                    Rvalue::Use(Operand::Copy(Place::from_local(adv))),
+                ));
+                self.push_stmt(StatementKind::Assign(
+                    Place::from_local(elem_local),
+                    Rvalue::Use(Operand::Copy(Place::from_local(tok))),
+                ));
+            }
+            Statement::ForTokens(..) => {
+                // The CFG expands a token loop into reset/advance blocks; a
+                // raw ForTokens statement would mean that expansion was
+                // skipped, so keep the named failure.
                 let message = "token cursors (for-in over a tokenize result) are not supported by the pure MIR pipeline yet";
                 if !self.unsupported.iter().any(|existing| existing == message) {
                     self.unsupported.push(message.to_owned());
