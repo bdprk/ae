@@ -1958,8 +1958,9 @@ fn main() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "41\nada\nleft\nwrapped\nk\n2\n");
     for (source, expected) in [
-        // The type arguments are mandatory: there is no inference.
-        ("fn id[T](x: T) -> T { return x; } fn main() { print(id(5)); }", "is a generic function"),
+        // A parameter that occurs only in a concrete argument cannot be
+        // inferred; the call still gets the explicit-type-argument remedy.
+        ("fn id[T](x: i64) -> i64 { return x; } fn main() { print(id(5)); }", "is a generic function"),
         ("fn id[T](x: T) -> T { return x; } fn main() { print(id[i64, string](5)); }", "takes 1 type argument(s), found 2"),
         // A body is checked after substitution, against the concrete type.
         ("fn bad[T](x: T) -> i64 { return x + 1; } fn main() { print(bad[string](\"a\")); }", "'+' requires two strings"),
@@ -1970,6 +1971,48 @@ fn main() {
         ("fn id[T](x: T) -> T { return x; } fn id(x: i64) -> i64 { return x; } fn main() { print(1); }", "duplicate function 'id'"),
     ] {
         let path = std::env::temp_dir().join(format!("ae-generic-fn-{}-{}.ae", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        fs::write(&path, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(!output.status.success(), "accepted invalid program: {source}");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(err.contains(expected), "{source}: {err}");
+    }
+}
+
+#[test]
+fn generic_calls_infer_direct_value_parameter_types() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("generic_inference.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "mode {label} failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (source, expected) in [
+        // Every occurrence of one parameter must instantiate to the same type.
+        ("fn first[T](a: T, b: T) -> T { return a; } fn main() { print(first(1, \"two\")); }", "argument 2 to 'first' must be i64"),
+        // Concrete parameters are still checked after inferring the other ones.
+        ("fn keep[T](value: T, index: i64) -> T { return value; } fn main() { print(keep(\"x\", \"index\")); }", "argument 2 to 'keep' must be i64"),
+        // A return-only parameter has no value argument to infer from.
+        ("fn make[T](x: i64) -> i64 { return x; } fn main() { print(make(1)); }", "write its type arguments"),
+    ] {
+        let path = std::env::temp_dir().join(format!("ae-generic-infer-{}-{}.ae", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         fs::write(&path, source).unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
         fs::remove_file(path).unwrap();

@@ -875,9 +875,9 @@ impl<'a> Parser<'a> {
                 };
                 let signature = match self.functions.get(name).cloned() {
                     Some(signature) => signature,
-                    // A bare call to a generic function: the type arguments are
-                    // mandatory (there is no inference), the typed route's
-                    // message.
+                    // A bare call infers direct value parameters (and the
+                    // existing Callable-bound shapes). Without enough
+                    // evidence, keep the explicit-type-argument remedy.
                     None if self.generics.fn_names.contains_key(name) => {
                         let gid = self.generics.fn_names[name];
                         if let Some((call_expr, call_ret)) = self.try_lower_inferred_generic_call(name, gid, callee.range.start, arguments, slots)? {
@@ -2092,12 +2092,23 @@ let mut args = Vec::with_capacity(arguments.len());
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
         let def = self.generics.fn_defs[gid].clone();
-        if !def.bounds.iter().flatten().any(|b| matches!(b, Bound::Callable(..))) {
-            return Ok(None);
-        }
+        let callable_inference = def.bounds.iter().flatten().any(|b| matches!(b, Bound::Callable(..)));
         let Some(bindings) = def.bindings.as_ref() else {
             return Ok(None);
         };
+        // P2.5.2 slice 1 infers only from a parameter whose complete type is
+        // a type parameter. Every type parameter needs such evidence, and a
+        // borrow argument stays on the explicit-argument path unless the
+        // existing Callable-bound inference owns it. Composite and return-only
+        // occurrences deliberately do not participate yet.
+        let direct_value_inference = arguments.iter().all(|argument| {
+            !matches!(&argument.kind, ae_syntax::expression::ExpressionKind::BorrowArgument { .. })
+        }) && def.params.iter().all(|param| {
+            bindings.iter().any(|binding| def.source[binding.ty.clone()].trim() == param)
+        });
+        if !callable_inference && !direct_value_inference {
+            return Ok(None);
+        }
         if arguments.len() != bindings.len() {
             return Err(self.error_at(call_offset, &format!(
                 "function '{name}' expects {} arguments, got {}",

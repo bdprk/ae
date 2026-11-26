@@ -1,11 +1,11 @@
 # Generics Specification (M1 subset, current implementation)
 
-Status: describes the implemented language (2026-11-15). Generic monomorphization is the only form: there is no type inference, no runtime generics, and no capability proofs on unsubstituted ASTs — every instantiation is checked as concrete code.
+Status: describes the implemented language (2026-11-26). Generic monomorphization is the only form: direct value arguments can infer call-site type parameters, but there is no general Hindley–Milner inference, no runtime generics, and no capability proofs on unsubstituted ASTs — every instantiation is checked as concrete code.
 
 ## 1. Design Rules
 
 ### Hard Rules:
-1. **Explicit Type Arguments**: type arguments are always written (`identity[i64](41)`, `Pair[string, i64]`); the language has no inference, and omitting them is a compile-time error that names the fix.
+1. **Explicit or Value-Inferred Call Arguments**: explicit type arguments are always accepted (`identity[i64](41)`, `Pair[string, i64]`). A bare generic function call infers a type parameter when that parameter is the complete type of at least one value argument (`identity(41)`); repeated occurrences must agree. Borrowed/composite parameters, return-only parameters and generic type constructors do not participate in this slice, so calls that still lack a parameter are rejected with the explicit-type-argument remedy.
 2. **One Argument List, One Layout**: `Pair[string, i64]` is the same type everywhere — freely assignable, passable, returnable. Different argument lists are different types and never interchangeable.
 3. **Check at Instantiation**: a generic body is fully type-checked *after* substitution with the actual arguments; errors point at expressions in the generic body itself. Constraints intercept two earlier points (call-site shape, declaration-site pre-check) but never replace this check.
 4. **No Recursive Layouts**: struct and enum names are not registered inside their own bodies, so `struct Node[T] { next: Node[T] }` is rejected — self-referential sizes cannot exist.
@@ -42,8 +42,9 @@ Status: describes the implemented language (2026-11-15). Generic monomorphizatio
 
 ## 5. Generic Functions
 
-`fn identity[T](x: T) -> T { return x; }` — the declaration produces no function; each call site (`identity[i64](41)`) instantiates one: parameter types, return type, and body are re-checked after substitution.
+`fn identity[T](x: T) -> T { return x; }` — the declaration produces no function; each call site (`identity[i64](41)` or `identity(41)`) instantiates one: parameter types, return type, and body are re-checked after substitution.
 
+- **Direct value inference (P2.5.2 slice 1):** a parameter spelled exactly `T` learns `T` from that argument's concrete value type. Different parameters infer independently, fixed parameters still check normally, and repeated uses of `T` must accept the same concrete type. The implementation lowers the arguments once, instantiates through the same cache as an explicit call, and performs the ordinary post-instantiation argument and body checks. This slice deliberately does not infer through `&T`, `&[T]`, `vec[T]`, another composite, a return type, or a local annotation; write explicit arguments for those forms.
 - Mismatched argument counts or types error at the call site. Body errors point at the declaration-site expressions (e.g. `'+' requires two strings` inside the generic body).
 - The same argument list is instantiated once and cached: `identity[i64]` is the same C function everywhere.
 - Type parameters flow into other generics: `fn double_wrap[T](x: T) -> Option[T] { let inner = wrap[T](x); return inner; }` resolves under the current substitution table.
@@ -94,7 +95,8 @@ No dedicated E-codes are assigned in this version; move-related rejections reuse
 | # | Case | Expected |
 |---|---|---|
 | G1 | `identity[i64]` / `identity[string]` both called | Two instantiations, correct values |
-| G2 | Omitted type arguments | Rejected, names the fix |
+| G2 | Omitted type arguments with no direct-value evidence | Rejected, names the fix |
+| G2a | Omitted type arguments with direct-value evidence | Infers each parameter; repeated occurrences must agree |
 | G3 | `Pair[string, i64]` assigned, passed, returned as one type | Single layout, runs |
 | G4 | `Pair[string, i64]` mixed with `Pair[i64, i64]` | Rejected (type mismatch) |
 | G5 | Owned field write `p.right = value;` consumes an owned variable; scope exit releases fields | Leak-clean, use-after-move rejected |

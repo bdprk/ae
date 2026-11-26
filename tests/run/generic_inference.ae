@@ -1,0 +1,15 @@
+// P2.5.2: a bare generic call infers parameters that occur as direct
+// value parameters. Explicit type arguments remain valid.
+fn identity[T](x: T) -> T { return x; }
+fn first[T](a: T, b: T) -> T { return a; }
+fn second[A, B](a: A, b: B) -> B { return b; }
+fn keep[T](value: T, index: i64) -> T { return value; }
+
+fn main() {
+    print(identity(41));
+    print(identity("ada"));
+    print(first("left", "right"));
+    print(second(1, "second"));
+    print(keep("kept", 7));
+    print(identity[i64](42));
+}
