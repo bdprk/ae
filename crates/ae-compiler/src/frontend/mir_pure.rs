@@ -541,7 +541,6 @@ impl<'a> PureMirBuilder<'a> {
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
             }
             Statement::BindPayload(bid, subject, path, pty) => {
-                let (dest_local, dest_ty) = self.ensure_var(*bid, *pty);
                 let (subj_local, _) = self.ensure_var(*subject, *pty);
                 let mut src_place = Place::from_local(subj_local);
                 for &(variant, field_idx) in path {
@@ -549,27 +548,22 @@ impl<'a> PureMirBuilder<'a> {
                     src_place.projection.push(ProjectionElem::Field(field_idx));
                 }
                 // A match binding of an owned payload is a borrow in the
-                // language: the enum keeps ownership, so the binding must
-                // not release the payload a second time.
-                let rvalue = if *pty == TyKind::String {
-                    let view = self.emit_intrinsic_call(
-                        "string_view",
-                        vec![Operand::Copy(src_place)],
-                        TyKind::String,
-                    );
-                    Rvalue::Use(Operand::Copy(Place::from_local(view)))
-                } else {
-                    Rvalue::Use(Operand::Copy(src_place))
-                };
+                // language: the enum keeps ownership and the binding sees a
+                // view (string view, vector ref, struct ref); scalar and
+                // enum payloads copy.
+                let (binding_ty, rvalue) = self.binding_rvalue(src_place, *pty);
+                let (dest_local, _) = self.ensure_var(*bid, binding_ty);
                 self.push_stmt(StatementKind::Assign(
                     Place::from_local(dest_local),
                     rvalue,
                 ));
-                let _ = dest_ty;
             }
             Statement::TakePropagationPayload(subject, ty, _fields, binding) => {
                 let (subj_local, _) = self.ensure_var(*subject, *ty);
                 if let Some((bid, pty)) = binding {
+                    // A propagation extracts the success payload from a temporary
+                    // result: the binding is the payload value (a string
+                    // binds as a view of the temporary, as before).
                     let (dest_local, _) = self.ensure_var(*bid, *pty);
                     let src_place = Place::from_local(subj_local)
                         .project(ProjectionElem::Downcast(0))
@@ -1112,10 +1106,18 @@ impl<'a> PureMirBuilder<'a> {
                 let op = self.lower_operand(inner);
                 Rvalue::Cast(classify_cast(from, TyKind::Float(FloatTy::F64)), op, TyKind::Float(FloatTy::F64))
             }
-            Expr::ToI64(inner, ..) => {
-                let from = expr_type(inner, self.ctx);
+            Expr::ToI64(inner, ty, line, column) => {
                 let op = self.lower_operand(inner);
-                Rvalue::Cast(classify_cast(from, TyKind::Int(IntTy::I64)), op, TyKind::Int(IntTy::I64))
+                if *ty == TyKind::Int(IntTy::I64) {
+                    return Rvalue::Cast(
+                        classify_cast(expr_type(inner, self.ctx), TyKind::Int(IntTy::I64)),
+                        op,
+                        TyKind::Int(IntTy::I64),
+                    );
+                }
+                self.pending_span = Some(self.span_at(*line, *column));
+                let dest = self.emit_intrinsic_call("to_i64", vec![op], *ty);
+                Rvalue::Use(Operand::Copy(Place::from_local(dest)))
             }
             Expr::StructLit(sid, values) => {
                 let ops = values
@@ -1337,6 +1339,40 @@ impl<'a> PureMirBuilder<'a> {
         let rvalue = self.lower_expr(expr);
         let temp = self.assign_to_temp(ty, rvalue);
         (Operand::Copy(Place::from_local(temp)), Some(temp))
+    }
+
+    /// The type and value of a match/propagation payload binding. Owned
+    /// payloads bind as views (a string view, a vector reference, a struct
+    /// reference); the enum keeps ownership. Scalars and enums copy.
+    fn binding_rvalue(&mut self, src_place: Place, payload_ty: TyKind) -> (TyKind, Rvalue) {
+        match payload_ty {
+            TyKind::String => {
+                let view = self.emit_intrinsic_call(
+                    "string_view",
+                    vec![Operand::Copy(src_place)],
+                    TyKind::StrView,
+                );
+                (
+                    TyKind::StrView,
+                    Rvalue::Use(Operand::Copy(Place::from_local(view))),
+                )
+            }
+            TyKind::Vector(id) => (
+                TyKind::VectorRef(id),
+                Rvalue::Ref {
+                    borrow_kind: BorrowKind::Shared,
+                    place: src_place,
+                },
+            ),
+            TyKind::Struct(sid) => (
+                TyKind::StructRef(sid),
+                Rvalue::Ref {
+                    borrow_kind: BorrowKind::Shared,
+                    place: src_place,
+                },
+            ),
+            other => (other, Rvalue::Use(Operand::Copy(src_place))),
+        }
     }
 
     fn lower_place(&mut self, expr: &Expr) -> Place {

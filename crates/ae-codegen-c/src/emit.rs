@@ -905,6 +905,56 @@ fn emit_intrinsic(
             }
             Ok(())
         }
+        "to_i64" => {
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("to_i64 result is {other:?}, not an IntResult enum"),
+                    });
+                }
+            };
+            let layouts = body.enum_layouts.get(&eid).ok_or_else(|| {
+                CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("enum layout for id {eid} is not carried on the body"),
+                }
+            })?;
+            let ok_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::Int(IntTy::I64)])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("to_i64 result enum {eid} has no i64 Ok variant"),
+                })?;
+            let err_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::String])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("to_i64 result enum {eid} has no string Err variant"),
+                })?;
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let ok = format!(
+                "((ae_enum_{eid}){{ .tag = {ok_variant}, .u = {{ .v{ok_variant} = {{ .f0 = _parsed.value }} }} }})"
+            );
+            let err = format!(
+                "((ae_enum_{eid}){{ .tag = {err_variant}, .u = {{ .v{err_variant} = {{ .f0 = ((ae_str){{ .ptr = _message, .len = (int64_t)strlen(_message), .owned = false }}) }} }} }})"
+            );
+            let _ = writeln!(
+                out,
+                "    {{ ae_f64_to_i64_result _parsed = ae_f64_to_i64_checked((double)({value}));\n      if (_parsed.status == 0) {{ {dest_expr} = {ok}; }}\n      else {{ const char *_message = _parsed.status == 1 ? \"f64 value is not finite\" : (_parsed.status == 2 ? \"f64 value is outside the i64 range\" : \"f64 value is not an exact integer\"); {dest_expr} = {err}; }} }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
         "parse_int" => {
             let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let dest_ty = types.infer_place_ty(body, destination);

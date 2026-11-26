@@ -665,7 +665,10 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::TryWriteFile(_, _, ty, ..) | Expr::TryCopyFile(_, _, ty, ..) | Expr::TryRenamePath(_, _, ty, ..)
         | Expr::TryAppendFile(_, _, ty, ..) | Expr::JsonGet(_, _, ty, ..) | Expr::JsonInt(_, _, ty, ..)
         | Expr::JsonBool(_, _, ty, ..) | Expr::JsonLen(_, _, ty, ..) | Expr::Find(_, _, ty, ..) => *ty,
-        Expr::ToI64(..) | Expr::WriteFile(..) | Expr::CountLinesWith(..) | Expr::Utf8Len(..)
+        // to_i64 is fallible: its type is the IntResult enum the parser
+        // attached, not a plain i64.
+        Expr::ToI64(_, ty, ..) => *ty,
+        Expr::WriteFile(..) | Expr::CountLinesWith(..) | Expr::Utf8Len(..)
         | Expr::MapInc(..) | Expr::NowMs | Expr::NowS => Type::Int(IntTy::I64),
     }
 }

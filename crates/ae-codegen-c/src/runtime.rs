@@ -582,6 +582,33 @@ static inline ae_parse_i64_result ae_parse_i64(ae_str text) {
     return out;
 }
 
+// to_i64: status 0 = value, 1 = not finite, 2 = outside the i64 range,
+// 3 = not an exact integer. The emitter turns the status into IntResult's
+// Ok/Err payload.
+typedef struct { int64_t status; int64_t value; } ae_f64_to_i64_result;
+static inline ae_f64_to_i64_result ae_f64_to_i64_checked(double value) {
+    ae_f64_to_i64_result out;
+    if (!isfinite(value)) {
+        out.status = 1;
+        out.value = 0;
+        return out;
+    }
+    if (value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+        out.status = 2;
+        out.value = 0;
+        return out;
+    }
+    const int64_t converted = (int64_t)value;
+    if ((double)converted != value) {
+        out.status = 3;
+        out.value = 0;
+        return out;
+    }
+    out.status = 0;
+    out.value = converted;
+    return out;
+}
+
 // Token cursors (the `tokenize`/`for t in cursor` form): the cursor holds a
 // view of the base text and an inline copy of the separator, so a temporary
 // separator is safe and iterating allocates nothing. Boundaries match
