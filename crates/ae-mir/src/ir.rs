@@ -52,6 +52,9 @@ pub struct Body {
     /// Function-pointer signatures (`sig id -> (params, return)`), so a
     /// standalone backend can spell and call an indirect callee.
     pub fn_sigs: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
+    /// Declared `extern "C"` callees (`def id -> symbol`). A standalone
+    /// backend cannot resolve these through its own function map.
+    pub externs: BTreeMap<DefId, String>,
     /// Payload field types per variant for every enum the program declares
     /// (`enum id -> variant -> fields`). Carried so a standalone backend can
     /// lay out a union member even when the body never constructs that
@@ -71,6 +74,7 @@ impl Body {
             intrinsics: BTreeMap::new(),
             pointees: BTreeMap::new(),
             fn_sigs: BTreeMap::new(),
+            externs: BTreeMap::new(),
             enum_layouts: BTreeMap::new(),
             span: None,
         }

@@ -159,6 +159,9 @@ struct PureMirBuilder<'a> {
     /// Signatures seen on function-value constants (`FnRef`, fn-pointer
     /// arguments), merged with the locals' signatures at `finish`.
     fn_sigs_seen: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
+    /// Declared extern callees seen while lowering, carried on the body so
+    /// the backend can name the symbol instead of reporting a raw DefId.
+    externs: BTreeMap<DefId, String>,
     enum_layouts: &'a BTreeMap<usize, Vec<Vec<TyKind>>>,
     /// Shapes this function uses that the pure pipeline cannot lower yet;
     /// a non-empty list turns the whole lowering into an error (fail closed)
@@ -222,6 +225,7 @@ impl<'a> PureMirBuilder<'a> {
             ctx,
             intrinsics: BTreeMap::new(),
             fn_sigs_seen: BTreeMap::new(),
+            externs: BTreeMap::new(),
             enum_layouts,
             unsupported: Vec::new(),
         }
@@ -359,6 +363,7 @@ impl<'a> PureMirBuilder<'a> {
             intrinsics: self.intrinsics,
             pointees,
             fn_sigs,
+            externs: self.externs,
             enum_layouts: self.enum_layouts.clone(),
             span: None,
         }
@@ -943,6 +948,9 @@ impl<'a> PureMirBuilder<'a> {
                 )))
             }
             Expr::Call(fn_id, args, ret) => {
+                if let Some(name) = self.ctx.extern_name(*fn_id) {
+                    self.externs.insert(DefId(*fn_id as u32), name);
+                }
                 let arg_ops = self.lower_args(args);
                 let dest = self.fresh_temp(*ret);
                 let next_bb = self.new_block();

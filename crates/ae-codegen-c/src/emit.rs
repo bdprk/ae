@@ -274,6 +274,14 @@ fn emit_terminator(
             let callee = match func {
                 Operand::Constant(c) => match &c.value {
                     ConstValue::FnDef(def_id) => {
+                        if let Some(symbol) = body.externs.get(def_id) {
+                            return Err(CodegenError::UnsupportedFeature {
+                                body_name: body.name.clone(),
+                                detail: format!(
+                                    "extern '{symbol}' is not linked by the pure C backend yet"
+                                ),
+                            });
+                        }
                         def_map.get(def_id).cloned().ok_or_else(|| {
                             CodegenError::UnresolvedCall {
                                 body_name: body.name.clone(),
