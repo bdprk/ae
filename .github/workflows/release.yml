@@ -1,0 +1,59 @@
+name: Release
+
+# v0.1.0 was published without assets, so trying AE meant building the
+# compiler first. This attaches a prebuilt `ae` binary to every `v*` tag.
+# Running the binary still needs a C11 toolchain (AE_CC selects it); the
+# release notes point that out.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: windows-x86_64
+          - os: ubuntu-latest
+            suffix: linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check C compiler
+        run: gcc --version
+
+      - name: Build the compiler
+        run: cargo build --workspace --locked --release
+
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          bin=target/release/ae
+          if [ "$RUNNER_OS" = Windows ]; then bin=target/release/ae.exe; fi
+          "$bin" check examples/hello.ae
+          "$bin" run examples/hello.ae
+
+      - name: Stage the release asset
+        shell: bash
+        run: |
+          bin=target/release/ae
+          if [ "$RUNNER_OS" = Windows ]; then bin=target/release/ae.exe; fi
+          mkdir -p dist
+          cp "$bin" "dist/ae-${{ github.ref_name }}-${{ matrix.suffix }}"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
