@@ -11,6 +11,6 @@ ae-hir = { path = "crates/ae-hir" }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [workspace]
-members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout"]
-default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout"]
+members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout", "crates/ae-query"]
+default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout", "crates/ae-query"]
 resolver = "3"
