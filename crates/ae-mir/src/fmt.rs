@@ -228,7 +228,7 @@ impl fmt::Display for Rvalue {
             Self::Aggregate(kind, ops) => {
                 match kind {
                     AggregateKind::Tuple => f.write_str("(")?,
-                    AggregateKind::Array(ty) => write!(f, "[{}; ", format_ty(*ty))?,
+                    AggregateKind::Array(ty, _) => write!(f, "[{}; ", format_ty(*ty))?,
                     AggregateKind::Struct(id) => write!(f, "Struct#{id} {{ ")?,
                     AggregateKind::Enum(id, variant) => {
                         write!(f, "Enum#{id}::variant#{variant}(")?
@@ -245,7 +245,7 @@ impl fmt::Display for Rvalue {
                     AggregateKind::Tuple
                     | AggregateKind::Enum(..)
                     | AggregateKind::Closure(_) => f.write_str(")"),
-                    AggregateKind::Array(_) => f.write_str("]"),
+                    AggregateKind::Array(_, _) => f.write_str("]"),
                     AggregateKind::Struct(_) => f.write_str(" }"),
                 }
             }

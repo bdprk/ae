@@ -95,3 +95,15 @@ fixture that ran is a hard failure. Layout probes (`c_size_of`,
 are the unimplemented intrinsic families (vectors, strings, threads, channels,
 atomics) and five C-emission bugs (array element typing, enum variant naming,
 function-pointer casts).
+
+## Layout metadata travels on the body
+
+Two C-emission bugs came from the backend guessing type metadata.
+`AggregateKind::Array` carried only the element type, so two same-length
+arrays of different element kinds shared one type slot (an i64 array could be
+emitted as a Copy-struct array); the aggregate now carries the compiler's
+interned element id. A match arm binds a payload variant the body may never
+construct, so the enum union typedef lacked that member (`u.v1` missing while
+`v10` existed); `Body.enum_layouts` now carries every declared variant's
+field types and `ae-codegen-c` seeds its enum table from it. The end-to-end
+gate rises from 90 to **93 of 161** fixtures with output parity intact.

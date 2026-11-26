@@ -603,7 +603,7 @@ fn eval_rvalue(
             }
             Ok(match kind {
                 AggregateKind::Tuple => MirValue::Tuple(fields),
-                AggregateKind::Array(_) => MirValue::Array(fields),
+                AggregateKind::Array(_, _) => MirValue::Array(fields),
                 AggregateKind::Enum(def_id, variant) => MirValue::Enum {
                     def_id: *def_id,
                     variant: *variant,

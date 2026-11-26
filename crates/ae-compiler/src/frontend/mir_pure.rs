@@ -85,10 +85,29 @@ pub(super) fn lower_path_with_imports(
 }
 
 pub(super) fn lower_program_to_pure_mir(program: &Program) -> Result<Vec<Body>, String> {
+    let enum_layouts: BTreeMap<usize, Vec<Vec<TyKind>>> = program
+        .enums
+        .iter()
+        .enumerate()
+        .map(|(id, def)| {
+            (
+                id,
+                def.variants
+                    .iter()
+                    .map(|(_, fields)| fields.clone())
+                    .collect(),
+            )
+        })
+        .collect();
     let mut bodies = Vec::new();
     for file in &program.files {
         for function in file {
-            let body = lower_function_to_pure_mir(function, &program.structs, &program.ctx)?;
+            let body = lower_function_to_pure_mir(
+                function,
+                &program.structs,
+                &program.ctx,
+                &enum_layouts,
+            )?;
             bodies.push(body);
         }
     }
@@ -99,9 +118,10 @@ pub(super) fn lower_function_to_pure_mir(
     function: &Function,
     structs: &[StructDef],
     ctx: &CompileContext,
+    enum_layouts: &BTreeMap<usize, Vec<Vec<TyKind>>>,
 ) -> Result<Body, String> {
     let cfg = build_cfg(function, ctx);
-    let mut builder = PureMirBuilder::new(function, &cfg, structs, ctx);
+    let mut builder = PureMirBuilder::new(function, &cfg, structs, ctx, enum_layouts);
     builder.lower_cfg(&cfg);
     if !builder.unsupported.is_empty() {
         return Err(format!(
@@ -136,6 +156,7 @@ struct PureMirBuilder<'a> {
     /// Synthetic intrinsic `DefId`s registered while lowering, carried on
     /// the body so a backend can emit the builtin itself.
     intrinsics: BTreeMap<DefId, String>,
+    enum_layouts: &'a BTreeMap<usize, Vec<Vec<TyKind>>>,
     /// Shapes this function uses that the pure pipeline cannot lower yet;
     /// a non-empty list turns the whole lowering into an error (fail closed)
     /// instead of emitting ill-formed MIR.
@@ -148,6 +169,7 @@ impl<'a> PureMirBuilder<'a> {
         cfg: &CfgFunction,
         structs: &'a [StructDef],
         ctx: &'a CompileContext,
+        enum_layouts: &'a BTreeMap<usize, Vec<Vec<TyKind>>>,
     ) -> Self {
         let name = if function.is_main {
             "main".to_owned()
@@ -196,6 +218,7 @@ impl<'a> PureMirBuilder<'a> {
             structs,
             ctx,
             intrinsics: BTreeMap::new(),
+            enum_layouts,
             unsupported: Vec::new(),
         }
     }
@@ -302,6 +325,7 @@ impl<'a> PureMirBuilder<'a> {
             locals: self.locals,
             basic_blocks: compact_blocks,
             intrinsics: self.intrinsics,
+            enum_layouts: self.enum_layouts.clone(),
             span: None,
         }
     }
@@ -330,7 +354,7 @@ impl<'a> PureMirBuilder<'a> {
                 let ops = values.iter().map(|v| self.lower_operand(v)).collect();
                 self.push_stmt(StatementKind::Assign(
                     Place::from_local(local),
-                    Rvalue::Aggregate(AggregateKind::Array(*elem_ty), ops),
+                    Rvalue::Aggregate(AggregateKind::Array(*elem_ty, arr_id), ops),
                 ));
             }
             Statement::Store(id, len, index, value, _, _, elem_ty) => {

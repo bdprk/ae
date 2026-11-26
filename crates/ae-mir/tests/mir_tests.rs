@@ -156,7 +156,7 @@ fn valid_drop_call_assert_and_projections_with_interner() {
                 Statement::new(StatementKind::Assign(
                     Place::from_local(LocalId(3)),
                     Rvalue::Aggregate(
-                        AggregateKind::Array(TyKind::Int(IntTy::I64)),
+                        AggregateKind::Array(TyKind::Int(IntTy::I64), 0),
                         vec![int_const(10), int_const(20), int_const(30)],
                     ),
                 )),

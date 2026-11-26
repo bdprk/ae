@@ -46,6 +46,11 @@ pub struct Body {
     /// names (`print`, `exit`, `vec_push`, ...). A backend emits these
     /// itself; they are not source functions.
     pub intrinsics: BTreeMap<DefId, String>,
+    /// Payload field types per variant for every enum the program declares
+    /// (`enum id -> variant -> fields`). Carried so a standalone backend can
+    /// lay out a union member even when the body never constructs that
+    /// variant (a match arm still binds its payload).
+    pub enum_layouts: BTreeMap<usize, Vec<Vec<TyKind>>>,
     pub span: Option<Span>,
 }
 
@@ -58,6 +63,7 @@ impl Body {
             locals: Vec::new(),
             basic_blocks: Vec::new(),
             intrinsics: BTreeMap::new(),
+            enum_layouts: BTreeMap::new(),
             span: None,
         }
     }
@@ -267,7 +273,9 @@ pub enum CastKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateKind {
     Tuple,
-    Array(TyKind),
+    /// A fixed array literal: its element type and the compiler's
+    /// interned element id (the id names the `ArrayOf` C typedef).
+    Array(TyKind, usize),
     Struct(usize),
     Enum(usize, usize),
     Closure(usize),

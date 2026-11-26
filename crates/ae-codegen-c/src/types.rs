@@ -121,6 +121,17 @@ impl ModuleTypes {
     }
 
     fn scan_body(&mut self, body: &Body) {
+        // Seed every declared variant from the body's layout table: a match
+        // arm binds a payload the body may never construct, and the union
+        // typedef still needs that member.
+        for (id, variants) in &body.enum_layouts {
+            let entry = self.enums.entry(*id).or_default();
+            for (variant, fields) in variants.iter().enumerate() {
+                let slots = entry.entry(variant).or_default();
+                let field_tys: Vec<Option<TyKind>> = fields.iter().map(|ty| Some(*ty)).collect();
+                ensure_field_slots(slots, &field_tys);
+            }
+        }
         for bb in &body.basic_blocks {
             for stmt in &bb.statements {
                 match &stmt.kind {
@@ -170,14 +181,11 @@ impl ModuleTypes {
                         let fields = variants.entry(*variant).or_default();
                         ensure_field_slots(fields, &op_tys);
                     }
-                    AggregateKind::Array(elem_ty) => {
+                    AggregateKind::Array(elem_ty, elem_id) => {
+                        // The literal names its interned element id, so two
+                        // arrays of the same length never share a slot.
                         self.register_ty(*elem_ty);
-                        let len = ops.len();
-                        for ((_, klen), slot) in &mut self.arrays {
-                            if *klen == len && slot.is_none() {
-                                *slot = Some(*elem_ty);
-                            }
-                        }
+                        self.arrays.insert((*elem_id, ops.len()), Some(*elem_ty));
                     }
                     AggregateKind::Tuple => {}
                 }
@@ -307,14 +315,8 @@ impl ModuleTypes {
                 AggregateKind::Struct(id) => Some(TyKind::Struct(*id)),
                 AggregateKind::Closure(id) => Some(TyKind::Closure(*id)),
                 AggregateKind::Enum(id, _) => Some(TyKind::Enum("Enum", *id)),
-                AggregateKind::Array(elem_ty) => {
-                    // Try to find matching ArrayOf in arrays
-                    for ((elem_id, len), slot) in &self.arrays {
-                        if *len == ops.len() && *slot == Some(*elem_ty) {
-                            return Some(TyKind::ArrayOf(*elem_id, *len));
-                        }
-                    }
-                    None
+                AggregateKind::Array(_elem_ty, elem_id) => {
+                    Some(TyKind::ArrayOf(*elem_id, ops.len()))
                 }
                 AggregateKind::Tuple => None,
             },

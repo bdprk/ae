@@ -469,7 +469,7 @@ fn parity_structs_arrays_ref_deref_and_len() {
             assign(
                 LocalId(2),
                 Rvalue::Aggregate(
-                    AggregateKind::Array(TyKind::Int(IntTy::I64)),
+                    AggregateKind::Array(TyKind::Int(IntTy::I64), 0),
                     vec![const_i64(1), const_i64(2), const_i64(3)],
                 ),
             ),

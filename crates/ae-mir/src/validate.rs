@@ -463,10 +463,7 @@ fn validate_rvalue(
             match kind {
                 AggregateKind::Struct(id) => Some(TyKind::Struct(*id)),
                 AggregateKind::Closure(id) => Some(TyKind::Closure(*id)),
-                AggregateKind::Array(elem_ty) => interner.and_then(|i| {
-                    i.find_array_elem(*elem_ty)
-                        .map(|id| TyKind::ArrayOf(id, ops.len()))
-                }),
+                AggregateKind::Array(_elem_ty, elem_id) => Some(TyKind::ArrayOf(*elem_id, ops.len())),
                 AggregateKind::Tuple | AggregateKind::Enum(..) => None,
             }
         }

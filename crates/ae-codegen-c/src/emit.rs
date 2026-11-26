@@ -699,7 +699,7 @@ fn emit_rvalue(
                         ))
                     }
                 }
-                AggregateKind::Array(_) => {
+                AggregateKind::Array(_, _) => {
                     let arr_ty = expected_ty
                         .or_else(|| types.infer_rvalue_ty(body, rvalue))
                         .ok_or_else(|| CodegenError::UnsupportedType {
