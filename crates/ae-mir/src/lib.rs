@@ -4,6 +4,7 @@
 //! It depends only on `ae-span` and `ae-ty`.
 
 pub mod analysis;
+pub mod borrowck;
 pub mod eval;
 pub mod fmt;
 pub mod ir;
@@ -11,6 +12,7 @@ pub mod opt;
 pub mod validate;
 
 pub use analysis::{Cfg, InitAnalysis, InitState, LivenessAnalysis};
+pub use borrowck::{BorrowError, BorrowErrorKind, Loan, Location, check_body};
 pub use eval::{DEFAULT_STEP_LIMIT, MirEvalError, MirValue, eval_body, eval_body_with_limit};
 pub use fmt::{format_body, format_ty};
 pub use ir::{
