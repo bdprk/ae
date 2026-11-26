@@ -374,10 +374,10 @@ impl Parser<'_> {
                 return Ok(Payload::Param(index));
             }
         let fty = self.named_type()?;
-        // Payloads stay flat: a variant may carry scalars, strings or a vector,
-        // but not a struct or another enum (no layout recursion).
-        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vector(_) | Type::Fn(_)) {
-            return Err(self.fail("enum variant payloads must be i64, bool, f64, string, vec, vec[string], or a type parameter"));
+        // Payloads may carry scalars, strings, vectors, function pointers,
+        // or previously declared enums (no struct or recursive enum layouts).
+        if !matches!(fty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::String | Type::Vector(_) | Type::Fn(_) | Type::Enum(..)) {
+            return Err(self.fail("enum variant payloads must be i64, bool, f64, string, vec, vec[string], enum, or a type parameter"));
         }
         Ok(Payload::Concrete(fty))
     }
@@ -550,7 +550,7 @@ impl Parser<'_> {
     // reason variant payloads are: no recursion and no hidden layout.
     pub(super) fn type_argument(&mut self) -> Result<Type, ae_span::Diagnostic> {
         let ty = self.named_type()?;
-        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Fn(_)) {
+        if !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Fn(_) | Type::Enum(..)) {
             return Err(self.fail("type arguments must be i64, bool, f64, char, string, vec, vec[string], fn(...), or ()"));
         }
         Ok(ty)

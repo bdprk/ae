@@ -1052,15 +1052,15 @@ fn eval_stmts(
                 }
             }
             Statement::Match(subject, _, arms) => {
-                let (vidx, payloads) = match read_var(locals, caller_locals, *subject, 0, 0) {
-                    Ok(Val::Enum(_, vidx, payloads)) => (vidx, payloads),
+                let subject_val = match read_var(locals, caller_locals, *subject, 0, 0) {
+                    Ok(v @ Val::Enum(..)) => v,
                     Ok(_) => return Flow::Trap("internal: match subject not enum".to_owned()),
                     Err(f) => return f,
                 };
                 for arm in arms {
-                    if arm.variant == vidx {
-                        for (bind_id, _, field_idx) in &arm.bindings {
-                            if let Some(p) = payloads.get(*field_idx) {
+                    if interp_pattern_matches(&arm.pattern, &subject_val) {
+                        for (bind_id, _, path) in &arm.bindings {
+                            if let Some(p) = interp_extract_path(&subject_val, path) {
                                 locals.insert(*bind_id, p.clone());
                             }
                         }
@@ -3383,4 +3383,31 @@ fn release_val(env: &mut Env<'_>, val: Val, ty: Type) -> Result<(), Flow> {
         }
         _ => Ok(()),
     }
+}
+
+fn interp_pattern_matches(pattern: &CompiledPattern, val: &Val) -> bool {
+    match pattern {
+        CompiledPattern::Wildcard | CompiledPattern::Binding => true,
+        CompiledPattern::Variant { variant, fields, .. } => {
+            let Val::Enum(_, vidx, payloads) = val else {
+                return false;
+            };
+            if *vidx != *variant {
+                return false;
+            }
+            fields
+                .iter()
+                .all(|(idx, _, subpat)| payloads.get(*idx).is_some_and(|p| interp_pattern_matches(subpat, p)))
+        }
+    }
+}
+
+fn interp_extract_path<'a>(mut val: &'a Val, path: &[(usize, usize)]) -> Option<&'a Val> {
+    for &(_, field_idx) in path {
+        let Val::Enum(_, _, payloads) = val else {
+            return None;
+        };
+        val = payloads.get(field_idx)?;
+    }
+    Some(val)
 }

@@ -245,8 +245,16 @@ impl<'a> TreePrinter<'a> {
                 self.line(&format!("match v{} ({}) {{", subject, ty.name(self.ctx)));
                 self.nested(|this| {
                     for arm in arms {
-                        let bindings = arm.bindings.iter().map(|(id, t, idx)| format!("v{}: {}#{}", id, t.name(this.ctx), idx)).collect::<Vec<_>>().join(", ");
-                        this.line(&format!("variant #{} ({}) => {{", arm.variant, bindings));
+                        let bindings = arm.bindings.iter().map(|(id, t, path)| {
+                            let p = path.iter().map(|(v, f)| format!("{v}.{f}")).collect::<Vec<_>>().join(".");
+                            format!("v{}: {}#{}", id, t.name(this.ctx), p)
+                        }).collect::<Vec<_>>().join(", ");
+                        let head = match &arm.pattern {
+                            CompiledPattern::Wildcard => "_".to_owned(),
+                            CompiledPattern::Binding => "_".to_owned(),
+                            CompiledPattern::Variant { variant, .. } => format!("variant #{variant}"),
+                        };
+                        this.line(&format!("{head} ({bindings}) => {{"));
                         this.nested(|inner| inner.statements(&arm.body));
                         this.line("}");
                     }
@@ -272,8 +280,9 @@ impl<'a> TreePrinter<'a> {
                 };
                 self.line(&format!("take success payload of v{subject}: {}{destination}", ty.name(self.ctx)));
             }
-            Statement::BindPayload(bid, subject, variant, index, ty) => {
-                self.line(&format!("bind v{bid} = payload #{index} of v{subject}::#{variant} ({})", ty.name(self.ctx)));
+            Statement::BindPayload(bid, subject, path, ty) => {
+                let p = path.iter().map(|(v, f)| format!("#{v}.#{f}")).collect::<Vec<_>>().join(".");
+                self.line(&format!("bind v{bid} = payload {p} of v{subject} ({})", ty.name(self.ctx)));
             }
             Statement::Propagate(expr, ty, ok_types, binding, frees) => {
                 let expr_text = self.expression_text(expr);

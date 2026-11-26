@@ -431,6 +431,7 @@ fn pattern_node<'a>(pattern: &'a Pattern, locals: &HashMap<usize, DefId>, ids: &
     let id = ids.next();
     let mut children = Vec::new();
     let kind = match &pattern.kind {
+        PatternKind::Wildcard => "wildcard",
         PatternKind::Binding(_) => "binding",
         PatternKind::Variant { payload, .. } => {
             if let Some(payload) = payload {

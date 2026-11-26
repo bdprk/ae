@@ -60,9 +60,9 @@ pub(super) enum CfgTerminator {
     Goto(usize),
     // Two-way branch; the condition is the source expression, unsplit.
     Branch(Expr, usize, usize),
-    // Enum dispatch: the subject variable id, its layout id, one target per
-    // variant of the matched enum in variant order.
-    Switch(usize, usize, Vec<usize>),
+    // Enum dispatch: the subject variable id, nested field path, its layout id,
+    // `(variant, target)` pairs, and an optional default target for wildcards.
+    Switch(usize, Vec<(usize, usize)>, usize, Vec<(usize, usize)>, Option<usize>),
     Return(Expr),
     Exit(Expr),
     // A block that no path reaches: the lowering's pending tail, or the
@@ -292,34 +292,38 @@ fn lower_statement(statement: &Statement, current: usize, lowering: &mut Lowerin
             (exit, false)
         }
         Statement::Match(subject, ty, arms) => {
-            let Type::Enum(_, eid) = *ty else {
+            if !matches!(*ty, Type::Enum(_, _)) {
                 // The statement tree guarantees an enum subject; the arm is a
                 // defensive default that the validator would flag.
                 return (current, false);
-            };
-            // One target per variant, in variant order — the terminator's
-            // contract. The parser enforces exhaustive unique coverage, so
-            // indexing by each arm's own variant fills every slot no matter
-            // what order the source wrote the arms in.
-            let variant_count = arms.iter().map(|arm| arm.variant).max().map(|max| max + 1).unwrap_or(0);
-            let mut targets = vec![usize::MAX; variant_count];
-            for arm in arms { targets[arm.variant] = lowering.new_block(); }
-            lowering.block(current).terminator = CfgTerminator::Switch(*subject, eid, targets.clone());
+            }
+            let mut arm_blocks = Vec::with_capacity(arms.len());
             let mut joins = Vec::new();
             let mut all_ended = true;
             for arm in arms {
-                let block = targets[arm.variant];
-                // Payload bindings become explicit statements at the top of
-                // the arm's block: the switch dispatches, then the block binds
-                // its payloads as the views/borrows/copies the tree backend's
-                // match arm emits, in the same order (M2.3).
-                for &(bid, pty, index) in &arm.bindings {
-                    lowering.block(block).statements.push(Statement::BindPayload(bid, *subject, arm.variant, index, pty));
+                let block = lowering.new_block();
+                for (bid, pty, path) in &arm.bindings {
+                    lowering.block(block).statements.push(Statement::BindPayload(
+                        *bid,
+                        *subject,
+                        path.clone(),
+                        *pty,
+                    ));
                 }
                 let (after, ended) = lower_statements(&arm.body, block, lowering);
+                arm_blocks.push(block);
                 joins.push((after, ended));
                 all_ended = all_ended && ended;
             }
+            let rows: Vec<MatchRow<'_>> = arms
+                .iter()
+                .enumerate()
+                .map(|(idx, arm)| MatchRow {
+                    tests: vec![(Vec::new(), &arm.pattern)],
+                    arm_block: arm_blocks[idx],
+                })
+                .collect();
+            lower_match_matrix(*subject, &rows, current, lowering);
             // Every continuing arm converges here, like an `if`'s join: code
             // after the match — and the enclosing loop's back edge — lives in
             // the join block, not in whichever arm happened to be first.
@@ -335,7 +339,13 @@ fn lower_statement(statement: &Statement, current: usize, lowering: &mut Lowerin
             let failure = lowering.new_block();
             let entry = lowering.block(current);
             entry.statements.push(Statement::Declare(subject, value.clone()));
-            entry.terminator = CfgTerminator::Switch(subject, layout, vec![success, failure]);
+            entry.terminator = CfgTerminator::Switch(
+                subject,
+                Vec::new(),
+                layout,
+                vec![(0, success), (1, failure)],
+                None,
+            );
             let failed = lowering.block(failure);
             if !frees.is_empty() {
                 failed.statements.push(Statement::Frees(frees.clone()));
@@ -407,6 +417,112 @@ fn lower_statement(statement: &Statement, current: usize, lowering: &mut Lowerin
     }
 }
 
+struct MatchRow<'a> {
+    tests: Vec<(Vec<(usize, usize)>, &'a CompiledPattern)>,
+    arm_block: usize,
+}
+
+fn lower_match_matrix(subject: usize, rows: &[MatchRow<'_>], current: usize, lowering: &mut Lowering) {
+    let Some(first) = rows.first() else {
+        return;
+    };
+    let Some(test_pos) = first
+        .tests
+        .iter()
+        .position(|(_, pat)| matches!(pat, CompiledPattern::Variant { .. }))
+    else {
+        lowering.block(current).terminator = CfgTerminator::Goto(first.arm_block);
+        return;
+    };
+    let (ref test_path, CompiledPattern::Variant { eid, .. }) = first.tests[test_pos] else {
+        unreachable!();
+    };
+    let test_path = test_path.clone();
+    let eid = *eid;
+
+    let mut variants_seen = Vec::new();
+    for row in rows {
+        if let Some((_, CompiledPattern::Variant { variant, .. })) = row
+            .tests
+            .iter()
+            .find(|(p, _)| *p == test_path)
+            && !variants_seen.contains(variant)
+        {
+            variants_seen.push(*variant);
+        }
+    }
+
+    let mut targets = Vec::with_capacity(variants_seen.len());
+    for v in &variants_seen {
+        let mut sub_rows = Vec::new();
+        for row in rows {
+            if let Some(pos) = row.tests.iter().position(|(p, _)| *p == test_path) {
+                match row.tests[pos].1 {
+                    CompiledPattern::Variant { variant, fields, .. } if variant == v => {
+                        let mut new_tests = row.tests.clone();
+                        new_tests.remove(pos);
+                        let mut insert_at = pos;
+                        for (fidx, _, subpat) in fields {
+                            if matches!(subpat, CompiledPattern::Variant { .. }) {
+                                let mut sub_path = test_path.clone();
+                                sub_path.push((*v, *fidx));
+                                new_tests.insert(insert_at, (sub_path, subpat));
+                                insert_at += 1;
+                            }
+                        }
+                        sub_rows.push(MatchRow { tests: new_tests, arm_block: row.arm_block });
+                    }
+                    CompiledPattern::Variant { .. } => {}
+                    CompiledPattern::Wildcard | CompiledPattern::Binding => {
+                        let mut new_tests = row.tests.clone();
+                        new_tests.remove(pos);
+                        sub_rows.push(MatchRow { tests: new_tests, arm_block: row.arm_block });
+                    }
+                }
+            } else {
+                sub_rows.push(MatchRow { tests: row.tests.clone(), arm_block: row.arm_block });
+            }
+        }
+        let target = if let Some(first_sub) = sub_rows.first()
+            && !first_sub.tests.iter().any(|(_, pat)| matches!(pat, CompiledPattern::Variant { .. }))
+        {
+            first_sub.arm_block
+        } else {
+            let dispatch = lowering.new_block();
+            lower_match_matrix(subject, &sub_rows, dispatch, lowering);
+            dispatch
+        };
+        targets.push((*v, target));
+    }
+
+    let mut default_rows = Vec::new();
+    for row in rows {
+        let matches_default = row
+            .tests
+            .iter()
+            .find(|(p, _)| *p == test_path)
+            .is_none_or(|(_, pat)| !matches!(pat, CompiledPattern::Variant { .. }));
+        if matches_default {
+            let mut new_tests = row.tests.clone();
+            new_tests.retain(|(p, _)| *p != test_path);
+            default_rows.push(MatchRow { tests: new_tests, arm_block: row.arm_block });
+        }
+    }
+    let default_target = if default_rows.is_empty() {
+        None
+    } else if let Some(first_def) = default_rows.first()
+        && !first_def.tests.iter().any(|(_, pat)| matches!(pat, CompiledPattern::Variant { .. }))
+    {
+        Some(first_def.arm_block)
+    } else {
+        let dispatch = lowering.new_block();
+        lower_match_matrix(subject, &default_rows, dispatch, lowering);
+        Some(dispatch)
+    };
+
+    lowering.block(current).terminator = CfgTerminator::Switch(subject, test_path, eid, targets, default_target);
+}
+
 // Redirect two paths into one continuation block; identical paths stay one.
 fn join(a: usize, b: usize, lowering: &mut Lowering) -> usize {
     if a == b { return a; }
@@ -450,7 +566,7 @@ fn validate(function: &CfgFunction) {
                             let shape = match &other.terminator {
                                 CfgTerminator::Goto(t) => format!("goto {}", t),
                                 CfgTerminator::Branch(_, a, b) => format!("branch {} {}", a, b),
-                                CfgTerminator::Switch(_, _, ts) => format!("switch {:?}", ts),
+                                CfgTerminator::Switch(_, _, _, ts, def) => format!("switch {:?} default {:?}", ts, def),
                                 CfgTerminator::Return(_) => "return".to_owned(),
                                 CfgTerminator::Exit(_) => "exit".to_owned(),
                                 CfgTerminator::Unreachable => "unreachable".to_owned(),
@@ -463,7 +579,14 @@ fn validate(function: &CfgFunction) {
             }
             CfgTerminator::Goto(target) => assert!(*target < count, "internal: fn #{} block {} branches to missing block {}", function.id, block.id, target),
             CfgTerminator::Branch(_, a, b) => assert!(*a < count && *b < count, "internal: fn #{} block {} branches to missing block", function.id, block.id),
-            CfgTerminator::Switch(_, _, targets) => for t in targets { assert!(*t < count, "internal: fn #{} switch target missing", function.id); },
+            CfgTerminator::Switch(_, _, _, targets, default) => {
+                for (_, t) in targets {
+                    assert!(*t < count, "internal: fn #{} switch target missing", function.id);
+                }
+                if let Some(d) = default {
+                    assert!(*d < count, "internal: fn #{} switch default target missing", function.id);
+                }
+            }
             CfgTerminator::Return(_) | CfgTerminator::Exit(_) => {}
         }
     }
@@ -483,7 +606,13 @@ fn print_function(function: &CfgFunction, out: &mut String, ctx: &CompileContext
         let tail = match &block.terminator {
             CfgTerminator::Goto(target) => format!("goto block {}", target),
             CfgTerminator::Branch(cond, a, b) => format!("branch on {} -> then block {} else block {}", crate::frontend::tree::expression_text(cond, ctx), a, b),
-            CfgTerminator::Switch(subject, eid, targets) => format!("switch v{} (enum #{}) -> {}", subject, eid, targets.iter().map(|t| format!("block {}", t)).collect::<Vec<_>>().join(", ")),
+            CfgTerminator::Switch(subject, _, eid, targets, default) => format!(
+                "switch v{} (enum #{}) -> {}{}",
+                subject,
+                eid,
+                targets.iter().map(|(v, t)| format!("v{v}: block {t}")).collect::<Vec<_>>().join(", "),
+                default.map(|d| format!(", default: block {d}")).unwrap_or_default(),
+            ),
             CfgTerminator::Return(expr) => format!("return {}", crate::frontend::tree::expression_text(expr, ctx)),
             CfgTerminator::Exit(code) => format!("exit {}", crate::frontend::tree::expression_text(code, ctx)),
             // Only main can end this way: the implicit exit-0.

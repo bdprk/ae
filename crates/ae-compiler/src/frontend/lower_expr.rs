@@ -1975,7 +1975,7 @@ impl<'a> Parser<'a> {
                     // The typed route admits only the flat payload-capable
                     // arguments for a generic enum; a struct or enum argument
                     // is a diagnostic, not an instantiation.
-                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Fn(_))) {
+                    if let Some((index, _)) = args.iter().enumerate().find(|(_, ty)| !matches!(ty, Type::Int(_) | Type::Bool | Type::Float(FloatTy::F64) | Type::Char | Type::Unit | Type::String | Type::Vector(_) | Type::Fn(_) | Type::Enum(..))) {
                         return Err(self.error_at(arguments[index].start, "type arguments must be i64, bool, f64, char, string, vec, vec[string], fn(...), or ()"));
                     }
                     self.instantiate_enum(gid, args, base.range.start)?

@@ -267,15 +267,7 @@ impl<'a> Parser<'a> {
                 // payload shape.
                 if let ae_syntax::statement::StatementKind::Match { arms, .. } = &statement.kind {
                     for arm in arms {
-                        let ae_syntax::pattern::PatternKind::Variant { enum_name, variant, payload: Some(bindings), .. } = &arm.pattern.kind else { continue };
-                        let Some(&eid) = self.enum_names.get(enum_name.as_str()) else { continue };
-                        let Some((_, types)) = self.enums[eid].variants.iter().find(|(name, _)| name == variant) else { continue };
-                        for (binding, ty) in bindings.iter().zip(types.iter()) {
-                            if let ae_syntax::pattern::PatternKind::Binding(name) = &binding.kind
-                                && matches!(ty, Type::Struct(_) | Type::Enum(..)) {
-                                local_structs.insert(name.clone(), *ty);
-                            }
-                        }
+                        self.collect_pattern_local_structs(&arm.pattern, &mut local_structs);
                     }
                 }
                 for root in statement.expressions() {
@@ -693,6 +685,31 @@ impl<'a> Parser<'a> {
 
     pub(super) fn seek_scalar_offset(&mut self, offset: usize) {
         self.pos = self.tokens.partition_point(|token| token.offset < offset);
+    }
+
+    fn collect_pattern_local_structs(
+        &self,
+        pattern: &ae_syntax::pattern::Pattern,
+        local_structs: &mut HashMap<String, Type>,
+    ) {
+        let ae_syntax::pattern::PatternKind::Variant { enum_name, variant, payload: Some(subpatterns), .. } = &pattern.kind else {
+            return;
+        };
+        let Some(&eid) = self.enum_names.get(enum_name.as_str()) else { return };
+        let Some((_, types)) = self.enums[eid].variants.iter().find(|(name, _)| name == variant) else { return };
+        for (subpat, ty) in subpatterns.iter().zip(types.iter()) {
+            match &subpat.kind {
+                ae_syntax::pattern::PatternKind::Binding(name)
+                    if matches!(ty, Type::Struct(_) | Type::Enum(..)) =>
+                {
+                    local_structs.insert(name.clone(), *ty);
+                }
+                ae_syntax::pattern::PatternKind::Variant { .. } => {
+                    self.collect_pattern_local_structs(subpat, local_structs);
+                }
+                _ => {}
+            }
+        }
     }
 
 }
