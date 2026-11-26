@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/bdprk/ae/security/advisories/new
+    about: Report privately instead of opening a public issue.
+  - name: Language reference
+    url: https://github.com/bdprk/ae/blob/main/docs/current-language.md
+    about: Check what the prototype currently supports before filing.
