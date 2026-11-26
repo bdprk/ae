@@ -32,6 +32,8 @@ mod movewalk;
 mod borrowscope;
 mod drops;
 mod mir;
+pub mod mir_pure;
+pub use mir_pure::{format_pure_mir_path, lower_path_to_pure_mir};
 pub mod interp;
 mod expression;
 mod types;
