@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use ae_mir::{
     AggregateKind, Body, Operand, Place, ProjectionElem, Rvalue, StatementKind,
 };
-use ae_ty::{FloatTy, IntTy, TyKind};
+use ae_ty::{DefId, FloatTy, IntTy, TyKind};
 
 use crate::CodegenError;
 
@@ -35,9 +35,14 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Bool => "bool".to_owned(),
         TyKind::Char => "uint32_t".to_owned(),
         TyKind::Unit => "ae_unit_t".to_owned(),
-        TyKind::String | TyKind::StrView => "const char *".to_owned(),
+        // Owned and borrowed strings share one C representation (ADR-0238):
+        // the `owned` flag says whether this value must free the bytes.
+        TyKind::String | TyKind::StrView => "ae_str".to_owned(),
         TyKind::Struct(id) => format!("ae_struct_{id}"),
-        TyKind::Closure(id) => format!("ae_closure_{id}"),
+        // A closure value is the lifted function's address: the legacy
+        // backend spells it `void` and calls it through a resolved function
+        // name, and the pure pipeline carries the same address constant.
+        TyKind::Closure(_) => "void *".to_owned(),
         TyKind::Enum(_, id) => format!("ae_enum_{id}"),
         TyKind::ArrayOf(elem_id, len) => format!("ae_array_{elem_id}_{len}"),
         // A function value is a typed function pointer (typedef emitted per
@@ -71,6 +76,7 @@ enum TypeDefKey {
     Closure(usize),
     Enum(usize),
     Array(usize, usize),
+    FnSig(usize),
 }
 
 /// Discovered aggregate/array layouts across all bodies in a module.
@@ -85,6 +91,8 @@ pub(crate) struct ModuleTypes {
     /// Function-pointer signature id -> (params, return), carried on each
     /// body; the emitter spells `ae_fn_t{id}` from it.
     pub fn_sigs: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
+    /// Struct id -> (user drop function, its return type, live-flag member).
+    pub drop_fns: BTreeMap<usize, (DefId, TyKind, String)>,
 }
 
 impl ModuleTypes {
@@ -101,6 +109,9 @@ impl ModuleTypes {
             }
             for (sig, signature) in &body.fn_sigs {
                 types.fn_sigs.entry(*sig).or_insert_with(|| signature.clone());
+            }
+            for (sid, drop) in &body.drop_fns {
+                types.drop_fns.entry(*sid).or_insert_with(|| drop.clone());
             }
         }
 
@@ -387,7 +398,11 @@ impl ModuleTypes {
         Some(cur_ty)
     }
 
-    pub fn emit_typedefs(&self, out: &mut String) -> Result<(), CodegenError> {
+    pub fn emit_typedefs(
+        &self,
+        out: &mut String,
+        def_map: &BTreeMap<DefId, String>,
+    ) -> Result<(), CodegenError> {
         let mut all_keys = BTreeSet::new();
         for &id in self.structs.keys() {
             all_keys.insert(TypeDefKey::Struct(id));
@@ -401,26 +416,17 @@ impl ModuleTypes {
         for &(elem_id, len) in self.arrays.keys() {
             all_keys.insert(TypeDefKey::Array(elem_id, len));
         }
+        for &sig in self.fn_sigs.keys() {
+            all_keys.insert(TypeDefKey::FnSig(sig));
+        }
 
         let mut visited = BTreeSet::new();
         let mut visiting = BTreeSet::new();
 
         for key in all_keys {
-            self.emit_typedef_topo(key, out, &mut visited, &mut visiting)?;
+            self.emit_typedef_topo(key, out, &mut visited, &mut visiting, def_map)?;
         }
         if !visited.is_empty() {
-            out.push('\n');
-        }
-        // Function-pointer typedefs come after the nominal types they name.
-        for (sig, (params, ret)) in &self.fn_sigs {
-            let params = if params.is_empty() {
-                "void".to_owned()
-            } else {
-                params.iter().map(|ty| c_type_name(*ty)).collect::<Vec<_>>().join(", ")
-            };
-            let _ = writeln!(out, "typedef {} (*ae_fn_t{sig})({params});", c_type_name(*ret));
-        }
-        if !self.fn_sigs.is_empty() {
             out.push('\n');
         }
         Ok(())
@@ -432,6 +438,7 @@ impl ModuleTypes {
         out: &mut String,
         visited: &mut BTreeSet<TypeDefKey>,
         visiting: &mut BTreeSet<TypeDefKey>,
+        def_map: &BTreeMap<DefId, String>,
     ) -> Result<(), CodegenError> {
         if visited.contains(&key) {
             return Ok(());
@@ -443,13 +450,133 @@ impl ModuleTypes {
         }
 
         for dep in self.direct_deps(key) {
-            self.emit_typedef_topo(dep, out, visited, visiting)?;
+            self.emit_typedef_topo(dep, out, visited, visiting, def_map)?;
         }
 
         visiting.remove(&key);
         visited.insert(key);
         self.emit_single_typedef(key, out);
+        // Ownership helpers follow each definition in the same topological
+        // order: a helper may call only helpers of types it depends on, and
+        // those were emitted before this type was complete.
+        self.emit_ownership_helpers(key, out, def_map);
         Ok(())
+    }
+
+    /// Emits `ae_rel_*` (release the owned value in this slot) and
+    /// `ae_take_*` (copy the value out and leave the slot empty) for one
+    /// nominal type. A move takes the value; a drop releases it. Both are
+    /// idempotent on an empty slot, which is what lets conservative release
+    /// lists coexist with moves.
+    fn emit_ownership_helpers(
+        &self,
+        key: TypeDefKey,
+        out: &mut String,
+        def_map: &BTreeMap<DefId, String>,
+    ) {
+        match key {
+            TypeDefKey::Struct(id) => {
+                let fields = self.structs.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+                self.emit_record_helpers(out, "struct", id, fields, def_map);
+            }
+            TypeDefKey::Closure(id) => {
+                let fields = self.closures.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+                self.emit_record_helpers(out, "closure", id, fields, def_map);
+            }
+            TypeDefKey::Enum(id) => self.emit_enum_helpers(out, id),
+            // Arrays are Copy-shaped in the pure backend for now; owned
+            // element arrays arrive with the container stage.
+            TypeDefKey::Array(_, _) | TypeDefKey::FnSig(_) => {}
+        }
+    }
+
+    fn emit_record_helpers(
+        &self,
+        out: &mut String,
+        kind: &str,
+        id: usize,
+        fields: &[Option<TyKind>],
+        def_map: &BTreeMap<DefId, String>,
+    ) {
+        let ty = format!("ae_{kind}_{id}");
+        let _ = writeln!(out, "static inline void ae_rel_{kind}_{id}({ty} *v) {{");
+        // A Copy-only record has no release statements; keep the parameter
+        // named for the signature but silent for -Wunused-parameter.
+        let _ = writeln!(out, "    (void)v;");
+        if kind == "struct"
+            && let Some((drop_id, drop_ret, live)) = self.drop_fns.get(&id)
+        {
+            // One user drop call per value: a moved-from slot is zeroed (the
+            // flag is false) and a second release returns immediately.
+            let drop_name = def_map.get(drop_id).map(String::as_str).unwrap_or("");
+            let _ = writeln!(out, "    if (!v->{live}) return;");
+            let _ = writeln!(out, "    v->{live} = false;");
+            if !drop_name.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "    extern {} {drop_name}(void *);",
+                    c_type_name(*drop_ret)
+                );
+                let _ = writeln!(out, "    {drop_name}((void *)v);");
+            }
+        }
+        for (idx, field) in fields.iter().enumerate() {
+            if let Some(field_ty) = field {
+                self.emit_release_field(out, &format!("v->f{idx}"), *field_ty);
+            }
+        }
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out, "static inline {ty} ae_take_{kind}_{id}({ty} *v) {{");
+        let _ = writeln!(out, "    {ty} out = *v;");
+        let _ = writeln!(out, "    *v = ({ty}){{0}};");
+        let _ = writeln!(out, "    return out;");
+        let _ = writeln!(out, "}}");
+    }
+
+    fn emit_enum_helpers(&self, out: &mut String, id: usize) {
+        let _ = writeln!(out, "static inline void ae_rel_enum_{id}(ae_enum_{id} *v) {{");
+        let _ = writeln!(out, "    switch (v->tag) {{");
+        if let Some(variants) = self.enums.get(&id) {
+            for (variant, fields) in variants {
+                if !fields.iter().any(|f| f.is_some()) {
+                    continue;
+                }
+                let _ = writeln!(out, "        case {variant}:");
+                for (idx, field) in fields.iter().enumerate() {
+                    if let Some(field_ty) = field {
+                        self.emit_release_field(out, &format!("v->u.v{variant}.f{idx}"), *field_ty);
+                    }
+                }
+                let _ = writeln!(out, "            break;");
+            }
+        }
+        let _ = writeln!(out, "    }}");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out, "static inline ae_enum_{id} ae_take_enum_{id}(ae_enum_{id} *v) {{");
+        let _ = writeln!(out, "    ae_enum_{id} out = *v;");
+        let _ = writeln!(out, "    *v = (ae_enum_{id}){{0}};");
+        let _ = writeln!(out, "    return out;");
+        let _ = writeln!(out, "}}");
+    }
+
+    fn emit_release_field(&self, out: &mut String, accessor: &str, field_ty: TyKind) {
+        match field_ty {
+            TyKind::String => {
+                let _ = writeln!(out, "    ae_str_release(&{accessor});");
+            }
+            TyKind::Struct(id) if self.structs.contains_key(&id) => {
+                let _ = writeln!(out, "    ae_rel_struct_{id}(&{accessor});");
+            }
+            TyKind::Enum(_, id) if self.enums.contains_key(&id) => {
+                let _ = writeln!(out, "    ae_rel_enum_{id}(&{accessor});");
+            }
+            // Owned containers land with the vector/map stage; a field that
+            // is still unregistered is a non-owning scalar shape.
+            TyKind::Vector(_) | TyKind::MapOf(_) => {
+                let _ = writeln!(out, "    /* {accessor}: container release pending */");
+            }
+            _ => {}
+        }
     }
 
     fn direct_deps(&self, key: TypeDefKey) -> Vec<TypeDefKey> {
@@ -459,6 +586,9 @@ impl ModuleTypes {
             TyKind::Closure(id) => deps.push(TypeDefKey::Closure(id)),
             TyKind::Enum(_, id) => deps.push(TypeDefKey::Enum(id)),
             TyKind::ArrayOf(elem_id, len) => deps.push(TypeDefKey::Array(elem_id, len)),
+            // A struct field may hold a function pointer; its typedef must
+            // exist before the struct that names it.
+            TyKind::Fn(sig) => deps.push(TypeDefKey::FnSig(sig)),
             _ => {}
         };
 
@@ -491,6 +621,14 @@ impl ModuleTypes {
                     push_ty(*elem_ty);
                 }
             }
+            TypeDefKey::FnSig(sig) => {
+                if let Some((params, ret)) = self.fn_sigs.get(&sig) {
+                    for ty in params {
+                        push_ty(*ty);
+                    }
+                    push_ty(*ret);
+                }
+            }
         }
         deps
     }
@@ -499,11 +637,12 @@ impl ModuleTypes {
         match key {
             TypeDefKey::Struct(id) => {
                 let fields = self.structs.get(&id).map(Vec::as_slice).unwrap_or(&[]);
-                emit_struct_typedef(out, &format!("ae_struct_{id}"), fields);
+                let live = self.drop_fns.get(&id).map(|(_, _, live)| live.as_str());
+                emit_struct_typedef(out, &format!("ae_struct_{id}"), fields, live);
             }
             TypeDefKey::Closure(id) => {
                 let fields = self.closures.get(&id).map(Vec::as_slice).unwrap_or(&[]);
-                emit_struct_typedef(out, &format!("ae_closure_{id}"), fields);
+                emit_struct_typedef(out, &format!("ae_closure_{id}"), fields, None);
             }
             TypeDefKey::Enum(id) => {
                 let variants = self.enums.get(&id);
@@ -549,12 +688,34 @@ impl ModuleTypes {
                     );
                 }
             }
+            TypeDefKey::FnSig(sig) => {
+                let (params, ret) = self
+                    .fn_sigs
+                    .get(&sig)
+                    .cloned()
+                    .unwrap_or_else(|| (Vec::new(), TyKind::Unit));
+                let params = if params.is_empty() {
+                    "void".to_owned()
+                } else {
+                    params
+                        .iter()
+                        .map(|ty| c_type_name(*ty))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let _ = writeln!(out, "typedef {} (*ae_fn_t{sig})({params});", c_type_name(ret));
+            }
         }
     }
 }
 
-fn emit_struct_typedef(out: &mut String, name: &str, fields: &[Option<TyKind>]) {
-    if fields.is_empty() {
+fn emit_struct_typedef(
+    out: &mut String,
+    name: &str,
+    fields: &[Option<TyKind>],
+    live: Option<&str>,
+) {
+    if fields.is_empty() && live.is_none() {
         let _ = writeln!(out, "typedef struct {{ uint8_t _empty; }} {name};");
         return;
     }
@@ -562,6 +723,9 @@ fn emit_struct_typedef(out: &mut String, name: &str, fields: &[Option<TyKind>]) 
     for (idx, f_ty) in fields.iter().enumerate() {
         let c_ty = c_type_name(f_ty.unwrap_or(TyKind::Int(IntTy::I64)));
         let _ = writeln!(out, "    {c_ty} f{idx};");
+    }
+    if let Some(live) = live {
+        let _ = writeln!(out, "    bool {live};");
     }
     let _ = writeln!(out, "}} {name};");
 }

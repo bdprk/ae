@@ -140,6 +140,123 @@ static inline void ae_print_f64(double value) {
 _Noreturn static inline void ae_exit(int64_t code) { exit((int)code); }
 "#);
 
+    // Owned strings (ADR-0238 stage 1): one C type carries the bytes, the
+    // length, and whether this value must free them. A string literal is a
+    // static view (`owned = false`); every allocating operation returns an
+    // owned buffer. Releases are idempotent because they clear the flag and
+    // the pointer, so the conservative release lists the frontend emits can
+    // run on every path that reaches them.
+    out.push_str(r#"typedef struct { const char *ptr; int64_t len; bool owned; } ae_str;
+
+static inline char *ae_str_alloc(int64_t len) {
+    char *out = (char *)malloc((size_t)len + 1u);
+    if (!out) ae_trap("out of memory");
+    return out;
+}
+static inline ae_str ae_str_from_parts(const char *ptr, int64_t len, bool owned) {
+    ae_str value = { ptr, len, owned };
+    return value;
+}
+static inline void ae_str_release(ae_str *slot) {
+    if (slot->owned && slot->ptr) free((void *)slot->ptr);
+    slot->ptr = NULL;
+    slot->len = 0;
+    slot->owned = false;
+}
+// Move a value out of a slot without releasing it: the destination owns the
+// buffer, and the (conservative) release of the moved-from slot sees empty.
+static inline ae_str ae_str_take(ae_str *slot) {
+    ae_str value = *slot;
+    slot->ptr = NULL;
+    slot->len = 0;
+    slot->owned = false;
+    return value;
+}
+// Borrowed face of a string: shares the bytes, never releases them. Used for
+// field/element reads and `slice_view`, where the owner stays responsible.
+static inline ae_str ae_str_view(ae_str value) {
+    value.owned = false;
+    return value;
+}
+static inline bool ae_str_eq(ae_str a, ae_str b) {
+    if (a.len != b.len) return false;
+    if (a.len <= 8) {
+        for (int64_t i = 0; i < a.len; i++) {
+            if (a.ptr[i] != b.ptr[i]) return false;
+        }
+        return true;
+    }
+    return memcmp(a.ptr, b.ptr, (size_t)a.len) == 0;
+}
+static inline ae_str ae_str_alloc_copy(const char *ptr, int64_t len) {
+    char *out = ae_str_alloc(len);
+    if (len > 0) memcpy(out, ptr, (size_t)len);
+    out[len] = 0;
+    return ae_str_from_parts(out, len, true);
+}
+static inline ae_str ae_str_clone(ae_str value) {
+    return ae_str_alloc_copy(value.ptr, value.len);
+}
+// Concatenation consumes both operands, like the main runtime: an owned
+// operand is released after its bytes are copied, a view or literal is only
+// read. Callers hand over owned values (taken from their slot) or clones, so
+// every input is either disposable or untouched-by-ownership.
+static inline ae_str ae_str_concat(ae_str a, ae_str b) {
+    if (a.len < 0 || b.len < 0 || a.len > INT64_MAX - b.len) ae_trap("string too long");
+    const int64_t total = a.len + b.len;
+    char *out = ae_str_alloc(total);
+    if (a.len > 0) memcpy(out, a.ptr, (size_t)a.len);
+    if (b.len > 0) memcpy(out + a.len, b.ptr, (size_t)b.len);
+    out[total] = 0;
+    ae_str_release(&a);
+    ae_str_release(&b);
+    return ae_str_from_parts(out, total, true);
+}
+static inline int64_t ae_str_len(ae_str value) { return value.len; }
+static inline void ae_print_str(ae_str value) {
+    if (value.len > 0) fwrite(value.ptr, 1, (size_t)value.len, stdout);
+    fputc(10, stdout);
+}
+static inline bool ae_utf8_continue_byte(unsigned char byte) { return (byte & 0xC0) == 0x80; }
+// Same rule as the main runtime: len/slice count bytes, but a slice may not
+// end in the middle of a character. Malformed input bytes are left alone.
+static inline void ae_str_check_bounds(ae_str value, int64_t start, int64_t end) {
+    if (start < 0 || end < start || end > value.len) ae_trap("string index out of bounds");
+    if ((start > 0 && start < value.len && ae_utf8_continue_byte((unsigned char)value.ptr[start]))
+        || (end > 0 && end < value.len && ae_utf8_continue_byte((unsigned char)value.ptr[end]))) {
+        ae_trap("string index splits a UTF-8 character");
+    }
+}
+static inline ae_str ae_str_slice_view(ae_str value, int64_t start, int64_t end) {
+    ae_str_check_bounds(value, start, end);
+    return ae_str_from_parts(value.ptr + start, end - start, false);
+}
+static inline ae_str ae_str_slice(ae_str value, int64_t start, int64_t end) {
+    ae_str_check_bounds(value, start, end);
+    return ae_str_alloc_copy(value.ptr + start, end - start);
+}
+static inline ae_str ae_str_from_i64(int64_t value) {
+    char buffer[24];
+    const int length = snprintf(buffer, sizeof buffer, "%" PRId64, value);
+    return ae_str_alloc_copy(buffer, (int64_t)length);
+}
+static inline ae_str ae_str_from_u64(uint64_t value) {
+    char buffer[24];
+    const int length = snprintf(buffer, sizeof buffer, "%" PRIu64, value);
+    return ae_str_alloc_copy(buffer, (int64_t)length);
+}
+static inline ae_str ae_str_from_char(uint32_t value) {
+    char buffer[4];
+    const size_t length = ae_utf8_encode(value, buffer);
+    return ae_str_alloc_copy(buffer, (int64_t)length);
+}
+static inline ae_str ae_str_from_f64(double value) {
+    char buffer[96];
+    const size_t length = ae_f64_text(value, buffer, sizeof buffer);
+    return ae_str_alloc_copy(buffer, (int64_t)length);
+}
+"#);
+
     let int_tys = [
         IntTy::I8,
         IntTy::I16,

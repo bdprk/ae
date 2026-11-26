@@ -3,7 +3,7 @@
 //! Pure control-flow graph representation independent of syntax and HIR.
 //! Types come exclusively from `ae-ty` and source positions from `ae-span`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ae_span::Span;
 use ae_ty::{DefId, TyKind};
@@ -60,6 +60,17 @@ pub struct Body {
     /// lay out a union member even when the body never constructs that
     /// variant (a match arm still binds its payload).
     pub enum_layouts: BTreeMap<usize, Vec<Vec<TyKind>>>,
+    /// User `Drop` implementations (`struct id -> (function, return type, live
+    /// field name)`). A release helper calls the user function before
+    /// releasing fields, and a struct with a drop function keeps a live flag
+    /// so a conservative release of a moved-from or already-released slot
+    /// calls it once. The frontend picks the flag's name because it knows the
+    /// declared field names.
+    pub drop_fns: BTreeMap<usize, (DefId, TyKind, String)>,
+    /// Nominal types that copy instead of moving (`#[derive(Copy)]`): a
+    /// binding of such a type stays usable after a by-value use.
+    pub copy_structs: BTreeSet<usize>,
+    pub copy_enums: BTreeSet<usize>,
     pub span: Option<Span>,
 }
 
@@ -76,6 +87,9 @@ impl Body {
             fn_sigs: BTreeMap::new(),
             externs: BTreeMap::new(),
             enum_layouts: BTreeMap::new(),
+            drop_fns: BTreeMap::new(),
+            copy_structs: BTreeSet::new(),
+            copy_enums: BTreeSet::new(),
             span: None,
         }
     }

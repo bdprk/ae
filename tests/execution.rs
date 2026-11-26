@@ -11441,3 +11441,101 @@ fn emit_pure_c_outputs_runnable_c_and_fails_closed() {
     );
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn emit_pure_c_owns_and_releases_strings() {
+    // ADR-0238 stage 1: one `ae_str` value type carries a literal's static
+    // bytes and an allocated buffer's ownership; concatenation consumes the
+    // owned operands, a move takes the slot, and a drop releases it.
+    let dir = unique_temp_dir("emit_pure_c_strings");
+    let source = dir.join("program.ae");
+    fs::write(
+        &source,
+        r#"struct Label { name: string, n: i64 }
+
+fn tag(s: string) -> string {
+    return "tag:" + s;
+}
+
+fn main() {
+    var s = "a" + "b";
+    print(s);
+    let t = s;
+    print(t);
+    let u = tag(t);
+    print(u);
+    print(len(u));
+    let v = slice(u, 0, 3);
+    print(v);
+    let w = slice_view(u, 4, 6);
+    print(w);
+    print(u == "tag:ab");
+    print(u != "nope");
+    let p = Label { name: "z" + to_string(7), n: 7 };
+    print(p.name);
+    print(p.n);
+}
+"#,
+    )
+    .unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(
+        text.contains("typedef struct { const char *ptr; int64_t len; bool owned; } ae_str;"),
+        "{text}"
+    );
+    assert!(text.contains("ae_str_take(&"), "a move must leave the source slot empty: {text}");
+    assert!(text.contains("ae_str_release(&"), "an owned value must be released: {text}");
+    assert!(text.contains("ae_str_concat("), "{text}");
+
+    let c_path = dir.join("program.c");
+    let exe_path = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    fs::write(&c_path, &emitted.stdout).unwrap();
+    let cc = std::env::var_os("AE_CC").unwrap_or_else(|| "gcc".into());
+    let build = Command::new(&cc)
+        .args(["-std=c11", "-O0", &c_path.to_string_lossy(), "-o", &exe_path.to_string_lossy(), "-lm"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe_path).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "ab\nab\ntag:ab\n6\ntag\nab\ntrue\ntrue\nz7\n7\n"
+    );
+
+    // Every allocation above is released exactly once. Linux CI runs the
+    // same binary under ASan+UBSan; MinGW has no sanitizers, so the plain
+    // run is the Windows evidence.
+    #[cfg(target_os = "linux")]
+    {
+        let asan_path = dir.join("program_asan");
+        let build = Command::new(&cc)
+            .args([
+                "-std=c11",
+                "-O0",
+                "-g",
+                "-fsanitize=address,undefined",
+                &c_path.to_string_lossy(),
+                "-o",
+                &asan_path.to_string_lossy(),
+                "-lm",
+            ])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let run = Command::new(&asan_path).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{stderr}");
+        assert!(
+            !stderr.contains("LeakSanitizer") && !stderr.contains("AddressSanitizer"),
+            "{stderr}"
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

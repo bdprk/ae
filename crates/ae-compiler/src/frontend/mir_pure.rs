@@ -99,6 +99,41 @@ pub(super) fn lower_program_to_pure_mir(program: &Program) -> Result<Vec<Body>, 
             )
         })
         .collect();
+    let drop_fns: BTreeMap<usize, (DefId, TyKind, String)> = program
+        .structs
+        .iter()
+        .enumerate()
+        .filter_map(|(sid, def)| {
+            def.drop_fn.map(|id| {
+                let ret = if def.drop_returns_unit {
+                    TyKind::Unit
+                } else {
+                    TyKind::Int(IntTy::I64)
+                };
+                // The release helper needs a flag that no declared field can
+                // shadow; choose it here, where field names are known.
+                let mut live = "ae_live".to_owned();
+                while def.fields.iter().any(|(name, _)| name == &live) {
+                    live.push('_');
+                }
+                (sid, (DefId(id as u32), ret, live))
+            })
+        })
+        .collect();
+    let copy_structs: BTreeSet<usize> = program
+        .structs
+        .iter()
+        .enumerate()
+        .filter(|(_, def)| def.is_copy)
+        .map(|(sid, _)| sid)
+        .collect();
+    let copy_enums: BTreeSet<usize> = program
+        .enums
+        .iter()
+        .enumerate()
+        .filter(|(_, def)| def.is_copy)
+        .map(|(eid, _)| eid)
+        .collect();
     let mut bodies = Vec::new();
     for file in &program.files {
         for function in file {
@@ -107,6 +142,9 @@ pub(super) fn lower_program_to_pure_mir(program: &Program) -> Result<Vec<Body>, 
                 &program.structs,
                 &program.ctx,
                 &enum_layouts,
+                &drop_fns,
+                &copy_structs,
+                &copy_enums,
             )?;
             bodies.push(body);
         }
@@ -119,9 +157,21 @@ pub(super) fn lower_function_to_pure_mir(
     structs: &[StructDef],
     ctx: &CompileContext,
     enum_layouts: &BTreeMap<usize, Vec<Vec<TyKind>>>,
+    drop_fns: &BTreeMap<usize, (DefId, TyKind, String)>,
+    copy_structs: &BTreeSet<usize>,
+    copy_enums: &BTreeSet<usize>,
 ) -> Result<Body, String> {
     let cfg = build_cfg(function, ctx);
-    let mut builder = PureMirBuilder::new(function, &cfg, structs, ctx, enum_layouts);
+    let mut builder = PureMirBuilder::new(
+        function,
+        &cfg,
+        structs,
+        ctx,
+        enum_layouts,
+        drop_fns,
+        copy_structs,
+        copy_enums,
+    );
     builder.lower_cfg(&cfg);
     if !builder.unsupported.is_empty() {
         return Err(format!(
@@ -163,6 +213,9 @@ struct PureMirBuilder<'a> {
     /// the backend can name the symbol instead of reporting a raw DefId.
     externs: BTreeMap<DefId, String>,
     enum_layouts: &'a BTreeMap<usize, Vec<Vec<TyKind>>>,
+    drop_fns: &'a BTreeMap<usize, (DefId, TyKind, String)>,
+    copy_structs: &'a BTreeSet<usize>,
+    copy_enums: &'a BTreeSet<usize>,
     /// Shapes this function uses that the pure pipeline cannot lower yet;
     /// a non-empty list turns the whole lowering into an error (fail closed)
     /// instead of emitting ill-formed MIR.
@@ -170,12 +223,16 @@ struct PureMirBuilder<'a> {
 }
 
 impl<'a> PureMirBuilder<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         function: &Function,
         cfg: &CfgFunction,
         structs: &'a [StructDef],
         ctx: &'a CompileContext,
         enum_layouts: &'a BTreeMap<usize, Vec<Vec<TyKind>>>,
+        drop_fns: &'a BTreeMap<usize, (DefId, TyKind, String)>,
+        copy_structs: &'a BTreeSet<usize>,
+        copy_enums: &'a BTreeSet<usize>,
     ) -> Self {
         let name = if function.is_main {
             "main".to_owned()
@@ -227,7 +284,20 @@ impl<'a> PureMirBuilder<'a> {
             fn_sigs_seen: BTreeMap::new(),
             externs: BTreeMap::new(),
             enum_layouts,
+            drop_fns,
+            copy_structs,
+            copy_enums,
             unsupported: Vec::new(),
+        }
+    }
+
+    /// Copy types keep the source binding usable after a by-value use, so a
+    /// moving position lowers to a plain copy for them.
+    fn is_copy_ty(&self, ty: TyKind) -> bool {
+        match ty {
+            TyKind::Struct(id) => self.copy_structs.contains(&id),
+            TyKind::Enum(_, id) => self.copy_enums.contains(&id),
+            other => !other.owned(),
         }
     }
 
@@ -365,6 +435,9 @@ impl<'a> PureMirBuilder<'a> {
             fn_sigs,
             externs: self.externs,
             enum_layouts: self.enum_layouts.clone(),
+            drop_fns: self.drop_fns.clone(),
+            copy_structs: self.copy_structs.clone(),
+            copy_enums: self.copy_enums.clone(),
             span: None,
         }
     }
@@ -374,7 +447,7 @@ impl<'a> PureMirBuilder<'a> {
             Statement::Declare(id, expr) => {
                 let ty = expr_type(expr, self.ctx);
                 let (local, _) = self.ensure_var(*id, ty);
-                let rvalue = self.lower_expr(expr);
+                let rvalue = self.lower_moving_expr(expr);
                 self.assign_checked(Place::from_local(local), ty, rvalue, ty);
             }
             Statement::Assign(id, expr, release_old) => {
@@ -383,14 +456,17 @@ impl<'a> PureMirBuilder<'a> {
                 if *release_old && var_ty.owned() {
                     self.push_stmt(StatementKind::Drop(Place::from_local(local)));
                 }
-                let rvalue = self.lower_expr(expr);
+                let rvalue = self.lower_moving_expr(expr);
                 self.assign_checked(Place::from_local(local), var_ty, rvalue, rhs_ty);
             }
             Statement::Array(id, values, elem_ty) => {
                 let arr_id = self.ctx.find_array_elem(*elem_ty).unwrap_or(0);
                 let arr_ty = TyKind::ArrayOf(arr_id, values.len());
                 let (local, _) = self.ensure_var(*id, arr_ty);
-                let ops = values.iter().map(|v| self.lower_operand(v)).collect();
+                let ops = values
+                    .iter()
+                    .map(|v| self.lower_operand_moving(v))
+                    .collect();
                 self.push_stmt(StatementKind::Assign(
                     Place::from_local(local),
                     Rvalue::Aggregate(AggregateKind::Array(*elem_ty, arr_id), ops),
@@ -401,14 +477,14 @@ impl<'a> PureMirBuilder<'a> {
                 let arr_ty = TyKind::ArrayOf(arr_id, *len);
                 let (local, _) = self.ensure_var(*id, arr_ty);
                 let idx_local = self.lower_index_local(index);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
             }
             Statement::FieldStore(id, path, _fty, value, base_ty) => {
                 let (local, _) = self.ensure_var(*id, *base_ty);
                 let place = self.build_field_path_place(local, *base_ty, path);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
             }
             Statement::BindPayload(bid, subject, path, pty) => {
@@ -419,9 +495,22 @@ impl<'a> PureMirBuilder<'a> {
                     src_place.projection.push(ProjectionElem::Downcast(variant));
                     src_place.projection.push(ProjectionElem::Field(field_idx));
                 }
+                // A match binding of an owned payload is a borrow in the
+                // language: the enum keeps ownership, so the binding must
+                // not release the payload a second time.
+                let rvalue = if *pty == TyKind::String {
+                    let view = self.emit_intrinsic_call(
+                        "string_view",
+                        vec![Operand::Copy(src_place)],
+                        TyKind::String,
+                    );
+                    Rvalue::Use(Operand::Copy(Place::from_local(view)))
+                } else {
+                    Rvalue::Use(Operand::Copy(src_place))
+                };
                 self.push_stmt(StatementKind::Assign(
                     Place::from_local(dest_local),
-                    Rvalue::Use(Operand::Copy(src_place)),
+                    rvalue,
                 ));
                 let _ = dest_ty;
             }
@@ -432,9 +521,19 @@ impl<'a> PureMirBuilder<'a> {
                     let src_place = Place::from_local(subj_local)
                         .project(ProjectionElem::Downcast(0))
                         .project(ProjectionElem::Field(0));
+                    let rvalue = if *pty == TyKind::String {
+                        let view = self.emit_intrinsic_call(
+                            "string_view",
+                            vec![Operand::Copy(src_place)],
+                            TyKind::String,
+                        );
+                        Rvalue::Use(Operand::Copy(Place::from_local(view)))
+                    } else {
+                        Rvalue::Use(Operand::Copy(src_place))
+                    };
                     self.push_stmt(StatementKind::Assign(
                         Place::from_local(dest_local),
-                        Rvalue::Use(Operand::Copy(src_place)),
+                        rvalue,
                     ));
                 }
             }
@@ -458,13 +557,21 @@ impl<'a> PureMirBuilder<'a> {
                 self.cur_bb = next_bb;
             }
             Statement::Print(printed) => {
-                let arg = match printed {
-                    Printed::Expr(e) => self.lower_operand(e),
-                    Printed::Text(s) => {
-                        Operand::Constant(Constant::new(TyKind::String, ConstValue::String(s.clone())))
-                    }
+                let (arg, owned_temp) = match printed {
+                    // A variable or place read prints a borrowed value; any
+                    // other owned expression materialized a temporary that
+                    // this statement alone owns, so it is released right
+                    // after the print.
+                    Printed::Expr(e) => self.lower_readonly_operand(e),
+                    Printed::Text(s) => (
+                        Operand::Constant(Constant::new(TyKind::String, ConstValue::String(s.clone()))),
+                        None,
+                    ),
                 };
                 self.emit_intrinsic_call("print", vec![arg], TyKind::Unit);
+                if let Some(local) = owned_temp {
+                    self.push_stmt(StatementKind::Drop(Place::from_local(local)));
+                }
             }
             Statement::StrVecPush(id, value, ..) => {
                 let vec_ty = vector_ty(self.ctx, Type::String, false);
@@ -530,7 +637,7 @@ impl<'a> PureMirBuilder<'a> {
                 let slice_ty = TyKind::SliceMut(self.ctx.find_slice_elem(*elem_ty).unwrap_or(0));
                 let (local, _) = self.ensure_var(*id, slice_ty);
                 let idx_local = self.lower_index_local(index);
-                let val_op = self.lower_operand(value);
+                let val_op = self.lower_operand_moving(value);
                 let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
             }
@@ -695,7 +802,10 @@ impl<'a> PureMirBuilder<'a> {
             }
             CfgTerminator::Return(expr) => {
                 let val_ty = expr_type(expr, self.ctx);
-                let val_op = self.lower_operand(expr);
+                // The returned expression is a moving position: a bare
+                // binding is taken, leaving its slot empty for the release
+                // list below.
+                let val_op = self.lower_operand_moving(expr);
                 let ret_ty = self.locals[0].ty;
                 // The parser's scope releases ride the return (the legacy
                 // backends run them *after* the value is copied out). The CFG
@@ -857,10 +967,24 @@ impl<'a> PureMirBuilder<'a> {
                 self.cur_bb = join_bb;
                 Rvalue::Use(Operand::Copy(Place::from_local(result)))
             }
+            Expr::StrEq(a, b, negated) => {
+                // A comparison only reads: a temporary operand (a
+                // concatenation, a call result) is released after the
+                // comparison, and a variable/field stays untouched.
+                let (a_op, a_temp) = self.lower_readonly_operand(a);
+                let (b_op, b_temp) = self.lower_readonly_operand(b);
+                let name = if *negated { "str_ne" } else { "str_eq" };
+                let dest = self.emit_intrinsic_call(name, vec![a_op, b_op], TyKind::Bool);
+                for temp in [a_temp, b_temp].into_iter().flatten() {
+                    self.push_stmt(StatementKind::Drop(Place::from_local(temp)));
+                }
+                Rvalue::Use(Operand::Copy(Place::from_local(dest)))
+            }
             Expr::Binary(lhs, op, rhs, _, _, ty) => {
-                let lhs_op = self.lower_operand(lhs);
-                let rhs_op = self.lower_operand(rhs);
                 if *ty == TyKind::String && matches!(op, Kind::Plus) {
+                    // Concatenation is a moving position for owned operands.
+                    let lhs_op = self.lower_operand_moving(lhs);
+                    let rhs_op = self.lower_operand_moving(rhs);
                     let res = self.emit_intrinsic_call(
                         "str_concat",
                         vec![lhs_op, rhs_op],
@@ -868,6 +992,8 @@ impl<'a> PureMirBuilder<'a> {
                     );
                     return Rvalue::Use(Operand::Copy(Place::from_local(res)));
                 }
+                let lhs_op = self.lower_operand(lhs);
+                let rhs_op = self.lower_operand(rhs);
                 let bin_op = map_bin_op(op);
                 Rvalue::BinaryOp(bin_op, lhs_op, rhs_op)
             }
@@ -894,11 +1020,17 @@ impl<'a> PureMirBuilder<'a> {
                 Rvalue::Cast(classify_cast(from, TyKind::Int(IntTy::I64)), op, TyKind::Int(IntTy::I64))
             }
             Expr::StructLit(sid, values) => {
-                let ops = values.iter().map(|v| self.lower_operand(v)).collect();
+                let ops = values
+                    .iter()
+                    .map(|v| self.lower_operand_moving(v))
+                    .collect();
                 Rvalue::Aggregate(AggregateKind::Struct(*sid), ops)
             }
             Expr::EnumLit(_name, eid, vidx, values) => {
-                let ops = values.iter().map(|v| self.lower_operand(v)).collect();
+                let ops = values
+                    .iter()
+                    .map(|v| self.lower_operand_moving(v))
+                    .collect();
                 Rvalue::Aggregate(AggregateKind::Enum(*eid, *vidx), ops)
             }
             Expr::Len(inner, ..) => {
@@ -1041,6 +1173,74 @@ impl<'a> PureMirBuilder<'a> {
         }
     }
 
+    /// Lower an expression in a moving position. A bare owned variable is
+    /// consumed (the emitter leaves its slot empty, so a conservative release
+    /// of that slot frees nothing); a field or element read is a borrow and
+    /// stays a copy; a private temporary is transferred rather than copied.
+    fn lower_operand_moving(&mut self, expr: &Expr) -> Operand {
+        match expr {
+            Expr::Variable(id, ty, ..) => {
+                let (local, _) = self.ensure_var(*id, *ty);
+                let place = Place::from_local(local);
+                if ty.owned() && !self.is_copy_ty(*ty) {
+                    Operand::Move(place)
+                } else {
+                    Operand::Copy(place)
+                }
+            }
+            Expr::Field(..)
+            | Expr::Index(..)
+            | Expr::VecIndex(..)
+            | Expr::StrVecIndex(..)
+            | Expr::DerefPtr(..) => self.lower_operand(expr),
+            other => {
+                let ty = expr_type(other, self.ctx);
+                let rvalue = self.lower_expr(other);
+                let temp = self.assign_to_temp(ty, rvalue);
+                let place = Place::from_local(temp);
+                if ty.owned() && !self.is_copy_ty(ty) {
+                    Operand::Move(place)
+                } else {
+                    Operand::Copy(place)
+                }
+            }
+        }
+    }
+
+    /// The root of a `let`/assignment/return: a bare owned binding moves,
+    /// every composite expression lowers normally (its own sub-expressions
+    /// carry the moving positions).
+    fn lower_moving_expr(&mut self, expr: &Expr) -> Rvalue {
+        match expr {
+            Expr::Variable(..) | Expr::Field(..) | Expr::Index(..) | Expr::DerefPtr(..) => {
+                Rvalue::Use(self.lower_operand_moving(expr))
+            }
+            other => self.lower_expr(other),
+        }
+    }
+
+    /// Lower an operand that a read-only consumer (print, string comparison)
+    /// merely reads: a variable or place is borrowed, and an owned temporary
+    /// is reported so the consumer can release it after the read.
+    fn lower_readonly_operand(&mut self, expr: &Expr) -> (Operand, Option<LocalId>) {
+        let ty = expr_type(expr, self.ctx);
+        let place_read = matches!(
+            expr,
+            Expr::Variable(..)
+                | Expr::Field(..)
+                | Expr::Index(..)
+                | Expr::VecIndex(..)
+                | Expr::StrVecIndex(..)
+                | Expr::DerefPtr(..)
+        );
+        if place_read || !ty.owned() || self.is_copy_ty(ty) {
+            return (self.lower_operand(expr), None);
+        }
+        let rvalue = self.lower_expr(expr);
+        let temp = self.assign_to_temp(ty, rvalue);
+        (Operand::Copy(Place::from_local(temp)), Some(temp))
+    }
+
     fn lower_place(&mut self, expr: &Expr) -> Place {
         match expr {
             Expr::Variable(id, ty, ..) => {
@@ -1141,7 +1341,8 @@ impl<'a> PureMirBuilder<'a> {
     fn lower_args(&mut self, args: &[Argument]) -> Vec<Operand> {
         args.iter()
             .map(|arg| match arg {
-                Argument::Value(e) => self.lower_operand(e),
+                // A by-value argument is a moving position: the callee owns it.
+                Argument::Value(e) => self.lower_operand_moving(e),
                 Argument::View(e) => {
                     let op = self.lower_operand(e);
                     if expr_type(e, self.ctx) == TyKind::StrView {
@@ -1261,7 +1462,10 @@ impl<'a> PureMirBuilder<'a> {
         match expr {
             Expr::VecLit(values, elem_ty, ..) => {
                 let _ = elem_ty;
-                let ops = values.iter().map(|v| self.lower_operand(v)).collect();
+                let ops = values
+                    .iter()
+                    .map(|v| self.lower_operand_moving(v))
+                    .collect();
                 ("vec_new", ops)
             }
             Expr::VecIndex(id, index, _, _, borrowed, elem) => {
@@ -1348,10 +1552,10 @@ impl<'a> PureMirBuilder<'a> {
             }
             Expr::FloatToString(e, ..) => ("float_to_string", vec![self.lower_operand(e)]),
             Expr::ToString(e, ..) => ("to_string", vec![self.lower_operand(e)]),
-            Expr::StrEq(a, b, _) => {
+            Expr::StrEq(a, b, negated) => {
                 let a_op = self.lower_operand(a);
                 let b_op = self.lower_operand(b);
-                ("str_eq", vec![a_op, b_op])
+                (if *negated { "str_ne" } else { "str_eq" }, vec![a_op, b_op])
             }
             Expr::MapNew(..) => ("map_new", Vec::new()),
             Expr::MapGet(p, k, ..) => {

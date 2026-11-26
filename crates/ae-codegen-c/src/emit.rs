@@ -211,8 +211,7 @@ fn emit_statement(
             let _ = writeln!(out, "    {place_expr}.tag = {variant_index};");
         }
         StatementKind::Drop(place) => {
-            let place_expr = emit_place(body, place, types, None)?;
-            let _ = writeln!(out, "    /* drop {place_expr} */");
+            emit_drop(out, body, place, types)?;
         }
         StatementKind::Nop => {
             out.push_str("    /* nop */\n");
@@ -265,7 +264,15 @@ fn emit_terminator(
                     arg_exprs.push(emit_operand(body, arg, types, def_map)?);
                 }
                 emit_intrinsic(
-                    IntrinsicCall { body, name: &name, args, arg_exprs: &arg_exprs, destination, target: *target },
+                    IntrinsicCall {
+                        body,
+                        name: &name,
+                        args,
+                        arg_exprs: &arg_exprs,
+                        destination,
+                        target: *target,
+                        def_map,
+                    },
                     types,
                     out,
                 )?;
@@ -319,7 +326,8 @@ fn emit_terminator(
                 out.push_str("    ae_trap(\"diverging call returned\");\n");
             }
         }
-        TerminatorKind::Drop { target, .. } => {
+        TerminatorKind::Drop { place, target, .. } => {
+            emit_drop(out, body, place, types)?;
             let _ = writeln!(out, "    goto bb{};", target.0);
         }
         TerminatorKind::Assert {
@@ -357,6 +365,7 @@ struct IntrinsicCall<'a> {
     arg_exprs: &'a [String],
     destination: &'a Place,
     target: Option<ae_mir::BasicBlockId>,
+    def_map: &'a BTreeMap<DefId, String>,
 }
 
 fn emit_intrinsic(
@@ -364,7 +373,7 @@ fn emit_intrinsic(
     types: &ModuleTypes,
     out: &mut String,
 ) -> Result<(), CodegenError> {
-    let IntrinsicCall { body, name, args, arg_exprs, destination, target } = call;
+    let IntrinsicCall { body, name, args, arg_exprs, destination, target, def_map } = call;
     match name {
         "print" => {
             let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
@@ -381,7 +390,7 @@ fn emit_intrinsic(
                 Some(TyKind::Char) => ("ae_print_char", expr.to_owned()),
                 Some(TyKind::Float(FloatTy::F32)) => ("ae_print_f64", format!("(double)({expr})")),
                 Some(TyKind::Float(FloatTy::F64)) => ("ae_print_f64", expr.to_owned()),
-                Some(TyKind::String | TyKind::StrView) => ("ae_print_cstr", expr.to_owned()),
+                Some(TyKind::String | TyKind::StrView) => ("ae_print_str", expr.to_owned()),
                 Some(other) => {
                     return Err(CodegenError::UnsupportedFeature {
                         body_name: body.name.clone(),
@@ -414,11 +423,155 @@ fn emit_intrinsic(
             }
             Ok(())
         }
+        "str_concat" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "str_concat needs two string operands".to_owned(),
+                });
+            }
+            let a = emit_concat_operand(body, &args[0], types, def_map)?;
+            let b = emit_concat_operand(body, &args[1], types, def_map)?;
+            finish_value(out, body, types, destination, target, &format!("ae_str_concat({a}, {b})"))
+        }
+        "str_eq" | "str_ne" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs two string operands"),
+                });
+            }
+            let a = emit_operand(body, &args[0], types, def_map)?;
+            let b = emit_operand(body, &args[1], types, def_map)?;
+            let call = format!("ae_str_eq({a}, {b})");
+            let call = if name == "str_ne" { format!("(!{call})") } else { call };
+            finish_value(out, body, types, destination, target, &call)
+        }
+        "string_view" => {
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_str_view({value})"),
+            )
+        }
+        "slice" | "slice_view" => {
+            if args.len() != 3 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs a base, a start and an end"),
+                });
+            }
+            let base = emit_operand(body, &args[0], types, def_map)?;
+            let start = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let end = arg_exprs.get(2).map(String::as_str).unwrap_or("0");
+            let helper = if name == "slice" { "ae_str_slice" } else { "ae_str_slice_view" };
+            let call = format!("{helper}({base}, (int64_t)({start}), (int64_t)({end}))");
+            finish_value(out, body, types, destination, target, &call)
+        }
+        "to_string" => {
+            let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: "to_string needs one value".to_owned(),
+            })?;
+            let expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let call = match types.infer_operand_ty(body, arg) {
+                Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => {
+                    format!("ae_str_from_u64((uint64_t)({expr}))")
+                }
+                Some(TyKind::Int(_)) => format!("ae_str_from_i64((int64_t)({expr}))"),
+                Some(TyKind::Char) => format!("ae_str_from_char({expr})"),
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("to_string of {other:?} is not supported"),
+                    });
+                }
+            };
+            finish_value(out, body, types, destination, target, &call)
+        }
+        "float_to_string" => {
+            let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: "float_to_string needs one value".to_owned(),
+            })?;
+            let expr = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let call = match types.infer_operand_ty(body, arg) {
+                Some(TyKind::Float(FloatTy::F32)) => {
+                    format!("ae_str_from_f64((double)({expr}))")
+                }
+                Some(TyKind::Float(FloatTy::F64)) => format!("ae_str_from_f64({expr})"),
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("float_to_string of {other:?} is not supported"),
+                    });
+                }
+            };
+            finish_value(out, body, types, destination, target, &call)
+        }
         other => Err(CodegenError::UnsupportedFeature {
             body_name: body.name.clone(),
             detail: format!("intrinsic '{other}' is not supported by the pure C backend yet"),
         }),
     }
+}
+
+/// Emit the release for a `Drop` statement or terminator. Types whose
+/// ownership helpers have not landed yet stay comments (the pre-existing
+/// behaviour); a dropped string is released exactly once.
+fn emit_drop(
+    out: &mut String,
+    body: &Body,
+    place: &Place,
+    types: &ModuleTypes,
+) -> Result<(), CodegenError> {
+    let place_expr = emit_place(body, place, types, None)?;
+    match types.infer_place_ty(body, place) {
+        Some(TyKind::String) => {
+            let _ = writeln!(out, "    ae_str_release(&{place_expr});");
+        }
+        Some(TyKind::Struct(id)) if types.structs.contains_key(&id) => {
+            let _ = writeln!(out, "    ae_rel_struct_{id}(&{place_expr});");
+        }
+        Some(TyKind::Enum(_, id)) if types.enums.contains_key(&id) => {
+            let _ = writeln!(out, "    ae_rel_enum_{id}(&{place_expr});");
+        }
+        Some(other) if other.owned() => {
+            // Fail closed: a drop we cannot emit would silently leak.
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("drop of {other:?} is not supported by the pure C backend yet"),
+            });
+        }
+        _ => {
+            let _ = writeln!(out, "    /* drop {place_expr} */");
+        }
+    }
+    Ok(())
+}
+
+/// Assign a value-producing intrinsic's result and continue at its target.
+fn finish_value(
+    out: &mut String,
+    body: &Body,
+    types: &ModuleTypes,
+    destination: &Place,
+    target: Option<ae_mir::BasicBlockId>,
+    value: &str,
+) -> Result<(), CodegenError> {
+    let dest_ty = types.infer_place_ty(body, destination);
+    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+    let _ = writeln!(out, "    {dest_expr} = {value};");
+    if let Some(next_bb) = target {
+        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+    } else {
+        out.push_str("    ae_trap(\"diverging call returned\");\n");
+    }
+    Ok(())
 }
 
 fn format_assert_message(msg: &AssertMessage) -> String {
@@ -524,6 +677,34 @@ fn emit_place(
     Ok(expr)
 }
 
+/// Renders one `str_concat` operand. A moved value transfers ownership into
+/// the concatenation; a borrowed read (field, element, view) is copied into a
+/// fresh owned buffer so the concatenation can consume it without touching
+/// the owner's bytes. A literal is static and needs neither.
+fn emit_concat_operand(
+    body: &Body,
+    op: &Operand,
+    types: &ModuleTypes,
+    def_map: &BTreeMap<DefId, String>,
+) -> Result<String, CodegenError> {
+    match op {
+        Operand::Move(place) if types.infer_place_ty(body, place) == Some(TyKind::String) => {
+            let expr = emit_place(body, place, types, Some(TyKind::String))?;
+            Ok(format!("ae_str_take(&{expr})"))
+        }
+        Operand::Copy(place)
+            if matches!(
+                types.infer_place_ty(body, place),
+                Some(TyKind::String | TyKind::StrView)
+            ) =>
+        {
+            let expr = emit_place(body, place, types, None)?;
+            Ok(format!("ae_str_clone({expr})"))
+        }
+        _ => emit_operand(body, op, types, def_map),
+    }
+}
+
 fn emit_operand(
     body: &Body,
     op: &Operand,
@@ -531,9 +712,29 @@ fn emit_operand(
     def_map: &BTreeMap<DefId, String>,
 ) -> Result<String, CodegenError> {
     match op {
-        Operand::Copy(place) | Operand::Move(place) => {
+        Operand::Copy(place) => {
             let ty = types.infer_place_ty(body, place);
             emit_place(body, place, types, ty)
+        }
+        // A move transfers ownership: leave the source slot empty so its
+        // conservative release (or any later one) frees nothing twice.
+        Operand::Move(place) => {
+            let ty = types.infer_place_ty(body, place);
+            let expr = emit_place(body, place, types, ty)?;
+            match ty {
+                Some(TyKind::String) => Ok(format!("ae_str_take(&{expr})")),
+                Some(TyKind::Struct(id)) if types.structs.contains_key(&id) => {
+                    Ok(format!("ae_take_struct_{id}(&{expr})"))
+                }
+                Some(TyKind::Enum(_, id)) if types.enums.contains_key(&id) => {
+                    Ok(format!("ae_take_enum_{id}(&{expr})"))
+                }
+                Some(other) if other.owned() => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("moving a {other:?} value is not supported yet"),
+                }),
+                _ => Ok(expr),
+            }
         }
         Operand::Constant(c) => emit_constant(body, &c.value, c.ty, def_map),
     }
@@ -555,7 +756,11 @@ fn emit_constant(
             // The literal body already uses C-compatible escapes (the lexer
             // validates the AE set, which is a subset); emitting it raw is
             // what the legacy backend does, so both produce the same bytes.
-            Ok(format!("\"{s}\""))
+            // `sizeof` of that literal is the decoded byte length (escapes
+            // already applied), and a literal is static: it is never freed.
+            Ok(format!(
+                "((ae_str){{ .ptr = \"{s}\", .len = (int64_t)(sizeof(\"{s}\") - 1), .owned = false }})"
+            ))
         }
         (ConstValue::FnDef(def_id), TyKind::Fn(sig)) => {
             let name = def_map.get(def_id).ok_or_else(|| CodegenError::UnresolvedCall {
@@ -676,14 +881,21 @@ fn emit_rvalue(
             }
             match kind {
                 AggregateKind::Struct(id) => {
-                    if op_exprs.is_empty() {
+                    // A struct with a user drop keeps a live flag: a literal
+                    // constructs it live, a move takes the flag along, and a
+                    // release clears it before calling the user function.
+                    let live = types.drop_fns.get(id).map(|(_, _, live)| live.as_str());
+                    let mut fields: Vec<String> = op_exprs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| format!(".f{i} = {e}"))
+                        .collect();
+                    if let Some(live) = live {
+                        fields.push(format!(".{live} = true"));
+                    }
+                    if fields.is_empty() {
                         Ok(format!("((ae_struct_{id}){{ 0 }})"))
                     } else {
-                        let fields: Vec<String> = op_exprs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, e)| format!(".f{i} = {e}"))
-                            .collect();
                         Ok(format!("((ae_struct_{id}){{ {} }})", fields.join(", ")))
                     }
                 }
@@ -742,7 +954,7 @@ fn emit_rvalue(
                 Some(TyKind::ArrayOf(_, len)) => Ok(format!("((uintptr_t){len}ULL)")),
                 Some(TyKind::String | TyKind::StrView) => {
                     let place_expr = emit_place(body, place, types, None)?;
-                    Ok(format!("((uintptr_t)strlen({place_expr}))"))
+                    Ok(format!("((uintptr_t)ae_str_len({place_expr}))"))
                 }
                 _ => Err(CodegenError::UnsupportedType {
                     body_name: body.name.clone(),

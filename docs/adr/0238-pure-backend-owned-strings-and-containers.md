@@ -1,6 +1,6 @@
 # ADR-0238: Owned strings and containers in the pure MIR C backend
 
-- Status: Proposed (design; no code yet)
+- Status: Accepted — stage 1 (owned strings) implemented 2026-11-27; stage 2 (vectors) pending
 - Date: 2026-11-26
 - Associated Milestone: P3.2 (pure MIR C backend parity), P4.1 (stdlib containers)
 
@@ -83,6 +83,40 @@ the existing gate floor.
   progress.
 - 100% `tests/run` + `examples/` parity and 50k fuzz seeds are the P3.2 exit
   gate; only then is the legacy tree emitter deleted.
+
+## Stage 1 evidence (2026-11-27)
+
+Stage 1 landed as one coherent slice:
+
+- `ae_str { const char *ptr; int64_t len; bool owned; }` is the C type for
+  both `string` and `&string`. A literal becomes a static value whose length
+  is `sizeof("…") - 1` (escapes already decoded by the C compiler);
+  `to_string`, `float_to_string`, `slice` and `str_concat` return owned
+  buffers; `slice_view` and `string_view` clear the flag.
+- Moves are explicit. A moving position (`let`, assignment, by-value call
+  argument, struct/enum field, `return`, and each operand of `+`) lowers to
+  `Operand::Move` when the type is owned and not `#[derive(Copy)]`; the
+  emitter spells it `ae_str_take(&place)`, which copies the value and empties
+  the slot. The conservative release lists therefore stay harmless: a moved
+  slot releases nothing. `Body.copy_structs` / `Body.copy_enums` keep copy
+  types copying.
+- Drops are emitted. `StatementKind::Drop` and `TerminatorKind::Drop` on a
+  string release it; every struct/enum gets `ae_rel_*` and `ae_take_*`
+  helpers in topological order. A struct with a user `Drop` impl carries a
+  live flag and calls the user function through `Body.drop_fns` before
+  releasing fields, which makes a conservative second release a no-op.
+- Owned temporaries read by `print` or a string comparison (a concatenation,
+  a call result) are released after the read, closing the leaks the first
+  gate run exposed.
+- Function-pointer typedefs joined the topological type order, so a struct
+  holding a fn pointer compiles; closures spell as `void *` matching the
+  legacy backend's address constant.
+
+Evidence: the end-to-end gate rises from 97 to **113 of 161** accepted
+fixtures with byte-identical stdout and zero tolerated mismatches. An
+ASan+UBSan sweep over every one of the 116 emit-capable fixtures in WSL
+passes 115 with no leaks or invalid accesses (`divide_by_zero` traps by
+design). Workspace suite 685 passed / 0 failed (2 ignored), clippy clean.
 
 ## Consequences
 

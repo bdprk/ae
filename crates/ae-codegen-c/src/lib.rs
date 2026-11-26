@@ -112,7 +112,10 @@ pub fn emit_module_c(bodies: &[Body], config: &EmitConfig) -> Result<String, Cod
 
     let mut out = String::new();
     emit_preamble(&mut out);
-    types.emit_typedefs(&mut out)?;
+    // Ownership helpers name the user drop functions, so the function name
+    // map is built first; forward declarations for the bodies still follow
+    // the typedefs.
+    types.emit_typedefs(&mut out, &def_map)?;
 
     for (body, c_name) in bodies.iter().zip(fn_names.iter()) {
         emit_fn_decl(&mut out, body, c_name);
