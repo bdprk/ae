@@ -2,7 +2,7 @@
 //! run every accepted `tests/run` fixture whose shapes it claims to support,
 //! and the program output must match the fixture's `.stdout` byte-for-byte.
 //!
-//! The floor (`passed >= 146` of 161 accepted fixtures at this slice) is a
+//! The floor (`passed >= 151` of 161 accepted fixtures at this slice) is a
 //! ratchet: it grows as the backend gains containers/strings/threads, and a
 //! drop below the floor is a regression. Emission failures are grouped by
 //! reason in the assertion message so the remaining gaps stay visible.
@@ -21,7 +21,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Fixtures the pipeline can emit, compile and run with matching output at
 /// this slice. Raise when coverage grows; never lower without a ledger entry.
-const PASS_FLOOR: usize = 146;
+const PASS_FLOOR: usize = 151;
 
 fn repo_path(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)

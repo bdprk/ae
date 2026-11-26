@@ -1134,6 +1134,207 @@ fn emit_intrinsic(
             let _ = writeln!(out, "    ae_cell_store({handle}, (int64_t)({value}));");
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
+        "shared_new" => {
+            let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: "shared_new needs a value".to_owned(),
+            })?;
+            let value_ty = types
+                .infer_operand_ty(body, arg)
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "shared_new value has no inferable type".to_owned(),
+                })?;
+            let c_ty = c_type_name(value_ty);
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(
+                out,
+                "    {{ {c_ty} _tmp = {value}; {dest_expr} = ae_shared_new(&_tmp, sizeof({c_ty})); }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "shared_get" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let c_ty = c_type_name(dest_ty.unwrap_or(TyKind::Int(IntTy::I64)));
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(out, "    {dest_expr} = (*(({c_ty} *)(({handle}).box)));");
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "shared_set" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "shared_set needs a handle and a value".to_owned(),
+                });
+            }
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let value_ty = types
+                .infer_operand_ty(body, &args[1])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "shared_set value has no inferable type".to_owned(),
+                })?;
+            let c_ty = c_type_name(value_ty);
+            let value = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let _ = writeln!(
+                out,
+                "    {{ {c_ty} _tmp = {value}; *(({c_ty} *)(({handle}).box)) = _tmp; }}"
+            );
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "mutex_new" => {
+            finish_value(out, body, types, destination, target, "ae_mutex_new()")
+        }
+        "mutex_lock" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_mutex_lock({handle})"))
+        }
+        "exec_new" => {
+            finish_value(out, body, types, destination, target, "ae_exec_new()")
+        }
+        "exec_run" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_exec_run({handle})"))
+        }
+        "task_yield" => {
+            out.push_str("    ae_task_yield();\n");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "task_spawn" => {
+            if args.len() < 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "task_spawn needs an executor and a callable".to_owned(),
+                });
+            }
+            let callable = match &args[1] {
+                Operand::Constant(c) => match &c.value {
+                    ConstValue::FnDef(id) => *id,
+                    other => {
+                        return Err(CodegenError::UnsupportedFeature {
+                            body_name: body.name.clone(),
+                            detail: format!("task_spawn callable constant {other:?} is not supported"),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: "task_spawn needs a closure literal".to_owned(),
+                    });
+                }
+            };
+            if !types.task_spawns.contains_key(&callable) {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("no recorded context for task callable DefId({})", callable.0),
+                });
+            }
+            let id = callable.0;
+            let ctx = format!("ae_task_ctx_{id}");
+            let entry = format!("ae_task_entry_{id}");
+            let executor = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let mut text = format!(
+                "    {{ {ctx} *_ctx = ({ctx} *)malloc(sizeof * _ctx);\n"
+            );
+            for (index, op) in args[2..].iter().enumerate() {
+                let value = emit_operand(body, op, types, def_map)?;
+                text.push_str(&format!("      _ctx->f{index} = {value};\n"));
+            }
+            text.push_str(&format!(
+                "      ae_task_spawn({executor}, {entry}, (void *)_ctx); }}"
+            ));
+            let _ = writeln!(out, "{text}");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
+        "thread_spawn" => {
+            if args.is_empty() {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "thread_spawn needs a callable".to_owned(),
+                });
+            }
+            let callable = match args.last() {
+                Some(Operand::Constant(c)) => match &c.value {
+                    ConstValue::FnDef(id) => *id,
+                    other => {
+                        return Err(CodegenError::UnsupportedFeature {
+                            body_name: body.name.clone(),
+                            detail: format!("thread_spawn callable constant {other:?} is not supported"),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: "thread_spawn needs a closure literal".to_owned(),
+                    });
+                }
+            };
+            if !types.thread_spawns.contains_key(&callable) {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("no recorded context for thread callable DefId({})", callable.0),
+                });
+            }
+            let id = callable.0;
+            let ctx = format!("ae_thread_ctx_{id}");
+            let entry = format!("ae_thread_entry_{id}");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let mut text = format!(
+                "    {{ {ctx} *_ctx = ({ctx} *)malloc(sizeof * _ctx);\n"
+            );
+            for (index, op) in args[..args.len() - 1].iter().enumerate() {
+                let value = emit_operand(body, op, types, def_map)?;
+                text.push_str(&format!("      _ctx->f{index} = {value};\n"));
+            }
+            text.push_str(&format!(
+                "      {dest_expr} = ae_thread_spawn_ctx({entry}, (void *)_ctx);\n      if (!{dest_expr}) ae_trap(\"out of memory\"); }}"
+            ));
+            let _ = writeln!(out, "{text}");
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "thread_wait" => {
+            if args.len() != 1 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "thread_wait needs a handle".to_owned(),
+                });
+            }
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let ret_c = c_type_name(dest_ty.unwrap_or(TyKind::Unit));
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let _ = writeln!(
+                out,
+                "    {{ ae_thread_slot *_slot = {handle};\n      if (!_slot) ae_trap(\"use of a moved thread handle\");\n      if (!ae_thread_join(_slot->native)) ae_trap(\"thread join failed\");\n      {dest_expr} = *(({ret_c} *)_slot->ctx);\n      free(_slot->ctx);\n      free(_slot); }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
         "ptr_offset" | "byte_offset" => {
             if args.len() != 2 {
                 return Err(CodegenError::UnsupportedFeature {
@@ -1196,6 +1397,12 @@ fn emit_drop(
         }
         Some(TyKind::Vector(_)) => {
             let _ = writeln!(out, "    ae_vec_release(&{place_expr});");
+        }
+        Some(TyKind::Thread(_)) => {
+            let _ = writeln!(out, "    ae_thread_release(&{place_expr});");
+        }
+        Some(TyKind::Guard) => {
+            let _ = writeln!(out, "    ae_mutex_unlock(&{place_expr});");
         }
         Some(other) if other.owned() => {
             // Fail closed: a drop we cannot emit would silently leak.
@@ -1565,6 +1772,8 @@ fn emit_operand(
                     Ok(format!("ae_take_enum_{id}(&{expr})"))
                 }
                 Some(TyKind::Vector(_)) => Ok(format!("ae_vec_take(&{expr})")),
+                Some(TyKind::Thread(_)) => Ok(format!("ae_thread_take(&{expr})")),
+                Some(TyKind::Guard) => Ok(format!("ae_guard_take(&{expr})")),
                 Some(other) if other.owned() => Err(CodegenError::UnsupportedFeature {
                     body_name: body.name.clone(),
                     detail: format!("moving a {other:?} value is not supported yet"),

@@ -800,7 +800,7 @@ impl<'a> PureMirBuilder<'a> {
             }
             Statement::TaskSpawn(ex, slots, callable, ..) => {
                 let mut ops = vec![self.lower_operand(ex), self.lower_operand(callable)];
-                ops.extend(slots.iter().map(|s| self.lower_operand(s)));
+                ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
                 self.emit_intrinsic_call("task_spawn", ops, TyKind::Unit);
             }
             Statement::TaskYield => {
@@ -808,12 +808,12 @@ impl<'a> PureMirBuilder<'a> {
             }
             Statement::ScopeSpawn(sc, slots, callable, ..) => {
                 let mut ops = vec![self.lower_operand(sc), self.lower_operand(callable)];
-                ops.extend(slots.iter().map(|s| self.lower_operand(s)));
+                ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
                 self.emit_intrinsic_call("scope_spawn", ops, TyKind::Unit);
             }
             Statement::PoolSpawn(p, slots, callable, ..) => {
                 let mut ops = vec![self.lower_operand(p), self.lower_operand(callable)];
-                ops.extend(slots.iter().map(|s| self.lower_operand(s)));
+                ops.extend(slots.iter().map(|s| self.lower_operand_moving(s)));
                 self.emit_intrinsic_call("pool_spawn", ops, TyKind::Unit);
             }
             // Control-flow statements are already lowered by `cfg::build_cfg`.
@@ -1761,11 +1761,14 @@ impl<'a> PureMirBuilder<'a> {
                 (kind.mir_name(), ops)
             }
             Expr::Spawn(slots, callable, ..) => {
-                let mut ops: Vec<Operand> = slots.iter().map(|s| self.lower_operand(s)).collect();
+                let mut ops: Vec<Operand> = slots
+                    .iter()
+                    .map(|s| self.lower_operand_moving(s))
+                    .collect();
                 ops.push(self.lower_operand(callable));
                 ("thread_spawn", ops)
             }
-            Expr::Wait(handle, ..) => ("thread_wait", vec![self.lower_operand(handle)]),
+            Expr::Wait(handle, ..) => ("thread_wait", vec![self.lower_operand_moving(handle)]),
             Expr::AtomicNew(v) => ("atomic_new", vec![self.lower_operand(v)]),
             Expr::AtomicLoad(h) => ("atomic_load", vec![self.lower_operand(h)]),
             Expr::AtomicAdd(h, v) => {

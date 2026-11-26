@@ -19,9 +19,12 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stdlib.h>\n\
          #include <string.h>\n\n\
          typedef struct { uint8_t _unused; } ae_unit_t;\n\n\
+         // The trap sink is defined with the concurrency runtime (a child\n\
+         // thread records a failure instead of ending the process); the\n\
+         // wrapper keeps the declaration order free.\n\
+         static _Noreturn void ae_fail_sink(const char *msg);\n\
          _Noreturn static inline void ae_trap(const char *msg) {\n\
-             fprintf(stderr, \"ae trap: %s\\n\", msg);\n\
-             abort();\n\
+             ae_fail_sink(msg);\n\
          }\n\n",
     );
 
@@ -678,6 +681,375 @@ static inline bool ae_cell_cas(ae_atomic a, int64_t expected, int64_t replacemen
         memory_order_seq_cst,
         memory_order_seq_cst
     );
+}
+
+// Cooperative task executor (spec/concurrency.md, ADR-0218): tasks are
+// stackful coroutines. Win32 uses fibers; POSIX uses C11 threads with a
+// turnstile so exactly one task runs at a time until it yields.
+#ifdef _WIN32
+extern void *ConvertThreadToFiber(void *param);
+extern void *CreateFiber(size_t stack, void (*start)(void *), void *param);
+extern void SwitchToFiber(void *fiber);
+extern void DeleteFiber(void *fiber);
+extern int ConvertFiberToThread(void);
+#else
+#include <threads.h>
+#endif
+typedef void (*ae_task_entry_fn)(void *);
+typedef struct { void *state; } ae_exec;
+typedef struct ae_task_node {
+    ae_task_entry_fn entry;
+    void *ctx;
+#ifdef _WIN32
+    void *fiber;
+#else
+    thrd_t thrd;
+    mtx_t mu;
+    cnd_t cv;
+    int started;
+    int turn;
+#endif
+    int done;
+    struct ae_task_node *next;
+} ae_task_node;
+typedef struct {
+    ae_task_node *head;
+    ae_task_node *tail;
+} ae_exec_state;
+#ifdef _WIN32
+static _Thread_local void *ae_task_sched_fiber = NULL;
+static _Thread_local int ae_task_in_task = 0;
+#else
+static _Thread_local ae_task_node *ae_task_current = NULL;
+#endif
+#ifdef _WIN32
+static void ae_task_trampoline(void *param) {
+    ae_task_node *node = (ae_task_node *)param;
+    node->entry(node->ctx);
+    node->done = 1;
+    SwitchToFiber(ae_task_sched_fiber);
+}
+#else
+static int ae_task_trampoline_posix(void *param) {
+    ae_task_node *node = (ae_task_node *)param;
+    ae_task_current = node;
+    mtx_lock(&node->mu);
+    while (!node->turn) cnd_wait(&node->cv, &node->mu);
+    mtx_unlock(&node->mu);
+    node->entry(node->ctx);
+    mtx_lock(&node->mu);
+    node->done = 1;
+    node->turn = 0;
+    cnd_signal(&node->cv);
+    mtx_unlock(&node->mu);
+    ae_task_current = NULL;
+    return 0;
+}
+#endif
+static inline void ae_task_yield(void) {
+#ifdef _WIN32
+    if (ae_task_in_task && ae_task_sched_fiber) {
+        SwitchToFiber(ae_task_sched_fiber);
+    }
+#else
+    ae_task_node *node = ae_task_current;
+    if (!node) return;
+    mtx_lock(&node->mu);
+    node->turn = 0;
+    cnd_signal(&node->cv);
+    while (!node->turn) cnd_wait(&node->cv, &node->mu);
+    mtx_unlock(&node->mu);
+#endif
+}
+static inline ae_exec ae_exec_new(void) {
+    ae_exec_state *s = (ae_exec_state *)calloc(1, sizeof(ae_exec_state));
+    if (!s) ae_trap("out of memory");
+    ae_exec value = { s };
+    return value;
+}
+static inline void ae_task_spawn(ae_exec ex, ae_task_entry_fn entry, void *ctx) {
+    ae_exec_state *s = (ae_exec_state *)ex.state;
+    ae_task_node *node = (ae_task_node *)calloc(1, sizeof(ae_task_node));
+    if (!node) ae_trap("out of memory");
+    node->entry = entry;
+    node->ctx = ctx;
+#ifndef _WIN32
+    mtx_init(&node->mu, mtx_plain);
+    cnd_init(&node->cv);
+#endif
+    if (s->tail) {
+        s->tail->next = node;
+        s->tail = node;
+    } else {
+        s->head = s->tail = node;
+    }
+}
+static inline int64_t ae_exec_run(ae_exec ex) {
+    ae_exec_state *s = (ae_exec_state *)ex.state;
+#ifdef _WIN32
+    void *prev_sched = ae_task_sched_fiber;
+    int converted = 0;
+    if (!ae_task_sched_fiber) {
+        void *f = ConvertThreadToFiber(NULL);
+        if (f) {
+            ae_task_sched_fiber = f;
+            converted = 1;
+        }
+    }
+    int64_t completed = 0;
+    while (s->head) {
+        ae_task_node *node = s->head;
+        s->head = node->next;
+        if (!s->head) s->tail = NULL;
+        node->next = NULL;
+        if (!node->fiber) {
+            node->fiber = CreateFiber(65536, ae_task_trampoline, node);
+            if (!node->fiber) ae_trap("out of memory");
+        }
+        ae_task_in_task = 1;
+        SwitchToFiber(node->fiber);
+        ae_task_in_task = 0;
+        if (node->done) {
+            DeleteFiber(node->fiber);
+            free(node->ctx);
+            free(node);
+            completed += 1;
+        } else if (s->tail) {
+            s->tail->next = node;
+            s->tail = node;
+        } else {
+            s->head = s->tail = node;
+        }
+    }
+    ae_task_sched_fiber = prev_sched;
+    if (converted) ConvertFiberToThread();
+    return completed;
+#else
+    int64_t completed = 0;
+    while (s->head) {
+        ae_task_node *node = s->head;
+        s->head = node->next;
+        if (!s->head) s->tail = NULL;
+        node->next = NULL;
+        if (!node->started) {
+            node->started = 1;
+            if (thrd_create(&node->thrd, ae_task_trampoline_posix, node) != thrd_success) {
+                ae_trap("task thread creation failed");
+            }
+        }
+        mtx_lock(&node->mu);
+        node->turn = 1;
+        cnd_signal(&node->cv);
+        while (node->turn && !node->done) cnd_wait(&node->cv, &node->mu);
+        mtx_unlock(&node->mu);
+        if (node->done) {
+            thrd_join(node->thrd, NULL);
+            free(node->ctx);
+            mtx_destroy(&node->mu);
+            cnd_destroy(&node->cv);
+            free(node);
+            completed += 1;
+        } else if (s->tail) {
+            s->tail->next = node;
+            s->tail = node;
+        } else {
+            s->head = s->tail = node;
+        }
+    }
+    return completed;
+#endif
+}
+
+// OS threads (spec/concurrency.md §12): spawn runs a void fn(void*) on an
+// operating-system thread; the language layer packages the typed return value
+// and captured slots into the context, and wait joins before reading them
+// out. A child failure is recorded on its handle instead of ending the
+// process; the first join that observes it reports and exits, matching an
+// immediate abort at the observation point.
+typedef void (*ae_thread_entry_fn)(void *);
+typedef struct { int failed; const char *message; } ae_thread_failure;
+typedef struct { ae_thread_entry_fn fn; void *ctx; ae_thread_failure *failure; } ae_thread_job;
+typedef struct { void *native; void *ctx; } ae_thread_slot;
+static _Thread_local ae_thread_failure *ae_thread_current_failure = NULL;
+static ae_thread_failure ae_thread_latched = { 0, NULL };
+static int ae_thread_hook_installed = 0;
+#ifdef _WIN32
+typedef struct { void *native; ae_thread_failure failure; } ae_thread_handle;
+struct _SECURITY_ATTRIBUTES;
+extern void *CreateThread(struct _SECURITY_ATTRIBUTES *attributes, size_t stack, unsigned long (*start)(void *), void *parameter, unsigned long flags, unsigned long *id);
+extern unsigned long WaitForSingleObject(void *handle, unsigned long milliseconds);
+extern int CloseHandle(void *handle);
+extern void ExitThread(unsigned long exit_code);
+static unsigned long ae_thread_body(void *raw) {
+    ae_thread_job *job = (ae_thread_job *)raw;
+    ae_thread_current_failure = job->failure;
+    job->fn(job->ctx);
+    ae_thread_current_failure = NULL;
+    free(raw);
+    return 0;
+}
+#else
+typedef struct { thrd_t native; ae_thread_failure failure; } ae_thread_handle;
+static int ae_thread_body(void *raw) {
+    ae_thread_job *job = (ae_thread_job *)raw;
+    ae_thread_current_failure = job->failure;
+    job->fn(job->ctx);
+    ae_thread_current_failure = NULL;
+    free(raw);
+    return 0;
+}
+#endif
+static void ae_thread_report_failure(const ae_thread_failure *failure) {
+    fprintf(stderr, "ae: %s\n", failure->message);
+    fflush(stdout);
+    _Exit(1);
+}
+static void ae_thread_check_latch(void) {
+    if (ae_thread_latched.failed) ae_thread_report_failure(&ae_thread_latched);
+}
+static inline ae_thread_slot *ae_thread_spawn_ctx(ae_thread_entry_fn entry, void *ctx) {
+    ae_thread_handle *handle = (ae_thread_handle *)malloc(sizeof(ae_thread_handle));
+    if (!handle) return NULL;
+    handle->failure.failed = 0;
+    handle->failure.message = NULL;
+    ae_thread_job *job = (ae_thread_job *)malloc(sizeof(ae_thread_job));
+    if (!job) {
+        free(handle);
+        return NULL;
+    }
+    job->fn = entry;
+    job->ctx = ctx;
+    job->failure = &handle->failure;
+    if (!ae_thread_hook_installed) {
+        atexit(ae_thread_check_latch);
+        ae_thread_hook_installed = 1;
+    }
+#ifdef _WIN32
+    handle->native = CreateThread(NULL, 0, ae_thread_body, job, 0, NULL);
+    if (!handle->native) {
+        free(job);
+        free(handle);
+        return NULL;
+    }
+#else
+    if (thrd_create(&handle->native, ae_thread_body, job) != thrd_success) {
+        free(job);
+        free(handle);
+        return NULL;
+    }
+#endif
+    ae_thread_slot *slot = (ae_thread_slot *)malloc(sizeof(ae_thread_slot));
+    if (!slot) return NULL;
+    slot->native = handle;
+    slot->ctx = ctx;
+    return slot;
+}
+static inline bool ae_thread_join(void *opaque) {
+    ae_thread_handle *handle = (ae_thread_handle *)opaque;
+    if (!handle) return false;
+#ifdef _WIN32
+    if (WaitForSingleObject(handle->native, 0xFFFFFFFFu) != 0) return false;
+    CloseHandle(handle->native);
+#else
+    if (thrd_join(handle->native, NULL) != thrd_success) return false;
+#endif
+    if (handle->failure.failed) {
+        ae_thread_failure failure = handle->failure;
+        ae_thread_latched.failed = 0;
+        ae_thread_report_failure(&failure);
+    }
+    free(handle);
+    return true;
+}
+static inline void ae_thread_release(ae_thread_slot **slot) {
+    if (slot && *slot) {
+        free(*slot);
+        *slot = NULL;
+    }
+}
+static inline ae_thread_slot *ae_thread_take(ae_thread_slot **slot) {
+    ae_thread_slot *value = *slot;
+    *slot = NULL;
+    return value;
+}
+static _Noreturn void ae_fail_sink(const char *msg) {
+    if (ae_thread_current_failure) {
+        ae_thread_current_failure->failed = 1;
+        ae_thread_current_failure->message = msg;
+        ae_thread_latched = *ae_thread_current_failure;
+#ifdef _WIN32
+        ExitThread(1);
+#else
+        thrd_exit(1);
+#endif
+    }
+    fprintf(stderr, "ae trap: %s\n", msg);
+    fflush(stdout);
+    abort();
+}
+
+// Shared boxes: a process-lifetime allocation behind a copy-semantics handle.
+// Copying the handle into another thread shares the box; nothing frees it.
+typedef struct { void *box; } ae_shared;
+static inline ae_shared ae_shared_new(const void *value, size_t size) {
+    void *box = malloc(size > 0 ? size : 1);
+    if (!box) ae_trap("out of memory");
+    if (size > 0) memcpy(box, value, size);
+    ae_shared handle = { box };
+    return handle;
+}
+
+// Mutexes and guards: one process-lifetime OS mutex behind a copy-semantics
+// handle; mutex_lock returns an owned guard whose release unlocks it.
+#ifdef _WIN32
+struct _SECURITY_ATTRIBUTES;
+extern void *CreateMutexA(struct _SECURITY_ATTRIBUTES *attributes, int initial_owner, const char *name);
+extern unsigned long WaitForSingleObject(void *handle, unsigned long milliseconds);
+extern int ReleaseMutex(void *handle);
+typedef struct { void *lock; } ae_mutex;
+typedef struct { void *lock; } ae_guard;
+static inline ae_mutex ae_mutex_new(void) {
+    void *handle = CreateMutexA(NULL, 0, NULL);
+    if (!handle) ae_trap("mutex_new failed");
+    ae_mutex value = { handle };
+    return value;
+}
+static inline ae_guard ae_mutex_lock(ae_mutex m) {
+    WaitForSingleObject(m.lock, 0xFFFFFFFFu);
+    ae_guard value = { m.lock };
+    return value;
+}
+static inline void ae_mutex_unlock(ae_guard *g) {
+    if (g->lock != NULL) {
+        ReleaseMutex(g->lock);
+        g->lock = NULL;
+    }
+}
+#else
+typedef struct { mtx_t *lock; } ae_mutex;
+typedef struct { mtx_t *lock; } ae_guard;
+static inline ae_mutex ae_mutex_new(void) {
+    mtx_t *lock = (mtx_t *)malloc(sizeof(mtx_t));
+    if (!lock || mtx_init(lock, mtx_plain) != thrd_success) ae_trap("mutex_new failed");
+    ae_mutex value = { lock };
+    return value;
+}
+static inline ae_guard ae_mutex_lock(ae_mutex m) {
+    mtx_lock(m.lock);
+    ae_guard value = { m.lock };
+    return value;
+}
+static inline void ae_mutex_unlock(ae_guard *g) {
+    if (g->lock != NULL) {
+        mtx_unlock(g->lock);
+        g->lock = NULL;
+    }
+}
+#endif
+static inline ae_guard ae_guard_take(ae_guard *g) {
+    ae_guard value = *g;
+    g->lock = NULL;
+    return value;
 }
 "#);
 

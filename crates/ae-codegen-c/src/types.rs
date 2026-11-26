@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use ae_mir::{
-    AggregateKind, Body, Operand, Place, ProjectionElem, Rvalue, StatementKind,
+    AggregateKind, Body, ConstValue, Operand, Place, ProjectionElem, Rvalue, StatementKind,
+    TerminatorKind,
 };
 use ae_ty::{DefId, FloatTy, IntTy, TyKind};
 
@@ -57,17 +58,17 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Slice(_) | TyKind::SliceMut(_) => "ae_slice".to_owned(),
         TyKind::Tokens => "ae_tokens".to_owned(),
         TyKind::Atomic => "ae_atomic".to_owned(),
+        TyKind::Exec => "ae_exec".to_owned(),
+        TyKind::Thread(_) => "ae_thread_slot *".to_owned(),
+        TyKind::Shared(_) => "ae_shared".to_owned(),
+        TyKind::Mutex => "ae_mutex".to_owned(),
+        TyKind::Guard => "ae_guard".to_owned(),
         TyKind::MapOf(_)
         | TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::Ptr(_)
         | TyKind::PtrMut(_)
-        | TyKind::Thread(_)
-        | TyKind::Shared(_)
-        | TyKind::Mutex
-        | TyKind::Guard
         | TyKind::Chan
-        | TyKind::Exec
         | TyKind::TaskScope
         | TyKind::Pool => "void *".to_owned(),
     }
@@ -100,6 +101,11 @@ pub(crate) struct ModuleTypes {
     pub vector_elems: BTreeMap<usize, TyKind>,
     /// Slice element interner id -> element type, carried on each body.
     pub slice_elems: BTreeMap<usize, TyKind>,
+    /// Closure/function DefId -> captured slot types, for spawn entry
+    /// trampolines (the lifted function's parameters are those slots).
+    pub task_spawns: BTreeMap<DefId, Vec<TyKind>>,
+    /// Thread spawn sites: closure DefId -> (captured slots, return type).
+    pub thread_spawns: BTreeMap<DefId, (Vec<TyKind>, TyKind)>,
 }
 
 impl ModuleTypes {
@@ -133,6 +139,28 @@ impl ModuleTypes {
         for _ in 0..4 {
             for body in bodies {
                 types.scan_body(body);
+            }
+        }
+
+        // A thread trampoline stores the closure's return value in its
+        // context; the return type comes from the closure body.
+        let rets: BTreeMap<DefId, TyKind> = bodies
+            .iter()
+            .filter_map(|body| {
+                body.def.map(|def| {
+                    (
+                        def,
+                        body.locals
+                            .first()
+                            .map(|local| local.ty)
+                            .unwrap_or(TyKind::Unit),
+                    )
+                })
+            })
+            .collect();
+        for (def, (_, ret)) in types.thread_spawns.iter_mut() {
+            if let Some(found) = rets.get(def) {
+                *ret = *found;
             }
         }
 
@@ -196,7 +224,43 @@ impl ModuleTypes {
                     | StatementKind::Nop => {}
                 }
             }
+            if let Some(term) = &bb.terminator
+                && let TerminatorKind::Call { func, args, .. } = &term.kind
+            {
+                self.scan_task_spawn(body, func, args);
+            }
         }
+    }
+
+    /// Records a spawn site's callable and captured slot types, so the module
+    /// can emit one context struct and entry trampoline per lifted function.
+    fn scan_task_spawn(&mut self, body: &Body, func: &Operand, args: &[Operand]) {
+        let Operand::Constant(c) = func else { return };
+        let ConstValue::FnDef(def_id) = &c.value else { return };
+        let Some(name) = body.intrinsics.get(def_id) else { return };
+        if name == "thread_spawn" {
+            // Thread spawn passes the callable last: [slots..., callable].
+            let Some(Operand::Constant(callable)) = args.last() else { return };
+            let ConstValue::FnDef(closure_id) = &callable.value else { return };
+            let slots: Vec<TyKind> = args[..args.len().saturating_sub(1)]
+                .iter()
+                .filter_map(|op| self.infer_operand_ty(body, op))
+                .collect();
+            self.thread_spawns
+                .entry(*closure_id)
+                .or_insert((slots, TyKind::Unit));
+            return;
+        }
+        if !matches!(name.as_str(), "task_spawn" | "scope_spawn" | "pool_spawn") {
+            return;
+        }
+        let Some(Operand::Constant(callable)) = args.get(1) else { return };
+        let ConstValue::FnDef(closure_id) = &callable.value else { return };
+        let slots: Vec<TyKind> = args[2..]
+            .iter()
+            .filter_map(|op| self.infer_operand_ty(body, op))
+            .collect();
+        self.task_spawns.entry(*closure_id).or_insert(slots);
     }
 
     fn scan_rvalue(&mut self, body: &Body, rvalue: &Rvalue) {
@@ -490,6 +554,73 @@ impl ModuleTypes {
             self.emit_typedef_topo(key, out, &mut visited, &mut visiting, def_map)?;
         }
         if !visited.is_empty() {
+            out.push('\n');
+        }
+        Ok(())
+    }
+
+    /// Emits one context struct and entry trampoline per lifted function a
+    /// spawn site names. The trampoline calls the lifted function (its
+    /// parameters are the captured slots), so this runs after the function
+    /// forward declarations.
+    pub fn emit_task_entries(
+        &self,
+        out: &mut String,
+        def_map: &BTreeMap<DefId, String>,
+    ) -> Result<(), CodegenError> {
+        for (closure_id, slots) in &self.task_spawns {
+            let id = closure_id.0;
+            let name = def_map.get(closure_id).ok_or_else(|| CodegenError::UnresolvedCall {
+                body_name: "<spawn>".to_owned(),
+                def_id: *closure_id,
+            })?;
+            let ctx = format!("ae_task_ctx_{id}");
+            if slots.is_empty() {
+                let _ = writeln!(out, "typedef struct {{ uint8_t _empty; }} {ctx};");
+            } else {
+                let _ = writeln!(out, "typedef struct {{");
+                for (i, ty) in slots.iter().enumerate() {
+                    let _ = writeln!(out, "    {} f{i};", c_type_name(*ty));
+                }
+                let _ = writeln!(out, "}} {ctx};");
+            }
+            let args = (0..slots.len())
+                .map(|i| format!("c->f{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "static void ae_task_entry_{id}(void *raw) {{");
+            let _ = writeln!(out, "    {ctx} *c = ({ctx} *)raw;");
+            let _ = writeln!(out, "    (void)c;");
+            let _ = writeln!(out, "    {name}({args});");
+            let _ = writeln!(out, "}}");
+        }
+        if !self.task_spawns.is_empty() {
+            out.push('\n');
+        }
+        for (closure_id, (slots, ret)) in &self.thread_spawns {
+            let id = closure_id.0;
+            let name = def_map.get(closure_id).ok_or_else(|| CodegenError::UnresolvedCall {
+                body_name: "<spawn>".to_owned(),
+                def_id: *closure_id,
+            })?;
+            let ctx = format!("ae_thread_ctx_{id}");
+            let ret_c = c_type_name(*ret);
+            let _ = writeln!(out, "typedef struct {{");
+            let _ = writeln!(out, "    {ret_c} ret;");
+            for (i, ty) in slots.iter().enumerate() {
+                let _ = writeln!(out, "    {} f{i};", c_type_name(*ty));
+            }
+            let _ = writeln!(out, "}} {ctx};");
+            let args = (0..slots.len())
+                .map(|i| format!("c->f{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "static void ae_thread_entry_{id}(void *raw) {{");
+            let _ = writeln!(out, "    {ctx} *c = ({ctx} *)raw;");
+            let _ = writeln!(out, "    c->ret = {name}({args});");
+            let _ = writeln!(out, "}}");
+        }
+        if !self.thread_spawns.is_empty() {
             out.push('\n');
         }
         Ok(())

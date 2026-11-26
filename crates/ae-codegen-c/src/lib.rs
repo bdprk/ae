@@ -124,6 +124,9 @@ pub fn emit_module_c(bodies: &[Body], config: &EmitConfig) -> Result<String, Cod
     if !bodies.is_empty() {
         out.push('\n');
     }
+    // Spawn entry trampolines call the lifted functions, so they follow the
+    // forward declarations and precede the definitions.
+    types.emit_task_entries(&mut out, &def_map)?;
 
     for (body, c_name) in bodies.iter().zip(fn_names.iter()) {
         emit_fn_body(&mut out, body, c_name, &types, &def_map)?;
