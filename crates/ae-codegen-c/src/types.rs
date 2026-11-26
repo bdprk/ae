@@ -52,9 +52,10 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         // A borrowed vector is a pointer to the owner's header; indexing and
         // length reads go through the pointer.
         TyKind::VectorRef(_) => "ae_vec *".to_owned(),
+        // A slice is a fat pointer value; mutable windows share the header
+        // and differ only in what the source allows.
+        TyKind::Slice(_) | TyKind::SliceMut(_) => "ae_slice".to_owned(),
         TyKind::MapOf(_)
-        | TyKind::Slice(_)
-        | TyKind::SliceMut(_)
         | TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::Tokens
@@ -97,6 +98,8 @@ pub(crate) struct ModuleTypes {
     pub drop_fns: BTreeMap<usize, (DefId, TyKind, String)>,
     /// Vector element interner id -> element type, carried on each body.
     pub vector_elems: BTreeMap<usize, TyKind>,
+    /// Slice element interner id -> element type, carried on each body.
+    pub slice_elems: BTreeMap<usize, TyKind>,
 }
 
 impl ModuleTypes {
@@ -119,6 +122,9 @@ impl ModuleTypes {
             }
             for (elem_id, elem_ty) in &body.vector_elems {
                 types.vector_elems.entry(*elem_id).or_insert(*elem_ty);
+            }
+            for (elem_id, elem_ty) in &body.slice_elems {
+                types.slice_elems.entry(*elem_id).or_insert(*elem_ty);
             }
         }
 
@@ -329,6 +335,11 @@ impl ModuleTypes {
         self.vector_elems.get(&id).copied()
     }
 
+    /// The element type of a slice interner id, when the body carried it.
+    pub fn slice_elem(&self, id: usize) -> Option<TyKind> {
+        self.slice_elems.get(&id).copied()
+    }
+
     /// The C expression naming a per-element drop thunk (`NULL` for a Copy
     /// element kind). The thunks release the value in place so the vector can
     /// drop every element it owns.
@@ -429,6 +440,9 @@ impl ModuleTypes {
                 ProjectionElem::Index(_) => match cur_ty {
                     TyKind::ArrayOf(elem_id, len) => {
                         cur_ty = self.arrays.get(&(elem_id, len)).and_then(|t| *t)?;
+                    }
+                    TyKind::SliceMut(elem_id) => {
+                        cur_ty = self.slice_elem(elem_id)?;
                     }
                     _ => return None,
                 },

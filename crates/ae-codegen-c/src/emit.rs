@@ -681,6 +681,72 @@ fn emit_intrinsic(
             };
             finish_value(out, body, types, destination, target, &value)
         }
+        "slice_of" => {
+            let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: "slice_of needs a source".to_owned(),
+            })?;
+            let place = match arg {
+                Operand::Copy(place) | Operand::Move(place) => place,
+                Operand::Constant(c) => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("slice_of cannot view a constant {:?}", c.value),
+                    });
+                }
+            };
+            let (view, _elem) = slice_view_of_place(body, place, types)?;
+            finish_value(out, body, types, destination, target, &view)
+        }
+        "slice_index" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "slice_index needs a slice and an index".to_owned(),
+                });
+            }
+            let (slice_expr, elem) = slice_operand(body, &args[0], types, def_map)?;
+            let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let access = format!("ae_slice_at({slice_expr}, (int64_t)({index}))");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let value = match (dest_ty, elem) {
+                (Some(TyKind::String | TyKind::StrView), TyKind::String) => {
+                    format!("ae_str_view(*(ae_str *){access})")
+                }
+                (Some(TyKind::StructRef(_) | TyKind::StructMut(_)), _) => {
+                    format!("((void *){access})")
+                }
+                (Some(TyKind::VectorRef(_)), _) => format!("((ae_vec *){access})"),
+                (Some(TyKind::Vector(_)), TyKind::Vector(_)) => {
+                    format!("(*((ae_vec *){access}))")
+                }
+                (Some(dest), _) if dest == elem => {
+                    format!("(*(({} *){access}))", c_type_name(dest))
+                }
+                (other, _) => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!(
+                            "slice element read as {other:?} from {elem:?} elements is not supported yet"
+                        ),
+                    });
+                }
+            };
+            finish_value(out, body, types, destination, target, &value)
+        }
+        "slice_range" => {
+            if args.len() != 3 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "slice_range needs a slice, a start and an end".to_owned(),
+                });
+            }
+            let (slice_expr, _elem) = slice_operand(body, &args[0], types, def_map)?;
+            let start = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let end = arg_exprs.get(2).map(String::as_str).unwrap_or("0");
+            let call = format!("ae_slice_range({slice_expr}, (int64_t)({start}), (int64_t)({end}))");
+            finish_value(out, body, types, destination, target, &call)
+        }
         "bytes" => {
             let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
             match types.infer_place_ty(body, destination) {
@@ -831,6 +897,23 @@ fn emit_place(
                     expr = format!("({expr}.data[(size_t)_{}])", idx_local.0);
                     cur_ty = types.arrays.get(&(elem_id, len)).and_then(|t| *t);
                 }
+                Some(TyKind::SliceMut(elem_id)) => {
+                    let elem =
+                        types
+                            .slice_elem(elem_id)
+                            .ok_or_else(|| CodegenError::UnsupportedFeature {
+                                body_name: body.name.clone(),
+                                detail: format!(
+                                    "slice element type for id {elem_id} is not carried on the body"
+                                ),
+                            })?;
+                    let c_ty = c_type_name(elem);
+                    expr = format!(
+                        "(*(({c_ty} *)ae_slice_at_mut(&{expr}, (int64_t)_{})))",
+                        idx_local.0
+                    );
+                    cur_ty = Some(elem);
+                }
                 other => {
                     return Err(CodegenError::UnsupportedType {
                         body_name: body.name.clone(),
@@ -937,6 +1020,87 @@ fn vector_operand(
     let expr = emit_place(body, place, types, Some(vec_ty))?;
     let ptr = if borrowed { expr } else { format!("(&{expr})") };
     Ok((ptr, elem))
+}
+
+/// Builds an `ae_slice` view over a place that holds a vector, an array, or
+/// another slice, with the element type. The storage stays with the source.
+fn slice_view_of_place(
+    body: &Body,
+    place: &Place,
+    types: &ModuleTypes,
+) -> Result<(String, TyKind), CodegenError> {
+    let ty = types.infer_place_ty(body, place).ok_or_else(|| {
+        CodegenError::UnsupportedFeature {
+            body_name: body.name.clone(),
+            detail: "slice source has no inferable type".to_owned(),
+        }
+    })?;
+    let expr = emit_place(body, place, types, Some(ty))?;
+    let (view, elem) = match ty {
+        TyKind::Vector(id) | TyKind::VectorRef(id) => {
+            let elem = types.vector_elem(id).ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("vector element type for id {id} is not carried on the body"),
+            })?;
+            let c_elem = c_type_name(elem);
+            let arrow = if matches!(ty, TyKind::VectorRef(_)) { "->" } else { "." };
+            (
+                format!(
+                    "ae_slice_view({expr}{arrow}data, {expr}{arrow}len, (int64_t)sizeof({c_elem}))"
+                ),
+                elem,
+            )
+        }
+        TyKind::ArrayOf(elem_id, len) => {
+            let elem = types
+                .arrays
+                .get(&(elem_id, len))
+                .and_then(|t| *t)
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("array element type for ({elem_id}, {len}) is not known"),
+                })?;
+            let c_elem = c_type_name(elem);
+            (
+                format!("ae_slice_view({expr}.data, (int64_t){len}, (int64_t)sizeof({c_elem}))"),
+                elem,
+            )
+        }
+        TyKind::Slice(id) | TyKind::SliceMut(id) => {
+            let elem = types.slice_elem(id).ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("slice element type for id {id} is not carried on the body"),
+            })?;
+            (expr, elem)
+        }
+        other => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("slice source type {other:?} is not supported yet"),
+            });
+        }
+    };
+    Ok((view, elem))
+}
+
+/// Resolves the slice behind an operand: the C expression naming the view
+/// and its element type.
+fn slice_operand(
+    body: &Body,
+    op: &Operand,
+    types: &ModuleTypes,
+    _def_map: &BTreeMap<DefId, String>,
+) -> Result<(String, TyKind), CodegenError> {
+    let place = match op {
+        Operand::Copy(place) | Operand::Move(place) => place,
+        Operand::Constant(c) => {
+            return Err(CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("slice operand cannot be a constant {:?}", c.value),
+            });
+        }
+    };
+    slice_view_of_place(body, place, types)
 }
 
 fn emit_operand(
@@ -1198,6 +1362,10 @@ fn emit_rvalue(
                 Some(TyKind::VectorRef(_)) => {
                     let place_expr = emit_place(body, place, types, None)?;
                     Ok(format!("((uintptr_t)ae_vec_len({place_expr}))"))
+                }
+                Some(TyKind::Slice(_) | TyKind::SliceMut(_)) => {
+                    let place_expr = emit_place(body, place, types, None)?;
+                    Ok(format!("((uintptr_t)ae_slice_len({place_expr}))"))
                 }
                 _ => Err(CodegenError::UnsupportedType {
                     body_name: body.name.clone(),

@@ -74,6 +74,8 @@ pub struct Body {
     /// Vector element interner id -> element type, so a standalone backend
     /// can size the storage, type an index, and pick a drop thunk.
     pub vector_elems: BTreeMap<usize, TyKind>,
+    /// Slice element interner id -> element type, for the same reasons.
+    pub slice_elems: BTreeMap<usize, TyKind>,
     pub span: Option<Span>,
 }
 
@@ -94,6 +96,7 @@ impl Body {
             copy_structs: BTreeSet::new(),
             copy_enums: BTreeSet::new(),
             vector_elems: BTreeMap::new(),
+            slice_elems: BTreeMap::new(),
             span: None,
         }
     }

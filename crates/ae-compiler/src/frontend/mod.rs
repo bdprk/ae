@@ -194,6 +194,10 @@ impl CompileContext {
         self.types.slice_elem(id)
     }
 
+    fn slice_elem_count(&self) -> usize {
+        self.types.slice_elem_count()
+    }
+
     fn intern_map_types(&mut self, key: Type, value: Type) -> usize {
         self.types.intern_map_types(key, value)
     }

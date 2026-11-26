@@ -341,6 +341,41 @@ static inline ae_vec ae_vec_bytes(ae_str s) {
     }
     return v;
 }
+
+// Slices (ADR-0236): a read-only fat pointer over a vector, an array, or
+// another slice. The element storage stays with the source; a slice is never
+// released. `ae_slice` also carries mutable windows: the same header, with
+// writes bounds-checked at the access site.
+typedef struct {
+    void *data;
+    int64_t len;
+    int64_t elem_size;
+} ae_slice;
+
+static inline ae_slice ae_slice_view(void *data, int64_t len, int64_t elem_size) {
+    ae_slice value;
+    value.data = data;
+    value.len = len;
+    value.elem_size = elem_size > 0 ? elem_size : 1;
+    return value;
+}
+static inline int64_t ae_slice_len(ae_slice s) { return s.len; }
+static inline void *ae_slice_at(ae_slice s, int64_t index) {
+    if (index < 0 || index >= s.len) ae_trap("array index out of bounds");
+    return (char *)s.data + (size_t)index * (size_t)s.elem_size;
+}
+static inline void *ae_slice_at_mut(ae_slice *s, int64_t index) {
+    if (index < 0 || index >= s->len) ae_trap("array index out of bounds");
+    return (char *)s->data + (size_t)index * (size_t)s->elem_size;
+}
+static inline ae_slice ae_slice_range(ae_slice s, int64_t start, int64_t end) {
+    if (start < 0 || end < start || end > s.len) ae_trap("array index out of bounds");
+    return ae_slice_view(
+        (char *)s.data + (size_t)start * (size_t)s.elem_size,
+        end - start,
+        s.elem_size
+    );
+}
 "#);
 
     let int_tys = [

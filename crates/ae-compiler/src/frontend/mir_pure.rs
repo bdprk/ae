@@ -403,6 +403,7 @@ impl<'a> PureMirBuilder<'a> {
         let mut pointees = BTreeMap::new();
         let mut fn_sigs = BTreeMap::new();
         let mut vector_elems = BTreeMap::new();
+        let mut slice_elems = BTreeMap::new();
         let mut visited_structs = BTreeSet::new();
         for decl in &self.locals {
             collect_pointees(
@@ -429,6 +430,14 @@ impl<'a> PureMirBuilder<'a> {
                 &mut BTreeSet::new(),
                 &mut vector_elems,
             );
+            collect_slice_elems(
+                decl.ty,
+                self.structs,
+                self.enum_layouts,
+                self.ctx,
+                &mut BTreeSet::new(),
+                &mut slice_elems,
+            );
         }
         for (sig, signature) in &self.fn_sigs_seen {
             fn_sigs.entry(*sig).or_insert_with(|| signature.clone());
@@ -448,6 +457,7 @@ impl<'a> PureMirBuilder<'a> {
             copy_structs: self.copy_structs.clone(),
             copy_enums: self.copy_enums.clone(),
             vector_elems,
+            slice_elems,
             span: None,
         }
     }
@@ -1922,6 +1932,70 @@ fn collect_vector_elems(
                 for fields in variants {
                     for field in fields {
                         collect_vector_elems(*field, structs, enum_layouts, ctx, visited_structs, out);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk `ty` for slice types and record each element type (`elem id ->
+/// type`), so a standalone backend can size an index and type an element
+/// read through the fat pointer.
+fn collect_slice_elems(
+    ty: TyKind,
+    structs: &[StructDef],
+    enum_layouts: &BTreeMap<usize, Vec<Vec<TyKind>>>,
+    ctx: &CompileContext,
+    visited_structs: &mut BTreeSet<usize>,
+    out: &mut BTreeMap<usize, TyKind>,
+) {
+    match ty {
+        TyKind::Slice(id) | TyKind::SliceMut(id) => {
+            if id < ctx.slice_elem_count() {
+                let elem = ctx.slice_elem(id);
+                out.entry(id).or_insert(elem);
+                collect_slice_elems(elem, structs, enum_layouts, ctx, visited_structs, out);
+            }
+        }
+        TyKind::Vector(id) | TyKind::VectorRef(id) => {
+            if id < ctx.vector_elem_count() {
+                collect_slice_elems(
+                    ctx.vector_elem(id),
+                    structs,
+                    enum_layouts,
+                    ctx,
+                    visited_structs,
+                    out,
+                );
+            }
+        }
+        TyKind::Ptr(id) | TyKind::PtrMut(id) => {
+            if let Some(pointee) = ctx.pointee_checked(id) {
+                collect_slice_elems(pointee, structs, enum_layouts, ctx, visited_structs, out);
+            }
+        }
+        TyKind::ArrayOf(id, _) => {
+            collect_slice_elems(ctx.array_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::MapOf(id) => {
+            let (key, value) = ctx.map_types(id);
+            collect_slice_elems(key, structs, enum_layouts, ctx, visited_structs, out);
+            collect_slice_elems(value, structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::Struct(sid) | TyKind::StructRef(sid) | TyKind::StructMut(sid) => {
+            if visited_structs.insert(sid) {
+                for (_, field) in &structs[sid].fields {
+                    collect_slice_elems(*field, structs, enum_layouts, ctx, visited_structs, out);
+                }
+            }
+        }
+        TyKind::Enum(_, eid) => {
+            if let Some(variants) = enum_layouts.get(&eid) {
+                for fields in variants {
+                    for field in fields {
+                        collect_slice_elems(*field, structs, enum_layouts, ctx, visited_structs, out);
                     }
                 }
             }
