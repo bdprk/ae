@@ -78,16 +78,15 @@ see).
 
 `examples/copy_notes.ae` leaked both faces at once: a `len(lines(text))`
 temporary vector and two `path_join` paths passed to `write_file`. After the
-rule: an AddressSanitizer+UBSan sweep of the 19 feature examples in Ubuntu
-WSL reports **19/19 clean** (exit status 0, 1 or 2 as designed), where the
+rule: an AddressSanitizer+UBSan sweep of the 21 feature examples in Ubuntu
+WSL reports **21/21 clean** (exit status 0, 1 or 2 as designed), where the
 same sweep previously failed on `copy_notes`. The `tests/run` end-to-end gate
 stays **161 of 161** with zero output mismatches, `cargo test --workspace
 --locked` reports **686 passed / 0 failed**, clippy is clean, and
 `python scripts/verify_generated_c.py` passes **41/41**. The differential
 fuzzer compares the mixed mode at **300 seeds / 0 failures** (the 26
 borrow-capture spawns skip as an unsupported subset) and `--pure-subset` at
-**300/300 with 0 skipped**. The examples corpus emits **47 of 49** programs
-(the remaining two are `run_command` and JSON).
+**300/300 with 0 skipped**. The examples corpus emits **49 of 49** programs.
 
 ## Consequences
 

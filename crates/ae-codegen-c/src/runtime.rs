@@ -20,6 +20,11 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stdlib.h>\n\
          #include <string.h>\n\
          #include <sys/stat.h>\n\
+         #ifndef _WIN32\n\
+         #include <fcntl.h>\n\
+         #include <sys/wait.h>\n\
+         #include <unistd.h>\n\
+         #endif\n\
          #include <time.h>\n\n\
          typedef struct { uint8_t _unused; } ae_unit_t;\n\n\
          // The positioned failure sink is defined with the concurrency runtime\n\
@@ -1467,6 +1472,801 @@ static inline bool ae_cell_cas(ae_atomic a, int64_t expected, int64_t replacemen
     );
 }
 
+// JSON reader (ADR-0238): a path query over a string, with the kind checks
+// and distinct "missing", "wrong shape" and "syntax" errors the language
+// reports as Result payloads. There is no container type to own or release.
+typedef struct { ae_str f0; } ae_json_text;
+typedef struct { int64_t f0; } ae_json_number;
+typedef struct { bool f0; } ae_json_flag;
+typedef struct { int64_t status; union { ae_json_text v0; ae_json_text v1; } u; } ae_json_read_result;
+typedef struct { int64_t status; union { ae_json_number v0; ae_json_text v1; } u; } ae_json_int_result;
+typedef struct { int64_t status; union { ae_json_flag v0; ae_json_text v1; } u; } ae_json_bool_result;
+static inline ae_str ae_json_error(const char *text) { return ae_str_alloc_copy(text, (int64_t)strlen(text)); }
+
+// A path query, not a document model: one call selects one value and reports it
+// as text, an integer or a boolean. The document is rescanned per call, which is
+// the right trade for config-sized input and keeps JSON out of the type system:
+// there is no container type to own, borrow or release.
+#define AE_JSON_OK 0
+#define AE_JSON_SYNTAX 1
+#define AE_JSON_MISSING 2
+#define AE_JSON_EXPECTED 3
+#define AE_JSON_DEPTH 64
+#define AE_JSON_STRING 0
+#define AE_JSON_NUMBER 1
+#define AE_JSON_BOOL 2
+#define AE_JSON_NULL 3
+#define AE_JSON_ARRAY 4
+#define AE_JSON_OBJECT 5
+
+static inline void ae_json_ws(const char *t, int64_t n, int64_t *i) {
+    while (*i < n) {
+        const char c = t[*i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+        *i += 1;
+    }
+}
+static inline int ae_json_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static inline int ae_json_utf8(char *out, unsigned cp) {
+    if (cp < 0x80u) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800u) { out[0] = (char)(0xC0u | (cp >> 6)); out[1] = (char)(0x80u | (cp & 0x3Fu)); return 2; }
+    if (cp < 0x10000u) { out[0] = (char)(0xE0u | (cp >> 12)); out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu)); out[2] = (char)(0x80u | (cp & 0x3Fu)); return 3; }
+    out[0] = (char)(0xF0u | (cp >> 18)); out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu)); out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu)); out[3] = (char)(0x80u | (cp & 0x3Fu)); return 4;
+}
+static inline int ae_json_skip_string(const char *t, int64_t n, int64_t *i) {
+    if (*i >= n || t[*i] != '"') return 0;
+    int64_t j = *i + 1;
+    while (j < n) {
+        const unsigned char c = (unsigned char)t[j];
+        if (c == '"') { *i = j + 1; return 1; }
+        if (c == '\\') { j += 2; continue; }
+        if (c < 0x20u) return 0;
+        j += 1;
+    }
+    return 0;
+}
+static inline int ae_json_skip_value(const char *t, int64_t n, int64_t *i, int depth) {
+    if (depth > AE_JSON_DEPTH) return 0;
+    ae_json_ws(t, n, i);
+    if (*i >= n) return 0;
+    const char c = t[*i];
+    if (c == '"') return ae_json_skip_string(t, n, i);
+    if (c == '{' || c == '[') {
+        const char close = c == '{' ? '}' : ']';
+        *i += 1;
+        ae_json_ws(t, n, i);
+        if (*i < n && t[*i] == close) { *i += 1; return 1; }
+        for (;;) {
+            ae_json_ws(t, n, i);
+            if (c == '{') {
+                if (!ae_json_skip_string(t, n, i)) return 0;
+                ae_json_ws(t, n, i);
+                if (*i >= n || t[*i] != ':') return 0;
+                *i += 1;
+            }
+            if (!ae_json_skip_value(t, n, i, depth + 1)) return 0;
+            ae_json_ws(t, n, i);
+            if (*i >= n) return 0;
+            if (t[*i] == ',') { *i += 1; continue; }
+            if (t[*i] == close) { *i += 1; return 1; }
+            return 0;
+        }
+    }
+    // A bare token: number, true, false or null. Its end is punctuation or space.
+    const int64_t start = *i;
+    while (*i < n) {
+        const char d = t[*i];
+        if (d == ',' || d == '}' || d == ']' || d == ' ' || d == '\t' || d == '\r' || d == '\n') break;
+        *i += 1;
+    }
+    return *i > start;
+}
+// Decodes one JSON string at *i into an owned string, resolving escapes (and
+// surrogate pairs) so the language never sees a \uXXXX sequence.
+static inline int ae_json_decode(const char *t, int64_t n, int64_t *i, ae_str *out, size_t line, size_t column) {
+    if (*i >= n || t[*i] != '"') return 0;
+    int64_t j = *i + 1;
+    while (j < n) {
+        const unsigned char c = (unsigned char)t[j];
+        if (c == '"') break;
+        if (c == '\\') { j += 2; continue; }
+        if (c < 0x20u) return 0;
+        j += 1;
+    }
+    if (j >= n) return 0;
+    const int64_t raw = j - (*i + 1);
+    char *buffer = (char *)ae_std_alloc((int64_t)((size_t)raw + 1), (int64_t)line, (int64_t)column);
+    int64_t s = *i + 1;
+    int64_t k = 0;
+    while (s < j) {
+        const unsigned char c = (unsigned char)t[s];
+        if (c != '\\') { buffer[k] = (char)c; k += 1; s += 1; continue; }
+        s += 1;
+        if (s >= j) { free(buffer); return 0; }
+        const char e = t[s];
+        s += 1;
+        switch (e) {
+            case '"': buffer[k] = '"'; k += 1; break;
+            case '\\': buffer[k] = '\\'; k += 1; break;
+            case '/': buffer[k] = '/'; k += 1; break;
+            case 'b': buffer[k] = '\b'; k += 1; break;
+            case 'f': buffer[k] = '\f'; k += 1; break;
+            case 'n': buffer[k] = '\n'; k += 1; break;
+            case 'r': buffer[k] = '\r'; k += 1; break;
+            case 't': buffer[k] = '\t'; k += 1; break;
+            case 'u': {
+                unsigned cp = 0;
+                if (s + 4 > j) { free(buffer); return 0; }
+                for (int d = 0; d < 4; d++) {
+                    const int v = ae_json_hex(t[s + d]);
+                    if (v < 0) { free(buffer); return 0; }
+                    cp = (cp << 4) | (unsigned)v;
+                }
+                s += 4;
+                if (cp >= 0xD800u && cp <= 0xDBFFu && s + 6 <= j && t[s] == '\\' && t[s + 1] == 'u') {
+                    unsigned low = 0;
+                    int ok = 1;
+                    for (int d = 0; d < 4; d++) {
+                        const int v = ae_json_hex(t[s + 2 + d]);
+                        if (v < 0) { ok = 0; break; }
+                        low = (low << 4) | (unsigned)v;
+                    }
+                    if (ok && low >= 0xDC00u && low <= 0xDFFFu) {
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
+                        s += 6;
+                    }
+                }
+                // A NUL would end the string early for every C consumer.
+                if (cp == 0) { free(buffer); return 0; }
+                k += ae_json_utf8(buffer + k, cp);
+                break;
+            }
+            default: free(buffer); return 0;
+        }
+    }
+    buffer[k] = 0;
+    out->ptr = buffer;
+    out->len = k;
+    out->owned = true;
+    *i = j + 1;
+    return 1;
+}
+static inline int ae_json_kind(const char *t, int64_t n, int64_t start) {
+    if (start >= n) return -1;
+    const char c = t[start];
+    if (c == '"') return AE_JSON_STRING;
+    if (c == '{') return AE_JSON_OBJECT;
+    if (c == '[') return AE_JSON_ARRAY;
+    if (c == 't' || c == 'f') return AE_JSON_BOOL;
+    if (c == 'n') return AE_JSON_NULL;
+    return AE_JSON_NUMBER;
+}
+static const char *ae_json_kind_name(int kind) {
+    switch (kind) {
+        case AE_JSON_STRING: return "a string";
+        case AE_JSON_NUMBER: return "a number";
+        case AE_JSON_BOOL: return "a boolean";
+        case AE_JSON_NULL: return "null";
+        case AE_JSON_ARRAY: return "an array";
+        case AE_JSON_OBJECT: return "an object";
+        default: return "nothing";
+    }
+}
+// Locates one member inside the object at *pos, leaving its value span in
+// *vs/*ve. *found separates "no such member" from "not an object at all".
+static inline int ae_json_member(const char *t, int64_t n, int64_t *pos, const char *key, int64_t key_len, int64_t *vs, int64_t *ve, int *found, size_t line, size_t column) {
+    *found = 0;
+    int64_t i = *pos;
+    if (i >= n || t[i] != '{') return 0;
+    i += 1;
+    ae_json_ws(t, n, &i);
+    if (i < n && t[i] == '}') { *pos = i + 1; return 1; }
+    for (;;) {
+        ae_json_ws(t, n, &i);
+        if (i >= n || t[i] != '"') return 0;
+        // Fast path: unescaped keys can be matched directly without heap allocation.
+        int64_t j = i + 1;
+        int has_escape = 0;
+        while (j < n) {
+            const unsigned char ch = (unsigned char)t[j];
+            if (ch == '"') break;
+            if (ch == '\\') { has_escape = 1; break; }
+            if (ch < 0x20u) return 0;
+            j += 1;
+        }
+        int match = 0;
+        if (!has_escape) {
+            if (j >= n) return 0;
+            const int64_t raw_len = j - (i + 1);
+            match = raw_len == key_len && (key_len == 0 || memcmp(t + i + 1, key, (size_t)key_len) == 0);
+            i = j + 1;
+        } else {
+            ae_str name;
+            if (!ae_json_decode(t, n, &i, &name, line, column)) return 0;
+            match = name.len == key_len && memcmp(name.ptr, key, (size_t)key_len) == 0;
+            ae_str_release(&name);
+        }
+        ae_json_ws(t, n, &i);
+        if (i >= n || t[i] != ':') return 0;
+        i += 1;
+        ae_json_ws(t, n, &i);
+        const int64_t start = i;
+        if (!ae_json_skip_value(t, n, &i, 0)) return 0;
+        if (match) { *vs = start; *ve = i; *found = 1; return 1; }
+        ae_json_ws(t, n, &i);
+        if (i >= n) return 0;
+        if (t[i] == ',') { i += 1; continue; }
+        if (t[i] == '}') { *pos = i + 1; return 1; }
+        return 0;
+    }
+}
+static inline int ae_json_element(const char *t, int64_t n, int64_t *pos, int64_t index, int64_t *vs, int64_t *ve, int *found) {
+    *found = 0;
+    int64_t i = *pos;
+    if (i >= n || t[i] != '[') return 0;
+    i += 1;
+    ae_json_ws(t, n, &i);
+    if (i < n && t[i] == ']') { *pos = i + 1; return 1; }
+    int64_t k = 0;
+    for (;;) {
+        ae_json_ws(t, n, &i);
+        const int64_t start = i;
+        if (!ae_json_skip_value(t, n, &i, 0)) return 0;
+        if (k == index) { *vs = start; *ve = i; *found = 1; return 1; }
+        k += 1;
+        ae_json_ws(t, n, &i);
+        if (i >= n) return 0;
+        if (t[i] == ',') { i += 1; continue; }
+        if (t[i] == ']') { *pos = i + 1; return 1; }
+        return 0;
+    }
+}
+// Validates the path on its own first, so a typo in the path is reported as a
+// path error even when the document would have failed on the same segment.
+static inline int ae_json_path_check(const char *path, int64_t plen, char *why, size_t why_cap) {
+    int64_t p = 0;
+    while (p < plen) {
+        if (path[p] == '[') {
+            const int64_t open = p;
+            p += 1;
+            int digits = 0;
+            while (p < plen && path[p] >= '0' && path[p] <= '9') { p += 1; digits += 1; }
+            if (digits == 0 || p >= plen || path[p] != ']') {
+                snprintf(why, why_cap, "path index at byte %lld needs digits and a closing ']'", (long long)open);
+                return 0;
+            }
+            p += 1;
+            if (p < plen && path[p] == '.') {
+                p += 1;
+                if (p >= plen) { snprintf(why, why_cap, "path ends with '.'"); return 0; }
+            }
+            continue;
+        }
+        const int64_t kstart = p;
+        while (p < plen && path[p] != '.' && path[p] != '[') p += 1;
+        if (p == kstart) {
+            snprintf(why, why_cap, "path has an empty segment at byte %lld", (long long)kstart);
+            return 0;
+        }
+        if (p < plen && path[p] == '.') {
+            p += 1;
+            if (p >= plen) { snprintf(why, why_cap, "path ends with '.'"); return 0; }
+        }
+    }
+    return 1;
+}
+// Path grammar: `key`, `key.sub`, `key[2].sub`, `[0].key`. A segment is a run of
+// bytes up to the next '.' or '['; keys are compared after unescaping.
+static inline int ae_json_locate(const char *t, int64_t n, const char *path, int64_t plen, int64_t *vs, int64_t *ve, int *kind, char *why, size_t why_cap, size_t line, size_t column) {
+    if (!ae_json_path_check(path, plen, why, why_cap)) return AE_JSON_SYNTAX;
+    int64_t pos = 0;
+    ae_json_ws(t, n, &pos);
+    const int64_t start0 = pos;
+    if (!ae_json_skip_value(t, n, &pos, 0)) {
+        snprintf(why, why_cap, "JSON syntax error near byte %lld", (long long)start0);
+        return AE_JSON_SYNTAX;
+    }
+    int64_t start = start0;
+    int64_t end = pos;
+    int current = ae_json_kind(t, n, start);
+    int64_t p = 0;
+    while (p < plen) {
+        if (path[p] == '[') {
+            const int64_t open = p;
+            p += 1;
+            int64_t index = 0;
+            int digits = 0;
+            while (p < plen && path[p] >= '0' && path[p] <= '9' && digits < 10) { index = index * 10 + (path[p] - '0'); p += 1; digits += 1; }
+            if (digits == 0 || p >= plen || path[p] != ']') {
+                snprintf(why, why_cap, "path index at byte %lld needs digits and a closing ']'", (long long)open);
+                return AE_JSON_SYNTAX;
+            }
+            p += 1;
+            if (current != AE_JSON_ARRAY) {
+                snprintf(why, why_cap, "path segment [%lld] needs an array, found %s", (long long)index, ae_json_kind_name(current));
+                return AE_JSON_EXPECTED;
+            }
+            int64_t cursor = start;
+            int found = 0;
+            if (!ae_json_element(t, n, &cursor, index, &start, &end, &found)) {
+                snprintf(why, why_cap, "JSON syntax error while reading an array element");
+                return AE_JSON_SYNTAX;
+            }
+            if (!found) {
+                snprintf(why, why_cap, "path segment [%lld] is past the end of the array", (long long)index);
+                return AE_JSON_MISSING;
+            }
+        } else {
+            const int64_t kstart = p;
+            while (p < plen && path[p] != '.' && path[p] != '[') p += 1;
+            const int64_t klen = p - kstart;
+            if (klen == 0) {
+                snprintf(why, why_cap, "path has an empty segment at byte %lld", (long long)kstart);
+                return AE_JSON_SYNTAX;
+            }
+            if (current != AE_JSON_OBJECT) {
+                snprintf(why, why_cap, "path segment '%.*s' needs an object, found %s", (int)klen, path + kstart, ae_json_kind_name(current));
+                return AE_JSON_EXPECTED;
+            }
+            int64_t cursor = start;
+            int found = 0;
+            if (!ae_json_member(t, n, &cursor, path + kstart, klen, &start, &end, &found, line, column)) {
+                snprintf(why, why_cap, "JSON syntax error while reading a member");
+                return AE_JSON_SYNTAX;
+            }
+            if (!found) {
+                snprintf(why, why_cap, "no member named '%.*s'", (int)klen, path + kstart);
+                return AE_JSON_MISSING;
+            }
+        }
+        current = ae_json_kind(t, n, start);
+        if (p < plen) {
+            if (path[p] != '.' && path[p] != '[') {
+                snprintf(why, why_cap, "path segment ends unexpectedly at byte %lld", (long long)p);
+                return AE_JSON_SYNTAX;
+            }
+            if (path[p] == '.') {
+                p += 1;
+                if (p >= plen) {
+                    snprintf(why, why_cap, "path ends with '.'");
+                    return AE_JSON_SYNTAX;
+                }
+            }
+        }
+    }
+    *vs = start;
+    *ve = end;
+    *kind = current;
+    return AE_JSON_OK;
+}
+static inline int ae_json_count(const char *t, int64_t n, int64_t start, int kind) {
+    int64_t i = start + 1;
+    int64_t count = 0;
+    const char close = kind == AE_JSON_OBJECT ? '}' : ']';
+    ae_json_ws(t, n, &i);
+    if (i < n && t[i] == close) return 0;
+    for (;;) {
+        ae_json_ws(t, n, &i);
+        if (kind == AE_JSON_OBJECT) {
+            if (!ae_json_skip_string(t, n, &i)) return -1;
+            ae_json_ws(t, n, &i);
+            if (i >= n || t[i] != ':') return -1;
+            i += 1;
+        }
+        if (!ae_json_skip_value(t, n, &i, 0)) return -1;
+        count += 1;
+        ae_json_ws(t, n, &i);
+        if (i >= n) return -1;
+        if (t[i] == ',') { i += 1; continue; }
+        if (t[i] == close) return count;
+        return -1;
+    }
+}
+static inline ae_json_read_result ae_json_get(ae_str doc, ae_str path, size_t line, size_t column) {
+
+    int64_t vs = 0;
+    int64_t ve = 0;
+    int kind = 0;
+    char why[192];
+    if (ae_json_locate(doc.ptr, doc.len, path.ptr, path.len, &vs, &ve, &kind, why, sizeof why, line, column) != AE_JSON_OK) {
+        ae_json_read_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    ae_str value;
+    if (kind == AE_JSON_STRING) {
+        int64_t at = vs;
+        if (!ae_json_decode(doc.ptr, doc.len, &at, &value, line, column)) {
+            ae_json_read_result out = { 1, { .v1 = { ae_json_error("JSON string could not be decoded") } } };
+            return out;
+        }
+    } else {
+        value = ae_str_alloc_copy(doc.ptr + vs, ve - vs);
+    }
+    ae_json_read_result out = { 0, { .v0 = { value } } };
+    return out;
+}
+static inline ae_json_int_result ae_json_int(ae_str doc, ae_str path, size_t line, size_t column) {
+
+    int64_t vs = 0;
+    int64_t ve = 0;
+    int kind = 0;
+    char why[192];
+    if (ae_json_locate(doc.ptr, doc.len, path.ptr, path.len, &vs, &ve, &kind, why, sizeof why, line, column) != AE_JSON_OK) {
+        ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    if (kind != AE_JSON_NUMBER) {
+        snprintf(why, sizeof why, "'%.*s' is %s, not a number", (int)path.len, path.ptr, ae_json_kind_name(kind));
+        ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    int64_t i = vs;
+    int negative = 0;
+    if (i < ve && doc.ptr[i] == '-') { negative = 1; i += 1; }
+    if (i >= ve) {
+        snprintf(why, sizeof why, "'%.*s' is not an integer", (int)path.len, path.ptr);
+        ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    int64_t value = 0;
+    for (; i < ve; i++) {
+        const char d = doc.ptr[i];
+        if (d < '0' || d > '9') {
+            // A fraction or exponent is a real number; this reader has no float type.
+            snprintf(why, sizeof why, "'%.*s' is not an integer", (int)path.len, path.ptr);
+            ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+            return out;
+        }
+        const int digit = d - '0';
+        if (value > (INT64_MAX - digit) / 10) {
+            snprintf(why, sizeof why, "'%.*s' does not fit in i64", (int)path.len, path.ptr);
+            ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+            return out;
+        }
+        value = value * 10 + digit;
+    }
+    ae_json_int_result out = { 0, { .v0 = { negative ? -value : value } } };
+    return out;
+}
+static inline ae_json_bool_result ae_json_bool(ae_str doc, ae_str path, size_t line, size_t column) {
+
+    int64_t vs = 0;
+    int64_t ve = 0;
+    int kind = 0;
+    char why[192];
+    if (ae_json_locate(doc.ptr, doc.len, path.ptr, path.len, &vs, &ve, &kind, why, sizeof why, line, column) != AE_JSON_OK) {
+        ae_json_bool_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    const int64_t width = ve - vs;
+    bool value = false;
+    if (kind == AE_JSON_BOOL && width == 4 && memcmp(doc.ptr + vs, "true", 4) == 0) value = true;
+    else if (!(kind == AE_JSON_BOOL && width == 5 && memcmp(doc.ptr + vs, "false", 5) == 0)) {
+        snprintf(why, sizeof why, "'%.*s' is %s, not a boolean", (int)path.len, path.ptr, ae_json_kind_name(kind));
+        ae_json_bool_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    ae_json_bool_result out = { 0, { .v0 = { value } } };
+    return out;
+}
+static inline ae_json_int_result ae_json_len(ae_str doc, ae_str path, size_t line, size_t column) {
+
+    int64_t vs = 0;
+    int64_t ve = 0;
+    int kind = 0;
+    char why[192];
+    if (ae_json_locate(doc.ptr, doc.len, path.ptr, path.len, &vs, &ve, &kind, why, sizeof why, line, column) != AE_JSON_OK) {
+        ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    if (kind != AE_JSON_ARRAY && kind != AE_JSON_OBJECT) {
+        snprintf(why, sizeof why, "'%.*s' is %s; only arrays and objects have a member count", (int)path.len, path.ptr, ae_json_kind_name(kind));
+        ae_json_int_result out = { 1, { .v1 = { ae_json_error(why) } } };
+        return out;
+    }
+    const int64_t count = ae_json_count(doc.ptr, doc.len, vs, kind);
+    if (count < 0) {
+        ae_json_int_result out = { 1, { .v1 = { ae_json_error("JSON syntax error while counting members") } } };
+        return out;
+    }
+    ae_json_int_result out = { 0, { .v0 = { count } } };
+    return out;
+}
+static inline bool ae_json_has(ae_str doc, ae_str path, size_t line, size_t column) {
+
+    int64_t vs = 0;
+    int64_t ve = 0;
+    int kind = 0;
+    char why[192];
+    return ae_json_locate(doc.ptr, doc.len, path.ptr, path.len, &vs, &ve, &kind, why, sizeof why, line, column) == AE_JSON_OK;
+}
+
+
+// Child processes (ADR-0238): stdout and stderr share one pipe, so the
+// child's own write order survives; a second CLOEXEC pipe tells "could not
+// start the program" apart from a child that exits 127. A non-zero exit
+// status is a result, not an error.
+typedef struct { int64_t status; int64_t code; ae_str output; ae_str error; } ae_command_result;
+static inline ae_command_result ae_command_ok_value(ae_str output, int64_t code) {
+    ae_command_result out;
+    out.status = 0;
+    out.code = code;
+    out.output = output;
+    out.error = ae_str_from_parts("", 0, false);
+    return out;
+}
+static inline ae_command_result ae_command_fail_value(ae_str error) {
+    ae_command_result out;
+    out.status = 1;
+    out.code = 0;
+    out.output = ae_str_from_parts("", 0, false);
+    out.error = error;
+    return out;
+}
+static inline ae_str ae_command_literal(const char *text) {
+    return ae_str_alloc_copy(text, (int64_t)strlen(text));
+}
+static inline ae_str ae_command_status_error(const char *what, unsigned long code) {
+    char buffer[160];
+    const int length = snprintf(buffer, sizeof buffer, "%s (status %lu)", what, code);
+    if (length < 0) return ae_command_literal(what);
+    const int64_t used = length < (int)sizeof buffer ? (int64_t)length : (int64_t)sizeof buffer - 1;
+    return ae_str_alloc_copy(buffer, used);
+}
+#ifndef _WIN32
+static inline ae_command_result ae_run_command_value(ae_str program, ae_vec *args, size_t line, size_t column) {
+    int fds[2];
+    if (pipe(fds) != 0) return ae_command_fail_value(ae_io_error());
+    int errors[2];
+    if (pipe(errors) != 0) {
+        const ae_str failure = ae_io_error();
+        close(fds[0]);
+        close(fds[1]);
+        return ae_command_fail_value(failure);
+    }
+    (void)fcntl(errors[1], F_SETFD, FD_CLOEXEC);
+    const pid_t pid = fork();
+    if (pid < 0) {
+        const ae_str failure = ae_io_error();
+        close(fds[0]);
+        close(fds[1]);
+        close(errors[0]);
+        close(errors[1]);
+        return ae_command_fail_value(failure);
+    }
+    if (pid == 0) {
+        if (dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0) _exit(127);
+        close(fds[0]);
+        close(fds[1]);
+        close(errors[0]);
+        char **argv = (char **)malloc(sizeof(char *) * (size_t)(args->len + 2));
+        if (!argv) _exit(127);
+        argv[0] = (char *)program.ptr;
+        for (int64_t i = 0; i < args->len; i++) {
+            argv[i + 1] = (char *)((ae_str *)ae_vec_at(args, i, line, column))->ptr;
+        }
+        argv[args->len + 1] = NULL;
+        execvp(program.ptr, argv);
+        const int code = errno;
+        (void)!write(errors[1], &code, sizeof code);
+        _exit(127);
+    }
+    close(fds[1]);
+    close(errors[1]);
+    int exec_error = 0;
+    ssize_t reported = 0;
+    do {
+        reported = read(errors[0], &exec_error, sizeof exec_error);
+    } while (reported < 0 && errno == EINTR);
+    close(errors[0]);
+    if (reported == (ssize_t)sizeof exec_error) {
+        int ignored = 0;
+        close(fds[0]);
+        while (waitpid(pid, &ignored, 0) < 0 && errno == EINTR) {}
+        return ae_command_fail_value(ae_command_status_error("cannot start the program", (unsigned long)exec_error));
+    }
+    int64_t capacity = 4096;
+    int64_t length = 0;
+    char *buffer = (char *)ae_std_alloc(capacity, (int64_t)line, (int64_t)column);
+    for (;;) {
+        if (length == capacity) {
+            char *grown = (char *)ae_std_alloc(capacity * 2, (int64_t)line, (int64_t)column);
+            memcpy(grown, buffer, (size_t)length);
+            free(buffer);
+            buffer = grown;
+            capacity = capacity * 2;
+        }
+        const ssize_t got = read(fds[0], buffer + length, (size_t)(capacity - length));
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            const ae_str failure = ae_io_error();
+            free(buffer);
+            close(fds[0]);
+            return ae_command_fail_value(failure);
+        }
+        if (got == 0) break;
+        length += got;
+    }
+    close(fds[0]);
+    buffer[length] = 0;
+    int status = 0;
+    for (;;) {
+        if (waitpid(pid, &status, 0) >= 0) break;
+        if (errno != EINTR) {
+            const ae_str failure = ae_io_error();
+            free(buffer);
+            return ae_command_fail_value(failure);
+        }
+    }
+    // A signaled child is reported the way a shell reports it.
+    const int64_t code = WIFEXITED(status) ? (int64_t)WEXITSTATUS(status)
+                                           : (int64_t)(128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0));
+    return ae_command_ok_value(ae_str_from_parts(buffer, length, true), code);
+}
+#else
+// The Win32 path declares the few kernel32 entry points it needs instead of
+// including <windows.h>, whose prototypes would collide with the fiber,
+// thread and lock declarations elsewhere in this preamble.
+typedef struct {
+    unsigned long cb;
+    wchar_t *lpReserved;
+    wchar_t *lpDesktop;
+    wchar_t *lpTitle;
+    unsigned long dwX;
+    unsigned long dwY;
+    unsigned long dwXSize;
+    unsigned long dwYSize;
+    unsigned long dwXCountChars;
+    unsigned long dwYCountChars;
+    unsigned long dwFillAttribute;
+    unsigned long dwFlags;
+    unsigned short wShowWindow;
+    unsigned short cbReserved2;
+    unsigned char *lpReserved2;
+    void *hStdInput;
+    void *hStdOutput;
+    void *hStdError;
+} ae_startup_info;
+typedef struct {
+    void *hProcess;
+    void *hThread;
+    unsigned long process_id;
+    unsigned long thread_id;
+} ae_process_info;
+extern int CreatePipe(void **read_pipe, void **write_pipe, void *attributes, unsigned long size);
+extern int SetHandleInformation(void *object, unsigned long mask, unsigned long flags);
+extern void *GetStdHandle(unsigned long which);
+extern int CreateProcessW(wchar_t *application, wchar_t *command, void *process_attributes,
+                          void *thread_attributes, int inherit_handles, unsigned long flags,
+                          void *environment, wchar_t *directory, ae_startup_info *startup,
+                          ae_process_info *info);
+extern int ReadFile(void *file, void *buffer, unsigned long bytes, unsigned long *read, void *overlapped);
+extern int GetExitCodeProcess(void *process, unsigned long *code);
+extern unsigned long GetLastError(void);
+extern int MultiByteToWideChar(unsigned int codepage, unsigned long flags, const char *text,
+                               int length, wchar_t *out, int capacity);
+extern unsigned long WaitForSingleObject(void *handle, unsigned long milliseconds);
+extern int CloseHandle(void *handle);
+static inline ae_command_result ae_run_command_value(ae_str program, ae_vec *args, size_t line, size_t column) {
+    // Quotes and trailing backslashes are refused instead of escaped: guessing
+    // the quoting rules wrong silently changes what the child runs.
+    for (int64_t i = 0; i < args->len; i++) {
+        const ae_str arg = *(ae_str *)ae_vec_at(args, i, line, column);
+        for (int64_t k = 0; k < arg.len; k++) {
+            if (arg.ptr[k] == '"') {
+                return ae_command_fail_value(ae_command_literal("command arguments must not contain a double quote"));
+            }
+        }
+        if (arg.len > 0 && arg.ptr[arg.len - 1] == '\\') {
+            return ae_command_fail_value(ae_command_literal("command arguments must not end with a backslash"));
+        }
+    }
+    for (int64_t k = 0; k < program.len; k++) {
+        if (program.ptr[k] == '"') {
+            return ae_command_fail_value(ae_command_literal("the program name must not contain a double quote"));
+        }
+    }
+    int64_t width = program.len + 3;
+    for (int64_t i = 0; i < args->len; i++) {
+        width += ((ae_str *)ae_vec_at(args, i, line, column))->len + 3;
+    }
+    char *command = (char *)ae_std_alloc(width, (int64_t)line, (int64_t)column);
+    int64_t at = 0;
+    command[at++] = '"';
+    memcpy(command + at, program.ptr, (size_t)program.len);
+    at += program.len;
+    command[at++] = '"';
+    for (int64_t i = 0; i < args->len; i++) {
+        const ae_str arg = *(ae_str *)ae_vec_at(args, i, line, column);
+        bool spaced = false;
+        for (int64_t k = 0; k < arg.len; k++) {
+            if (arg.ptr[k] == ' ' || arg.ptr[k] == '\t') { spaced = true; break; }
+        }
+        command[at++] = ' ';
+        if (spaced) command[at++] = '"';
+        memcpy(command + at, arg.ptr, (size_t)arg.len);
+        at += arg.len;
+        if (spaced) command[at++] = '"';
+    }
+    command[at] = 0;
+    const int needed = MultiByteToWideChar(65001, 0, command, -1, NULL, 0);
+    wchar_t *wide = NULL;
+    if (needed > 0) {
+        wide = (wchar_t *)ae_std_alloc((int64_t)(sizeof(wchar_t) * (size_t)needed), (int64_t)line, (int64_t)column);
+        if (MultiByteToWideChar(65001, 0, command, -1, wide, needed) <= 0) {
+            free(wide);
+            wide = NULL;
+        }
+    }
+    free(command);
+    if (!wide) return ae_command_fail_value(ae_command_literal("out of memory"));
+    void *read_end = NULL;
+    void *write_end = NULL;
+    if (!CreatePipe(&read_end, &write_end, NULL, 0)) {
+        free(wide);
+        return ae_command_fail_value(ae_command_status_error("cannot create a pipe", GetLastError()));
+    }
+    // CreatePipe with no security attributes makes both ends private; the
+    // child needs the write end, so mark that one inheritable.
+    (void)SetHandleInformation(write_end, 1u, 1u);
+    ae_startup_info startup;
+    memset(&startup, 0, sizeof startup);
+    startup.cb = (unsigned long)sizeof startup;
+    startup.dwFlags = 256u; // STARTF_USESTDHANDLES
+    startup.hStdInput = GetStdHandle(0xFFFFFFF6u); // STD_INPUT_HANDLE
+    startup.hStdOutput = write_end;
+    startup.hStdError = write_end;
+    ae_process_info process;
+    memset(&process, 0, sizeof process);
+    const int started = CreateProcessW(NULL, wide, NULL, NULL, 1, 0x08000000u, NULL, NULL, &startup, &process);
+    const unsigned long failure = started ? 0 : GetLastError();
+    free(wide);
+    CloseHandle(write_end);
+    if (!started) {
+        CloseHandle(read_end);
+        return ae_command_fail_value(ae_command_status_error("cannot start the program", failure));
+    }
+    CloseHandle(process.hThread);
+    int64_t capacity = 4096;
+    int64_t length = 0;
+    char *buffer = (char *)ae_std_alloc(capacity, (int64_t)line, (int64_t)column);
+    for (;;) {
+        if (length == capacity) {
+            char *grown = (char *)ae_std_alloc(capacity * 2, (int64_t)line, (int64_t)column);
+            memcpy(grown, buffer, (size_t)length);
+            free(buffer);
+            buffer = grown;
+            capacity = capacity * 2;
+        }
+        unsigned long got = 0;
+        const int64_t room = capacity - length;
+        const unsigned long request = (unsigned long)(room > 0x7FFFFFFF ? 0x7FFFFFFF : room);
+        if (!ReadFile(read_end, buffer + length, request, &got, NULL)) {
+            const unsigned long code = GetLastError();
+            if (code == 109u) break; // ERROR_BROKEN_PIPE: the child closed its end
+            const ae_str failure = ae_command_status_error("cannot read the program output", code);
+            free(buffer);
+            CloseHandle(read_end);
+            CloseHandle(process.hProcess);
+            return ae_command_fail_value(failure);
+        }
+        if (got == 0) break;
+        length += (int64_t)got;
+    }
+    CloseHandle(read_end);
+    buffer[length] = 0;
+    (void)WaitForSingleObject(process.hProcess, 0xFFFFFFFFu);
+    unsigned long status = 0;
+    (void)GetExitCodeProcess(process.hProcess, &status);
+    CloseHandle(process.hProcess);
+    return ae_command_ok_value(ae_str_from_parts(buffer, length, true), (int64_t)status);
+}
+#endif
 // Cooperative task executor (spec/concurrency.md, ADR-0218): tasks are
 // stackful coroutines. Win32 uses fibers; POSIX uses C11 threads with a
 // turnstile so exactly one task runs at a time until it yields.
