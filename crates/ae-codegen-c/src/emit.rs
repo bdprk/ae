@@ -810,6 +810,223 @@ fn emit_intrinsic(
             let sep = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             finish_value(out, body, types, destination, target, &format!("ae_vec_join({ptr}, {sep})"))
         }
+        "starts_with" | "ends_with" | "contains" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs two strings"),
+                });
+            }
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let helper = match name {
+                "starts_with" => "ae_str_starts_with",
+                "ends_with" => "ae_str_ends_with",
+                _ => "ae_str_contains",
+            };
+            finish_value(out, body, types, destination, target, &format!("{helper}({a}, {b})"))
+        }
+        "find" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "find needs two strings".to_owned(),
+                });
+            }
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            // `find` returns IntResult: Ok(index) or Err("substring not
+            // found"), like the main runtime.
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("find result is {other:?}, not an IntResult enum"),
+                    });
+                }
+            };
+            let layouts = body.enum_layouts.get(&eid).ok_or_else(|| {
+                CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("enum layout for id {eid} is not carried on the body"),
+                }
+            })?;
+            let ok_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::Int(IntTy::I64)])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("find result enum {eid} has no i64 Ok variant"),
+                })?;
+            let err_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::String])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("find result enum {eid} has no string Err variant"),
+                })?;
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let ok = format!(
+                "((ae_enum_{eid}){{ .tag = {ok_variant}, .u = {{ .v{ok_variant} = {{ .f0 = _at }} }} }})"
+            );
+            let err = format!(
+                "((ae_enum_{eid}){{ .tag = {err_variant}, .u = {{ .v{err_variant} = {{ .f0 = ((ae_str){{ .ptr = \"substring not found\", .len = (int64_t)(sizeof(\"substring not found\") - 1), .owned = false }}) }} }} }})"
+            );
+            let _ = writeln!(
+                out,
+                "    {{ int64_t _at = ae_str_find({a}, {b}); if (_at >= 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "parse_int" => {
+            let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("parse_int result is {other:?}, not a Result enum"),
+                    });
+                }
+            };
+            let layouts = body.enum_layouts.get(&eid).ok_or_else(|| {
+                CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("enum layout for id {eid} is not carried on the body"),
+                }
+            })?;
+            let ok_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::Int(IntTy::I64)])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("parse_int result enum {eid} has no i64 Ok variant"),
+                })?;
+            let err_variant = layouts
+                .iter()
+                .position(|fields| fields.as_slice() == [TyKind::String])
+                .ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("parse_int result enum {eid} has no string Err variant"),
+                })?;
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let ok = format!(
+                "((ae_enum_{eid}){{ .tag = {ok_variant}, .u = {{ .v{ok_variant} = {{ .f0 = _parsed.value }} }} }})"
+            );
+            let err = format!(
+                "((ae_enum_{eid}){{ .tag = {err_variant}, .u = {{ .v{err_variant} = {{ .f0 = ((ae_str){{ .ptr = _message, .len = (int64_t)strlen(_message), .owned = false }}) }} }} }})"
+            );
+            let _ = writeln!(
+                out,
+                "    {{ ae_parse_i64_result _parsed = ae_parse_i64({text});\n      if (_parsed.status == 0) {{ {dest_expr} = {ok}; }}\n      else {{ const char *_message = _parsed.status == 1 ? \"empty or sign-only integer\" : (_parsed.status == 2 ? \"not a base-10 integer\" : \"integer out of i64 range\"); {dest_expr} = {err}; }} }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
+        "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_neg"
+        | "saturating_add" | "saturating_sub" | "saturating_mul" => {
+            let width = match types.infer_operand_ty(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs a receiver"),
+                })?,
+            ) {
+                Some(TyKind::Int(width)) => width,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("{name} receiver is {other:?}, not an integer"),
+                    });
+                }
+            };
+            let prefix = match name {
+                "wrapping_add" => "ae_wrap_add",
+                "wrapping_sub" => "ae_wrap_sub",
+                "wrapping_mul" => "ae_wrap_mul",
+                "wrapping_neg" => "ae_wrap_neg",
+                "saturating_add" => "ae_sat_add",
+                "saturating_sub" => "ae_sat_sub",
+                _ => "ae_sat_mul",
+            };
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let call = if args.len() == 1 {
+                format!("{prefix}_{}({a})", width.name())
+            } else {
+                let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+                format!("{prefix}_{}({a}, {b})", width.name())
+            };
+            finish_value(out, body, types, destination, target, &call)
+        }
+        "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
+        | "checked_neg" => {
+            let width = match types.infer_operand_ty(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs a receiver"),
+                })?,
+            ) {
+                Some(TyKind::Int(width)) => width,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("{name} receiver is {other:?}, not an integer"),
+                    });
+                }
+            };
+            let dest_ty = types.infer_place_ty(body, destination);
+            let eid = match dest_ty {
+                Some(TyKind::Enum(_, id)) => id,
+                other => {
+                    return Err(CodegenError::UnsupportedFeature {
+                        body_name: body.name.clone(),
+                        detail: format!("{name} result is {other:?}, not an Option enum"),
+                    });
+                }
+            };
+            let prefix = match name {
+                "checked_add" => "ae_opt_add",
+                "checked_sub" => "ae_opt_sub",
+                "checked_mul" => "ae_opt_mul",
+                "checked_div" => "ae_opt_div",
+                "checked_rem" => "ae_opt_mod",
+                _ => "ae_opt_neg",
+            };
+            let c_w = width.c_name();
+            let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let call = if args.len() == 1 {
+                format!("{prefix}_{}({a}, &_opt)", width.name())
+            } else {
+                let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+                format!("{prefix}_{}({a}, {b}, &_opt)", width.name())
+            };
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            let some = format!("((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _opt }} }} }})");
+            let none = format!("((ae_enum_{eid}){{ .tag = 1 }})");
+            let _ = writeln!(
+                out,
+                "    {{ {c_w} _opt = 0; if ({call}) {{ {dest_expr} = {some}; }} else {{ {dest_expr} = {none}; }} }}"
+            );
+            if let Some(next_bb) = target {
+                let _ = writeln!(out, "    goto bb{};", next_bb.0);
+            } else {
+                out.push_str("    ae_trap(\"diverging call returned\");\n");
+            }
+            Ok(())
+        }
         "count_lines_with" => {
             if args.len() != 2 {
                 return Err(CodegenError::UnsupportedFeature {

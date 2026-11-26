@@ -804,8 +804,9 @@ fn run_source(
     }
     if cmd == "emit-pure-c" {
         // The pure-MIR C pipeline (ADR-0237): lower -> optimize -> validate ->
-        // borrow-check -> C11. Standalone programs only for now; project
-        // imports are not followed by this path yet.
+        // borrow-check -> C11. Relative imports are followed (byte_streams
+        // compiles through std/io/reader.ae); package imports are not
+        // resolved by this path yet.
         let config = ae_compiler::ae_codegen_c::EmitConfig {
             target: ae_compiler::ae_layout::TargetSpec::host(),
             // Like `emit-c`, the output is a runnable translation unit.

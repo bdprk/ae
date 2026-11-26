@@ -489,6 +489,97 @@ static inline int64_t ae_count_lines_with(ae_str text, ae_str pattern) {
     }
     return count;
 }
+static inline bool ae_str_starts_with(ae_str s, ae_str prefix) {
+    return prefix.len <= s.len && (prefix.len == 0 || memcmp(s.ptr, prefix.ptr, (size_t)prefix.len) == 0);
+}
+static inline bool ae_str_ends_with(ae_str s, ae_str suffix) {
+    return suffix.len <= s.len
+        && (suffix.len == 0 || memcmp(s.ptr + (s.len - suffix.len), suffix.ptr, (size_t)suffix.len) == 0);
+}
+static inline bool ae_str_contains(ae_str haystack, ae_str needle) {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+    return strstr(haystack.ptr, needle.ptr) != NULL;
+}
+static inline int64_t ae_str_find(ae_str haystack, ae_str needle) {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return -1;
+    if (needle.len == 1) {
+        const char *hit = (const char *)memchr(haystack.ptr, needle.ptr[0], (size_t)haystack.len);
+        return hit == NULL ? -1 : (int64_t)(hit - haystack.ptr);
+    }
+    const char first = needle.ptr[0];
+    for (int64_t i = 0; i + needle.len <= haystack.len; ) {
+        const char *hit = (const char *)memchr(
+            haystack.ptr + i,
+            first,
+            (size_t)(haystack.len - needle.len - i + 1)
+        );
+        if (!hit) return -1;
+        i = (int64_t)(hit - haystack.ptr);
+        if (memcmp(haystack.ptr + i, needle.ptr, (size_t)needle.len) == 0) return i;
+        i += 1;
+    }
+    return -1;
+}
+
+// Wrapping/saturating/checked integer helpers (the `wrapping_*`,
+// `saturating_*` and `checked_*` methods). GCC and Clang both provide the
+// overflow builtins, so the helper family is one macro set instantiated per
+// width below; matching the checked semantics of the main runtime.
+#define AE_WRAP_BIN_S(T, U, OP, a, b) do { U u = (U)((U)(a) OP (U)(b)); T r; memcpy(&r, &u, sizeof(r)); return r; } while (0)
+#define AE_WRAP_NEG_S(T, U, a) do { U u = (U)(0 - (U)(a)); T r; memcpy(&r, &u, sizeof(r)); return r; } while (0)
+#define AE_SAT_ADD_S(T, MIN, MAX, a, b) do { T r; if (__builtin_add_overflow((a), (b), &r)) return (b) > 0 ? (MAX) : (MIN); return r; } while (0)
+#define AE_SAT_SUB_S(T, MIN, MAX, a, b) do { T r; if (__builtin_sub_overflow((a), (b), &r)) return (b) < 0 ? (MAX) : (MIN); return r; } while (0)
+#define AE_SAT_MUL_S(T, MIN, MAX, a, b) do { T r; if (__builtin_mul_overflow((a), (b), &r)) return (((a) > 0) == ((b) > 0)) ? (MAX) : (MIN); return r; } while (0)
+#define AE_SAT_ADD_U(T, MAX, a, b) do { T r; if (__builtin_add_overflow((a), (b), &r)) return (MAX); return r; } while (0)
+#define AE_SAT_SUB_U(T, MAX, a, b) do { T r; if (__builtin_sub_overflow((a), (b), &r)) return 0; return r; } while (0)
+#define AE_SAT_MUL_U(T, MAX, a, b) do { T r; if (__builtin_mul_overflow((a), (b), &r)) return (MAX); return r; } while (0)
+#define AE_OPT_ADD_S(T, MIN, MAX, a, b, out) return !__builtin_add_overflow((a), (b), (out))
+#define AE_OPT_SUB_S(T, MIN, MAX, a, b, out) return !__builtin_sub_overflow((a), (b), (out))
+#define AE_OPT_MUL_S(T, MIN, MAX, a, b, out) return !__builtin_mul_overflow((a), (b), (out))
+#define AE_OPT_ADD_U(T, MAX, a, b, out) return !__builtin_add_overflow((a), (b), (out))
+#define AE_OPT_SUB_U(T, MAX, a, b, out) return !__builtin_sub_overflow((a), (b), (out))
+#define AE_OPT_MUL_U(T, MAX, a, b, out) return !__builtin_mul_overflow((a), (b), (out))
+#define AE_OPT_DIV_S(T, MIN, a, b, out) do { if ((b) == 0 || ((a) == (MIN) && (b) == -1)) return false; *(out) = (T)((a) / (b)); return true; } while (0)
+#define AE_OPT_MOD_S(T, MIN, a, b, out) do { if ((b) == 0 || ((a) == (MIN) && (b) == -1)) return false; *(out) = (T)((a) % (b)); return true; } while (0)
+#define AE_OPT_NEG_S(T, MIN, a, out) do { if ((a) == (MIN)) return false; *(out) = (T)(-(a)); return true; } while (0)
+#define AE_OPT_DIV_U(T, MAX, a, b, out) do { if ((b) == 0) return false; *(out) = (T)((a) / (b)); return true; } while (0)
+#define AE_OPT_MOD_U(T, MAX, a, b, out) do { if ((b) == 0) return false; *(out) = (T)((a) % (b)); return true; } while (0)
+
+// parse_int: status 0 = value, 1 = empty/sign-only, 2 = not a base-10
+// integer, 3 = out of i64 range. The emitter turns the status into the
+// Result enum's Ok/Err payload.
+typedef struct { int64_t status; int64_t value; } ae_parse_i64_result;
+static inline ae_parse_i64_result ae_parse_i64(ae_str text) {
+    int64_t at = 0;
+    bool negative = false;
+    if (text.len > 0 && (text.ptr[0] == '-' || text.ptr[0] == '+')) {
+        negative = text.ptr[0] == '-';
+        at = 1;
+    }
+    if (at >= text.len) {
+        ae_parse_i64_result bad = { 1, 0 };
+        return bad;
+    }
+    uint64_t magnitude = 0;
+    const uint64_t limit = negative ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
+    for (; at < text.len; at++) {
+        const char c = text.ptr[at];
+        if (c < '0' || c > '9') {
+            ae_parse_i64_result bad = { 2, 0 };
+            return bad;
+        }
+        const uint64_t digit = (uint64_t)(c - '0');
+        if (magnitude > (limit - digit) / 10u) {
+            ae_parse_i64_result bad = { 3, 0 };
+            return bad;
+        }
+        magnitude = magnitude * 10u + digit;
+    }
+    ae_parse_i64_result out = { 0, negative ? (int64_t)(0u - magnitude) : (int64_t)magnitude };
+    return out;
+}
 "#);
 
     let int_tys = [
@@ -506,6 +597,51 @@ static inline int64_t ae_count_lines_with(ae_str text, ae_str pattern) {
 
     for ity in int_tys {
         emit_int_helpers(out, ity);
+        emit_int_method_helpers(out, ity);
+    }
+}
+
+/// Wrapping, saturating and checked helpers for one width, used by the
+/// `wrapping_*`/`saturating_*`/`checked_*` integer methods.
+fn emit_int_method_helpers(out: &mut String, ity: IntTy) {
+    let t = ity.c_name();
+    let n = ity.name();
+    let (min_expr, max_expr) = int_c_bounds(ity);
+    if ity.signed() {
+        let u = match ity {
+            IntTy::I8 => "uint8_t",
+            IntTy::I16 => "uint16_t",
+            IntTy::I32 => "uint32_t",
+            IntTy::I64 => "uint64_t",
+            IntTy::Isize => "uintptr_t",
+            _ => unreachable!(),
+        };
+        let _ = writeln!(out, "static inline {t} ae_wrap_add_{n}({t} a, {t} b) {{ AE_WRAP_BIN_S({t}, {u}, +, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_wrap_sub_{n}({t} a, {t} b) {{ AE_WRAP_BIN_S({t}, {u}, -, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_wrap_mul_{n}({t} a, {t} b) {{ AE_WRAP_BIN_S({t}, {u}, *, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_wrap_neg_{n}({t} a) {{ AE_WRAP_NEG_S({t}, {u}, a); }}");
+        let _ = writeln!(out, "static inline {t} ae_sat_add_{n}({t} a, {t} b) {{ AE_SAT_ADD_S({t}, {min_expr}, {max_expr}, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_sat_sub_{n}({t} a, {t} b) {{ AE_SAT_SUB_S({t}, {min_expr}, {max_expr}, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_sat_mul_{n}({t} a, {t} b) {{ AE_SAT_MUL_S({t}, {min_expr}, {max_expr}, a, b); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_add_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_ADD_S({t}, {min_expr}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_sub_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_SUB_S({t}, {min_expr}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_mul_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_MUL_S({t}, {min_expr}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_div_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_DIV_S({t}, {min_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_mod_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_MOD_S({t}, {min_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_neg_{n}({t} a, {t} *out) {{ AE_OPT_NEG_S({t}, {min_expr}, a, out); }}");
+    } else {
+        let _ = writeln!(out, "static inline {t} ae_wrap_add_{n}({t} a, {t} b) {{ AE_WRAP_BIN_S({t}, {t}, +, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_wrap_sub_{n}({t} a, {t} b) {{ AE_WRAP_BIN_S({t}, {t}, -, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_wrap_mul_{n}({t} a, {t} b) {{ AE_WRAP_BIN_S({t}, {t}, *, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_wrap_neg_{n}({t} a) {{ AE_WRAP_NEG_S({t}, {t}, a); }}");
+        let _ = writeln!(out, "static inline {t} ae_sat_add_{n}({t} a, {t} b) {{ AE_SAT_ADD_U({t}, {max_expr}, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_sat_sub_{n}({t} a, {t} b) {{ AE_SAT_SUB_U({t}, {max_expr}, a, b); }}");
+        let _ = writeln!(out, "static inline {t} ae_sat_mul_{n}({t} a, {t} b) {{ AE_SAT_MUL_U({t}, {max_expr}, a, b); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_add_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_ADD_U({t}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_sub_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_SUB_U({t}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_mul_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_MUL_U({t}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_div_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_DIV_U({t}, {max_expr}, a, b, out); }}");
+        let _ = writeln!(out, "static inline bool ae_opt_mod_{n}({t} a, {t} b, {t} *out) {{ AE_OPT_MOD_U({t}, {max_expr}, a, b, out); }}");
     }
 }
 
