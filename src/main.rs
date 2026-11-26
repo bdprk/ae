@@ -5,7 +5,7 @@ mod package;
 mod render;
 mod frontend_cache;
 
-const USAGE: &str = "usage: ae <check|emit-c|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
+const USAGE: &str = "usage: ae <check|emit-c|emit-pure-c|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
 
 /// A toolchain failure with the exit code it maps to. Usage errors exit 2 and
 /// everything else exits 1, so a script can tell "you called it wrong" from
@@ -388,8 +388,8 @@ fn cache_command(subcommand: Option<&OsString>) -> Result<u8, String> {
 fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if args.is_empty() { return Err(Failure::usage(USAGE)); }
     let cmd = args[0].to_str().ok_or(Failure::usage("command must be UTF-8"))?.to_owned();
-    const COMMANDS: [&str; 23] = [
-        "check", "emit-c", "emit-tree", "emit-cfg", "emit-mir", "emit-resolve", "emit-types", "emit-hir", "run", "build", "test",
+    const COMMANDS: [&str; 24] = [
+        "check", "emit-c", "emit-pure-c", "emit-tree", "emit-cfg", "emit-mir", "emit-resolve", "emit-types", "emit-hir", "run", "build", "test",
         "fmt", "cache", "new", "init", "update", "deps", "version", "doc", "explain",
         "add", "remove", "lsp",
     ];
@@ -608,7 +608,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     }
     let first = args.get(1).and_then(|arg| arg.to_str());
     let implicit_project = match cmd.as_str() {
-        "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" => args.len() == 1,
+        "check" | "emit-c" | "emit-pure-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" => args.len() == 1,
         "run" => args.len() == 1 || matches!(first, Some("--release" | "--debug" | "--interp" | "--")),
         "build" => first == Some("-o"),
         _ => false,
@@ -661,10 +661,10 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         _ => level.unwrap_or(false),
     };
     let output = match cmd.as_str() {
-        "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" | "run" if args.len() == 2 => None,
+        "check" | "emit-c" | "emit-pure-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" | "run" if args.len() == 2 => None,
         "run" if level.is_some() => None,
         "build" if (args.len() == 4 || level.is_some()) && args[2] == "-o" => Some(PathBuf::from(&args[3])),
-        "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" | "run" | "build" => return Err(Failure::usage(USAGE)),
+        "check" | "emit-c" | "emit-pure-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" | "run" | "build" => return Err(Failure::usage(USAGE)),
         _ => return Err(Failure::usage(format!("unknown command: {cmd}\n{USAGE}"))),
     };
     let package::PackageEntry { path: input, imports, lock } = package::entry_path(Path::new(&args[1]))?;
@@ -800,6 +800,20 @@ fn run_source(
         let (module, resolution) = ae_resolve::load_and_resolve(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let hir = ae_hir::build(&module, Some(&resolution));
         print!("{}", ae_hir::dump::dump(&hir));
+        return Ok(0);
+    }
+    if cmd == "emit-pure-c" {
+        // The pure-MIR C pipeline (ADR-0237): lower -> optimize -> validate ->
+        // borrow-check -> C11. Standalone programs only for now; project
+        // imports are not followed by this path yet.
+        let config = ae_compiler::ae_codegen_c::EmitConfig {
+            target: ae_compiler::ae_layout::TargetSpec::host(),
+            // Like `emit-c`, the output is a runnable translation unit.
+            emit_main_wrapper: true,
+        };
+        let c = ae_compiler::compile_path_pure_mir_to_c(input, &config)
+            .map_err(|e| format!("{}: {e}", input.display()))?;
+        print!("{c}");
         return Ok(0);
     }
     if cmd == "emit-mir" {

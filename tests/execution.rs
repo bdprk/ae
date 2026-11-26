@@ -11392,3 +11392,52 @@ fn slice_mut_match_across_backends() {
         );
     }
 }
+
+
+#[test]
+fn emit_pure_c_outputs_runnable_c_and_fails_closed() {
+    // The pure-MIR C pipeline (ADR-0237) is reachable from the CLI and its
+    // output is a runnable translation unit, like the legacy `emit-c`.
+    let dir = unique_temp_dir("emit_pure_c");
+    let source = dir.join("program.ae");
+    fs::write(&source, "fn main() { print(6 * 7); }").unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(text.contains("ae_fn_main") && text.contains("int main"), "{text}");
+
+    let c_path = dir.join("program.c");
+    let exe_path = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    fs::write(&c_path, &emitted.stdout).unwrap();
+    let cc = std::env::var_os("AE_CC").unwrap_or_else(|| "gcc".into());
+    let build = Command::new(cc)
+        .args(["-std=c11", "-O0", &c_path.to_string_lossy(), "-o", &exe_path.to_string_lossy(), "-lm"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe_path).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "42\n");
+
+    // Shapes the pipeline does not support yet fail closed with a named
+    // diagnostic instead of emitting malformed C.
+    let unsupported = dir.join("unsupported.ae");
+    fs::write(&unsupported, "fn main() { var v = vec[1]; push(v, 2); }").unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&unsupported)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let message = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        message.contains("is not supported by the pure C backend")
+            || message.contains("cannot handle"),
+        "{message}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
