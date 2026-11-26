@@ -322,7 +322,7 @@ impl<'a> Parser<'a> {
                     match arg {
                         Argument::Value(e) => self.record_borrow_bases(e),
                         Argument::View(e) => self.record_borrow_bases(e),
-                        Argument::Borrow(_, _) | Argument::FnPtr(_) => {}
+                        Argument::Borrow(_, _) | Argument::FnPtr(..) => {}
                     }
                 }
             }

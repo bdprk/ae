@@ -288,12 +288,10 @@ fn emit_terminator(
                         });
                     }
                 },
-                other => {
-                    return Err(CodegenError::UnsupportedFeature {
-                        body_name: body.name.clone(),
-                        detail: format!("indirect call operand {other:?} is not supported"),
-                    });
-                }
+                // A function-typed binding holds the pointer: call the value
+                // through a parenthesized expression (its C type is the
+                // signature typedef, so no cast is needed).
+                operand => format!("({})", emit_operand(body, operand, types, def_map)?),
             };
 
             let mut arg_exprs = Vec::with_capacity(args.len());
@@ -500,6 +498,7 @@ fn emit_place(
                 let reference_pointee = match cur_ty {
                     Some(TyKind::StructRef(sid) | TyKind::StructMut(sid)) => Some(TyKind::Struct(sid)),
                     Some(TyKind::VectorRef(id)) => Some(TyKind::Vector(id)),
+                    Some(TyKind::Ptr(id) | TyKind::PtrMut(id)) => types.pointees.get(&id).copied(),
                     _ => None,
                 };
                 let target_ty = reference_pointee.or(if is_last { deref_pointee_ty } else { None });
@@ -550,7 +549,15 @@ fn emit_constant(
             // what the legacy backend does, so both produce the same bytes.
             Ok(format!("\"{s}\""))
         }
-        (ConstValue::FnDef(def_id), TyKind::Fn(_) | TyKind::Closure(_)) => {
+        (ConstValue::FnDef(def_id), TyKind::Fn(sig)) => {
+            let name = def_map.get(def_id).ok_or_else(|| CodegenError::UnresolvedCall {
+                body_name: body.name.clone(),
+                def_id: *def_id,
+            })?;
+            // A function designator converts to the signature's typedef.
+            Ok(format!("((ae_fn_t{sig}){name})"))
+        }
+        (ConstValue::FnDef(def_id), TyKind::Closure(_)) => {
             let name = def_map.get(def_id).ok_or_else(|| CodegenError::UnresolvedCall {
                 body_name: body.name.clone(),
                 def_id: *def_id,

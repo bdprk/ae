@@ -1525,7 +1525,7 @@ impl Parser<'_> {
                     }
                     let id = function.id;
                     self.pos += 1;
-                    return Ok(Argument::FnPtr(id));
+                    return Ok(Argument::FnPtr(id, sig));
                 }
         }
 
@@ -1562,6 +1562,6 @@ impl Parser<'_> {
             let got = format!("fn({}) -> {}", def.params.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", "), def.ret.name(self.ctx));
             return Err(self.fail(&format!("argument {position} to '{callee}' must be a closure of type {}, found {}", expected.name(self.ctx), got)));
         }
-        Ok(Argument::FnPtr(def.fn_id))
+        Ok(Argument::FnPtr(def.fn_id, sig))
     }
 }

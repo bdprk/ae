@@ -522,7 +522,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
                         moved.mut_release(*sig, position, *id);
                         if let Some(violation) = moved.read(*id) { return Some(violation); }
                     }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
             None
@@ -543,7 +543,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
                             }
                         if let Some(violation) = moved.read(*id) { return Some(violation); }
                     }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
             None
@@ -563,7 +563,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
                             }
                         if let Some(violation) = moved.read(*id) { return Some(violation); }
                     }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
             None

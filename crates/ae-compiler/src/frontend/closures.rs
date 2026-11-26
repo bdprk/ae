@@ -483,7 +483,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
                 match arg {
                     Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
                     Argument::Borrow(id, _) => { used.insert(*id); }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
         }
@@ -493,7 +493,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
                 match arg {
                     Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
                     Argument::Borrow(id, _) => { used.insert(*id); }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
         }
@@ -502,7 +502,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
                 match arg {
                     Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
                     Argument::Borrow(id, _) => { used.insert(*id); }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
         }

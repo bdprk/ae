@@ -107,3 +107,25 @@ construct, so the enum union typedef lacked that member (`u.v1` missing while
 `v10` existed); `Body.enum_layouts` now carries every declared variant's
 field types and `ae-codegen-c` seeds its enum table from it. The end-to-end
 gate rises from 90 to **93 of 161** fixtures with output parity intact.
+
+## Pointer metadata and indirect calls
+
+Two more type facts travel on the body so a standalone backend can type
+operations with no syntactic type. `Body.pointees` maps a raw pointer's
+interned pointee id to its type (collected through containers, struct fields
+and enum payloads; the lookup is bounds-checked because a few lowering temps
+carry `PtrMut(0)` placeholders), and `Body.fn_sigs` maps a function-signature
+id to `(params, return)` (collected from locals and from `FnRef`/`FnPtr`
+constants). `ae-codegen-c` emits one
+`typedef ret (*ae_fn_t{sig})(params);` per signature, spells a function value
+as that typedef, casts a function designator to it, and calls a
+function-typed binding through the operand itself. `FnCall` now lowers to an
+indirect callee (the slot operand) rather than a direct call to a
+same-numbered function: the variable and function id spaces are separate.
+
+The optimizer also gained a soundness fix: intra-block constant propagation
+clears its environment on a store whose projection contains `Deref`. A raw
+pointer write may land in any local whose address was taken, so folding a
+later read of that local back to its pre-write constant is wrong (the corpus
+caught exactly that in `unsafe_pointer_write`). The end-to-end gate rises
+from 93 to **97 of 161** fixtures.

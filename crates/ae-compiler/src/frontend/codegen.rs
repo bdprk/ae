@@ -79,7 +79,7 @@ fn emit_call_and_cleanup(callee: &str, args: &[Argument], ret: Type, out: &mut S
         // The function pointer goes into the argument list directly:
         // a temporary of function type would need C's parenthesized
         // declarator form, which the temp template cannot print.
-        Argument::FnPtr(id) => Some(ctx.exposure_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))),
+        Argument::FnPtr(id, _) => Some(ctx.exposure_name(*id).unwrap_or_else(|| format!("ae_fn_{id}"))),
     }).collect::<Vec<_>>().join(", ");
     if ret == Type::Unit {
         out.push_str(&format!("    {callee}({arguments});\n"));

@@ -40,6 +40,9 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Closure(id) => format!("ae_closure_{id}"),
         TyKind::Enum(_, id) => format!("ae_enum_{id}"),
         TyKind::ArrayOf(elem_id, len) => format!("ae_array_{elem_id}_{len}"),
+        // A function value is a typed function pointer (typedef emitted per
+        // signature), never an opaque `void *`.
+        TyKind::Fn(sig) => format!("ae_fn_t{sig}"),
         TyKind::Vector(_)
         | TyKind::VectorRef(_)
         | TyKind::MapOf(_)
@@ -48,7 +51,6 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         | TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::Tokens
-        | TyKind::Fn(_)
         | TyKind::Ptr(_)
         | TyKind::PtrMut(_)
         | TyKind::Thread(_)
@@ -78,6 +80,11 @@ pub(crate) struct ModuleTypes {
     pub closures: BTreeMap<usize, Vec<Option<TyKind>>>,
     pub enums: BTreeMap<usize, BTreeMap<usize, Vec<Option<TyKind>>>>,
     pub arrays: BTreeMap<(usize, usize), Option<TyKind>>,
+    /// Raw-pointer interner id -> pointee type, carried on each body.
+    pub pointees: BTreeMap<usize, TyKind>,
+    /// Function-pointer signature id -> (params, return), carried on each
+    /// body; the emitter spells `ae_fn_t{id}` from it.
+    pub fn_sigs: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
 }
 
 impl ModuleTypes {
@@ -88,6 +95,12 @@ impl ModuleTypes {
         for body in bodies {
             for decl in &body.locals {
                 types.register_ty(decl.ty);
+            }
+            for (id, pointee) in &body.pointees {
+                types.pointees.entry(*id).or_insert(*pointee);
+            }
+            for (sig, signature) in &body.fn_sigs {
+                types.fn_sigs.entry(*sig).or_insert_with(|| signature.clone());
             }
         }
 
@@ -365,6 +378,7 @@ impl ModuleTypes {
                     cur_ty = match cur_ty {
                         TyKind::StructRef(sid) | TyKind::StructMut(sid) => TyKind::Struct(sid),
                         TyKind::VectorRef(id) => TyKind::Vector(id),
+                        TyKind::Ptr(id) | TyKind::PtrMut(id) => *self.pointees.get(&id)?,
                         _ => return None,
                     };
                 }
@@ -395,6 +409,18 @@ impl ModuleTypes {
             self.emit_typedef_topo(key, out, &mut visited, &mut visiting)?;
         }
         if !visited.is_empty() {
+            out.push('\n');
+        }
+        // Function-pointer typedefs come after the nominal types they name.
+        for (sig, (params, ret)) in &self.fn_sigs {
+            let params = if params.is_empty() {
+                "void".to_owned()
+            } else {
+                params.iter().map(|ty| c_type_name(*ty)).collect::<Vec<_>>().join(", ")
+            };
+            let _ = writeln!(out, "typedef {} (*ae_fn_t{sig})({params});", c_type_name(*ret));
+        }
+        if !self.fn_sigs.is_empty() {
             out.push('\n');
         }
         Ok(())

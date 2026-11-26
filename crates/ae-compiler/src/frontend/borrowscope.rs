@@ -179,7 +179,7 @@ fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
             for arg in args {
                 match arg {
                     Argument::Value(e) | Argument::View(e) => collect_waits_expr(e, out),
-                    Argument::Borrow(..) | Argument::FnPtr(_) => {}
+                    Argument::Borrow(..) | Argument::FnPtr(..) => {}
                 }
             }
         }
@@ -188,7 +188,7 @@ fn collect_waits_expr(expr: &Expr, out: &mut Vec<usize>) {
             for arg in args {
                 match arg {
                     Argument::Value(e) | Argument::View(e) => collect_waits_expr(e, out),
-                    Argument::Borrow(..) | Argument::FnPtr(_) => {}
+                    Argument::Borrow(..) | Argument::FnPtr(..) => {}
                 }
             }
         }

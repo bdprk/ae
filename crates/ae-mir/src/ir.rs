@@ -46,6 +46,12 @@ pub struct Body {
     /// names (`print`, `exit`, `vec_push`, ...). A backend emits these
     /// itself; they are not source functions.
     pub intrinsics: BTreeMap<DefId, String>,
+    /// Pointee types for the raw-pointer interner ids the body names
+    /// (`pointee id -> type`), so a standalone backend can type a deref.
+    pub pointees: BTreeMap<usize, TyKind>,
+    /// Function-pointer signatures (`sig id -> (params, return)`), so a
+    /// standalone backend can spell and call an indirect callee.
+    pub fn_sigs: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
     /// Payload field types per variant for every enum the program declares
     /// (`enum id -> variant -> fields`). Carried so a standalone backend can
     /// lay out a union member even when the body never constructs that
@@ -63,6 +69,8 @@ impl Body {
             locals: Vec::new(),
             basic_blocks: Vec::new(),
             intrinsics: BTreeMap::new(),
+            pointees: BTreeMap::new(),
+            fn_sigs: BTreeMap::new(),
             enum_layouts: BTreeMap::new(),
             span: None,
         }

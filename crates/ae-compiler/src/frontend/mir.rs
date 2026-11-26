@@ -291,7 +291,7 @@ fn lower_args(args: &[Argument], bindings: &mut Vec<MirBinding>, lowering: &mut 
             MirOperand::Place(target)
         }
         Argument::Borrow(slot, take_address) => MirOperand::Borrow { slot: *slot, take_address: *take_address },
-        Argument::FnPtr(id) => MirOperand::FnPtr(*id),
+        Argument::FnPtr(id, _) => MirOperand::FnPtr(*id),
     }).collect()
 }
 

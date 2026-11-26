@@ -2781,7 +2781,7 @@ fn invoke_call(
                     read_var(locals, caller_locals, *slot, 0, 0)?
                 }
             }
-            Argument::FnPtr(id) => Val::FnPtr(*id),
+            Argument::FnPtr(id, _) => Val::FnPtr(*id),
         };
         callee_locals.insert(*param_id, val);
     }

@@ -264,7 +264,11 @@ pub fn fold_constants_and_propagate(body: &mut Body) -> (usize, usize) {
                         folded += 1;
                     }
 
-                    if place.projection.is_empty() {
+                    if place.projection.iter().any(|elem| matches!(elem, ProjectionElem::Deref)) {
+                        // A store through a pointer may land in any local
+                        // whose address was taken; no constant survives.
+                        const_env.clear();
+                    } else if place.projection.is_empty() {
                         if let Rvalue::Use(Operand::Constant(c)) = &new_rvalue {
                             const_env.insert(place.local, c.clone());
                         } else {

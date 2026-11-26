@@ -4,7 +4,7 @@
 //! zero AST `Statement` or `Expr` nodes retained. Short-circuit `&&` and `||`
 //! expressions are lowered into explicit basic blocks and `SwitchInt` branches.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
 
 use ae_mir::{
@@ -156,6 +156,9 @@ struct PureMirBuilder<'a> {
     /// Synthetic intrinsic `DefId`s registered while lowering, carried on
     /// the body so a backend can emit the builtin itself.
     intrinsics: BTreeMap<DefId, String>,
+    /// Signatures seen on function-value constants (`FnRef`, fn-pointer
+    /// arguments), merged with the locals' signatures at `finish`.
+    fn_sigs_seen: BTreeMap<usize, (Vec<TyKind>, TyKind)>,
     enum_layouts: &'a BTreeMap<usize, Vec<Vec<TyKind>>>,
     /// Shapes this function uses that the pure pipeline cannot lower yet;
     /// a non-empty list turns the whole lowering into an error (fail closed)
@@ -218,6 +221,7 @@ impl<'a> PureMirBuilder<'a> {
             structs,
             ctx,
             intrinsics: BTreeMap::new(),
+            fn_sigs_seen: BTreeMap::new(),
             enum_layouts,
             unsupported: Vec::new(),
         }
@@ -318,6 +322,34 @@ impl<'a> PureMirBuilder<'a> {
             }
         }
 
+        // Every pointer type the body can touch (locals, nested container
+        // elements, struct fields, enum payloads) contributes its pointee,
+        // and every function-pointer type contributes its signature, so a
+        // standalone backend can type a dereference and an indirect call.
+        let mut pointees = BTreeMap::new();
+        let mut fn_sigs = BTreeMap::new();
+        let mut visited_structs = BTreeSet::new();
+        for decl in &self.locals {
+            collect_pointees(
+                decl.ty,
+                self.structs,
+                self.enum_layouts,
+                self.ctx,
+                &mut visited_structs,
+                &mut pointees,
+            );
+            collect_fn_sigs(
+                decl.ty,
+                self.structs,
+                self.enum_layouts,
+                self.ctx,
+                &mut BTreeSet::new(),
+                &mut fn_sigs,
+            );
+        }
+        for (sig, signature) in &self.fn_sigs_seen {
+            fn_sigs.entry(*sig).or_insert_with(|| signature.clone());
+        }
         Body {
             name: self.name,
             def: self.def,
@@ -325,6 +357,8 @@ impl<'a> PureMirBuilder<'a> {
             locals: self.locals,
             basic_blocks: compact_blocks,
             intrinsics: self.intrinsics,
+            pointees,
+            fn_sigs,
             enum_layouts: self.enum_layouts.clone(),
             span: None,
         }
@@ -894,10 +928,13 @@ impl<'a> PureMirBuilder<'a> {
                 let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
                 Rvalue::Use(Operand::Copy(place))
             }
-            Expr::FnRef(id, sig) => Rvalue::Use(Operand::Constant(Constant::new(
-                TyKind::Fn(*sig),
-                ConstValue::FnDef(DefId(*id as u32)),
-            ))),
+            Expr::FnRef(id, sig) => {
+                self.record_fn_sig(*sig);
+                Rvalue::Use(Operand::Constant(Constant::new(
+                    TyKind::Fn(*sig),
+                    ConstValue::FnDef(DefId(*id as u32)),
+                )))
+            }
             Expr::ClosureLit(cid) => {
                 let fn_id = self.ctx.closure_fn_id(*cid);
                 Rvalue::Use(Operand::Constant(Constant::new(
@@ -905,7 +942,7 @@ impl<'a> PureMirBuilder<'a> {
                     ConstValue::FnDef(DefId(fn_id as u32)),
                 )))
             }
-            Expr::Call(fn_id, args, ret) | Expr::FnCall(fn_id, args, ret, _) => {
+            Expr::Call(fn_id, args, ret) => {
                 let arg_ops = self.lower_args(args);
                 let dest = self.fresh_temp(*ret);
                 let next_bb = self.new_block();
@@ -914,6 +951,22 @@ impl<'a> PureMirBuilder<'a> {
                         TyKind::Fn(*fn_id),
                         ConstValue::FnDef(DefId(*fn_id as u32)),
                     )),
+                    args: arg_ops,
+                    destination: Place::from_local(dest),
+                    target: Some(next_bb),
+                });
+                self.cur_bb = next_bb;
+                Rvalue::Use(Operand::Copy(Place::from_local(dest)))
+            }
+            // A call through a function-typed binding: the slot holds the
+            // pointer, so the terminator takes the local as its callee.
+            Expr::FnCall(slot, args, ret, _) => {
+                let (local, _) = self.ensure_var(*slot, TyKind::Fn(0));
+                let arg_ops = self.lower_args(args);
+                let dest = self.fresh_temp(*ret);
+                let next_bb = self.new_block();
+                self.set_terminator(TerminatorKind::Call {
+                    func: Operand::Copy(Place::from_local(local)),
                     args: arg_ops,
                     destination: Place::from_local(dest),
                     target: Some(next_bb),
@@ -1116,10 +1169,13 @@ impl<'a> PureMirBuilder<'a> {
                         Operand::Copy(place)
                     }
                 }
-                Argument::FnPtr(id) => Operand::Constant(Constant::new(
-                    TyKind::Fn(*id),
-                    ConstValue::FnDef(DefId(*id as u32)),
-                )),
+                Argument::FnPtr(id, sig) => {
+                    self.record_fn_sig(*sig);
+                    Operand::Constant(Constant::new(
+                        TyKind::Fn(*sig),
+                        ConstValue::FnDef(DefId(*id as u32)),
+                    ))
+                }
             })
             .collect()
     }
@@ -1522,6 +1578,122 @@ impl PureMirBuilder<'_> {
         let id = 0x8000_0000 | (hash & 0x7fff_ffff);
         self.intrinsics.insert(DefId(id), name.to_owned());
         Operand::Constant(Constant::new(TyKind::Fn(0), ConstValue::FnDef(DefId(id))))
+    }
+
+    /// Record a function-value constant's signature (a `FnRef` names it
+    /// directly; the id may be absent from the interner for a placeholder).
+    fn record_fn_sig(&mut self, sig: usize) {
+        if !self.fn_sigs_seen.contains_key(&sig)
+            && let Some(signature) = self.ctx.fn_sig_checked(sig)
+        {
+            self.fn_sigs_seen.insert(sig, signature);
+        }
+    }
+}
+
+/// Walk `ty` for raw-pointer pointee ids (and the types reachable through
+/// containers, struct fields and enum payloads), recording `id -> pointee`.
+fn collect_pointees(
+    ty: TyKind,
+    structs: &[StructDef],
+    enum_layouts: &BTreeMap<usize, Vec<Vec<TyKind>>>,
+    ctx: &CompileContext,
+    visited_structs: &mut BTreeSet<usize>,
+    out: &mut BTreeMap<usize, TyKind>,
+) {
+    match ty {
+        TyKind::Ptr(id) | TyKind::PtrMut(id) => {
+            if let Some(pointee) = ctx.pointee_checked(id) {
+                out.entry(id).or_insert(pointee);
+            }
+        }
+        TyKind::Vector(id) | TyKind::VectorRef(id) => {
+            collect_pointees(ctx.vector_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::Slice(id) | TyKind::SliceMut(id) => {
+            collect_pointees(ctx.slice_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::ArrayOf(id, _) => {
+            collect_pointees(ctx.array_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::MapOf(id) => {
+            let (key, value) = ctx.map_types(id);
+            collect_pointees(key, structs, enum_layouts, ctx, visited_structs, out);
+            collect_pointees(value, structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::Struct(sid) | TyKind::StructRef(sid) | TyKind::StructMut(sid) => {
+            if visited_structs.insert(sid) {
+                for (_, field) in &structs[sid].fields {
+                    collect_pointees(*field, structs, enum_layouts, ctx, visited_structs, out);
+                }
+            }
+        }
+        TyKind::Enum(_, eid) => {
+            if let Some(variants) = enum_layouts.get(&eid) {
+                for fields in variants {
+                    for field in fields {
+                        collect_pointees(*field, structs, enum_layouts, ctx, visited_structs, out);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk `ty` for `fn(..) -> ..` types and record each signature
+/// (`sig id -> (params, return)`) so a backend can spell the pointer and
+/// cast an indirect callee.
+fn collect_fn_sigs(
+    ty: TyKind,
+    structs: &[StructDef],
+    enum_layouts: &BTreeMap<usize, Vec<Vec<TyKind>>>,
+    ctx: &CompileContext,
+    visited_structs: &mut BTreeSet<usize>,
+    out: &mut BTreeMap<usize, (Vec<TyKind>, TyKind)>,
+) {
+    match ty {
+        TyKind::Fn(sig) => {
+            if let Some((params, ret)) = ctx.fn_sig_checked(sig) {
+                out.entry(sig).or_insert((params, ret));
+            }
+        }
+        TyKind::Ptr(id) | TyKind::PtrMut(id) => {
+            if let Some(pointee) = ctx.pointee_checked(id) {
+                collect_fn_sigs(pointee, structs, enum_layouts, ctx, visited_structs, out);
+            }
+        }
+        TyKind::Vector(id) | TyKind::VectorRef(id) => {
+            collect_fn_sigs(ctx.vector_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::Slice(id) | TyKind::SliceMut(id) => {
+            collect_fn_sigs(ctx.slice_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::ArrayOf(id, _) => {
+            collect_fn_sigs(ctx.array_elem(id), structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::MapOf(id) => {
+            let (key, value) = ctx.map_types(id);
+            collect_fn_sigs(key, structs, enum_layouts, ctx, visited_structs, out);
+            collect_fn_sigs(value, structs, enum_layouts, ctx, visited_structs, out);
+        }
+        TyKind::Struct(sid) | TyKind::StructRef(sid) | TyKind::StructMut(sid) => {
+            if visited_structs.insert(sid) {
+                for (_, field) in &structs[sid].fields {
+                    collect_fn_sigs(*field, structs, enum_layouts, ctx, visited_structs, out);
+                }
+            }
+        }
+        TyKind::Enum(_, eid) => {
+            if let Some(variants) = enum_layouts.get(&eid) {
+                for fields in variants {
+                    for field in fields {
+                        collect_fn_sigs(*field, structs, enum_layouts, ctx, visited_structs, out);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

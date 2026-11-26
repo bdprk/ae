@@ -149,4 +149,10 @@ fn pure_mir_c11_pipeline_matches_fixture_output() {
     );
     let _ = fs::remove_dir_all(&dir);
     println!("pure-MIR -> C11: {passed}/{accepted} fixtures emit, compile and match their stdout");
+    if std::env::var("AE_PURE_GATE_VERBOSE").is_ok() {
+        for (key, (count, example)) in &grouped {
+            println!("{count:3} {key}
+      e.g. {example}");
+        }
+    }
 }

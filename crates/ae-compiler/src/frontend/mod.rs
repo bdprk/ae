@@ -155,6 +155,12 @@ impl CompileContext {
         self.types.pointee(id)
     }
 
+    /// A bounds-checked pointee lookup: some lowering temps carry a
+    /// placeholder pointer id (`PtrMut(0)`) without an interned pointee.
+    fn pointee_checked(&self, id: usize) -> Option<Type> {
+        (id < self.types.pointee_count()).then(|| self.types.pointee(id))
+    }
+
     fn intern_shared(&mut self, elem: Type) -> usize {
         self.types.intern_shared(elem)
     }
@@ -680,7 +686,7 @@ fn map_element_ty(kind: MapKind) -> Type {
     if kind == MapKind::Float { Type::Float(FloatTy::F64) } else { Type::Int(IntTy::I64) }
 }
 #[derive(Debug, Clone)]
-enum Argument { Value(Expr), Borrow(usize, bool), View(Expr), FnPtr(usize) } // Borrow bool: pass &slot vs array (decays); View: read-only string borrow; FnPtr: an internal function ID (ADR-0189)
+enum Argument { Value(Expr), Borrow(usize, bool), View(Expr), FnPtr(usize, usize) } // Borrow bool: pass &slot vs array (decays); View: read-only string borrow; FnPtr: internal function ID + its signature ID (ADR-0189)
 #[derive(Debug, Clone)]
 enum Printed { Expr(Expr), Text(String) }
 #[derive(Debug, Clone)]
