@@ -1,13 +1,13 @@
 # Generics Specification (M1 subset, current implementation)
 
-Status: describes the implemented language (2026-11-26). Generic monomorphization is the only form: direct value arguments can infer call-site type parameters, but there is no general Hindley–Milner inference, no runtime generics, and no capability proofs on unsubstituted ASTs — every instantiation is checked as concrete code.
+Status: describes the implemented language (2026-11-26). Generic monomorphization is the only form: direct value, `&T`, `&mut T`, `&[T]`, `&mut [T]`, and `vec[T]` arguments can infer call-site type parameters, and declaration-site checks validate built-in operator bounds and trait method calls on type parameters — while every instantiation is still checked as concrete code.
 
 ## 1. Design Rules
 
 ### Hard Rules:
-1. **Explicit or Value-Inferred Call Arguments**: explicit type arguments are always accepted (`identity[i64](41)`, `Pair[string, i64]`). A bare generic function call infers a type parameter when that parameter is the complete type of at least one value argument (`identity(41)`); repeated occurrences must agree. Borrowed/composite parameters, return-only parameters and generic type constructors do not participate in this slice, so calls that still lack a parameter are rejected with the explicit-type-argument remedy.
+1. **Explicit or Argument-Inferred Call Arguments**: explicit type arguments are always accepted (`identity[i64](41)`, `Pair[string, i64]`). A bare generic function call infers a type parameter when that parameter is determined by at least one argument matching `T`, `&T`, `&mut T`, `&[T]`, `&mut [T]`, or `vec[T]` (`identity(41)`, `read_x(&pt)`, `slice_len(&vi)`, `set_first(&mut mv, 99)`, `vec_len(vec[10, 20])`); repeated occurrences must agree. Return-only parameters, `map[K, V]`, and generic type constructors do not participate in inference, so calls that still lack a parameter are rejected with the explicit-type-argument remedy.
 2. **One Argument List, One Layout**: `Pair[string, i64]` is the same type everywhere — freely assignable, passable, returnable. Different argument lists are different types and never interchangeable.
-3. **Check at Instantiation**: a generic body is fully type-checked *after* substitution with the actual arguments; errors point at expressions in the generic body itself. Constraints intercept two earlier points (call-site shape, declaration-site pre-check) but never replace this check.
+3. **Check at Declaration and Instantiation**: declaration-site checks validate built-in constraint tightening and trait method calls on `T` (even for unused generics), and every generic body is fully type-checked *after* substitution with the actual arguments; errors point at expressions in the generic body itself.
 4. **No Recursive Layouts**: struct and enum names are not registered inside their own bodies, so `struct Node[T] { next: Node[T] }` is rejected — self-referential sizes cannot exist.
 
 ### Non-Goals (this version):
@@ -44,7 +44,7 @@ Status: describes the implemented language (2026-11-26). Generic monomorphizatio
 
 `fn identity[T](x: T) -> T { return x; }` — the declaration produces no function; each call site (`identity[i64](41)` or `identity(41)`) instantiates one: parameter types, return type, and body are re-checked after substitution.
 
-- **Direct value inference (P2.5.2 slice 1):** a parameter spelled exactly `T` learns `T` from that argument's concrete value type. Different parameters infer independently, fixed parameters still check normally, and repeated uses of `T` must accept the same concrete type. The implementation lowers the arguments once, instantiates through the same cache as an explicit call, and performs the ordinary post-instantiation argument and body checks. This slice deliberately does not infer through `&T`, `&[T]`, `vec[T]`, another composite, a return type, or a local annotation; write explicit arguments for those forms.
+- **Call-site argument inference (P2.5.2):** a bare generic call infers each type parameter `T` from arguments matching `T` (direct value), `&T`, `&mut T`, `&[T]` (from `vec[T]`, fixed array, or slice window), `&mut [T]`, or `vec[T]`. Different parameters infer independently, fixed parameters still check normally, and repeated uses of `T` must accept the same concrete type. The implementation lowers arguments once, instantiates through the same cache as an explicit call, and performs the ordinary post-instantiation argument, borrow/mutability, and body checks (`&mut T` / `&mut [T]` still require mutable bindings and reject aliasing mutable borrows). Return-only type parameters, `map[K, V]`, and generic struct/enum constructors still require explicit type arguments.
 - Mismatched argument counts or types error at the call site. Body errors point at the declaration-site expressions (e.g. `'+' requires two strings` inside the generic body).
 - The same argument list is instantiated once and cached: `identity[i64]` is the same C function everywhere.
 - Type parameters flow into other generics: `fn double_wrap[T](x: T) -> Option[T] { let inner = wrap[T](x); return inner; }` resolves under the current substitution table.
@@ -84,7 +84,13 @@ Checked at two levels, **both of which only reject, never permit**:
 1. **Call site**: the argument type must be in the constraint's allowlist; the error lists the permitted types. Applies across files for `pub fn`.
 2. **Declaration site**: for constrained functions, the **intersection** of all constraint allowlists is the valid set; the body is scanned for operations applied to type parameters, and if a valid type does not support such an operation, the declaration is rejected (`the constraint still admits bool, which does not support it`). Conservative by design: only identifiers immediately adjacent to operation tokens are examined; call results, subscripts, fields, and indeterminate locals are skipped — **false negatives are permitted** (the instantiation check still catches them), **false positives are not**.
 
-Unknown constraints (`T: Printable`), duplicate constraints (`T: Add + Add`), and constraints on structs/enums are rejected at the declaration site. Constraints do not participate in code generation and are not a dispatch mechanism; dispatch through generic bounds via user traits is future work (`spec/methods_and_traits.md`).
+Unknown constraints (`T: Printable`), duplicate constraints (`T: Add + Add`), and constraints on structs/enums are rejected at the declaration site.
+
+**Declaration-site trait method checking (P2.5.4):** for user-defined trait bounds (`[T: Area]`, `[T: TraitA + TraitB]`), the compiler also checks method calls on `T`, `&T`, `&mut T`, and local bindings typed via `T` (explicit `let copy: T = shape;` or inferred from a trait method return `let cloned = v.clone_val();`, as well as chained calls `v.clone_val().nope()`) at the **declaration site**, even when the generic function is never called. Both method syntax (`x.method(...)`) and function syntax (`method(x, ...)`) are checked:
+- Calling a method on an unbounded type parameter `T` is rejected (`generic function '...' calls method '...' on unbounded type parameter 'T' (add a trait bound that defines '...')`).
+- Calling a method not defined by any of `T`'s trait bounds is rejected (`generic function '...' calls missing method '...' on type parameter 'T' with bounds '...' (no bound defines '...')`).
+- Arity mismatches and ambiguous method names across multiple trait bounds (`TraitA + TraitB`) are rejected at the declaration site.
+Instantiation-site checking still verifies that the concrete argument type has an `impl` for every required trait. See `spec/methods_and_traits.md`.
 
 ## 8. Diagnostics Summary
 
@@ -97,6 +103,7 @@ No dedicated E-codes are assigned in this version; move-related rejections reuse
 | G1 | `identity[i64]` / `identity[string]` both called | Two instantiations, correct values |
 | G2 | Omitted type arguments with no direct-value evidence | Rejected, names the fix |
 | G2a | Omitted type arguments with direct-value evidence | Infers each parameter; repeated occurrences must agree |
+| G2b | Omitted type arguments with `&T`, `&mut T`, `&[T]`, `&mut [T]`, or `vec[T]` | Infers `T`; rejects conflicts, immutable `&mut`, and aliasing `&mut` |
 | G3 | `Pair[string, i64]` assigned, passed, returned as one type | Single layout, runs |
 | G4 | `Pair[string, i64]` mixed with `Pair[i64, i64]` | Rejected (type mismatch) |
 | G5 | Owned field write `p.right = value;` consumes an owned variable; scope exit releases fields | Leak-clean, use-after-move rejected |
@@ -111,5 +118,6 @@ No dedicated E-codes are assigned in this version; move-related rejections reuse
 | G14 | `T: Add` called with `string` and `i64` | Both allowed |
 | G15 | `T: Copy` body using `+` | Rejected at the declaration site (tightening) |
 | G16 | Unknown / duplicate constraint | Rejected at the declaration site |
+| G17 | Unused generic calling missing/unbounded/ambiguous/wrong-arity trait method | Rejected at the declaration site |
 
-See `examples/generic_fn.ae`, `examples/generic_owned.ae`, `examples/generic_borrow.ae`, `examples/generic_impl.ae`, `examples/nested_generics.ae`, `examples/constraints.ae`, `examples/generic_constraints.ae`, `tests/run/generic_impl.ae`, `tests/run/enum_generic_impls.ae`, `tests/run/nested_generics.ae`, and the corresponding `ui` snapshots.
+See `examples/generic_fn.ae`, `examples/generic_owned.ae`, `examples/generic_borrow.ae`, `examples/generic_impl.ae`, `examples/nested_generics.ae`, `examples/constraints.ae`, `examples/generic_constraints.ae`, `tests/run/generic_impl.ae`, `tests/run/generic_inference_p25.ae`, `tests/run/enum_generic_impls.ae`, `tests/run/nested_generics.ae`, `tests/generic_inference_p25.rs`, `tests/generic_trait_check_p25.rs`, and the corresponding `ui` snapshots.
