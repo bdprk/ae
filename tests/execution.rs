@@ -11424,12 +11424,13 @@ fn emit_pure_c_outputs_runnable_c_and_fails_closed() {
     assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "42\n");
 
     // Shapes the pipeline does not support yet fail closed with a named
-    // diagnostic instead of emitting malformed C. Externs need the backend's
-    // own runtime unit (ADR-0238 stage 3), so they are still rejected.
+    // diagnostic instead of emitting malformed C. The pure backend ships a
+    // small runtime bridge (ae_std_alloc/free, ae_extern_probe); any other
+    // extern symbol is still rejected.
     let unsupported = dir.join("unsupported.ae");
     fs::write(
         &unsupported,
-        "extern \"C\" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;\nfn main() { unsafe { let p = ae_std_alloc(8, 1, 1); } }\n",
+        "extern \"C\" fn ae_unknown_symbol(v: i64) -> i64;\nfn main() { unsafe { let p = ae_unknown_symbol(1); } }\n",
     )
     .unwrap();
     let rejected = Command::new(env!("CARGO_BIN_EXE_ae"))

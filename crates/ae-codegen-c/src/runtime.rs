@@ -138,6 +138,28 @@ static inline void ae_print_f64(double value) {
     fputc(10, stdout);
 }
 _Noreturn static inline void ae_exit(int64_t code) { exit((int)code); }
+
+// Extern bridge (ADR-0238 stage 3): the pure backend ships the small set of
+// runtime symbols the language's `extern "C"` corpus links against, instead
+// of depending on the main runtime's translation unit. A declaration naming
+// a symbol outside this set still fails closed, so an unsupported extern is
+// a compile-time diagnostic rather than a link error.
+static inline int64_t ae_extern_probe(int64_t v) { return v * 2 + 1; }
+static inline int64_t *ae_std_alloc(int64_t size, int64_t line, int64_t column) {
+    (void)line;
+    (void)column;
+    if (size < 0) ae_trap("allocation failed");
+    void *out = malloc((size_t)size + 1u);
+    if (!out) ae_trap("allocation failed");
+    return (int64_t *)out;
+}
+static inline int64_t *ae_std_free(int64_t *block) {
+    // The wrapper returns the block value so a call site can bind it (the
+    // legacy bridge does the same); the address is not dereferenced again.
+    const uintptr_t address = (uintptr_t)block;
+    free(block);
+    return (int64_t *)address;
+}
 "#);
 
     // Owned strings (ADR-0238 stage 1): one C type carries the bytes, the

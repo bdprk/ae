@@ -1,6 +1,6 @@
 # ADR-0238: Owned strings and containers in the pure MIR C backend
 
-- Status: Accepted — stage 1 (owned strings) and stage 2 (vectors) implemented; stage 3 (extern runtime unit) pending
+- Status: Accepted — stages 1 (strings), 2 (vectors) and 3 (extern bridge) implemented
 - Date: 2026-11-26
 - Associated Milestone: P3.2 (pure MIR C backend parity), P4.1 (stdlib containers)
 
@@ -146,6 +146,31 @@ ASan+UBSan sweep: 128 of 130 emit-capable fixtures clean, the two intended
 traps (`divide_by_zero`, `vector_out_of_bounds`) abort by design. Workspace
 suite **686 passed / 0 failed** (2 ignored), clippy clean, calibration gate
 unchanged.
+
+## Stage 3 evidence (2026-11-27)
+
+The extern bridge landed with the pointer operations the allocator fixtures
+need:
+
+- The backend's own preamble now defines the small runtime set the language's
+  `extern "C"` corpus links against: `ae_std_alloc(size, line, column)`,
+  `ae_std_free(block)` and the probe helper `ae_extern_probe(v)`. Every other
+  declared symbol still fails closed with `extern '<symbol>' is not linked by
+  the pure C backend yet`, so an unsupported extern is a compile-time
+  diagnostic, never a link error.
+- `ptr_offset`/`byte_offset` emit `char *` arithmetic with the pointee size
+  scaled only on the element form; `ptr_cast`/`ptr_cast_mut` are the same
+  address (`void *`) with no runtime step.
+- `ae_std_free` returns the block value the way the legacy bridge does, but
+  carries it through `uintptr_t` so the generated C is warning-clean under
+  `-Wall -Wextra -Werror`.
+
+Evidence: gate 132 → **137 of 161** with zero mismatches. The ASan+UBSan
+sweep passes 139 of 142 emit-capable fixtures; the three intended traps
+(`divide_by_zero`, `vector_out_of_bounds`, `extern_alloc_oom`) abort by
+design (the OOM one is exercised with `allocator_may_return_null=1` so the
+runtime's own NULL check runs). Suite 686 passed / 0 failed (2 ignored),
+clippy clean.
 
 ## Consequences
 

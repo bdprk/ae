@@ -282,19 +282,23 @@ fn emit_terminator(
                 Operand::Constant(c) => match &c.value {
                     ConstValue::FnDef(def_id) => {
                         if let Some(symbol) = body.externs.get(def_id) {
-                            return Err(CodegenError::UnsupportedFeature {
-                                body_name: body.name.clone(),
-                                detail: format!(
-                                    "extern '{symbol}' is not linked by the pure C backend yet"
-                                ),
-                            });
-                        }
-                        def_map.get(def_id).cloned().ok_or_else(|| {
-                            CodegenError::UnresolvedCall {
-                                body_name: body.name.clone(),
-                                def_id: *def_id,
+                            if !runtime_extern(symbol) {
+                                return Err(CodegenError::UnsupportedFeature {
+                                    body_name: body.name.clone(),
+                                    detail: format!(
+                                        "extern '{symbol}' is not linked by the pure C backend yet"
+                                    ),
+                                });
                             }
-                        })?
+                            symbol.clone()
+                        } else {
+                            def_map.get(def_id).cloned().ok_or_else(|| {
+                                CodegenError::UnresolvedCall {
+                                    body_name: body.name.clone(),
+                                    def_id: *def_id,
+                                }
+                            })?
+                        }
                     }
                     other => {
                         return Err(CodegenError::UnsupportedFeature {
@@ -761,6 +765,39 @@ fn emit_intrinsic(
                 }),
             }
         }
+        "ptr_offset" | "byte_offset" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("{name} needs a pointer and a count"),
+                });
+            }
+            let base = emit_operand(body, &args[0], types, def_map)?;
+            let count = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let call = if name == "byte_offset" {
+                format!("((void *)((char *)({base}) + (int64_t)({count})))")
+            } else {
+                let pointee = match types.infer_operand_ty(body, &args[0]) {
+                    Some(TyKind::Ptr(id) | TyKind::PtrMut(id)) => types.pointees.get(&id).copied(),
+                    _ => None,
+                };
+                let pointee = pointee.ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "ptr_offset pointer has no known pointee type".to_owned(),
+                })?;
+                let c_pointee = c_type_name(pointee);
+                format!(
+                    "((void *)((char *)({base}) + (int64_t)({count}) * (int64_t)sizeof({c_pointee})))"
+                )
+            };
+            finish_value(out, body, types, destination, target, &call)
+        }
+        "ptr_cast" | "ptr_cast_mut" => {
+            // Both pointer kinds are `void *` in this backend, so a
+            // reinterpretation is the same address with no runtime step.
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("((void *){value})"))
+        }
         other => Err(CodegenError::UnsupportedFeature {
             body_name: body.name.clone(),
             detail: format!("intrinsic '{other}' is not supported by the pure C backend yet"),
@@ -823,6 +860,12 @@ fn finish_value(
         out.push_str("    ae_trap(\"diverging call returned\");\n");
     }
     Ok(())
+}
+
+/// Symbols the pure C backend supplies in its own runtime preamble. A
+/// declaration naming anything else still fails closed.
+fn runtime_extern(symbol: &str) -> bool {
+    matches!(symbol, "ae_std_alloc" | "ae_std_free" | "ae_extern_probe")
 }
 
 fn format_assert_message(msg: &AssertMessage) -> String {
