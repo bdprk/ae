@@ -3,10 +3,75 @@ use super::*;
 use super::parser::moved_value_hint;
 use super::route_marks::resolved_builtin;
 
+/// Structured registry of runtime-object intrinsics frozen by ADR-0224.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeIntrinsic {
+    SharedNew,
+    SharedGet,
+    MutexNew,
+    MutexLock,
+    ChanNew,
+    ChanSend,
+    ChanTrySend,
+    ChanRecv,
+    ChanSelect,
+    ExecNew,
+    ExecRun,
+    ScopeNew,
+    PoolNew,
+    PoolJoin,
+}
+
+impl RuntimeIntrinsic {
+    /// Returns the AE source-level builtin name for this intrinsic.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SharedNew => "shared_new",
+            Self::SharedGet => "shared_get",
+            Self::MutexNew => "mutex_new",
+            Self::MutexLock => "mutex_lock",
+            Self::ChanNew => "chan_new",
+            Self::ChanSend => "chan_send",
+            Self::ChanTrySend => "chan_try_send",
+            Self::ChanRecv => "chan_recv",
+            Self::ChanSelect => "chan_select",
+            Self::ExecNew => "exec_new",
+            Self::ExecRun => "exec_run",
+            Self::ScopeNew => "scope_new",
+            Self::PoolNew => "pool_new",
+            Self::PoolJoin => "pool_join",
+        }
+    }
+
+    /// Returns the allowlist family (`sync`, `chan`, or `task`) for this intrinsic.
+    pub const fn family(self) -> &'static str {
+        match self {
+            Self::SharedNew | Self::SharedGet | Self::MutexNew | Self::MutexLock => "sync",
+            Self::ChanNew | Self::ChanSend | Self::ChanTrySend | Self::ChanRecv | Self::ChanSelect => "chan",
+            Self::ExecNew | Self::ExecRun | Self::ScopeNew | Self::PoolNew | Self::PoolJoin => "task",
+        }
+    }
+}
+
 /// The runtime-object intrinsic surface frozen by ADR-0224. Keep this list
 /// in sync with `docs/architecture/intrinsic-allowlist.txt`;
-/// `tests/intrinsic_freeze.rs` reads this line.
-pub(super) const RUNTIME_OBJECT_INTRINSICS: &[&str] = &["shared_new", "shared_get", "mutex_new", "mutex_lock", "chan_new", "chan_send", "chan_try_send", "chan_recv", "chan_select", "exec_new", "exec_run", "scope_new", "pool_new", "pool_join"];
+/// `tests/intrinsic_freeze.rs` inspects this registry directly.
+pub const RUNTIME_OBJECT_INTRINSICS: &[RuntimeIntrinsic] = &[
+    RuntimeIntrinsic::SharedNew,
+    RuntimeIntrinsic::SharedGet,
+    RuntimeIntrinsic::MutexNew,
+    RuntimeIntrinsic::MutexLock,
+    RuntimeIntrinsic::ChanNew,
+    RuntimeIntrinsic::ChanSend,
+    RuntimeIntrinsic::ChanTrySend,
+    RuntimeIntrinsic::ChanRecv,
+    RuntimeIntrinsic::ChanSelect,
+    RuntimeIntrinsic::ExecNew,
+    RuntimeIntrinsic::ExecRun,
+    RuntimeIntrinsic::ScopeNew,
+    RuntimeIntrinsic::PoolNew,
+    RuntimeIntrinsic::PoolJoin,
+];
 
 impl<'a> Parser<'a> {
     /// The pure value builtins, lowered with the same `Expr` variants and the
@@ -22,7 +87,7 @@ impl<'a> Parser<'a> {
         arguments: &[ae_syntax::expression::Expression],
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        debug_assert!(RUNTIME_OBJECT_INTRINSICS.iter().all(|name| resolved_builtin(name)));
+        debug_assert!(RUNTIME_OBJECT_INTRINSICS.iter().all(|intrinsic| resolved_builtin(intrinsic.name())));
         use ae_syntax::expression::ExpressionKind;
         (|| -> Result<(Expr, Type), ae_span::Diagnostic> {
             self.seek_scalar_offset(callee.range.start);

@@ -16,6 +16,7 @@ mod lower_stmt;
 mod lower_loop;
 mod lower_expr;
 mod lower_builtin;
+pub use lower_builtin::{RUNTIME_OBJECT_INTRINSICS, RuntimeIntrinsic};
 mod lower_builtin_io;
 mod lower_builtin_stmt;
 mod lower_call;

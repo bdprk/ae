@@ -3,16 +3,9 @@
 use std::collections::BTreeSet;
 
 fn compiler_intrinsics() -> BTreeSet<String> {
-    let src = include_str!("../crates/ae-compiler/src/frontend/lower_builtin.rs");
-    let line = src
-        .lines()
-        .find(|l| l.contains("const RUNTIME_OBJECT_INTRINSICS"))
-        .expect("runtime-object intrinsic dispatch line not found; update tests/intrinsic_freeze.rs");
-    line.split('"')
-        .skip(1)
-        .step_by(2)
-        .filter(|s| s.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()) && !s.is_empty())
-        .map(str::to_owned)
+    ae_compiler::RUNTIME_OBJECT_INTRINSICS
+        .iter()
+        .map(|intrinsic| intrinsic.name().to_owned())
         .collect()
 }
 
@@ -43,5 +36,29 @@ fn every_allowlisted_intrinsic_has_a_disposition() {
         }
         let disposition = line.split_whitespace().nth(2).unwrap_or("");
         assert!(matches!(disposition, "keep" | "migrate" | "demote"), "bad disposition: {line}");
+    }
+}
+
+#[test]
+fn registry_families_match_allowlist() {
+    let allowlist_families: std::collections::BTreeMap<&str, &str> =
+        include_str!("../docs/architecture/intrinsic-allowlist.txt")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let mut cols = l.split_whitespace();
+                (cols.next().unwrap(), cols.next().unwrap())
+            })
+            .collect();
+    for intrinsic in ae_compiler::RUNTIME_OBJECT_INTRINSICS {
+        let expected = allowlist_families
+            .get(intrinsic.name())
+            .unwrap_or_else(|| panic!("{} missing from allowlist", intrinsic.name()));
+        assert_eq!(
+            intrinsic.family(),
+            *expected,
+            "family mismatch for {}",
+            intrinsic.name()
+        );
     }
 }
