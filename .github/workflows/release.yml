@@ -4,6 +4,10 @@ name: Release
 # compiler first. This attaches a prebuilt `ae` binary to every `v*` tag.
 # Running the binary still needs a C11 toolchain (AE_CC selects it); the
 # release notes point that out.
+#
+# The suffix carries the executable extension where the platform has one,
+# so a download is named `ae-<tag>-windows-x86_64.exe` and not a
+# extensionless file Windows refuses to run.
 
 on:
   push:
@@ -21,7 +25,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            suffix: windows-x86_64
+            suffix: windows-x86_64.exe
           - os: ubuntu-latest
             suffix: linux-x86_64
     steps:
