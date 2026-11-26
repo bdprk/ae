@@ -325,7 +325,11 @@ impl Parser<'_> {
                 let gid = self.generics.fn_defs.len();
                 self.generics.fn_names.insert(name.clone(), gid);
                 let bindings = parsed_parameters.map(Rc::from);
-                self.generics.fn_defs.push(GenericFn { name, bindings, params, bounds, trait_bounds, start, tokens: Rc::clone(&self.tokens), source: Rc::clone(&self.shared_source), file: self.file.clone(), public });
+                let returns = parsed_declaration.and_then(|item| match &item.kind {
+                    DeclarationKind::Function { returns, .. } => returns.clone(),
+                    _ => None,
+                });
+                self.generics.fn_defs.push(GenericFn { name, bindings, returns, params, bounds, trait_bounds, start, tokens: Rc::clone(&self.tokens), source: Rc::clone(&self.shared_source), file: self.file.clone(), public });
                 continue;
             }
             self.take(Kind::LParen)?;
