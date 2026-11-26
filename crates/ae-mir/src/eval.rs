@@ -636,9 +636,9 @@ fn eval_rvalue(
                 }),
             }
         }
-        Rvalue::Ref { .. } => Err(MirEvalError::UnsupportedFeature {
+        Rvalue::Ref { .. } | Rvalue::AddressOf(_) => Err(MirEvalError::UnsupportedFeature {
             block,
-            detail: "Rvalue::Ref is not supported in pure MIR eval".to_string(),
+            detail: "Rvalue::Ref/AddressOf is not supported in pure MIR eval".to_string(),
         }),
     }
 }

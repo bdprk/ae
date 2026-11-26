@@ -221,6 +221,7 @@ impl fmt::Display for Rvalue {
                 BorrowKind::Shared => write!(f, "&{place}"),
                 BorrowKind::Mut => write!(f, "&mut {place}"),
             },
+            Self::AddressOf(place) => write!(f, "address_of({place})"),
             Self::BinaryOp(op, lhs, rhs) => write!(f, "{op}({lhs}, {rhs})"),
             Self::UnaryOp(op, operand) => write!(f, "{op}({operand})"),
             Self::Cast(kind, op, ty) => write!(f, "{op} as {} ({kind})", format_ty(*ty)),

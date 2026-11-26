@@ -384,7 +384,7 @@ fn propagate_rvalue(
             }
             count
         }
-        Rvalue::Ref { .. } | Rvalue::Len(_) | Rvalue::Discriminant(_) => 0,
+        Rvalue::Ref { .. } | Rvalue::AddressOf(_) | Rvalue::Len(_) | Rvalue::Discriminant(_) => 0,
     }
 }
 
@@ -473,7 +473,8 @@ fn rvalue_references_local(rvalue: &Rvalue, local: LocalId) -> bool {
         Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast(_, op, _) => {
             operand_references_local(op, local)
         }
-        Rvalue::Ref { place, .. } | Rvalue::Len(place) | Rvalue::Discriminant(place) => {
+        Rvalue::Ref { place, .. } | Rvalue::AddressOf(place) | Rvalue::Len(place)
+        | Rvalue::Discriminant(place) => {
             place_references_local(place, local)
         }
         Rvalue::BinaryOp(_, l, r) => {

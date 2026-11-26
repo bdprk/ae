@@ -515,7 +515,7 @@ fn emit_rvalue(
 ) -> Result<String, CodegenError> {
     match rvalue {
         Rvalue::Use(op) => emit_operand(body, op, types, def_map),
-        Rvalue::Ref { place, .. } => {
+        Rvalue::Ref { place, .. } | Rvalue::AddressOf(place) => {
             let place_expr = emit_place(body, place, types, None)?;
             Ok(format!("((void *)&({place_expr}))"))
         }

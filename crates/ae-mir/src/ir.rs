@@ -274,6 +274,10 @@ pub enum Rvalue {
         borrow_kind: BorrowKind,
         place: Place,
     },
+    /// A raw address of a place (`&v as *const T`): the same C expression as
+    /// `Ref`, but it creates no borrow loan — `unsafe` sees the address and
+    /// the place stays writable (ADR-0237).
+    AddressOf(Place),
     BinaryOp(BinOp, Operand, Operand),
     UnaryOp(UnOp, Operand),
     Cast(CastKind, Operand, TyKind),

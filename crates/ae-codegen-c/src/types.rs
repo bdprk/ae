@@ -320,7 +320,7 @@ impl ModuleTypes {
             },
             Rvalue::Len(_) => Some(TyKind::Int(IntTy::Usize)),
             Rvalue::Discriminant(_) => Some(TyKind::Int(IntTy::I64)),
-            Rvalue::Ref { .. } => Some(TyKind::Ptr(0)),
+            Rvalue::Ref { .. } | Rvalue::AddressOf(_) => Some(TyKind::Ptr(0)),
         }
     }
 

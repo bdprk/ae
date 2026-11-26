@@ -519,7 +519,7 @@ fn apply_rvalue_moves(rvalue: &Rvalue, state: &mut [LocalInitTree]) {
                 }
             }
         }
-        Rvalue::Ref { .. } | Rvalue::Len(_) | Rvalue::Discriminant(_) => {}
+        Rvalue::Ref { .. } | Rvalue::AddressOf(_) | Rvalue::Len(_) | Rvalue::Discriminant(_) => {}
     }
 }
 
@@ -778,7 +778,7 @@ fn rvalue_loans(
                 }
             }
         }
-        Rvalue::BinaryOp(..) | Rvalue::UnaryOp(..) | Rvalue::Len(_) | Rvalue::Discriminant(_) => {}
+        Rvalue::AddressOf(_) | Rvalue::BinaryOp(..) | Rvalue::UnaryOp(..) | Rvalue::Len(_) | Rvalue::Discriminant(_) => {}
     }
     out
 }
@@ -916,7 +916,7 @@ fn collect_rvalue_uses(rvalue: &Rvalue, uses: &mut BTreeSet<LocalId>) {
         Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast(_, op, _) => {
             collect_operand_uses(op, uses);
         }
-        Rvalue::Ref { place, .. } | Rvalue::Len(place) | Rvalue::Discriminant(place) => {
+        Rvalue::Ref { place, .. } | Rvalue::AddressOf(place) | Rvalue::Len(place) | Rvalue::Discriminant(place) => {
             collect_place_uses(place, true, uses);
         }
         Rvalue::BinaryOp(_, lhs, rhs) => {
@@ -1226,6 +1226,12 @@ fn check_rvalue(
                 loans,
                 errors,
             );
+        }
+        Rvalue::AddressOf(place) => {
+            // A raw address takes no loan and may alias (ADR-0237); the
+            // place still has to be initialized for the address to be usable.
+            check_place_init(place, loc, init_state, errors);
+            check_place_indices_access(place, loc, active_loans, loans, init_state, errors);
         }
         Rvalue::Len(place) | Rvalue::Discriminant(place) => {
             check_place_init(place, loc, init_state, errors);

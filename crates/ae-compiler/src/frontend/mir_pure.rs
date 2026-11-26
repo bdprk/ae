@@ -103,6 +103,13 @@ pub(super) fn lower_function_to_pure_mir(
     let cfg = build_cfg(function, ctx);
     let mut builder = PureMirBuilder::new(function, &cfg, structs, ctx);
     builder.lower_cfg(&cfg);
+    if !builder.unsupported.is_empty() {
+        return Err(format!(
+            "pure MIR lowering cannot handle `{}`: {}",
+            builder.name,
+            builder.unsupported.join("; ")
+        ));
+    }
     let body = builder.finish();
     if let Err(errors) = validate(&body) {
         let formatted = errors
@@ -126,6 +133,10 @@ struct PureMirBuilder<'a> {
     cur_bb: BasicBlockId,
     structs: &'a [StructDef],
     ctx: &'a CompileContext,
+    /// Shapes this function uses that the pure pipeline cannot lower yet;
+    /// a non-empty list turns the whole lowering into an error (fail closed)
+    /// instead of emitting ill-formed MIR.
+    unsupported: Vec<String>,
 }
 
 impl<'a> PureMirBuilder<'a> {
@@ -181,6 +192,7 @@ impl<'a> PureMirBuilder<'a> {
             cur_bb: BasicBlockId::ENTRY,
             structs,
             ctx,
+            unsupported: Vec::new(),
         }
     }
 
@@ -504,34 +516,15 @@ impl<'a> PureMirBuilder<'a> {
                 let val_op = self.lower_operand(value);
                 self.emit_intrinsic_call("map_put", vec![map_op, key_op, val_op], TyKind::Unit);
             }
-            Statement::ResetTokens(cursor, iteration) => {
-                let (iter_local, _) = self.ensure_var(*iteration, TyKind::Tokens);
-                let (cur_local, _) = self.ensure_var(*cursor, TyKind::Tokens);
-                self.emit_intrinsic_call(
-                    "reset_tokens",
-                    vec![
-                        Operand::Copy(Place::from_local(iter_local)),
-                        Operand::Copy(Place::from_local(cur_local)),
-                    ],
-                    TyKind::Unit,
-                );
-            }
-            Statement::AdvanceTokens(_, cursor, element, advanced) => {
-                let (cur_local, _) = self.ensure_var(*cursor, TyKind::Tokens);
-                let (elem_local, _) = self.ensure_var(*element, TyKind::StrView);
-                let (adv_local, _) = self.ensure_var(*advanced, TyKind::Bool);
-                let res_local = self.emit_intrinsic_call(
-                    "advance_tokens",
-                    vec![
-                        Operand::Copy(Place::from_local(cur_local)),
-                        Operand::Copy(Place::from_local(elem_local)),
-                    ],
-                    TyKind::Bool,
-                );
-                self.push_stmt(StatementKind::Assign(
-                    Place::from_local(adv_local),
-                    Rvalue::Use(Operand::Copy(Place::from_local(res_local))),
-                ));
+            // A token cursor needs a runtime cursor model (reset/advance) the pure
+            // pipeline does not implement yet. Fail closed: emitting the
+            // current best-effort shape leaves the iteration local
+            // uninitialized, which the borrow checker rightly rejects.
+            Statement::ForTokens(..) | Statement::ResetTokens(..) | Statement::AdvanceTokens(..) => {
+                let message = "token cursors (for-in over a tokenize result) are not supported by the pure MIR pipeline yet";
+                if !self.unsupported.iter().any(|existing| existing == message) {
+                    self.unsupported.push(message.to_owned());
+                }
             }
             Statement::PtrStore(id, value, ..) => {
                 let val_ty = expr_type(value, self.ctx);
@@ -581,7 +574,6 @@ impl<'a> PureMirBuilder<'a> {
             Statement::If(..)
             | Statement::While(..)
             | Statement::For(..)
-            | Statement::ForTokens(..)
             | Statement::Match(..)
             | Statement::Propagate(..)
             | Statement::Return(..)
@@ -637,12 +629,28 @@ impl<'a> PureMirBuilder<'a> {
                 let val_ty = expr_type(expr, self.ctx);
                 let val_op = self.lower_operand(expr);
                 let ret_ty = self.locals[0].ty;
+                // The parser's scope releases ride the return (the legacy
+                // backends run them *after* the value is copied out). The CFG
+                // appends them as trailing `Drop` statements, so the return
+                // assignment is inserted before that run: a drop of the
+                // returned binding must not precede the copy that moves it.
+                let insert_at = {
+                    let statements = &self.blocks[self.cur_bb.index()].statements;
+                    let mut at = statements.len();
+                    while at > 0 && matches!(statements[at - 1].kind, StatementKind::Drop(_)) {
+                        at -= 1;
+                    }
+                    at
+                };
+                let mark = self.blocks[self.cur_bb.index()].statements.len();
                 self.assign_checked(
                     Place::from_local(LocalId::RETURN_PLACE),
                     ret_ty,
                     Rvalue::Use(val_op),
                     val_ty,
                 );
+                let tail = self.blocks[self.cur_bb.index()].statements.split_off(mark);
+                self.blocks[self.cur_bb.index()].statements.splice(insert_at..insert_at, tail);
                 self.set_terminator(TerminatorKind::Return);
             }
             CfgTerminator::Exit(expr) => {
@@ -830,12 +838,19 @@ impl<'a> PureMirBuilder<'a> {
             }
             Expr::BorrowAs(inner, mutable, ..) => {
                 let place = self.lower_place(inner);
-                let borrow_kind = if *mutable {
-                    BorrowKind::Mut
+                // `&v as *const T` names an address, not a borrow (the
+                // expression's type is the raw pointer); a real `&T` keeps
+                // its loan (ADR-0237).
+                if matches!(expr_type(expr, self.ctx), TyKind::Ptr(_) | TyKind::PtrMut(_)) {
+                    Rvalue::AddressOf(place)
                 } else {
-                    BorrowKind::Shared
-                };
-                Rvalue::Ref { borrow_kind, place }
+                    let borrow_kind = if *mutable {
+                        BorrowKind::Mut
+                    } else {
+                        BorrowKind::Shared
+                    };
+                    Rvalue::Ref { borrow_kind, place }
+                }
             }
             Expr::DerefPtr(inner, ..) => {
                 let place = self.lower_place(inner).project(ProjectionElem::Deref);

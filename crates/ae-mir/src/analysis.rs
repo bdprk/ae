@@ -292,7 +292,7 @@ fn mark_rvalue_moves(rvalue: &Rvalue, state: &mut [InitState]) {
                 mark_operand_moves(op, state);
             }
         }
-        Rvalue::Ref { .. } | Rvalue::Len(_) | Rvalue::Discriminant(_) => {}
+        Rvalue::Ref { .. } | Rvalue::AddressOf(_) | Rvalue::Len(_) | Rvalue::Discriminant(_) => {}
     }
 }
 
@@ -467,7 +467,7 @@ fn collect_rvalue_uses(rvalue: &Rvalue, uses: &mut BTreeSet<LocalId>) {
         Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast(_, op, _) => {
             collect_operand_uses(op, uses);
         }
-        Rvalue::Ref { place, .. } | Rvalue::Len(place) | Rvalue::Discriminant(place) => {
+        Rvalue::Ref { place, .. } | Rvalue::AddressOf(place) | Rvalue::Len(place) | Rvalue::Discriminant(place) => {
             collect_place_uses(place, true, uses);
         }
         Rvalue::BinaryOp(_, lhs, rhs) => {

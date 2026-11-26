@@ -434,7 +434,7 @@ fn validate_rvalue(
 ) -> Option<TyKind> {
     match rvalue {
         Rvalue::Use(op) => validate_operand(body, interner, block, op, errors),
-        Rvalue::Ref { place, .. } => {
+        Rvalue::Ref { place, .. } | Rvalue::AddressOf(place) => {
             validate_place(body, interner, block, place, errors);
             None
         }
