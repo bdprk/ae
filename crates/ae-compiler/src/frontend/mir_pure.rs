@@ -27,6 +27,41 @@ pub fn lower_path_to_pure_mir(path: &Path) -> Result<Vec<Body>, String> {
     lower_path_with_imports(path, &PackageImports::new())
 }
 
+/// Lowers, optimizes, validates, and borrow-checks every function in the AE program at `path`.
+pub fn compile_path_pure_mir_bodies(path: &Path) -> Result<Vec<Body>, String> {
+    let mut bodies = lower_path_to_pure_mir(path)?;
+    for body in &mut bodies {
+        ae_mir::opt::optimize_body(body);
+        if let Err(errors) = validate(body) {
+            let formatted = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!("MIR validation failed for `{}`: {formatted}", body.name));
+        }
+        if let Err(errors) = ae_mir::borrowck::check_body(body) {
+            let formatted = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!("MIR borrow check failed for `{}`: {formatted}", body.name));
+        }
+    }
+    Ok(bodies)
+}
+
+/// Compiles the AE program at `path` end-to-end through pure MIR optimization,
+/// validation, borrow checking, and C11 code generation.
+pub fn compile_path_pure_mir_to_c(
+    path: &Path,
+    config: &ae_codegen_c::EmitConfig,
+) -> Result<String, String> {
+    let bodies = compile_path_pure_mir_bodies(path)?;
+    ae_codegen_c::emit_module_c(&bodies, config).map_err(|e| e.to_string())
+}
+
 /// Lowers and deterministically formats every function in the AE program at `path`.
 pub fn format_pure_mir_path(path: &Path) -> Result<String, String> {
     let bodies = lower_path_to_pure_mir(path)?;
@@ -621,7 +656,26 @@ impl<'a> PureMirBuilder<'a> {
                 });
             }
             CfgTerminator::Unreachable => {
-                self.set_terminator(TerminatorKind::Unreachable);
+                // `cfg::build_cfg` leaves `main`'s implicit fallthrough as `CfgTerminator::Unreachable`
+                // (meaning implicit exit-0); initialize `_0` and return normally instead of trapping.
+                if self.name == "main" {
+                    let ret_ty = self.locals[0].ty;
+                    let default_val = match ret_ty {
+                        TyKind::Int(_) => ConstValue::Int(0),
+                        _ => ConstValue::Unit,
+                    };
+                    let val_ty = match ret_ty {
+                        TyKind::Int(_) => ret_ty,
+                        _ => TyKind::Unit,
+                    };
+                    self.push_stmt(StatementKind::Assign(
+                        Place::from_local(LocalId::RETURN_PLACE),
+                        Rvalue::Use(Operand::Constant(Constant::new(val_ty, default_val))),
+                    ));
+                    self.set_terminator(TerminatorKind::Return);
+                } else {
+                    self.set_terminator(TerminatorKind::Unreachable);
+                }
             }
         }
     }
