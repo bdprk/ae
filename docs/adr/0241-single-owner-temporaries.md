@@ -83,7 +83,7 @@ temporary vector and two `path_join` paths passed to `write_file`. After the
 rule: an AddressSanitizer+UBSan sweep of the 21 feature examples in Ubuntu
 WSL reports **21/21 clean** (exit status 0, 1 or 2 as designed), where the
 same sweep previously failed on `copy_notes`. The `tests/run` end-to-end gate
-stays **161 of 161** with zero output mismatches, `cargo test --workspace
+stays **164 of 164** with zero output mismatches, `cargo test --workspace
 --locked` reports **686 passed / 0 failed**, clippy is clean, and
 `python scripts/verify_generated_c.py` passes **41/41**. The differential
 fuzzer compares **300 seeds / 0 failures / 0 skipped** in both the mixed
