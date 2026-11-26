@@ -163,6 +163,9 @@ impl<'a> Parser<'a> {
                     (arguments.len() + 1 == signature.params.len()).then_some(signature.ret)
                 }
                 ExpressionKind::Atom(Kind::Ident(name)) if !RESERVED.contains(&name.as_str()) => {
+                    if let Some(&gid) = self.generics.fn_names.get(name.as_str()) {
+                        return self.inferred_generic_return_type(gid, arguments, local_structs);
+                    }
                     let signature = self.functions.get(name)?;
                     (arguments.len() == signature.params.len()).then_some(signature.ret)
                 }
@@ -170,6 +173,133 @@ impl<'a> Parser<'a> {
             },
             _ => None,
         }
+    }
+
+    /// The precompute's type for a bare generic call whose declared return
+    /// is one type parameter (`T`) or `vec[T]` (`let q = id(p);`, P2.5.2).
+    /// The type comes from the first argument whose declared parameter pattern
+    /// binds `T`, typed statelessly like any other chain root; no instance is
+    /// built here, the lowering instantiates and re-checks.
+    fn inferred_generic_return_type(
+        &mut self,
+        gid: usize,
+        arguments: &[ae_syntax::expression::Expression],
+        local_structs: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        use ae_syntax::expression::ExpressionKind;
+        let def = &self.generics.fn_defs[gid];
+        let returns_raw = def.source.get(def.returns.clone()?)?.trim().to_string();
+        let (target_param, ret_is_vec) = if def.params.contains(&returns_raw) {
+            (returns_raw, false)
+        } else if let Some(inner) = returns_raw
+            .strip_prefix("vec[")
+            .and_then(|s| s.strip_suffix(']'))
+            .map(str::trim)
+            && def.params.iter().any(|p| *p == inner)
+        {
+            (inner.to_string(), true)
+        } else {
+            return None;
+        };
+        let bindings = def.bindings.clone()?;
+        if bindings.len() != arguments.len() {
+            return None;
+        }
+        let source = Rc::clone(&def.source);
+        for (binding, argument) in bindings.iter().zip(arguments) {
+            let raw = source[binding.ty.clone()].trim();
+            fn elem_of_slice(s: &str) -> Option<&str> {
+                s.strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .map(str::trim)
+            }
+            let inferred_ty = if raw == target_param {
+                let ty = match &argument.kind {
+                    ExpressionKind::Struct { target, .. } => match &target.kind {
+                        ExpressionKind::Atom(Kind::Ident(struct_name)) => {
+                            self.struct_names.get(struct_name).map(|&sid| Type::Struct(sid))
+                        }
+                        _ => None,
+                    },
+                    _ => self.chain_call_type(argument, local_structs),
+                };
+                let Some(ty) = ty else { continue };
+                ty
+            } else if let Some(inner) = raw
+                .strip_prefix("&mut ")
+                .or_else(|| raw.strip_prefix('&'))
+                .map(str::trim)
+            {
+                if let Some(elem) = elem_of_slice(inner) {
+                    if elem != target_param {
+                        continue;
+                    }
+                    let base_ty = match &argument.kind {
+                        ExpressionKind::BorrowArgument { name, fields, .. } if fields.is_empty() => {
+                            self.names.get(name).map(|&(_, _, ty)| ty).or_else(|| local_structs.get(name).copied())
+                        }
+                        _ if !raw.starts_with("&mut ") => self.chain_call_type(argument, local_structs),
+                        _ => None,
+                    };
+                    let Some(base_ty) = base_ty else { continue };
+                    match base_ty {
+                        Type::Vector(id) | Type::VectorRef(id) => self.ctx.vector_elem(id),
+                        Type::ArrayOf(id, _) => self.ctx.array_elem(id),
+                        Type::Slice(id) | Type::SliceMut(id) => self.ctx.slice_elem(id),
+                        _ => continue,
+                    }
+                } else {
+                    if inner != target_param {
+                        continue;
+                    }
+                    let ty = match &argument.kind {
+                        ExpressionKind::BorrowArgument { name, fields, index, .. }
+                            if fields.is_empty() && index.is_none() =>
+                        {
+                            self.names.get(name).map(|&(_, _, ty)| ty).or_else(|| local_structs.get(name).copied())
+                        }
+                        _ if !raw.starts_with("&mut ") => self.chain_call_type(argument, local_structs),
+                        _ => None,
+                    };
+                    let Some(ty) = ty else { continue };
+                    match ty {
+                        Type::StructRef(sid) | Type::StructMut(sid) => Type::Struct(sid),
+                        Type::VectorRef(id) => Type::Vector(id),
+                        Type::StrView => Type::String,
+                        other => other,
+                    }
+                }
+            } else if let Some(inner) = raw
+                .strip_prefix("vec[")
+                .and_then(|s| s.strip_suffix(']'))
+                .map(str::trim)
+                && inner == target_param
+            {
+                let Some(Type::Vector(id)) = self.chain_call_type(argument, local_structs) else {
+                    continue;
+                };
+                self.ctx.vector_elem(id)
+            } else {
+                continue;
+            };
+            let result_ty = if ret_is_vec {
+                Type::Vector(self.ctx.intern_vector_elem(inferred_ty))
+            } else {
+                inferred_ty
+            };
+            return match result_ty {
+                Type::Struct(_)
+                | Type::Enum(..)
+                | Type::Int(_)
+                | Type::Float(_)
+                | Type::Bool
+                | Type::Char
+                | Type::String
+                | Type::Vector(_) => Some(result_ty),
+                _ => None,
+            };
+        }
+        None
     }
 
     /// A method call on a bare struct variable (`self.m(...)` included).

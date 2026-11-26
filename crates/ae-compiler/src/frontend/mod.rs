@@ -970,7 +970,7 @@ static AUDIT_EOF: Kind = Kind::Eof;
 // cloning `Kind::Ident(String)` on each visit would add a heap allocation per
 // identifier for a check that must stay cheap on the front-end path.
 #[derive(Debug, Clone)]
-struct GenericFn { name: String, bindings: Option<Rc<[ae_syntax::declaration::TypedName]>>, params: Vec<String>, bounds: Vec<Vec<Bound>>, trait_bounds: Vec<Vec<usize>>, start: usize, tokens: Rc<Vec<Token>>, source: Rc<str>, file: String, public: bool }
+struct GenericFn { name: String, bindings: Option<Rc<[ae_syntax::declaration::TypedName]>>, returns: Option<std::ops::Range<usize>>, params: Vec<String>, bounds: Vec<Vec<Bound>>, trait_bounds: Vec<Vec<usize>>, start: usize, tokens: Rc<Vec<Token>>, source: Rc<str>, file: String, public: bool }
 // An instantiated generic function: its id, parameter types and return type.
 type Instance = (usize, Vec<Type>, Type);
 // Instantiated generic enums, structs and functions, keyed by declaration and

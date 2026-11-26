@@ -11090,7 +11090,9 @@ fn generic_slices_match_across_backends() {
         );
         assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
     }
-    // A generic slice call needs its type arguments spelled (P2.5.2).
+    // P2.5.2: a bare generic slice call infers `&[T]` from `&a`, while a
+    // genuinely uninferable parameter (such as an extra type parameter with no
+    // inferable argument) still requires explicit type arguments.
     let path = std::env::temp_dir().join(format!(
         "ae-generic-slices-{}-{}.ae",
         std::process::id(),
@@ -11101,13 +11103,28 @@ fn generic_slices_match_across_backends() {
         "fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1, 2]; print(size(&a)); }",
     )
     .unwrap();
+    let inferred = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        inferred.status.success(),
+        "inferred generic slice call must succeed: {}",
+        String::from_utf8_lossy(&inferred.stderr)
+    );
+    fs::write(
+        &path,
+        "fn size_tagged[T, U](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1, 2]; print(size_tagged(&a)); }",
+    )
+    .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("check")
         .arg(&path)
         .output()
         .unwrap();
     fs::remove_file(&path).unwrap();
-    assert!(!result.status.success(), "the call must be rejected");
+    assert!(!result.status.success(), "the uninferable call must be rejected");
     assert!(
         String::from_utf8_lossy(&result.stderr).contains("write its type arguments"),
         "expected the type-argument remedy, got {}",

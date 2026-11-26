@@ -1296,8 +1296,19 @@ impl<'a> Parser<'a> {
         params: &[Type],
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<Vec<Argument>, ae_span::Diagnostic> {
+        self.lower_value_arguments_with(callee_name, arguments, params, slots, Vec::new())
+    }
+
+    fn lower_value_arguments_with(
+        &mut self,
+        callee_name: &str,
+        arguments: &[ae_syntax::expression::Expression],
+        params: &[Type],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+        mut prelowered: Vec<Option<(Expr, Type)>>,
+    ) -> Result<Vec<Argument>, ae_span::Diagnostic> {
         use ae_syntax::expression::ExpressionKind;
-let mut args = Vec::with_capacity(arguments.len());
+        let mut args = Vec::with_capacity(arguments.len());
         for (index, argument) in arguments.iter().enumerate() {
             self.seek_scalar_offset(argument.range.start);
             if index >= 64 {
@@ -1309,6 +1320,17 @@ let mut args = Vec::with_capacity(arguments.len());
             // a named function) as `Argument::FnPtr`; the typed reader
             // owns the shape check and the generated function.
             if let Type::Fn(callable) = expected {
+                if let Some((value, actual)) = prelowered.get_mut(index).and_then(Option::take) {
+                    let (value, actual) = self.coerce_to_fn(
+                        value,
+                        actual,
+                        expected,
+                        &format!("argument {} to '{callee_name}'", index + 1),
+                    )?;
+                    self.check_value_argument_type(callee_name, index, expected, actual, Some(&argument.range))?;
+                    args.push(Argument::Value(value));
+                    continue;
+                }
                 self.seek_scalar_offset(argument.range.start);
                 let converted = self.function_value_argument(callee_name, index + 1, callable, Some(argument), slots)?;
                 args.push(converted);
@@ -1658,7 +1680,10 @@ let mut args = Vec::with_capacity(arguments.len());
                 }
                 continue;
             }
-            let (value, actual) = self.lower_scalar_body_expression(argument, slots)?;
+            let (value, actual) = match prelowered.get_mut(index).and_then(Option::take) {
+                Some(pair) => pair,
+                None => self.lower_scalar_body_expression(argument, slots)?,
+            };
             // A `&string` parameter is a read-only view: the argument
             // lowers as `Argument::View` and nothing moves (the typed
             // route's `typed_call_argument` for a `StrView`).
@@ -2083,6 +2108,34 @@ let mut args = Vec::with_capacity(arguments.len());
         Ok((args, ret))
     }
 
+    /// Resolve the target type of a borrow argument's place chain (`&x`,
+    /// `&x.field`, `&x[i]`, `&x.field[i]`) without mutating borrow or move
+    /// state, for generic call-site type inference.
+    fn resolve_borrow_place_type(
+        &self,
+        base_ty: Type,
+        fields: &[(String, std::ops::Range<usize>)],
+        has_index: bool,
+    ) -> Option<Type> {
+        let mut ty = base_ty;
+        for (field, _) in fields {
+            let sid = match ty {
+                Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => sid,
+                _ => return None,
+            };
+            ty = field_ty_in(sid, field, self.structs)?;
+        }
+        if has_index {
+            ty = match ty {
+                Type::Vector(id) | Type::VectorRef(id) => self.ctx.vector_elem(id),
+                Type::Slice(id) | Type::SliceMut(id) => self.ctx.slice_elem(id),
+                Type::ArrayOf(id, _) => self.ctx.array_elem(id),
+                _ => return None,
+            };
+        }
+        Some(ty)
+    }
+
     fn try_lower_inferred_generic_call(
         &mut self,
         name: &str,
@@ -2091,22 +2144,26 @@ let mut args = Vec::with_capacity(arguments.len());
         arguments: &[ae_syntax::expression::Expression],
         slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
     ) -> Result<Option<(Expr, Type)>, ae_span::Diagnostic> {
+        use ae_syntax::expression::ExpressionKind;
+
         let def = self.generics.fn_defs[gid].clone();
         let callable_inference = def.bounds.iter().flatten().any(|b| matches!(b, Bound::Callable(..)));
         let Some(bindings) = def.bindings.as_ref() else {
             return Ok(None);
         };
-        // P2.5.2 slice 1 infers only from a parameter whose complete type is
-        // a type parameter. Every type parameter needs such evidence, and a
-        // borrow argument stays on the explicit-argument path unless the
-        // existing Callable-bound inference owns it. Composite and return-only
-        // occurrences deliberately do not participate yet.
-        let direct_value_inference = arguments.iter().all(|argument| {
-            !matches!(&argument.kind, ae_syntax::expression::ExpressionKind::BorrowArgument { .. })
-        }) && def.params.iter().all(|param| {
-            bindings.iter().any(|binding| def.source[binding.ty.clone()].trim() == param)
+        // P2.5.2 infers from direct value parameters (`T`), borrow parameters
+        // (`&T`, `&mut T`), slice parameters (`&[T]`, `&mut [T]`), and vector
+        // parameters (`vec[T]`). Every type parameter needs at least one
+        // inferable parameter position; return-only or nested composite
+        // parameters stay on the explicit-type-argument path.
+        let patterns: Vec<ParamPattern> = bindings
+            .iter()
+            .map(|binding| classify_generic_param_pattern(&def.source[binding.ty.clone()], &def.params))
+            .collect();
+        let every_param_covered = (0..def.params.len()).all(|tp| {
+            patterns.iter().any(|p| p.type_param() == Some(tp))
         });
-        if !callable_inference && !direct_value_inference {
+        if !callable_inference && !every_param_covered {
             return Ok(None);
         }
         if arguments.len() != bindings.len() {
@@ -2116,104 +2173,181 @@ let mut args = Vec::with_capacity(arguments.len());
                 arguments.len()
             )));
         }
-        let mut lowered_args: Vec<(Option<Argument>, Expr, Type)> = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            self.seek_scalar_offset(argument.range.start);
-            if let ae_syntax::expression::ExpressionKind::BorrowArgument { name: arg_name, name_range, mutable, .. } = &argument.kind {
-                let &(slot, var_mut, ty) = self.names.get(arg_name).ok_or_else(|| {
-                    self.error_at(name_range.start, &format!("unknown variable '{arg_name}'")).with_code("E0101")
-                })?;
-                if *mutable && !var_mut {
-                    let diagnostic = self.error_at(name_range.start, &format!("cannot mutably borrow immutable variable '{arg_name}'")).with_code("E0103");
-                    return Err(self.immutable_binding_error(diagnostic, slot));
-                }
-                if self.moved.contains(&slot) {
-                    return Err(moved_value_hint(self.binding_label(
-                        self.error_at(name_range.start, &format!("cannot borrow '{arg_name}' because it was moved")).with_code("E0102"),
-                        slot,
-                    )));
-                }
-                let borrow_ty = match ty {
-                    Type::Struct(sid) => if *mutable { Type::StructMut(sid) } else { Type::StructRef(sid) },
-                    _ => ty,
-                };
-                lowered_args.push((Some(Argument::Borrow(slot, matches!(ty, Type::Struct(_)))), Expr::Unit, borrow_ty));
-            } else {
-                let (expr, ty) = self.lower_scalar_body_expression(argument, slots)?;
-                lowered_args.push((None, expr, ty));
-            }
-        }
+
+        let mut prelowered: Vec<Option<(Expr, Type)>> = vec![None; arguments.len()];
         let mut inferred: Vec<Option<Type>> = vec![None; def.params.len()];
-        for (param_idx, binding) in bindings.iter().enumerate() {
-            let raw_text = def.source[binding.ty.clone()].trim();
-            let type_text = raw_text.strip_prefix("&mut ")
-                .or_else(|| raw_text.strip_prefix('&'))
-                .unwrap_or(raw_text)
-                .trim();
-            if let Some(tp_idx) = def.params.iter().position(|p| p == type_text) {
-                let callable_req = def.bounds[tp_idx].iter().find_map(|b| match b {
-                    Bound::Callable(kind, sig) => Some((*kind, *sig)),
+
+        for (index, (argument, &pattern)) in arguments.iter().zip(&patterns).enumerate() {
+            self.seek_scalar_offset(argument.range.start);
+            if let ExpressionKind::BorrowArgument { name: arg_name, fields, index: elem_index, .. } = &argument.kind {
+                // Borrow arguments are inspected read-only here and lowered
+                // after instantiation by `lower_value_arguments_with`, so all
+                // mutability, move, and borrow-conflict checks run once.
+                let Some(&(_, _, base_ty)) = self.names.get(arg_name) else {
+                    continue;
+                };
+                let candidate = match pattern {
+                    ParamPattern::Slice(tp) | ParamPattern::SliceMut(tp) if fields.is_empty() => {
+                        let elem = match base_ty {
+                            Type::Vector(id) | Type::VectorRef(id) => Some(self.ctx.vector_elem(id)),
+                            Type::ArrayOf(id, _) => Some(self.ctx.array_elem(id)),
+                            Type::Slice(id) | Type::SliceMut(id) => Some(self.ctx.slice_elem(id)),
+                            _ => None,
+                        };
+                        elem.map(|ty| (tp, ty))
+                    }
+                    ParamPattern::Borrow(tp) | ParamPattern::BorrowMut(tp) => {
+                        self.resolve_borrow_place_type(base_ty, fields, elem_index.is_some()).map(|place_ty| {
+                            let target = match place_ty {
+                                Type::StructRef(sid) | Type::StructMut(sid) => Type::Struct(sid),
+                                Type::VectorRef(id) => Type::Vector(id),
+                                other => other,
+                            };
+                            (tp, target)
+                        })
+                    }
                     _ => None,
-                });
-                if let Some((req_kind, req_sig)) = callable_req {
-                    let cid = match (&lowered_args[param_idx].1, lowered_args[param_idx].2) {
-                        (Expr::ClosureLit(cid), _) => Some(*cid),
-                        (_, Type::Closure(cid)) => Some(cid),
+                };
+                if let Some((tp, ty)) = candidate && inferred[tp].is_none() {
+                    inferred[tp] = Some(ty);
+                }
+                continue;
+            }
+
+            let (mut expr, mut ty) = self.lower_scalar_body_expression(argument, slots)?;
+            match pattern {
+                ParamPattern::Value(tp) => {
+                    let callable_req = def.bounds[tp].iter().find_map(|b| match b {
+                        Bound::Callable(kind, sig) => Some((*kind, *sig)),
                         _ => None,
-                    };
-                    if let Some(cid) = cid {
-                        let (struct_lit, env_info) = self.materialize_closure_struct_lit(
-                            cid,
-                            None,
-                            arguments[param_idx].range.start,
-                        )?;
-                        if env_info.sig != req_sig || !env_info.kind.satisfies(req_kind) {
-                            return Err(self.error_at(
-                                arguments[param_idx].range.start,
-                                &format!("closure does not satisfy '{}({})' constraint", req_kind.name(), name),
-                            ));
+                    });
+                    if let Some((req_kind, req_sig)) = callable_req {
+                        let cid = match (&expr, ty) {
+                            (Expr::ClosureLit(cid), _) => Some(*cid),
+                            (_, Type::Closure(cid)) => Some(cid),
+                            _ => None,
+                        };
+                        if let Some(cid) = cid {
+                            let (struct_lit, env_info) = self.materialize_closure_struct_lit(
+                                cid,
+                                None,
+                                argument.range.start,
+                            )?;
+                            if env_info.sig != req_sig || !env_info.kind.satisfies(req_kind) {
+                                return Err(self.error_at(
+                                    argument.range.start,
+                                    &format!("closure does not satisfy '{}({})' constraint", req_kind.name(), name),
+                                ));
+                            }
+                            expr = struct_lit;
+                            ty = Type::Struct(env_info.env_sid);
                         }
-                        lowered_args[param_idx] = (None, struct_lit, Type::Struct(env_info.env_sid));
+                    }
+                    if inferred[tp].is_none() {
+                        inferred[tp] = Some(ty);
                     }
                 }
-                if inferred[tp_idx].is_none() {
-                    let arg_ty = match lowered_args[param_idx].2 {
-                        Type::StructRef(sid) | Type::StructMut(sid) if raw_text != type_text => Type::Struct(sid),
+                ParamPattern::Borrow(tp) => {
+                    let target = match ty {
+                        Type::String | Type::StrView => Type::String,
+                        Type::StructRef(sid) | Type::StructMut(sid) | Type::Struct(sid) => Type::Struct(sid),
+                        Type::VectorRef(id) | Type::Vector(id) => Type::Vector(id),
                         other => other,
                     };
-                    inferred[tp_idx] = Some(arg_ty);
+                    if inferred[tp].is_none() {
+                        inferred[tp] = Some(target);
+                    }
                 }
+                ParamPattern::BorrowMut(tp) => {
+                    let target = match ty {
+                        Type::StructMut(sid) | Type::Struct(sid) => Type::Struct(sid),
+                        other => other,
+                    };
+                    if inferred[tp].is_none() {
+                        inferred[tp] = Some(target);
+                    }
+                }
+                ParamPattern::Slice(tp) => {
+                    if let Type::Slice(id) = ty && inferred[tp].is_none() {
+                        inferred[tp] = Some(self.ctx.slice_elem(id));
+                    }
+                }
+                ParamPattern::Vec(tp) => {
+                    if let Type::Vector(id) = ty && inferred[tp].is_none() {
+                        inferred[tp] = Some(self.ctx.vector_elem(id));
+                    }
+                }
+                ParamPattern::SliceMut(_) | ParamPattern::Fixed => {}
             }
+            prelowered[index] = Some((expr, ty));
         }
+
         if inferred.iter().any(Option::is_none) {
             return Ok(None);
         }
         let type_args: Vec<Type> = inferred.into_iter().map(Option::unwrap).collect();
         let (inst_id, inst_params, inst_ret) = self.instantiate_fn(gid, type_args, call_offset)?;
-        let mut final_args = Vec::with_capacity(lowered_args.len());
-        for (index, (borrow_arg, value, actual)) in lowered_args.into_iter().enumerate() {
-            let expected = inst_params[index];
-            if let Some(arg) = borrow_arg {
-                if expected != actual {
-                    return Err(self.error_at(arguments[index].range.start, &format!(
-                        "argument {} to '{name}' must be {}, found {}",
-                        index + 1, expected.name(self.ctx), actual.name(self.ctx)
-                    )));
-                }
-                final_args.push(arg);
-                continue;
-            }
-            self.check_value_argument_type(name, index, expected, actual, Some(&arguments[index].range))?;
-            if self.is_owned(actual)
-                && let Expr::Variable(source, ..) = &value
-            {
-                self.check_variable_move(*source)?;
-                self.moved.insert(*source);
-            }
-            final_args.push(Argument::Value(value));
-        }
+        let final_args = self.lower_value_arguments_with(name, arguments, &inst_params, slots, prelowered)?;
         Ok(Some((Expr::Call(inst_id, final_args, inst_ret), inst_ret)))
     }
+}
+
+#[derive(Clone, Copy)]
+enum ParamPattern {
+    Value(usize),
+    Borrow(usize),
+    BorrowMut(usize),
+    Slice(usize),
+    SliceMut(usize),
+    Vec(usize),
+    Fixed,
+}
+
+impl ParamPattern {
+    fn type_param(self) -> Option<usize> {
+        match self {
+            Self::Value(tp)
+            | Self::Borrow(tp)
+            | Self::BorrowMut(tp)
+            | Self::Slice(tp)
+            | Self::SliceMut(tp)
+            | Self::Vec(tp) => Some(tp),
+            Self::Fixed => None,
+        }
+    }
+}
+
+fn classify_generic_param_pattern(raw: &str, params: &[String]) -> ParamPattern {
+    let raw = raw.trim();
+    if let Some(tp) = params.iter().position(|p| p == raw) {
+        return ParamPattern::Value(tp);
+    }
+    if let Some(inner) = raw.strip_prefix("&mut ").map(str::trim) {
+        if let Some(elem) = inner.strip_prefix('[').and_then(|s| s.strip_suffix(']')).map(str::trim) {
+            if let Some(tp) = params.iter().position(|p| p == elem) {
+                return ParamPattern::SliceMut(tp);
+            }
+        } else if let Some(tp) = params.iter().position(|p| p == inner) {
+            return ParamPattern::BorrowMut(tp);
+        }
+        return ParamPattern::Fixed;
+    }
+    if let Some(inner) = raw.strip_prefix('&').map(str::trim) {
+        if let Some(elem) = inner.strip_prefix('[').and_then(|s| s.strip_suffix(']')).map(str::trim) {
+            if let Some(tp) = params.iter().position(|p| p == elem) {
+                return ParamPattern::Slice(tp);
+            }
+        } else if let Some(tp) = params.iter().position(|p| p == inner) {
+            return ParamPattern::Borrow(tp);
+        }
+        return ParamPattern::Fixed;
+    }
+    if let Some(inner) = raw.strip_prefix("vec[").and_then(|s| s.strip_suffix(']')).map(str::trim)
+        && let Some(tp) = params.iter().position(|p| p == inner)
+    {
+        return ParamPattern::Vec(tp);
+    }
+    ParamPattern::Fixed
 }
 
 /// Resolve a struct-field receiver chain (`a.b.cells`) to its root binding

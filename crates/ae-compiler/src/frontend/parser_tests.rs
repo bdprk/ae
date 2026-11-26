@@ -255,7 +255,7 @@ use super::*;
         let definition = source.find("(generic_value: T)").unwrap();
         parser.generics.fn_names.insert("generic_scalar".into(), 0);
         parser.generics.fn_defs.push(GenericFn {
-            name: "generic_scalar".into(), bindings: None, params: vec!["T".into()],
+            name: "generic_scalar".into(), bindings: None, returns: None, params: vec!["T".into()],
             bounds: vec![vec![]], trait_bounds: vec![vec![]],
             start: parser.tokens.partition_point(|token| token.offset < definition),
             tokens: Rc::clone(&parser.tokens), source: Rc::clone(&parser.shared_source),
