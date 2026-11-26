@@ -1865,19 +1865,34 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
             // in an arm body must leave the enclosing loop, which a switch
             // would swallow. Coverage is exhaustive, so no fall-through case
             // is needed.
-            Statement::Match(subject, subject_ty, arms) => {
-                let eid = match subject_ty { Type::Enum(_, k) => *k, _ => unreachable!("match subjects are enum-typed") };
+            Statement::Match(subject, _, arms) => {
                 let mut first = true;
                 for arm in arms {
-                    let test = format!("v{subject}.tag == AE_E{eid}_{}", arm.variant);
-                    if first { out.push_str(&format!("    if ({test}) {{\n")); } else { out.push_str(&format!("    }} else if ({test}) {{\n")); }
+                    let mut conds = Vec::new();
+                    collect_pattern_conditions(&arm.pattern, &format!("v{subject}"), &mut conds);
+                    if conds.is_empty() {
+                        if first {
+                            out.push_str("    if (1) {\n");
+                        } else {
+                            out.push_str("    } else {\n");
+                        }
+                    } else {
+                        let test = conds.join(" && ");
+                        if first {
+                            out.push_str(&format!("    if ({test}) {{\n"));
+                        } else {
+                            out.push_str(&format!("    }} else if ({test}) {{\n"));
+                        }
+                    }
                     first = false;
-                    for &(bid, pty, index) in &arm.bindings {
-                        emit_payload_binding(out, bid, *subject, arm.variant, index, pty, ctx);
+                    for (bid, pty, path) in &arm.bindings {
+                        emit_payload_binding(out, *bid, *subject, path, *pty, ctx);
                     }
                     emit_statements(&arm.body, out, next, ctx);
                 }
-                out.push_str("    }\n");
+                if !first {
+                    out.push_str("    }\n");
+                }
             }
             // CFG-only (M2.3): the match lowering puts a variant's payload
             // bindings at the top of the arm's block. The parser never emits
@@ -1887,8 +1902,8 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let Type::Enum(_, layout) = *ty else { unreachable!("propagation requires an enum") };
                 emit_propagation_payload(out, &format!("v{subject}"), layout, fields, *binding, ctx);
             }
-            Statement::BindPayload(bid, subject, variant, index, pty) => {
-                emit_payload_binding(out, *bid, *subject, *variant, *index, *pty, ctx);
+            Statement::BindPayload(bid, subject, path, pty) => {
+                emit_payload_binding(out, *bid, *subject, path, *pty, ctx);
             }
             Statement::For(var, end_var, body, label, line, col) => {
                 out.push_str("    while (1) {\n");
@@ -2008,12 +2023,35 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
     }
 }
 
+fn collect_pattern_conditions(pattern: &CompiledPattern, place: &str, out: &mut Vec<String>) {
+    match pattern {
+        CompiledPattern::Wildcard | CompiledPattern::Binding => {}
+        CompiledPattern::Variant { eid, variant, fields } => {
+            out.push(format!("{place}.tag == AE_E{eid}_{variant}"));
+            for (fidx, _, subpat) in fields {
+                let sub_place = format!("{place}.u.v{variant}.p{fidx}");
+                collect_pattern_conditions(subpat, &sub_place, out);
+            }
+        }
+    }
+}
+
 // One match arm's payload binding, as both backends emit it (M2.3): a
 // view/borrow/copy read of the matched variant's payload slot. String
 // payloads bind as read-only views, vector payloads as read-only borrows,
 // and scalars as plain copies — nothing is ever moved out of a matched enum.
-fn emit_payload_binding(out: &mut String, bid: usize, subject: usize, variant: usize, index: usize, pty: Type, ctx: &CompileContext) {
-    let member = format!("v{subject}.u.v{variant}.p{index}");
+fn emit_payload_binding(
+    out: &mut String,
+    bid: usize,
+    subject: usize,
+    path: &[(usize, usize)],
+    pty: Type,
+    ctx: &CompileContext,
+) {
+    let mut member = format!("v{subject}");
+    for (variant, index) in path {
+        member.push_str(&format!(".u.v{variant}.p{index}"));
+    }
     match pty {
         Type::String => out.push_str(&format!("    ae_strview v{bid} = AE_VIEW({member});\n")),
         Type::Bool => out.push_str(&format!("    bool v{bid} = {member};\n")),
@@ -2025,6 +2063,7 @@ fn emit_payload_binding(out: &mut String, bid: usize, subject: usize, variant: u
         // A struct payload binds as a read-only view, like a string payload:
         // the origin enum keeps ownership and releases at scope end.
         Type::Struct(k) => out.push_str(&format!("    const ae_t{k} *v{bid} = &{member};\n")),
+        Type::Enum(_, k) => out.push_str(&format!("    ae_e{k} v{bid} = {member};\n")),
         _ => out.push_str(&format!("    int64_t v{bid} = {member};\n")),
     }
 }

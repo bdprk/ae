@@ -1,0 +1,1 @@
+ae: $DIR/pattern_after_wildcard.ae:7:9: unreachable match arm after wildcard '_'

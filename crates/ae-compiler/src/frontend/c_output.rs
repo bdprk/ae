@@ -618,6 +618,14 @@ pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, structs: &[Stru
                     let _ = writeln!(release, "        ae_t{k}_release(&v->u.v{vidx}.p{index});");
                     let _ = writeln!(forfeit, "        ae_t{k}_forfeit(&v->u.v{vidx}.p{index});");
                 }
+                Type::Enum(_, k) if enums[*k].is_copy => {
+                    let _ = writeln!(release, "        v->u.v{vidx}.p{index} = (ae_e{k}){{0}};");
+                    let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = (ae_e{k}){{0}};");
+                }
+                Type::Enum(_, k) => {
+                    let _ = writeln!(release, "        ae_e{k}_release(&v->u.v{vidx}.p{index});");
+                    let _ = writeln!(forfeit, "        ae_e{k}_forfeit(&v->u.v{vidx}.p{index});");
+                }
                 _ => {
                     let _ = writeln!(release, "        v->u.v{vidx}.p{index} = 0;");
                     let _ = writeln!(forfeit, "        v->u.v{vidx}.p{index} = 0;");

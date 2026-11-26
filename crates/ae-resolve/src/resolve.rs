@@ -1328,7 +1328,7 @@ impl Walker<'_> {
         let mut catch_all = false;
         for arm in arms {
             match &arm.pattern.kind {
-                PatternKind::Binding(_) => catch_all = true,
+                PatternKind::Wildcard | PatternKind::Binding(_) => catch_all = true,
                 PatternKind::Variant { variant, .. } => covered.push(variant.clone()),
             }
         }
@@ -1362,6 +1362,7 @@ impl Walker<'_> {
     /// payload order.
     fn pattern(&mut self, pattern: &Pattern, subject_shape: Option<TypeSpelling>) {
         match &pattern.kind {
+            PatternKind::Wildcard => {}
             PatternKind::Binding(name) => {
                 // The pattern covers exactly the binding's name token.
                 self.declare(name.clone(), DefKind::PatternBinding, pattern.range.clone(), false, false, subject_shape, pattern.range.end);

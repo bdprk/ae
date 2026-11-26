@@ -233,19 +233,7 @@ impl<'a> Parser<'a> {
                             // variant's payload types come from the enum
                             // layout, so a result enum (`DirResult::Ok`) marks
                             // the same way a spelled binding does.
-                            let ae_syntax::pattern::PatternKind::Variant { enum_name, variant, payload: Some(bindings), .. } = &arm.pattern.kind else { continue };
-                            let payload_types = self.enum_names.get(enum_name.as_str())
-                                .and_then(|&id| self.enums[id].variants.iter()
-                                    .find(|(name, _)| name == variant).map(|(_, types)| types.clone()));
-                            let Some(payload_types) = payload_types else { continue };
-                            for (binding, ty) in bindings.iter().zip(payload_types.iter()) {
-                                if !matches!(binding.kind, ae_syntax::pattern::PatternKind::Binding(_)) { continue }
-                                if !matches!(ty, Type::Vector(_)) { continue }
-                                if let Some(&id) = expressions.scalar_definitions.get(&binding.range.start) {
-                                    expressions.vector_definitions.insert(id);
-                                    expressions.owned_vectors.insert(id);
-                                }
-                            }
+                            self.mark_pattern_vector_bindings(&arm.pattern, &mut expressions);
                         }
                     }
                     if let StatementKind::ForIn { binding_range, .. } = &statement.kind
@@ -845,6 +833,36 @@ impl<'a> Parser<'a> {
     pub(super) fn shared_closure_header(&self) -> Option<std::sync::Arc<ae_syntax::expression::Expression>> {
         let offset = self.tokens.get(self.pos)?.offset;
         self.resolved_expressions().closure_headers.get(&offset).cloned()
+    }
+
+    fn mark_pattern_vector_bindings(
+        &self,
+        pattern: &ae_syntax::pattern::Pattern,
+        expressions: &mut ResolvedExpressions,
+    ) {
+        let ae_syntax::pattern::PatternKind::Variant { enum_name, variant, payload: Some(subpatterns), .. } = &pattern.kind else {
+            return;
+        };
+        let payload_types = self.enum_names.get(enum_name.as_str())
+            .and_then(|&id| self.enums[id].variants.iter()
+                .find(|(name, _)| name == variant).map(|(_, types)| types.clone()));
+        let Some(payload_types) = payload_types else { return };
+        for (subpat, ty) in subpatterns.iter().zip(payload_types.iter()) {
+            match &subpat.kind {
+                ae_syntax::pattern::PatternKind::Binding(_) => {
+                    if matches!(ty, Type::Vector(_))
+                        && let Some(&id) = expressions.scalar_definitions.get(&subpat.range.start)
+                    {
+                        expressions.vector_definitions.insert(id);
+                        expressions.owned_vectors.insert(id);
+                    }
+                }
+                ae_syntax::pattern::PatternKind::Variant { .. } => {
+                    self.mark_pattern_vector_bindings(subpat, expressions);
+                }
+                ae_syntax::pattern::PatternKind::Wildcard => {}
+            }
+        }
     }
 
 }

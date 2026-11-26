@@ -327,11 +327,14 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
         Statement::Print(Printed::Text(text)) => ("print", vec![MirOperand::Str(Rc::from(text.as_str()), 0, 0)]),
         // The match subject rides the switch terminator, so the payload
         // binding's operands are the binding itself and the variant indices.
-        Statement::BindPayload(bid, _, variant, index, ty) => ("bind_payload", vec![
-            MirOperand::Place(MirPlace::Local(*bid, *ty)),
-            MirOperand::Int(*variant as i64),
-            MirOperand::Int(*index as i64),
-        ]),
+        Statement::BindPayload(bid, _, path, ty) => {
+            let mut ops = vec![MirOperand::Place(MirPlace::Local(*bid, *ty))];
+            for (variant, index) in path {
+                ops.push(MirOperand::Int(*variant as i64));
+                ops.push(MirOperand::Int(*index as i64));
+            }
+            ("bind_payload", ops)
+        }
         // The `?`'s error-path releases ride inside the statement (the C
         // backend emits them where the error path exits); the continuing
         // path's operand is the unwrapped expression.
@@ -776,9 +779,14 @@ fn thread_edges(blocks: &mut [MirBlock]) -> bool {
                     None
                 }
             }
-            CfgTerminator::Switch(subject, layout, targets) => {
-                let resolved: Vec<usize> = targets.iter().map(|t| resolve_target(*t, &trampolines)).collect();
-                (resolved != *targets).then_some(CfgTerminator::Switch(*subject, *layout, resolved))
+            CfgTerminator::Switch(subject, path, layout, targets, default) => {
+                let resolved: Vec<(usize, usize)> = targets
+                    .iter()
+                    .map(|(v, t)| (*v, resolve_target(*t, &trampolines)))
+                    .collect();
+                let resolved_default = default.map(|d| resolve_target(d, &trampolines));
+                (resolved != *targets || resolved_default != *default)
+                    .then_some(CfgTerminator::Switch(*subject, path.clone(), *layout, resolved, resolved_default))
             }
             _ => None,
         };
@@ -880,7 +888,13 @@ fn terminator_targets(terminator: &CfgTerminator) -> Vec<usize> {
     match terminator {
         CfgTerminator::Goto(target) => vec![*target],
         CfgTerminator::Branch(_, a, b) => vec![*a, *b],
-        CfgTerminator::Switch(_, _, targets) => targets.clone(),
+        CfgTerminator::Switch(_, _, _, targets, default) => {
+            let mut out: Vec<usize> = targets.iter().map(|(_, t)| *t).collect();
+            if let Some(d) = default {
+                out.push(*d);
+            }
+            out
+        }
         CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => Vec::new(),
     }
 }
@@ -1139,7 +1153,18 @@ pub(super) fn validate(function: &MirFunction, ctx: &CompileContext) -> Result<(
                     return Err(format!("internal: fn #{} block {} branches to missing blocks", function.id, block.id));
                 }
             }
-            CfgTerminator::Switch(_, _, targets) => for t in targets { if !ids.contains(t) { return Err(format!("internal: fn #{} switch target missing", function.id)); } },
+            CfgTerminator::Switch(_, _, _, targets, default) => {
+                for (_, t) in targets {
+                    if !ids.contains(t) {
+                        return Err(format!("internal: fn #{} switch target missing", function.id));
+                    }
+                }
+                if let Some(d) = default
+                    && !ids.contains(d)
+                {
+                    return Err(format!("internal: fn #{} switch default target missing", function.id));
+                }
+            }
             CfgTerminator::Return(value) if expr_type(value, ctx) != function.returns => {
                 return Err(format!(
                     "internal: fn #{} block {} returns {}, expected {}",
@@ -1171,7 +1196,12 @@ fn print_function(function: &MirFunction, out: &mut String, ctx: &CompileContext
         let tail = match &block.terminator {
             CfgTerminator::Goto(target) => format!("goto block {}", target),
             CfgTerminator::Branch(cond, a, b) => format!("branch {} -> then block {} else block {}", mir_text(cond, ctx), a, b),
-            CfgTerminator::Switch(subject, _, targets) => format!("switch v{} -> {}", subject, targets.iter().map(|t| format!("block {}", t)).collect::<Vec<_>>().join(", ")),
+            CfgTerminator::Switch(subject, _, _, targets, default) => format!(
+                "switch v{} -> {}{}",
+                subject,
+                targets.iter().map(|(v, t)| format!("v{v}: block {t}")).collect::<Vec<_>>().join(", "),
+                default.map(|d| format!(", default: block {d}")).unwrap_or_default(),
+            ),
             CfgTerminator::Return(expr) => format!("return {}", mir_text(expr, ctx)),
             CfgTerminator::Exit(code) => format!("exit {}", mir_text(code, ctx)),
             CfgTerminator::Unreachable if function.is_main => "implicit exit (main)".to_owned(),

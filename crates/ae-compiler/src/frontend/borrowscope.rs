@@ -104,8 +104,9 @@ pub(super) fn adjudicate_borrow_spawns(function: &Function, spawns: &[(usize, Ve
                 CfgTerminator::Return(_) | CfgTerminator::Exit(_) => { escaped = true; break; }
                 CfgTerminator::Goto(target) => stack.push((*target, 0)),
                 CfgTerminator::Branch(_, yes, no) => { stack.push((*yes, 0)); stack.push((*no, 0)); }
-                CfgTerminator::Switch(_, _, targets) => {
-                    for target in targets { stack.push((*target, 0)); }
+                CfgTerminator::Switch(_, _, _, targets, default) => {
+                    for (_, target) in targets { stack.push((*target, 0)); }
+                    if let Some(d) = default { stack.push((*d, 0)); }
                 }
                 // main's tail is an implicit exit; other functions' tails
                 // fail loudly at runtime, which aborts the process — both
@@ -671,7 +672,13 @@ fn successors(function: &CfgFunction, block_id: usize) -> Vec<usize> {
     match &function.blocks[block_id].terminator {
         CfgTerminator::Goto(target) => vec![*target],
         CfgTerminator::Branch(_, a, b) => vec![*a, *b],
-        CfgTerminator::Switch(_, _, targets) => targets.clone(),
+        CfgTerminator::Switch(_, _, _, targets, default) => {
+            let mut out: Vec<usize> = targets.iter().map(|(_, t)| *t).collect();
+            if let Some(d) = default {
+                out.push(*d);
+            }
+            out
+        }
         CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => Vec::new(),
     }
 }

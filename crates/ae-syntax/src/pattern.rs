@@ -12,6 +12,7 @@ pub struct Pattern {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternKind {
+    Wildcard,
     Binding(String),
     /// `variant_range` is the variant name's byte span; semantic checks point
     /// at the variant (or the `(` that follows it) with this range.
@@ -104,7 +105,9 @@ impl Parser<'_> {
         let start = self.current().offset;
         let name = crate::parse_identifier(self.file, self.source, self.current())?.to_owned();
         self.cursor += 1;
-        let kind = if qualified || self.current().kind == Kind::ColonColon {
+        let kind = if name == "_" && self.current().kind != Kind::ColonColon {
+            PatternKind::Wildcard
+        } else if qualified || self.current().kind == Kind::ColonColon {
             let (variant, end) = parse_variant_suffix(self.file, self.source, self.tokens, self.cursor)?;
             let name_token = &self.tokens[self.cursor + 1];
             let variant_range = name_token.offset..name_token.end;

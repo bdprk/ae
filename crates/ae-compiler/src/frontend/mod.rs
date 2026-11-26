@@ -684,7 +684,7 @@ enum Printed { Expr(Expr), Text(String) }
 // top of the arm's block, so the MIR backend can emit them from the block
 // graph. The parser never produces one; the tree form of a match keeps its
 // bindings on the `MatchArm`.
-enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), SliceStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, Vec<(String, Type)>, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, usize, usize, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize),
+enum Statement { Return(Expr, Vec<(usize, Type)>), Declare(usize, Expr), Array(usize, Vec<Expr>, Type), Assign(usize, Expr, bool), Store(usize, usize, Expr, Expr, usize, usize, Type), Sort(usize, bool, usize, usize), Reverse(usize, bool, usize, usize), StrVecPush(usize, Expr, usize, usize, bool), StrVecPop(usize, usize, usize), StrVecStore(usize, Expr, Expr, usize, usize, bool), GVecPush(usize, Expr, Type, usize, usize), GVecPop(usize, Type, usize, usize), GVecStore(usize, Expr, Expr, Type, usize, usize), SliceStore(usize, Expr, Expr, Type, usize, usize), FieldStore(usize, Vec<(String, Type)>, Type, Expr, Type), Print(Printed), Assert(Expr, usize, usize), If(Expr, Vec<Statement>, Vec<Statement>), While(Expr, Vec<Statement>), For(usize, usize, Vec<Statement>, usize, usize, usize), ForTokens(usize, usize, Vec<Statement>, usize, usize, usize), ResetTokens(usize, usize), AdvanceTokens(usize, usize, usize, usize), Match(usize, Type, Vec<MatchArm>), BindPayload(usize, usize, Vec<(usize, usize)>, Type), TakePropagationPayload(usize, Type, Vec<Type>, Option<(usize, Type)>), MapPut(MapPlace, Expr, Expr, usize, usize), Propagate(Expr, Type, Vec<Type>, Option<(usize, Type)>, Vec<(usize, Type)>), Break, Continue(Option<usize>), Exit(Expr, Vec<(usize, Type)>), Frees(Vec<(usize, Type)>), Unsafe(Vec<Statement>), PtrStore(usize, Expr, usize, usize), AtomicStore(Box<Expr>, Box<Expr>), SharedSet(Box<Expr>, Box<Expr>, usize), ChanClose(Box<Expr>), TaskSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), TaskYield, ScopeSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize), PoolSpawn(Box<Expr>, Vec<Expr>, Box<Expr>, usize, usize, usize),
     // P2.4: vector operations on a struct's vector field (`r.cells`).
     // The statement carries the root slot, the field name and the root's
     // declared type (a `&mut` root reads through its pointer), so the
@@ -977,7 +977,23 @@ type Instance = (usize, Vec<Type>, Type);
 #[derive(Default, Clone)]
 struct Generics { defs: Vec<GenericEnum>, names: HashMap<String, usize>, done: HashMap<String, usize>, struct_defs: Vec<GenericStruct>, struct_names: HashMap<String, usize>, struct_done: HashMap<String, usize>, struct_origin: HashMap<usize, (usize, Vec<Type>)>, enum_origin: HashMap<usize, (usize, Vec<Type>)>, fn_defs: Vec<GenericFn>, fn_names: HashMap<String, usize>, fn_done: HashMap<String, Instance>, fn_in_progress: std::collections::HashSet<String>, next_fn_id: usize, traits: Vec<TraitDef>, trait_names: HashMap<String, usize>, impls: std::collections::HashSet<(usize, String)>, inherent: HashMap<String, MethodDef>, generic_impls: HashMap<String, GenericImplDef>, generic_impl_done: HashMap<String, Instance>, impl_in_progress: std::collections::HashSet<String>, closures: Vec<ClosureDef>, closure_envs: HashMap<usize, ClosureEnvInfo>, impl_fns: HashMap<usize, ImplFnInfo>, threads: Vec<Type>, nested_shapes: Vec<NestedShape>, instantiation_trace: Vec<(&'static str, String, String)> }
 #[derive(Debug, Clone)]
-struct MatchArm { variant: usize, bindings: Vec<(usize, Type, usize)>, body: Vec<Statement> }
+enum CompiledPattern {
+    Wildcard,
+    Binding,
+    Variant {
+        eid: usize,
+        variant: usize,
+        fields: Vec<(usize, Type, CompiledPattern)>,
+    },
+}
+type MatchPath = Vec<(usize, usize)>;
+type MatchBinding = (usize, Type, MatchPath);
+#[derive(Debug, Clone)]
+struct MatchArm {
+    pattern: CompiledPattern,
+    bindings: Vec<MatchBinding>,
+    body: Vec<Statement>,
+}
 
 // A function signature as seen by importers. `file` and `public` let a call
 // site reject a name that exists but was not exported (ADR-18).

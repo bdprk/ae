@@ -116,7 +116,9 @@ fn predecessors(function: &CfgFunction, block_id: usize) -> Vec<usize> {
         let hits = match &block.terminator {
             CfgTerminator::Goto(target) => *target == block_id,
             CfgTerminator::Branch(_, a, b) => *a == block_id || *b == block_id,
-            CfgTerminator::Switch(_, _, targets) => targets.contains(&block_id),
+            CfgTerminator::Switch(_, _, _, targets, default) => {
+                targets.iter().any(|(_, t)| *t == block_id) || *default == Some(block_id)
+            }
             CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => false,
         };
         if hits { preds.push(block.id); }
@@ -128,7 +130,13 @@ fn successors(function: &CfgFunction, block_id: usize) -> Vec<usize> {
     match &function.blocks[block_id].terminator {
         CfgTerminator::Goto(target) => vec![*target],
         CfgTerminator::Branch(_, a, b) => vec![*a, *b],
-        CfgTerminator::Switch(_, _, targets) => targets.clone(),
+        CfgTerminator::Switch(_, _, _, targets, default) => {
+            let mut out: Vec<usize> = targets.iter().map(|(_, t)| *t).collect();
+            if let Some(d) = default {
+                out.push(*d);
+            }
+            out
+        }
         CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => Vec::new(),
     }
 }

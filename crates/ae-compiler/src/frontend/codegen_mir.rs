@@ -93,10 +93,17 @@ fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: 
         // exhaustive, so every variant has a target and no default is
         // needed; the arm bodies are other blocks, so the switch contains
         // only gotos and nothing inside it can `break` an enclosing loop.
-        CfgTerminator::Switch(subject, eid, targets) => {
-            out.push_str(&format!("    switch (v{subject}.tag) {{\n"));
-            for (variant, target) in targets.iter().enumerate() {
+        CfgTerminator::Switch(subject, path, eid, targets, default) => {
+            let mut place = format!("v{subject}");
+            for (v, f) in path {
+                place.push_str(&format!(".u.v{v}.p{f}"));
+            }
+            out.push_str(&format!("    switch ({place}.tag) {{\n"));
+            for (variant, target) in targets {
                 out.push_str(&format!("    case AE_E{eid}_{variant}: goto block_{target};\n"));
+            }
+            if let Some(default_block) = default {
+                out.push_str(&format!("    default: goto block_{default_block};\n"));
             }
             out.push_str("    }\n");
         }

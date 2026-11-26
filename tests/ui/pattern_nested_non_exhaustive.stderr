@@ -1,0 +1,1 @@
+ae: $DIR/pattern_nested_non_exhaustive.ae:9:1: match is not exhaustive: 'Outer::Wrap(Inner::B)' is not handled

@@ -211,7 +211,13 @@ fn terminator_targets(terminator: &CfgTerminator) -> Vec<usize> {
     match terminator {
         CfgTerminator::Goto(target) => vec![*target],
         CfgTerminator::Branch(_, yes, no) => vec![*yes, *no],
-        CfgTerminator::Switch(_, _, targets) => targets.clone(),
+        CfgTerminator::Switch(_, _, _, targets, default) => {
+            let mut out: Vec<usize> = targets.iter().map(|(_, t)| *t).collect();
+            if let Some(d) = default {
+                out.push(*d);
+            }
+            out
+        }
         CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => Vec::new(),
     }
 }
