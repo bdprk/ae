@@ -14,6 +14,7 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stdbool.h>\n\
          #include <stddef.h>\n\
          #include <stdint.h>\n\
+         #include <stdatomic.h>\n\
          #include <stdio.h>\n\
          #include <stdlib.h>\n\
          #include <string.h>\n\n\
@@ -647,6 +648,37 @@ static inline bool ae_tokens_next(ae_tokens *cursor) {
     return true;
 }
 static inline ae_str ae_tokens_current(const ae_tokens *cursor) { return cursor->current; }
+
+// Atomic cells (spec/concurrency.md §8): one process-lifetime C11 atomic
+// behind a copy-semantics handle. Copying the struct shares the cell;
+// nothing frees it; every operation is seq_cst.
+typedef struct { _Atomic int64_t *cell; } ae_atomic;
+static inline ae_atomic ae_cell_new(int64_t seed) {
+    _Atomic int64_t *cell = (_Atomic int64_t *)malloc(sizeof(_Atomic int64_t));
+    if (!cell) ae_trap("out of memory");
+    atomic_store_explicit(cell, seed, memory_order_seq_cst);
+    ae_atomic value = { cell };
+    return value;
+}
+static inline int64_t ae_cell_load(ae_atomic a) {
+    return atomic_load_explicit(a.cell, memory_order_seq_cst);
+}
+static inline void ae_cell_store(ae_atomic a, int64_t value) {
+    atomic_store_explicit(a.cell, value, memory_order_seq_cst);
+}
+static inline int64_t ae_cell_add(ae_atomic a, int64_t value) {
+    return atomic_fetch_add_explicit(a.cell, value, memory_order_seq_cst);
+}
+static inline bool ae_cell_cas(ae_atomic a, int64_t expected, int64_t replacement) {
+    int64_t observed = expected;
+    return atomic_compare_exchange_strong_explicit(
+        a.cell,
+        &observed,
+        replacement,
+        memory_order_seq_cst,
+        memory_order_seq_cst
+    );
+}
 "#);
 
     let int_tys = [

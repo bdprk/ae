@@ -1093,6 +1093,47 @@ fn emit_intrinsic(
             )?;
             finish_value(out, body, types, destination, target, &format!("ae_tokens_current(&{expr})"))
         }
+        "atomic_new" => {
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_cell_new((int64_t)({value}))"))
+        }
+        "atomic_load" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("ae_cell_load({handle})"))
+        }
+        "atomic_add" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let value = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_cell_add({handle}, (int64_t)({value}))"),
+            )
+        }
+        "atomic_cas" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let expected = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let replacement = arg_exprs.get(2).map(String::as_str).unwrap_or("0");
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!(
+                    "ae_cell_cas({handle}, (int64_t)({expected}), (int64_t)({replacement}))"
+                ),
+            )
+        }
+        "atomic_store" => {
+            let handle = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let value = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let _ = writeln!(out, "    ae_cell_store({handle}, (int64_t)({value}));");
+            finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
+        }
         "ptr_offset" | "byte_offset" => {
             if args.len() != 2 {
                 return Err(CodegenError::UnsupportedFeature {

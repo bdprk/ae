@@ -56,13 +56,13 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         // and differ only in what the source allows.
         TyKind::Slice(_) | TyKind::SliceMut(_) => "ae_slice".to_owned(),
         TyKind::Tokens => "ae_tokens".to_owned(),
+        TyKind::Atomic => "ae_atomic".to_owned(),
         TyKind::MapOf(_)
         | TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::Ptr(_)
         | TyKind::PtrMut(_)
         | TyKind::Thread(_)
-        | TyKind::Atomic
         | TyKind::Shared(_)
         | TyKind::Mutex
         | TyKind::Guard
