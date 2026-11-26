@@ -304,4 +304,56 @@ fn main() {
 "#;
     let err = check_rejects("nested-assign-subject", assign_subject);
     assert!(err.contains("while it is borrowed"), "got: {err}");
+
+    // Cannot move a directly-bound non-Copy enum payload into a call.
+    let move_inner_call = r#"
+enum Inner { Text(string), Empty }
+enum Outer { Wrap(Inner), None }
+fn take(i: Inner) { match i { Inner::Text(s) => { print(s); } Inner::Empty => {} } }
+fn main() {
+    let s = "hello" + " world";
+    let o = Outer::Wrap(Inner::Text(s));
+    match o { Outer::Wrap(inner) => { take(inner); } Outer::None => {} }
+}
+"#;
+    let err = check_rejects("direct-enum-payload-move-call", move_inner_call);
+    assert!(err.contains("while it is borrowed"), "got: {err}");
+
+    // Cannot return a directly-bound non-Copy enum payload.
+    let move_inner_return = r#"
+enum Inner { Text(string), Empty }
+enum Outer { Wrap(Inner), None }
+fn extract(o: Outer) -> Inner {
+    match o {
+        Outer::Wrap(inner) => { return inner; }
+        Outer::None => { return Inner::Empty; }
+    }
+}
+fn main() {}
+"#;
+    let err = check_rejects("direct-enum-payload-move-return", move_inner_return);
+    assert!(err.contains("while it is borrowed"), "got: {err}");
+}
+
+#[test]
+fn direct_non_copy_enum_payload_match_parity_across_backends() {
+    let source = r#"
+enum Inner { Text(string), Empty }
+enum Outer { Wrap(Inner), None }
+
+fn main() {
+    let s = "hello" + " world";
+    let o = Outer::Wrap(Inner::Text(s));
+    match o {
+        Outer::Wrap(inner) => {
+            match inner {
+                Inner::Text(t) => { print(t); }
+                Inner::Empty => { print("empty"); }
+            }
+        }
+        Outer::None => { print("none"); }
+    }
+}
+"#;
+    run_all_backends("direct-enum-payload-match", source, "hello world\n");
 }

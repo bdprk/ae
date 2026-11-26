@@ -80,6 +80,7 @@ impl<'a> Parser<'a> {
                 return Err(self.error_at(tree.range.start, "unreachable match arm after wildcard '_'"));
             }
             self.scopes.push(Vec::new());
+            let borrow_base = self.borrows.len();
             let mut bindings = Vec::new();
             let mut bound = Vec::new();
             let mut path = Vec::new();
@@ -131,6 +132,7 @@ impl<'a> Parser<'a> {
             }
             self.take(Kind::FatArrow)?;
             let body = lower_body(self, arms.len(), &bound)?;
+            self.borrows.truncate(borrow_base);
             self.scopes.pop().unwrap();
             for (name, _) in bound { self.names.remove(&name); }
             arms.push(MatchArm { pattern: compiled_pattern, bindings, body });
@@ -193,8 +195,11 @@ impl<'a> Parser<'a> {
                 // payload needs the outer start to resolve its definition.
                 self.binding_ranges.insert(id, name_at..name_at + bname.len());
                 // Non-Copy enum payloads bound directly must not be freed at
-                // arm exit because the matched outer enum retains ownership.
-                if !matches!(bty, Type::Enum(_, k) if !self.enums[k].is_copy) {
+                // arm exit because the matched outer enum retains ownership,
+                // and must be marked container-borrowed so the arm cannot move them.
+                if matches!(bty, Type::Enum(_, k) if !self.enums[k].is_copy) {
+                    self.borrows.push((id, self.scopes.len(), BorrowKind::Container));
+                } else {
                     self.scopes.last_mut().unwrap().push((id, bty));
                 }
                 bound.push((bname.clone(), name_at));

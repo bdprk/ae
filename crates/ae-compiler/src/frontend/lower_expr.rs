@@ -1670,16 +1670,22 @@ let mut args = Vec::with_capacity(arguments.len());
                 args.push(Argument::View(value));
                 continue;
             }
-            if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
+            let checked_self = if let (Some(atom), Expr::Variable(slot, ..)) = (receiver_value(argument), &value) {
                 self.seek_scalar_offset(atom.range.end);
                 self.check_variable_move(*slot)?;
-            }
+                true
+            } else {
+                false
+            };
             self.check_value_argument_type(callee_name, index, expected, actual, Some(&argument.range))?;
             // An owned aggregate passed by value moves: later uses
             // are rejected (E0102), and the drops pass trims the
             // Frees lists for this slot.
             if self.is_owned(actual)
                 && let Expr::Variable(slot, ..) = &value {
+                    if !checked_self {
+                        self.check_variable_move(*slot)?;
+                    }
                     self.moved.insert(*slot);
                 }
             args.push(Argument::Value(value));
