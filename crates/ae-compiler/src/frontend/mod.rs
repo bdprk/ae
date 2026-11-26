@@ -40,6 +40,8 @@ mod loader;
 use loader::{load_program, load_program_with_imports, parse_source};
 mod capability_audit;
 use capability_audit::audit_generic_fn;
+mod generic_trait_check;
+use generic_trait_check::check_generic_fn_trait_methods;
 mod codegen;
 mod codegen_mir;
 mod c_output;

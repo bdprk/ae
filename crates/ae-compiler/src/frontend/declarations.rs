@@ -322,6 +322,18 @@ impl Parser<'_> {
                     self.skip_function_body()?
                 };
                 audit_generic_fn(&self.file, self.source, self.tokens.as_ref(), start, end, &name, &params, &bounds, declared_at, self.ctx)?;
+                check_generic_fn_trait_methods(
+                    &self.file,
+                    self.source,
+                    self.tokens.as_ref(),
+                    start,
+                    end,
+                    &name,
+                    &params,
+                    &trait_bounds,
+                    &self.generics.traits,
+                    parsed_parameters,
+                )?;
                 let gid = self.generics.fn_defs.len();
                 self.generics.fn_names.insert(name.clone(), gid);
                 let bindings = parsed_parameters.map(Rc::from);
