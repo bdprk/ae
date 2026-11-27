@@ -16,12 +16,19 @@ default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-res
 resolver = "3"
 
 # Keep build artifacts small. The full debuginfo + incremental cache in the dev
-# profile was dominating disk usage (~6 GB for this small workspace). Line-table
-# debuginfo is enough for backtraces, and dependencies do not need debuginfo at
-# all. Incremental is disabled to avoid the multi-GB `debug/incremental` cache;
-# re-enable locally with `CARGO_INCREMENTAL=1` if you want faster edit loops.
+# profile was dominating disk usage (~6 GB for this small workspace).
+#
+# `debug = 0`: on Windows/MSVC every test binary also gets a `.pdb`, and line
+# tables for this suite came to 1.85 GB of `deps/*.pdb` alone. Panic and
+# assertion locations are compile-time constants (`panicked at file:line`), so
+# they survive without debuginfo; only backtrace symbol/line resolution is lost.
+# Re-enable locally with `CARGO_PROFILE_DEV_DEBUG=1` (or `=line-tables-only`)
+# when you actually need to step through a crash.
+#
+# `incremental = false`: avoids the multi-GB `debug/incremental` cache;
+# re-enable locally with `CARGO_INCREMENTAL=1` for a faster edit loop.
 [profile.dev]
-debug = 1
+debug = 0
 incremental = false
 
 [profile.dev.package."*"]
