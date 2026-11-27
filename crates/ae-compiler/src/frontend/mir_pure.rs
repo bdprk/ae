@@ -30,7 +30,16 @@ pub fn lower_path_to_pure_mir(path: &Path) -> Result<Vec<Body>, String> {
 
 /// Lowers, optimizes, validates, and borrow-checks every function in the AE program at `path`.
 pub fn compile_path_pure_mir_bodies(path: &Path) -> Result<Vec<Body>, String> {
-    let mut bodies = lower_path_to_pure_mir(path)?;
+    compile_path_pure_mir_bodies_with_imports(path, &PackageImports::new())
+}
+
+/// [`compile_path_pure_mir_bodies`] with a package import map: the same checks
+/// over a program that may import other files.
+pub fn compile_path_pure_mir_bodies_with_imports(
+    path: &Path,
+    imports: &PackageImports,
+) -> Result<Vec<Body>, String> {
+    let mut bodies = lower_path_with_imports(path, imports)?;
     for body in &mut bodies {
         ae_mir::opt::optimize_body(body);
         if let Err(errors) = validate(body) {

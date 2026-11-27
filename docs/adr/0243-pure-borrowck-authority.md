@@ -72,7 +72,10 @@ both routes and requires the identical message and position, plus a
 positioned diagnostic for every rejection — zero divergences. The acceptance survey is widened beyond the run corpus:
 `tests/pure_route_coverage.rs` lowers, validates and borrow-checks every
 accepted program under `examples/` and `std/` (50 programs), so the route
-switch cannot reject an example or library module. To be
+switch cannot reject an example or library module. Stage 3 is rehearsed: `AE_PURE_VERIFY=1` makes `check` run the pure pipeline
+after the frontend accepts a program (imports included) and report a
+disagreement as an internal error; over `tests/run` and `examples` it reports
+zero. To be
 recorded per later stage:
 the workspace suite and clippy on both hosts, the corpus and examples gates,
 and the fuzz summaries for both generators. This ADR stays Proposed until

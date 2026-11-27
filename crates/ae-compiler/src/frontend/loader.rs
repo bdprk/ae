@@ -370,7 +370,27 @@ pub fn check_path(path: &Path) -> Result<(), String> {
 }
 
 pub fn check_path_with_imports(path: &Path, imports: &PackageImports) -> Result<(), String> {
-    load_program_with_imports(path, imports).map(|_| ())
+    load_program_with_imports(path, imports).map(|_| ())?;
+    verify_pure_route(path, imports);
+    Ok(())
+}
+
+/// ADR-0243 stage 3 rehearsal: with `AE_PURE_VERIFY=1`, every accepted program
+/// must also lower, validate and borrow-check through the pure MIR pipeline.
+/// The check is opt-in (an environment variable) so the default route keeps
+/// its current cost; a mismatch is reported as an internal error naming the
+/// fixture, because at this stage the legacy pass has already accepted the
+/// program and the divergence is the pipeline's bug, not the user's.
+fn verify_pure_route(path: &Path, imports: &PackageImports) {
+    if std::env::var("AE_PURE_VERIFY").as_deref() != Ok("1") {
+        return;
+    }
+    if let Err(err) = super::mir_pure::compile_path_pure_mir_bodies_with_imports(path, imports) {
+        eprintln!(
+            "ae: internal: the pure MIR checker disagrees with the accepted program {}: {err}",
+            path.display()
+        );
+    }
 }
 
 // A lexically invalid file can still expose imports that precede the first
