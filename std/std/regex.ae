@@ -12,12 +12,13 @@
 //   \d \w \s       digit / word / whitespace; \D \W \S are their negations
 //   \x             an escaped literal (\\ \. \* \| ...)
 //   * + ?          greedy repetition of the preceding atom (0+, 1+, 0-1)
+//   {m} {m,} {m,n} counted repetition (exact, at-least, between)
 //   ^ $            start-of-text and end-of-text anchors
 //   a|b            alternation, split at top level (never inside a class)
 //
-// Not yet supported: capture groups, counted repetition `{m,n}`, back
-// references, lazy quantifiers. `*` / `+` / `?` always take a precedable atom;
-// a quantifier with nothing before it is matched as a literal.
+// Not yet supported: capture groups, back references, lazy quantifiers. A
+// malformed counted quantifier (`a{x}`, `a{2,1}`, an unterminated `a{2`) is not
+// a quantifier — the brace is matched as a literal.
 //
 // The matcher is a small backtracking interpreter over code-point indices. A
 // greedy quantifier first runs to its maximum and then gives back one code
@@ -218,48 +219,109 @@ fn regex_match_seq(pat: &vec, pi: i64, pend: i64, txt: &vec, ti: i64) -> bool {
         return regex_match_seq(pat, pi + 1, pend, txt, ti);
     }
     let atom_end = regex_atom_end(pat, pi, pend);
-    // 0 none, 1 '*', 2 '+', 3 '?'
-    var quant = 0;
+    // A quantifier sets how many times the atom must repeat: `q_lo` minimum,
+    // `q_hi` maximum (-1 means unbounded). With no quantifier both are 1.
+    var q_lo = 1;
+    var q_hi = 1;
+    var has_quant = false;
     var next_pi = atom_end;
     if atom_end < pend {
         let q = pat[atom_end];
         if q == 42 {
-            quant = 1;
+            q_lo = 0;
+            q_hi = -1;
+            has_quant = true;
             next_pi = atom_end + 1;
         } else if q == 43 {
-            quant = 2;
+            q_lo = 1;
+            q_hi = -1;
+            has_quant = true;
             next_pi = atom_end + 1;
         } else if q == 63 {
-            quant = 3;
+            q_lo = 0;
+            q_hi = 1;
+            has_quant = true;
             next_pi = atom_end + 1;
+        } else if q == 123 {
+            // Counted repetition `{m}` `{m,}` `{m,n}`. A malformed brace is
+            // not a quantifier: it is left for the next call to match as a
+            // literal `{`.
+            var close = atom_end + 1;
+            while close < pend && pat[close] != 125 {
+                close = close + 1;
+            }
+            if close < pend {
+                var lo = 0;
+                var hi = 0;
+                var digits = 0;
+                var j = atom_end + 1;
+                while j < close && pat[j] >= 48 && pat[j] <= 57 {
+                    // Clamp so a huge count cannot overflow the product; such a
+                    // count is already larger than any subject.
+                    if lo < 1000000000 {
+                        lo = lo * 10 + (pat[j] - 48);
+                    }
+                    digits = digits + 1;
+                    j = j + 1;
+                }
+                var ok = digits > 0;
+                if ok && j == close {
+                    hi = lo;
+                } else if ok && j < close && pat[j] == 44 {
+                    j = j + 1;
+                    if j == close {
+                        hi = -1;
+                    } else {
+                        var d2 = 0;
+                        var hi2 = 0;
+                        while j < close && pat[j] >= 48 && pat[j] <= 57 {
+                            if hi2 < 1000000000 {
+                                hi2 = hi2 * 10 + (pat[j] - 48);
+                            }
+                            d2 = d2 + 1;
+                            j = j + 1;
+                        }
+                        if d2 > 0 && j == close {
+                            hi = hi2;
+                        } else {
+                            ok = false;
+                        }
+                    }
+                } else {
+                    ok = false;
+                }
+                if ok && hi >= 0 && hi < lo {
+                    ok = false;
+                }
+                if ok {
+                    q_lo = lo;
+                    q_hi = hi;
+                    has_quant = true;
+                    next_pi = close + 1;
+                }
+            }
         }
     }
     let n = len(txt);
-    if quant == 0 {
+    if !has_quant {
         if ti >= n || !regex_atom_matches(pat, pi, atom_end, txt[ti]) {
             return false;
         }
         return regex_match_seq(pat, next_pi, pend, txt, ti + 1);
     }
-    if quant == 3 {
-        if ti < n && regex_atom_matches(pat, pi, atom_end, txt[ti]) {
-            if regex_match_seq(pat, next_pi, pend, txt, ti + 1) {
-                return true;
-            }
-        }
-        return regex_match_seq(pat, next_pi, pend, txt, ti);
+    // Run the atom greedily up to its maximum, then give code points back one
+    // at a time until the rest of the pattern matches (down to the minimum).
+    var limit = n;
+    if q_hi >= 0 && ti + q_hi < limit {
+        limit = ti + q_hi;
     }
-    // '*' or '+': run greedily, then give code points back.
     var reach = ti;
-    while reach < n && regex_atom_matches(pat, pi, atom_end, txt[reach]) {
+    while reach < limit && regex_atom_matches(pat, pi, atom_end, txt[reach]) {
         reach = reach + 1;
     }
-    var base = ti;
-    if quant == 2 {
-        if reach == ti {
-            return false;
-        }
-        base = ti + 1;
+    let base = ti + q_lo;
+    if reach < base {
+        return false;
     }
     var k = reach;
     while k >= base {

@@ -30,6 +30,26 @@ fn main() {
     assert(regex_match("ab?c", "abc"));
     assert(!regex_match("ab?c", "abbc"));
 
+    // Counted repetition `{m}`, `{m,}`, `{m,n}`.
+    assert(regex_match("^a{3}$", "aaa"));
+    assert(!regex_match("^a{3}$", "aa"));
+    assert(!regex_match("^a{3}$", "aaaa"));
+    assert(regex_full_match("a{2,4}", "aa"));
+    assert(regex_full_match("a{2,4}", "aaaa"));
+    assert(!regex_full_match("a{2,4}", "a"));
+    assert(!regex_full_match("a{2,4}", "aaaaa"));
+    assert(regex_full_match("a{2,}", "aaaaa"));
+    assert(!regex_full_match("a{2,}", "a"));
+    assert(regex_full_match("a{0,1}", ""));
+    assert(regex_full_match("a{0,1}", "a"));
+    assert(!regex_full_match("a{0,1}", "aa"));
+    assert(regex_full_match("[0-9]{2,3}", "123"));
+    assert(!regex_full_match("[0-9]{2,3}", "1234"));
+    // A malformed brace is a literal, not a quantifier.
+    assert(regex_full_match("a{x}", "a{x}"));
+    assert(regex_full_match("a{2", "a{2"));
+    assert(regex_full_match("a{2,1}", "a{2,1}"));
+
     // Greedy repetition backtracks to the last usable match.
     assert(regex_match("a.*z", "abcz"));
     assert(regex_match("a.*z", "abczz"));
