@@ -42,6 +42,11 @@ jobs:
         # Every example builds through both backends and must match on exit
         # status, stdout and stderr; slow because it compiles 98 binaries.
         run: cargo test --test pure_examples_gate -- --ignored
+      - name: Pure MIR checker rehearsal (P3.3)
+        # AE_PURE_VERIFY=1 makes check run the pure pipeline after the
+        # frontend accepts: a program the language accepts must lower and
+        # borrow-check, or the ADR-0243 route switch would reject it.
+        run: python scripts/pure_verify_report.py --details
       - name: Body-route coverage ratchet (P1.1)
         # The resolved-body route replaces the legacy parser slice by slice.
         # The fallback total must never rise between slices; bump the ceiling
