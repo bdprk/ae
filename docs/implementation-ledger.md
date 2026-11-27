@@ -889,10 +889,18 @@ M5.1 and M6.2 pauses until R2 and R3a land.
   to an inherent impl's method def. Closure bodies resolve too:
   the parser re-enters a closure's brace-balanced body with the shared
   statement grammar inside a nested scope, binding its parameters as
-  `ClosureParameter` locals. Honest gaps left for later slices: imports
-  listed not followed, receiver method names need the receiver's type (R3c),
-  prelude/builtin surface `external`, single-file scope. The type checker
-  (R3c) consumes `Resolution` next.
+  `ClosureParameter` locals. Imports are followed: `crates/ae-resolve/src/imports.rs`
+  (`load_module_transitive` / `load_and_resolve`) reads the `use` headers,
+  resolves each path against the importer's directory, parses the target
+  module, cuts cycles and caps the closure at 64 files, then seeds the
+  imported `pub` items (and enum variants) under free names with
+  `imported: true`; the CLI (`ae emit-resolve`) and the differential gate use
+  the same entry, so an accepted multi-file program resolves without
+  unknowns. Remaining honest gaps: an imported module's *bodies* are seeded as
+  declarations only (`FnOccurrences` indexes `Module::functions`, so per-file
+  body identity needs a file tag), receiver method names need the receiver's
+  type (R3c), and the prelude/builtin surface stays `external` by design.
+  The type checker (R3c) consumes `Resolution` next.
 - [x] R3c. Type checker over the resolved tree emitting the existing typed
   Expr; MIR/codegen untouched; stable type dumps. **Progress:** step 1
   landed (ADR-0228): the resolver classifies every declarative type spelling
