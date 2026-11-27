@@ -620,10 +620,17 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         }
     }
     // `build --pure` / `run --pure` compile through the pure-MIR C backend
-    // (ADR-0237). The flag is removed before the positional parsing below, so
-    // `-o`, `--release` and `--debug` keep their existing shapes.
-    let pure = matches!(cmd.as_str(), "build" | "run") && args.iter().any(|a| a.to_str() == Some("--pure"));
-    if pure { args.retain(|a| a.to_str() != Some("--pure")); }
+    // (ADR-0237); `--legacy` forces the default legacy MIR backend, and
+    // `AE_BACKEND=pure|legacy` selects the same thing without a flag. The
+    // flags are removed before the positional parsing below, so `-o`,
+    // `--release` and `--debug` keep their existing shapes.
+    let backend_env = std::env::var("AE_BACKEND").unwrap_or_default();
+    let mut pure = matches!(cmd.as_str(), "build" | "run")
+        && (args.iter().any(|a| a.to_str() == Some("--pure")) || backend_env == "pure");
+    if args.iter().any(|a| a.to_str() == Some("--legacy")) {
+        pure = false;
+    }
+    args.retain(|a| a.to_str() != Some("--pure") && a.to_str() != Some("--legacy"));
     let first = args.get(1).and_then(|arg| arg.to_str());
     let implicit_project = match cmd.as_str() {
         "check" | "emit-c" | "emit-pure-c" | "emit-pure-mir" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" => args.len() == 1,

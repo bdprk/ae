@@ -78,7 +78,8 @@ cargo run -- fmt examples/hello.ae
 location; `cache dir|clear|stats` manages it). The generated C keeps only the
 runtime functions the program reaches, so emitted size varies by program.
 `--pure` compiles through the pure-MIR backend and bypasses that cache (the
-cached C belongs to the legacy backend).
+cached C belongs to the legacy backend); `--legacy` forces the default backend,
+and `AE_BACKEND=pure` / `AE_BACKEND=legacy` does the same without a flag.
 
 ## Limitations
 

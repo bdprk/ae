@@ -3,14 +3,14 @@
 Host: Windows x86-64, MinGW gcc 16.2 (`-O2`), 16 cores, measurements taken with
 the machine otherwise idle (the differential-fuzz campaigns were stopped for the
 runs). Each cell is the median of three to four runs of the benchmark binary;
-the sources are the seven ported programs in `bench/gojo-suite/ae/` (the
-`binarytrees` port is still missing — see "Coverage gap" below).
+the sources are the seven ported benchmark programs (the `binarytrees` port is
+still missing — see "Coverage gap" below).
 
 Command shapes:
 
 ```sh
-ae build bench/gojo-suite/ae/<name>.ae -o <legacy>            # legacy MIR backend
-ae build --pure bench/gojo-suite/ae/<name>.ae -o <pure>       # pure-MIR C backend
+ae build <name>.ae -o <legacy>            # legacy MIR backend
+ae build --pure <name>.ae -o <pure>       # pure-MIR C backend
 ```
 
 ## Results (ms)
@@ -41,22 +41,6 @@ legacy backend and now sits at ~450 ms on the pure backend.
   measurement above does not isolate the cause.
 - mandelbrot and hashmap are within noise; both are dominated by arithmetic or
   map operations the two backends spell the same way.
-
-## Relation to the external five-language report (2026-11-27)
-
-The external report (`gojo-zig-moonbit-benchmark/outputs/REPORT.md`) measured ae
-with the **legacy** backend and showed ae at 2.05× geometric mean, with fib 3.5×
-and spectralnorm 3.0× behind Gojo. Two factors explain that gap:
-
-1. **Backend choice.** The same machine measures the pure backend 1.7× (fib) to
-   2.9× (fannkuch) faster than legacy. `ae build --pure` / `ae run --pure`
-   (commit `9d978ddb`) expose it; a re-run should use it or the default should
-   switch after the ADR-0242 exit.
-2. **Checked arithmetic is a language contract.** ae traps on i64 overflow
-   (append-only, documented); Gojo, Go and Zig ReleaseFast wrap silently. The
-   fib cell is therefore not an apples-to-apples codegen comparison. The report
-   should mark that column as "checked arithmetic" (or add a wrapping-column
-   variant) before drawing conclusions about codegen quality.
 
 ## Coverage gap: binarytrees
 

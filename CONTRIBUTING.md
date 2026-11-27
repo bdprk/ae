@@ -2,7 +2,7 @@
 
 ## Independent implementation
 
-ae is an independently developed implementation. Do not copy implementation code, tests, documentation, or assets from other language projects, including Gojo. Public material may be studied for general ideas, but submitted code and text must be original to this project. Identify design sources in the change description or an ADR when applicable.
+ae is an independently developed implementation. Do not copy implementation code, tests, documentation, or assets from other language projects. Public material may be studied for general ideas, but submitted code and text must be original to this project. Identify design sources in the change description or an ADR when applicable.
 
 ## Change requirements
 

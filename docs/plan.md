@@ -37,7 +37,7 @@ Initial platforms: Windows x86-64 and Linux x86-64 (equal status), followed by m
 
 ### 1.2 Benchmarks/References
 
-Primary references: **Go, Rust**; secondary references: design concepts from Zig, Odin, Swift, Mojo, Vale, and Hylo. Gojo is treated only as a similar experimental project and is no longer an acceptance baseline.
+Primary references: **Go, Rust**; secondary references: design concepts from Zig, Odin, Swift, Mojo, Vale, and Hylo.
 
 ### 1.3 Meaning of "Replacement"
 
