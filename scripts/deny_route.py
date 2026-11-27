@@ -190,6 +190,7 @@ FILES = [
     "tests/run/sync_markers.ae",
     "tests/run/tasks_advanced.ae",
     "tests/run/tasks_fifo.ae",
+    "tests/run/test_tally.ae",
     "tests/run/thread_failure.ae",
     "tests/run/threads.ae",
     "tests/run/trait_bounds.ae",

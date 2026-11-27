@@ -1,0 +1,102 @@
+// std/std/test/test.ae
+// Pure-AE test support (P4.4). `ae test` already discovers zero-argument
+// `test_*` functions and reports them; this module is the in-program helper a
+// test body uses when it wants a running tally instead of one bare `assert`.
+// Each check prints a stable line — `ok NAME` or `FAIL NAME: detail` — and
+// bumps a counter, so a suite can report how many checks passed and failed and
+// a caller can assert the totals.
+//
+// The operations are free functions over a `&mut TestTally` rather than
+// methods: a method that takes any argument besides its receiver is not on the
+// resolved body route yet, while a free function with `&mut T` and `&string`
+// parameters is. The record shape is fixed and pinned by a fixture; printing
+// goes through the console bridge (`print`, stdout), the same sink `std/log`
+// uses.
+
+// Running counts for a suite of checks.
+pub struct TestTally {
+    ok_count: i64,
+    fail_count: i64,
+}
+
+// `ok NAME` for a passing check.
+fn test_pass_line(name: &string) -> string {
+    let label = slice(name, 0, len(name));
+    return "ok " + label;
+}
+
+// `FAIL NAME: detail` for a failing check.
+fn test_fail_line(name: &string, detail: &string) -> string {
+    let label = slice(name, 0, len(name));
+    let reason = slice(detail, 0, len(detail));
+    var line = "FAIL " + label;
+    let with_colon = line + ": ";
+    line = with_colon;
+    let with_reason = line + reason;
+    line = with_reason;
+    return line;
+}
+
+// A fresh tally at zero.
+pub fn tally_new() -> TestTally {
+    return TestTally { ok_count: 0, fail_count: 0 };
+}
+
+pub fn tally_passed(t: &TestTally) -> i64 {
+    return t.ok_count;
+}
+
+pub fn tally_failed(t: &TestTally) -> i64 {
+    return t.fail_count;
+}
+
+pub fn tally_total(t: &TestTally) -> i64 {
+    let ok = t.ok_count;
+    let bad = t.fail_count;
+    return ok + bad;
+}
+
+// Record one passing check.
+pub fn tally_ok(t: &mut TestTally, name: &string) {
+    t.ok_count = t.ok_count + 1;
+    print(test_pass_line(name));
+}
+
+// Record one failing check with a reason.
+pub fn tally_fail(t: &mut TestTally, name: &string, detail: &string) {
+    t.fail_count = t.fail_count + 1;
+    print(test_fail_line(name, detail));
+}
+
+// Record the outcome of a boolean condition.
+pub fn tally_check(t: &mut TestTally, name: &string, cond: bool) {
+    if cond {
+        t.ok_count = t.ok_count + 1;
+        print(test_pass_line(name));
+    } else {
+        t.fail_count = t.fail_count + 1;
+        print(test_fail_line(name, "condition was false"));
+    }
+}
+
+// Record the outcome of an integer comparison.
+pub fn tally_check_i64(t: &mut TestTally, name: &string, actual: i64, expected: i64) {
+    if actual == expected {
+        t.ok_count = t.ok_count + 1;
+        print(test_pass_line(name));
+    } else {
+        t.fail_count = t.fail_count + 1;
+        print(test_fail_line(name, "integer mismatch"));
+    }
+}
+
+// Record the outcome of a string comparison.
+pub fn tally_check_str(t: &mut TestTally, name: &string, actual: &string, expected: &string) {
+    if actual == expected {
+        t.ok_count = t.ok_count + 1;
+        print(test_pass_line(name));
+    } else {
+        t.fail_count = t.fail_count + 1;
+        print(test_fail_line(name, "string mismatch"));
+    }
+}

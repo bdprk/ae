@@ -1,0 +1,7 @@
+ok truth is true
+FAIL truth is false?: condition was false
+ok two plus two
+FAIL wrong math: integer mismatch
+ok greeting
+FAIL mismatch: string mismatch
+test tally ok
