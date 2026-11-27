@@ -33,6 +33,12 @@ rules diverge from the pure lowering's single-owner model (ADR-0241). Its
 remaining value is as a differential reference, which the legacy MIR C
 backend already provides for the same corpus.
 
+The pure backend is also the faster C backend on recursion- and
+index-heavy code: measured on this host, fib 530 → 305 ms, fannkuch
+620 → 215 ms and spectralnorm 695 → 490 ms (legacy MIR vs pure), with the
+other benchmarks within noise. The exit therefore also removes a
+performance dead end.
+
 ## Options
 
 | Option | Pros | Cons | Resource Cost |
