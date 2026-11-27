@@ -1,0 +1,36 @@
+// P4.4: pure-AE rand. The same seed reproduces the same sequence, the state
+// stays inside the Park-Miller range, and both `below` and `next_byte` stay in
+// their promised ranges.
+use "../../std/std/rand.ae";
+
+fn main() {
+    // Determinism: equal seeds give equal sequences.
+    var a = Rng::new(42);
+    let a0 = a.next();
+    let a1 = a.next();
+    var b = Rng::new(42);
+    assert(b.next() == a0);
+    assert(b.next() == a1);
+
+    // The raw state never leaves [1, m-1].
+    var s = 1;
+    var i = 0;
+    while i < 32 {
+        s = next_state(s);
+        assert(s >= 1 && s < 2147483647);
+        i = i + 1;
+    }
+
+    // below() and next_byte() stay in range.
+    var g = Rng::new(7);
+    var k = 0;
+    while k < 32 {
+        let v = g.below(100);
+        assert(v >= 0 && v < 100);
+        let byte = next_byte(k + 1);
+        assert(byte >= 0 && byte < 256);
+        k = k + 1;
+    }
+
+    print("rand ok");
+}

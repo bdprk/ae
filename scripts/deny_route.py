@@ -177,6 +177,7 @@ FILES = [
     "tests/run/pair_product.ae",
     "tests/run/ptr_offset.ae",
     "tests/run/ptr_retag.ae",
+    "tests/run/rand_minstd.ae",
     "tests/run/self_type.ae",
     "tests/run/shared_box.ae",
     "tests/run/slice_view.ae",

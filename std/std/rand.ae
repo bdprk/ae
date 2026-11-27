@@ -1,0 +1,72 @@
+// std/std/rand.ae
+// Pure-AE pseudo-random numbers (P4.4). A Park-Miller "MINSTD" generator:
+// state lives in [1, 2147483647) and each step is `state = (48271 * state) % m`.
+// The multiplier times the largest state is under 2^47, so the product always
+// fits in an i64 and the checked-overflow trap can never fire. The sequence is
+// fully determined by the seed, which is exactly what a test needs.
+
+fn rand_modulus() -> i64 {
+    return 2147483647;
+}
+
+// Normalize any starting value into the generator's [1, m-1] state range.
+pub fn seed_state(seed: i64) -> i64 {
+    let m = rand_modulus();
+    var s = seed % m;
+    if s < 0 {
+        s = s + m;
+    }
+    if s == 0 {
+        s = 1;
+    }
+    return s;
+}
+
+// One step: the next state, in [1, m-1].
+pub fn next_state(state: i64) -> i64 {
+    let m = rand_modulus();
+    let a = 48271;
+    let s = seed_state(state);
+    let product = a * s;
+    return product % m;
+}
+
+// A value in [0, bound) for a positive bound (0 when the bound is not positive).
+pub fn next_below(state: i64, bound: i64) -> i64 {
+    if bound <= 0 {
+        return 0;
+    }
+    return next_state(state) % bound;
+}
+
+// A byte in [0, 256).
+pub fn next_byte(state: i64) -> i64 {
+    return next_state(state) % 256;
+}
+
+// A threaded generator: each call advances the state and returns a value.
+// Lower-case `value` in [0, m-1] (never zero) is the raw step result.
+pub struct Rng {
+    state: i64,
+}
+
+impl Rng {
+    pub fn new(seed: i64) -> Rng {
+        return Rng { state: seed_state(seed) };
+    }
+
+    pub fn next(&mut self) -> i64 {
+        let s = next_state(self.state);
+        self.state = s;
+        return s;
+    }
+
+    pub fn below(&mut self, bound: i64) -> i64 {
+        if bound <= 0 {
+            return 0;
+        }
+        let s = next_state(self.state);
+        self.state = s;
+        return s % bound;
+    }
+}
