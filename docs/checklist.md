@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 155 of 202 items done.
-Charter-1.0 progress: 126 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 156 of 202 items done.
+Charter-1.0 progress: 127 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -251,7 +251,7 @@ Charter-1.0 progress: 126 of 202 items done (29 prototype-done items still name 
 
 - [ ] M8.1.01: **Freeze observable rules.** Map every frozen public behavior to a versioned conformance case.
 - [ ] M8.1.02: **edition policy.** Compile an old-edition package consumed by a new-edition package.
-- [ ] M8.1.03: **deprecated syntax diagnostics.** Emit a location, replacement and removal policy for one deprecated feature.
+- [x] M8.1.03: **deprecated syntax diagnostics.** Emit a location, replacement and removal policy for one deprecated feature. (implemented as `W0703` for `strvec_new()`: `ae: line:column: warning: deprecated 'strvec_new' (W0703): use 'var v: vec[string] = vec[]' or a 'vec["text"]' literal; the alias is removed at the 1.0 boundary` while the alias still compiles; pinned by `deprecated_strvec_new_warns_with_replacement_and_removal_policy`, `spec/diagnostics.md` and `spec/stdlib.md` §4; slice 89)
 - [ ] M8.1.04: **migration tool.** Apply migration twice and verify the second run produces no changes.
 - [ ] M8.1.05: **run old package corpus.** Rebuild pinned downstream packages and compare outputs with saved baselines.
 

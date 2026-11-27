@@ -2,7 +2,7 @@
 // element view keeps the whole vector borrowed, so an element write (and a
 // push) while the element is bound is rejected.
 fn main() {
-    var v = strvec_new();
+    var v: vec[string] = vec[];
     push(v, "a");
     push(v, "b");
     let e = v[0];

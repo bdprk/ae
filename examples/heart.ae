@@ -6,7 +6,7 @@
 fn main() {
     var y = 1.2;
     while y >= -0.95 {
-        var row = strvec_new();
+        var row: vec[string] = vec[];
         var x = -1.35;
         while x <= 1.35 {
             let a = x * x + y * y - 1.0;

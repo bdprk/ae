@@ -73,7 +73,7 @@ pub fn encode_row(fields: &vec[string]) -> string {
 pub fn parse_row(line: &string) -> vec[string] {
     let raw = bytes(line);
     let size = len(raw);
-    var fields = strvec_new();
+    var fields: vec[string] = vec[];
     var current = "";
     var quoted = false;
     var at = 0;

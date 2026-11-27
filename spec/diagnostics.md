@@ -42,6 +42,8 @@ The following semantic codes are currently assigned where the corresponding chec
 
 `ae explain <CODE>` prints the stable explanation for a code; the text lives in the compiler next to the assignment sites, so a new code without an explanation is a build-time omission the catalog test catches.
 
+Warnings share the `ae: line:column:` prefix, carry a stable `(W####)` code, and never fail a compile. `W0703` is the first deprecation warning: it names the deprecated spelling, the replacement and the version boundary that removes it. The first alias is `strvec_new()` — the warning reads `deprecated 'strvec_new' (W0703): use 'var v: vec[string] = vec[]' or a 'vec["text"]' literal; the alias is removed at the 1.0 boundary` (`spec/stdlib.md` §4).
+
 Every JSON diagnostic includes `suggestions`, an array of human-readable guidance strings. An empty array means no suggestion is available. Suggestions are not guaranteed edits and must not be applied automatically. The current implementation offers conditional guidance for unsupported string escapes (`E0002`) and immutable local or parameter bindings whose declarations are known (`E0103`); it does not infer the programmer's intent or suggest `var` for loop or pattern bindings.
 
 Every JSON diagnostic includes `secondary`, an array of related source labels. Each label has `file`, `line`, `column`, `byte_start`, `byte_end`, and `message` (which may be `null`). When the declaration is known, `E0102`, `E0103`, and `E0104` include a label on the corresponding local or parameter binding. The `E0102` label identifies the declaration, not necessarily the move site; `E0104` identifies the earlier binding. A missing label is represented by an empty array; no declaration or move location is guessed.

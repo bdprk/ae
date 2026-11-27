@@ -5402,6 +5402,30 @@ fn unnecessary_unsafe_block_warns_without_failing_the_compile() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn deprecated_strvec_new_warns_with_replacement_and_removal_policy() {
+    // M8.1.03 (spec/stdlib.md §4): the first deprecated alias still
+    // compiles, the warning names the call site, the replacement and the
+    // version boundary that removes the alias, and the replacement
+    // spelling produces the same output with no warning.
+    let dir = unique_temp_dir("w0703");
+    let source = dir.join("w0703.ae");
+    fs::write(&source, "fn main() {\n    var v = strvec_new();\n    push(v, \"x\");\n    print(v[0]);\n}\n").unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&source).output().unwrap();
+    assert!(run.status.success(), "the alias still compiles: {}", String::from_utf8_lossy(&run.stderr));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("ae: 2:13: warning: deprecated 'strvec_new' (W0703)"), "the call site is named: {stderr}");
+    assert!(stderr.contains("var v: vec[string] = vec[]"), "the replacement is named: {stderr}");
+    assert!(stderr.contains("removed at the 1.0 boundary"), "the removal policy is named: {stderr}");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "x\n");
+    fs::write(&source, "fn main() {\n    var v: vec[string] = vec[];\n    push(v, \"x\");\n    print(v[0]);\n}\n").unwrap();
+    let quiet = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&source).output().unwrap();
+    assert!(quiet.status.success(), "the replacement compiles: {}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(!String::from_utf8_lossy(&quiet.stderr).contains("W0703"), "the replacement is silent: {}", String::from_utf8_lossy(&quiet.stderr));
+    assert_eq!(String::from_utf8_lossy(&quiet.stdout).replace("\r\n", "\n"), "x\n");
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[allow(dead_code)] // kept as the documented M2.4 propagate-elision probe; superseded by the MIR differential suite
 fn mir_drop_elision_thins_propagate_error_path_releases() {
     // M2.4: a `?`'s releases ride the error path, which exits the function,

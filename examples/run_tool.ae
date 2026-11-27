@@ -9,7 +9,7 @@ fn main() {
         print("usage: run_tool <program> [args...]");
         exit(2);
     }
-    var command = strvec_new();
+    var command: vec[string] = vec[];
     for i in 2..len(argv) {
         push(command, argv[i]);
     }

@@ -12,7 +12,7 @@ fn read_again(flag: bool) -> Result[string, string] {
 
 fn names(flag: bool) -> DirResult {
     if flag {
-        var list = strvec_new();
+        var list: vec[string] = vec[];
         push(list, "a");
         push(list, "b");
         return DirResult::Ok(list);

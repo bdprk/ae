@@ -21,7 +21,8 @@ fn body() -> i64 {
         }
     }
 
-    let with_args = launch("ae-definitely-missing-program", strvec_new());
+    let no_args: vec[string] = vec[];
+    let with_args = launch("ae-definitely-missing-program", no_args);
     match with_args {
         CommandResult::Ok(finished) => {
             print("unexpected " + to_string(finished.status));

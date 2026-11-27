@@ -22,7 +22,7 @@ fn main() {
     assert(encode_string("héllo") == "\"héllo\"");
 
     // Arrays: encoded elements joined with commas.
-    var values = strvec_new();
+    var values: vec[string] = vec[];
     push(values, encode_i64(1));
     push(values, encode_i64(2));
     push(values, encode_i64(3));
@@ -31,7 +31,7 @@ fn main() {
     assert(array == "[1,2,3]");
 
     // Objects: each member is a quoted key plus an already-encoded value.
-    var members = strvec_new();
+    var members: vec[string] = vec[];
     push(members, encode_field("name", encode_string("gateway")));
     push(members, encode_field("workers", encode_i64(4)));
     push(members, encode_field("debug", encode_bool(true)));

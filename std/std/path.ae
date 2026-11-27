@@ -93,7 +93,7 @@ pub fn with_extension(path: &string, ext: &string) -> string {
 // separators do not produce empty names. An absolute path keeps a leading "/"
 // component so joining the pieces cannot silently lose it.
 pub fn components(path: &string) -> vec[string] {
-    var parts = strvec_new();
+    var parts: vec[string] = vec[];
     let raw = bytes(path);
     let size = len(path);
     if size > 0 && path_byte_is_separator(raw[0]) {

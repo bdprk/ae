@@ -39,7 +39,7 @@ fn main() {
     print(n);
 
     // Tokens are views: keeping them is an explicit copy into a vector.
-    var kept = strvec_new();
+    var kept: vec[string] = vec[];
     for field in fields { push(kept, field); }
     print(join(kept, ","));
 

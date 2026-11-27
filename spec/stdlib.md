@@ -53,7 +53,7 @@ The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-comp
 ## 4. Migration Policy (plan §5.3)
 
 1. Each slice lands one domain: spec + positive/negative tests → implementation → examples migrated → snapshots blessed → ADR.
-2. Old names remain **deprecated aliases** for one version: they compile, emit a deprecation warning naming the replacement, and are removed at the next version boundary.
+2. Old names remain **deprecated aliases** for one version: they compile, emit a deprecation warning naming the replacement, and are removed at the next version boundary. The first alias is `strvec_new()` → a typed `vec[string]` binding (`var v: vec[string] = vec[]`) or a `vec["text"]` literal; it warns `W0703` today (`spec/diagnostics.md`).
 3. The alias layer is written in the language itself (wrapper functions/methods), not in the compiler — so removal deletes library code, not compiler surface.
 4. `examples/` migrates per slice; the Go-comparison set (M1.13) runs only after the last alias is gone.
 5. Performance gate (M1.14): map/text/sum workloads after migration must be within 10% of the pre-freeze baseline (benchmark report per change batch).

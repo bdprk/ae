@@ -23,6 +23,6 @@ pub fn launch(program: &string, arguments: vec[string]) -> CommandResult {
 // A convenience for the common "no arguments" case.
 pub fn launch_plain(program: &string) -> CommandResult {
     // `run_command` takes a bare vector variable, not an expression.
-    let empty = strvec_new();
+    let empty: vec[string] = vec[];
     return run_command(program, empty);
 }

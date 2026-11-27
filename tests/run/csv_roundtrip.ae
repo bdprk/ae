@@ -3,7 +3,7 @@
 use "../../std/std/csv.ae";
 
 fn main() {
-    var fields = strvec_new();
+    var fields: vec[string] = vec[];
     push(fields, "a");
     push(fields, "b,c");
     push(fields, "d\"e");

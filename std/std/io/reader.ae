@@ -53,7 +53,7 @@ pub fn reader_read(r: &mut ByteReader, max_bytes: i64) -> string {
 // refilled chunk-by-chunk until a newline arrives or the source is drained.
 // One trailing carriage return is dropped, and EOF yields "".
 pub fn reader_read_line(r: &mut ByteReader) -> string {
-    var parts = strvec_new();
+    var parts: vec[string] = vec[];
     while true {
         if r.buf_pos >= len(r.buf) {
             r.buf = "";
