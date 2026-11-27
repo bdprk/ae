@@ -470,14 +470,14 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
             walk_expr(index, moved)
         }
         // A slice is a read of its owner; the index is an ordinary read.
-        Expr::SliceOf(slot, ..) => moved.read(*slot),
+        Expr::SliceOf(source, ..) => moved.read(source.slot()),
         Expr::SliceIndex(slot, index, ..) => {
             if let Some(violation) = moved.read(*slot) { return Some(violation); }
             walk_expr(index, moved)
         }
         // A sub-slice reads its owner and both bounds.
-        Expr::SliceRange(slot, _, _, start, end, ..) => {
-            if let Some(violation) = moved.read(*slot) { return Some(violation); }
+        Expr::SliceRange(source, _, _, start, end, ..) => {
+            if let Some(violation) = moved.read(source.slot()) { return Some(violation); }
             if let Some(violation) = walk_expr(start, moved) { return Some(violation); }
             walk_expr(end, moved)
         }

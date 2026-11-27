@@ -1362,7 +1362,7 @@ impl<'a> Parser<'a> {
                 }
                 if !fields.is_empty() {
                     self.seek_scalar_offset(argument.range.start);
-                    return Err(self.fail("a mutable slice argument borrows a whole vector; field slices are not supported yet"));
+                    return Err(self.fail("a mutable slice argument borrows a whole vector; mutable field slices are not supported yet"));
                 }
                 // `&mut name[start..end]` windows the exclusive borrow; a single
                 // element is not a slice.
@@ -1411,12 +1411,12 @@ impl<'a> Parser<'a> {
                     let end = self.lower_slice_bound(end_range, slots)?;
                     self.seek_scalar_offset(argument.range.start);
                     let (line, column) = self.position();
-                    args.push(Argument::Value(Expr::SliceRange(slot, actual, wanted_elem, Box::new(start), Box::new(end), line, column)));
+                    args.push(Argument::Value(Expr::SliceRange(Box::new(SliceSource::Var(slot)), actual, wanted_elem, Box::new(start), Box::new(end), line, column)));
                     continue;
                 }
                 self.seek_scalar_offset(argument.range.start);
                 let (line, column) = self.position();
-                args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));
+                args.push(Argument::Value(Expr::SliceOf(Box::new(SliceSource::Var(slot)), actual, wanted_elem, line, column)));
                 continue;
             }
             // A `&[T]` argument builds the fat pointer from a whole vector or
@@ -1436,17 +1436,13 @@ impl<'a> Parser<'a> {
                     }
                     self.seek_scalar_offset(argument.range.start);
                     let (line, column) = self.position();
-                    args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));
+                    args.push(Argument::Value(Expr::SliceOf(Box::new(SliceSource::Var(slot)), actual, wanted_elem, line, column)));
                     continue;
                 }
                 let ExpressionKind::BorrowArgument { name: borrowed, mutable, name_range: _, fields, index } = &argument.kind else {
                     self.seek_scalar_offset(argument.range.end);
                     return Err(self.fail("a slice argument borrows a whole vector or array: write '&name'"));
                 };
-                if !fields.is_empty() {
-                    self.seek_scalar_offset(argument.range.start);
-                    return Err(self.fail("a slice argument borrows a whole vector or array; field slices are not supported yet"));
-                }
                 if *mutable {
                     self.seek_scalar_offset(argument.range.start);
                     return Err(self.fail("this parameter borrows read-only; write the argument as '&name'"));
@@ -1465,14 +1461,23 @@ impl<'a> Parser<'a> {
                     return Err(moved_value_hint(self.binding_label(
                         self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
                 }
-                let matches_element = match actual {
+                // P2.4: a field chain (`&h.cells`) reads the leaf vector; the
+                // borrow is statement-scoped and records the root binding.
+                let (source, source_ty) = if fields.is_empty() {
+                    (Box::new(SliceSource::Var(slot)), actual)
+                } else {
+                    let path = field_path_types(self, actual, fields)?;
+                    let leaf = path.last().map(|(_, ty)| *ty).unwrap_or(actual);
+                    (Box::new(SliceSource::Field { root: slot, root_ty: actual, path }), leaf)
+                };
+                let matches_element = match source_ty {
                     Type::Vector(id) | Type::VectorRef(id) => self.ctx.vector_elem(id) == wanted_elem,
                     Type::ArrayOf(id, _) => self.ctx.array_elem(id) == wanted_elem,
                     Type::Slice(id) => self.ctx.slice_elem(id) == wanted_elem,
                     _ => false,
                 };
                 if !matches_element {
-                    return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx))));
+                    return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), source_ty.name(self.ctx))));
                 }
                 if let Some((start_range, end_range)) = range_bounds {
                     if start_range.is_empty() || end_range.is_empty() {
@@ -1481,20 +1486,20 @@ impl<'a> Parser<'a> {
                     }
                     let start = self.lower_slice_bound(start_range, slots)?;
                     let end = self.lower_slice_bound(end_range, slots)?;
-                    if matches!(actual, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
+                    if matches!(source_ty, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
                         self.call_borrows.push((slot, self.scopes.len()));
                     }
                     self.seek_scalar_offset(argument.range.start);
                     let (line, column) = self.position();
-                    args.push(Argument::Value(Expr::SliceRange(slot, actual, wanted_elem, Box::new(start), Box::new(end), line, column)));
+                    args.push(Argument::Value(Expr::SliceRange(source, source_ty, wanted_elem, Box::new(start), Box::new(end), line, column)));
                     continue;
                 }
-                if matches!(actual, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
+                if matches!(source_ty, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
                     self.call_borrows.push((slot, self.scopes.len()));
                 }
                 self.seek_scalar_offset(argument.range.start);
                 let (line, column) = self.position();
-                args.push(Argument::Value(Expr::SliceOf(slot, actual, wanted_elem, line, column)));
+                args.push(Argument::Value(Expr::SliceOf(source, source_ty, wanted_elem, line, column)));
                 continue;
             }
             // A container or struct borrow takes the binding's
@@ -2364,6 +2369,33 @@ pub(super) struct FieldChain {
     pub(super) slot: usize,
     pub(super) root_ty: Type,
     pub(super) path: Vec<(String, Type)>,
+}
+
+/// Resolve a parsed borrow-argument field path (`h.a.cells`) to each step's
+/// declared type, starting from the root binding's type.
+fn field_path_types(
+    parser: &Parser<'_>,
+    root_ty: Type,
+    fields: &[(String, std::ops::Range<usize>)],
+) -> Result<FieldPath, ae_span::Diagnostic> {
+    let mut path = Vec::new();
+    let mut current = root_ty;
+    for (name, range) in fields {
+        let sid = match current {
+            Type::Struct(sid) | Type::StructMut(sid) | Type::StructRef(sid) => sid,
+            other => {
+                return Err(parser.error_at(range.start, &format!(
+                    "only a struct has fields, found {}", other.name(parser.ctx),
+                )));
+            }
+        };
+        let fty = field_ty_in(sid, name, parser.structs).ok_or_else(|| {
+            parser.error_at(range.start, &format!("struct '{}' has no field '{name}'", parser.structs[sid].name))
+        })?;
+        path.push((name.clone(), fty));
+        current = fty;
+    }
+    Ok(path)
 }
 
 pub(super) fn resolve_field_chain(

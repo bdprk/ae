@@ -589,8 +589,40 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // or another slice (the source kind picks the C construction), an
     // element read through a slice parameter, and a sub-range of any of the
     // three (`&v[start..end]`, rung 3: start/end are i64 expressions).
-    SliceOf(usize, Type, Type, usize, usize), SliceIndex(usize, Box<Expr>, usize, usize, Type),
-    SliceRange(usize, Type, Type, Box<Expr>, Box<Expr>, usize, usize) }
+    // P2.4: the source is a whole binding or a field chain of one
+    // (`&h.cells`, `&h.cells[a..b]`), boxed so `Expr` stays small.
+    SliceOf(Box<SliceSource>, Type, Type, usize, usize), SliceIndex(usize, Box<Expr>, usize, usize, Type),
+    SliceRange(Box<SliceSource>, Type, Type, Box<Expr>, Box<Expr>, usize, usize) }
+
+// Where a slice argument comes from: a whole binding or a field chain of one
+// (the root type decides the C accessor for a `&Struct`/`&mut Struct` root).
+#[derive(Debug, Clone)]
+pub(super) enum SliceSource {
+    Var(usize),
+    Field { root: usize, root_ty: Type, path: FieldPath },
+}
+
+impl SliceSource {
+    pub(super) fn slot(&self) -> usize {
+        match self {
+            SliceSource::Var(slot) => *slot,
+            SliceSource::Field { root, .. } => *root,
+        }
+    }
+
+    pub(super) fn c_base(&self) -> String {
+        match self {
+            SliceSource::Var(slot) => format!("v{slot}"),
+            SliceSource::Field { root, root_ty, path } => {
+                let mut text = format!("v{root}");
+                text.push_str(if matches!(root_ty, Type::StructMut(_) | Type::StructRef(_)) { "->" } else { "." });
+                let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
+                text.push_str(&names.join("."));
+                text
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IntMethodKind {

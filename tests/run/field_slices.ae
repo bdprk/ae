@@ -1,0 +1,49 @@
+// P2.4 container rung: a read-only slice argument that names a struct field
+// (`&h.cells`, `&h.cells[a..b]`). The field chain walks to the leaf vector, the
+// borrow stays statement-scoped and records the root, and a `&Struct`/`&mut
+// Struct` root reaches the caller's storage.
+struct Counters { cells: vec[i64] }
+struct Stats { counts: Counters, names: vec[string] }
+struct Report { stats: Stats, label: string }
+
+fn sum(part: &[i64]) -> i64 {
+    var total = 0;
+    var i = 0;
+    while i < len(part) {
+        total = total + part[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+fn pair(first: &[i64], second: &[i64]) -> i64 {
+    return first[0] + second[0];
+}
+
+fn names_len(part: &[string]) -> i64 {
+    return len(part);
+}
+
+fn read(report: &Report) -> i64 {
+    return sum(&report.stats.counts.cells);
+}
+
+fn widen(report: &mut Report) -> i64 {
+    return sum(&report.stats.counts.cells[1..3]);
+}
+
+fn main() {
+    var report = Report {
+        stats: Stats { counts: Counters { cells: vec[1, 2, 3, 4] }, names: vec["a", "b", "c"] },
+        label: "r",
+    };
+    print(report.label);
+    print(read(&report));
+    print(widen(&mut report));
+    // Two read-only windows of the same field share the statement.
+    print(pair(&report.stats.counts.cells[0..1], &report.stats.counts.cells[2..3]));
+    // A whole field and an empty window.
+    print(sum(&report.stats.counts.cells[0..4]));
+    print(sum(&report.stats.counts.cells[2..2]));
+    print(names_len(&report.stats.names[0..2]));
+}

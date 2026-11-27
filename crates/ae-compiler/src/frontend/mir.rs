@@ -406,6 +406,25 @@ fn field_vector_operand(id: usize, path: &[(String, Type)], base_ty: Type, elem_
     MirOperand::Place(place)
 }
 
+fn slice_source_operand(source: &SliceSource, source_ty: Type, elem: Type, lowering: &MirLowering) -> MirOperand {
+    match source {
+        SliceSource::Var(slot) => {
+            let ty = match source_ty {
+                Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(elem).unwrap_or(0)),
+                other => other,
+            };
+            MirOperand::Place(MirPlace::Local(*slot, ty))
+        }
+        SliceSource::Field { root, root_ty, path } => {
+            let mut place = MirPlace::Local(*root, *root_ty);
+            for (name, step_ty) in path {
+                place = MirPlace::Field(Box::new(place), name.clone(), *step_ty);
+            }
+            MirOperand::Place(place)
+        }
+    }
+}
+
 fn map_place_operand(place: &MapPlace, ctx: &CompileContext) -> MirOperand {
     match place {
         MapPlace::Var(id, kind) => MirOperand::Place(MirPlace::Local(*id, map_kind_type(kind, ctx))),
@@ -462,12 +481,9 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             "index_of",
             vec![lower_operand(base, bindings, lowering), lower_operand(index, bindings, lowering)],
         ),
-        Expr::SliceOf(slot, source, elem, ..) => (
+        Expr::SliceOf(source, source_ty, elem, ..) => (
             "slice_of",
-            vec![MirOperand::Place(MirPlace::Local(*slot, match *source {
-                Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)),
-                other => other,
-            }))],
+            vec![slice_source_operand(source, *source_ty, *elem, lowering)],
         ),
         Expr::SliceIndex(slot, index, _, _, elem) => (
             "slice_index",
@@ -476,13 +492,10 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
                 lower_operand(index, bindings, lowering),
             ],
         ),
-        Expr::SliceRange(slot, source, elem, start, end, ..) => (
+        Expr::SliceRange(source, source_ty, elem, start, end, ..) => (
             "slice_range",
             vec![
-                MirOperand::Place(MirPlace::Local(*slot, match *source {
-                    Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)),
-                    other => other,
-                })),
+                slice_source_operand(source, *source_ty, *elem, lowering),
                 lower_operand(start, bindings, lowering),
                 lower_operand(end, bindings, lowering),
             ],

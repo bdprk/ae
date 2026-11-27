@@ -173,6 +173,37 @@ enum MapVal<'a> {
     Missing,
 }
 
+// Walk a struct field path immutably and clone the leaf.
+fn field_path_get(value: &Val, path: &[&str]) -> Option<Val> {
+    let mut current = value;
+    for name in path {
+        current = match current {
+            Val::Struct(_, fields) => fields.get(*name)?,
+            _ => return None,
+        };
+    }
+    Some(current.clone())
+}
+
+// P2.4: the value a slice argument reads: a whole binding or the struct field
+// chain a field slice names (`&h.cells`). A read-only slice is a snapshot.
+fn read_slice_source(
+    source: &SliceSource,
+    locals: &HashMap<usize, Val>,
+    caller_locals: &Option<&mut HashMap<usize, Val>>,
+    line: usize,
+    col: usize,
+) -> Result<Val, Flow> {
+    match source {
+        SliceSource::Var(slot) => read_var(locals, caller_locals, *slot, line, col),
+        SliceSource::Field { root, path, .. } => {
+            let value = read_var(locals, caller_locals, *root, line, col)?;
+            let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
+            field_path_get(&value, &names).ok_or_else(|| Flow::Trap("internal: slice field path".to_owned()))
+        }
+    }
+}
+
 // Walk a struct field path; every step must be a struct field.
 fn field_path_mut<'a>(value: &'a mut Val, path: &[&str]) -> Option<&'a mut Val> {
     let mut current = value;
@@ -1391,11 +1422,11 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
             }
         }
-        Expr::SliceOf(slot, source, ..) => {
+        Expr::SliceOf(source, source_ty, ..) => {
             // A read-only borrow is a snapshot here: the visible elements are
             // copied, exactly like a `&vec` parameter's value.
-            let value = read_var(locals, caller_locals, *slot, 0, 0)?;
-            let elements = match (*source, value) {
+            let value = read_slice_source(source, locals, caller_locals, 0, 0)?;
+            let elements = match (*source_ty, value) {
                 (Type::Slice(_), Val::Slice(values)) => values,
                 (Type::ArrayOf(..), Val::Array(values)) => values,
                 (_, Val::VecI(values)) => values.into_iter().map(Val::Int).collect(),
@@ -1442,7 +1473,7 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: slice index on non-slice".to_owned())),
             }
         }
-        Expr::SliceRange(slot, source, _, start, end, line, col) => {
+        Expr::SliceRange(source, source_ty, _, start, end, line, col) => {
             // ADR-0236 rung 3: the bounds evaluate first; the visible window
             // is clipped from the same snapshot a whole slice would copy.
             let start = match eval_expr(env, start, locals, caller_locals, false)? {
@@ -1453,8 +1484,8 @@ fn eval_expr(
                 Val::Int(n) => n,
                 _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
             };
-            let value = read_var(locals, caller_locals, *slot, *line, *col)?;
-            let elements = match (*source, value) {
+            let value = read_slice_source(source, locals, caller_locals, *line, *col)?;
+            let elements = match (*source_ty, value) {
                 (Type::Slice(_), Val::Slice(values)) => values,
                 (Type::ArrayOf(..), Val::Array(values)) => values,
                 (_, Val::VecI(values)) => values.into_iter().map(Val::Int).collect(),
@@ -2727,12 +2758,14 @@ fn invoke_call(
                     }
                 };
                 match e {
-                    Expr::SliceOf(slot, Type::Vector(_), ..) => {
-                        Val::SliceMutRef { owner: *slot, start: 0, len: owner_len(locals, slot)? }
+                    Expr::SliceOf(source, Type::Vector(_), ..) => {
+                        let owner = source.slot();
+                        Val::SliceMutRef { owner, start: 0, len: owner_len(locals, &owner)? }
                     }
                     // `&mut v[start..end]` (ADR-0236 rung 4): the bounds run in
                     // the caller's frame; the window keeps the owner's slot.
-                    Expr::SliceRange(slot, Type::Vector(_), _, start_expr, end_expr, line, col) => {
+                    Expr::SliceRange(source, Type::Vector(_), _, start_expr, end_expr, line, col) => {
+                        let owner = source.slot();
                         let start = match eval_expr(env, start_expr, locals, caller_locals, false)? {
                             Val::Int(n) => n,
                             _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
@@ -2741,11 +2774,11 @@ fn invoke_call(
                             Val::Int(n) => n,
                             _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
                         };
-                        let len = owner_len(locals, slot)?;
+                        let len = owner_len(locals, &owner)?;
                         if start < 0 || end < start || end > len {
                             return Err(trap("slice range out of bounds", *line, *col));
                         }
-                        Val::SliceMutRef { owner: *slot, start, len: end - start }
+                        Val::SliceMutRef { owner, start, len: end - start }
                     }
                     _ => eval_expr(env, e, locals, caller_locals, true)?,
                 }

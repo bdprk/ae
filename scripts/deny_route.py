@@ -157,6 +157,7 @@ FILES = [
     "tests/run/extern_alloc_ok.ae",
     "tests/run/extern_alloc_oom.ae",
     "tests/run/extern_c_call.ae",
+    "tests/run/field_slices.ae",
     "tests/run/fake_clock.ae",
     "tests/run/fake_io.ae",
     "tests/run/function_types.ae",

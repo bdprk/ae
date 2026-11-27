@@ -20,7 +20,7 @@ use super::cfg::{CfgFunction, CfgTerminator, build_cfg};
 use super::mir::expr_type;
 use super::{
     Argument, CompileContext, Expr, Function, Kind, MapKind, MapPlace, PackageImports, Printed,
-    Program, Statement, StructDef, Type, loader,
+    Program, SliceSource, Statement, StructDef, Type, loader,
 };
 
 /// Lowers every function in the AE program at `path` into validated `ae_mir::Body` graphs.
@@ -1540,6 +1540,22 @@ impl<'a> PureMirBuilder<'a> {
         self.build_field_path_place(local, base_ty, path)
     }
 
+    // P2.4: the storage a slice argument borrows: a whole binding or a field
+    // chain of one (`&h.cells`, `&h.cells[a..b]`).
+    fn slice_source_place(&mut self, source: &SliceSource, source_ty: TyKind, elem: Type) -> Place {
+        match source {
+            SliceSource::Var(slot) => {
+                let ty = match source_ty {
+                    TyKind::Slice(_) => TyKind::Slice(self.ctx.find_slice_elem(elem).unwrap_or(0)),
+                    other => other,
+                };
+                let (local, _) = self.ensure_var(*slot, ty);
+                Place::from_local(local)
+            }
+            SliceSource::Field { root, root_ty, path } => self.field_vector_place(*root, path, *root_ty, elem),
+        }
+    }
+
     fn resolve_field_index(&self, sid: usize, fname: &str) -> usize {
         self.structs
             .get(sid)
@@ -1760,13 +1776,9 @@ impl<'a> PureMirBuilder<'a> {
                 self.pending_span = Some(self.span_at(*line, *column));
                 ("vec_index_of", vec![b, i])
             }
-            Expr::SliceOf(slot, source, elem, ..) => {
-                let ty = match *source {
-                    Type::Slice(_) => TyKind::Slice(self.ctx.find_slice_elem(*elem).unwrap_or(0)),
-                    other => other,
-                };
-                let (local, _) = self.ensure_var(*slot, ty);
-                ("slice_of", vec![Operand::Copy(Place::from_local(local))])
+            Expr::SliceOf(source, source_ty, elem, ..) => {
+                let base = self.slice_source_place(source, *source_ty, *elem);
+                ("slice_of", vec![Operand::Copy(base)])
             }
             Expr::SliceIndex(slot, index, line, column, elem) => {
                 let ty = TyKind::Slice(self.ctx.find_slice_elem(*elem).unwrap_or(0));
@@ -1775,16 +1787,12 @@ impl<'a> PureMirBuilder<'a> {
                 self.pending_span = Some(self.span_at(*line, *column));
                 ("slice_index", vec![Operand::Copy(Place::from_local(local)), idx_op])
             }
-            Expr::SliceRange(slot, source, elem, start, end, line, column) => {
-                let ty = match *source {
-                    Type::Slice(_) => TyKind::Slice(self.ctx.find_slice_elem(*elem).unwrap_or(0)),
-                    other => other,
-                };
-                let (local, _) = self.ensure_var(*slot, ty);
+            Expr::SliceRange(source, source_ty, elem, start, end, line, column) => {
+                let base = self.slice_source_place(source, *source_ty, *elem);
                 let s = self.lower_operand(start);
                 let e = self.lower_operand(end);
                 self.pending_span = Some(self.span_at(*line, *column));
-                ("slice_range", vec![Operand::Copy(Place::from_local(local)), s, e])
+                ("slice_range", vec![Operand::Copy(base), s, e])
             }
             Expr::SliceView(id, field, start, end, line, column) => {
                 let base = self.string_base_operand(*id, field);

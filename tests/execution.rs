@@ -10834,6 +10834,86 @@ fn nested_map_receivers_match_across_backends() {
     }
 }
 
+/// P2.4: read-only slice arguments that name a struct field (`&r.cells`,
+/// `&r.cells[a..b]`). The field chain walks to the leaf vector, a `&Struct` /
+/// `&mut Struct` root reaches the caller's storage, and two windows of the same
+/// field may share one statement.
+#[test]
+fn field_slices_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("field_slices.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "mutable field slice",
+            r#"struct H { cells: vec[i64] } fn bump(s: &mut [i64]) { s[0] = 9; } fn main() { var h = H { cells: vec[1, 2] }; bump(&mut h.cells); }"#,
+            "mutable field slices are not supported yet",
+        ),
+        (
+            "moved root",
+            r#"struct H { cells: vec[i64] } fn peek(s: &[i64]) -> i64 { return s[0]; } fn main() { var h = H { cells: vec[1, 2] }; let m = h; print(peek(&h.cells)); }"#,
+            "cannot borrow 'h' because it was moved",
+        ),
+        (
+            "scalar field",
+            r#"struct H { count: i64 } fn peek(s: &[i64]) -> i64 { return s[0]; } fn main() { let h = H { count: 1 }; print(peek(&h.count)); }"#,
+            "argument must be &[i64], found i64",
+        ),
+        (
+            "wrong element",
+            r#"struct H { cells: vec[f64] } fn peek(s: &[i64]) -> i64 { return s[0]; } fn main() { let h = H { cells: vec[1.5] }; print(peek(&h.cells)); }"#,
+            "argument must be &[i64], found vec[f64]",
+        ),
+        (
+            "missing field",
+            r#"struct H { cells: vec[i64] } fn peek(s: &[i64]) -> i64 { return s[0]; } fn main() { let h = H { cells: vec[1] }; print(peek(&h.missing)); }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-field-slices-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
 /// `bytes(s)` copies a string's UTF-8 bytes into an i64 vector. The
 /// interpreter now implements it too, and with its `bytes` arm the interpreter
 /// covers every expression variant — there is no "unsupported expression"
@@ -11090,11 +11170,6 @@ fn slice_ranges_match_across_backends() {
             "non-integer bound",
             r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v["a"..2])); }"#,
             "slice range bounds must be integers",
-        ),
-        (
-            "field range",
-            r#"struct R { cells: vec } fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var r = R { cells: vec[1, 2] }; print(take(&r.cells[0..1])); }"#,
-            "field slices are not supported yet",
         ),
         (
             "element slice",
@@ -11429,7 +11504,7 @@ fn slice_mut_match_across_backends() {
         (
             "field mutable slice",
             r#"struct R { cells: vec } fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var r = R { cells: vec[1] }; f(&mut r.cells); }"#,
-            "field slices are not supported yet",
+            "mutable field slices are not supported yet",
         ),
         (
             "wrong store type",

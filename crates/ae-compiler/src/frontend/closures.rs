@@ -445,14 +445,14 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
             walk_expr(index, used, mutated);
         }
         // A slice reads its owner; its index reads are ordinary reads.
-        Expr::SliceOf(slot, ..) => { used.insert(*slot); }
+        Expr::SliceOf(source, ..) => { used.insert(source.slot()); }
         Expr::SliceIndex(slot, index, ..) => {
             used.insert(*slot);
             walk_expr(index, used, mutated);
         }
         // A sub-slice reads its owner and both bounds.
-        Expr::SliceRange(slot, _, _, start, end, ..) => {
-            used.insert(*slot);
+        Expr::SliceRange(source, _, _, start, end, ..) => {
+            used.insert(source.slot());
             walk_expr(start, used, mutated);
             walk_expr(end, used, mutated);
         }

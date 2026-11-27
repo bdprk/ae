@@ -567,24 +567,26 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted { text: get, ty: *elem_ty, owned: false, moves: i.moves, materialized: true }
         }
-        Expr::SliceOf(slot, source, elem, line, col) => {
+        Expr::SliceOf(source, source_ty, elem, line, col) => {
             // ADR-0236: the fat pointer is built at the call site. A vector
             // hands its storage; an array is already a pointer plus its
-            // compile-time length; a slice forwards its value.
+            // compile-time length; a slice forwards its value. P2.4: the base
+            // is a whole binding or a field chain of one (`h.cells`).
             let c_elem = c_output::c_type_field(*elem, ctx);
-            let text = match *source {
+            let base = source.c_base();
+            let text = match *source_ty {
                 Type::Vector(_) => {
-                    out.push_str(&format!("    if (!v{slot}.data) ae_fail(\"use of moved vector\", {line}, {col});
+                    out.push_str(&format!("    if (!{base}.data) ae_fail(\"use of moved vector\", {line}, {col});
 "));
-                    format!("(ae_slice){{ v{slot}.data, v{slot}.len, (int64_t)sizeof({c_elem}) }}")
+                    format!("(ae_slice){{ {base}.data, {base}.len, (int64_t)sizeof({c_elem}) }}")
                 }
                 Type::VectorRef(_) => {
-                    out.push_str(&format!("    if (!v{slot}->data) ae_fail(\"use of moved vector\", {line}, {col});
+                    out.push_str(&format!("    if (!{base}->data) ae_fail(\"use of moved vector\", {line}, {col});
 "));
-                    format!("(ae_slice){{ v{slot}->data, v{slot}->len, (int64_t)sizeof({c_elem}) }}")
+                    format!("(ae_slice){{ {base}->data, {base}->len, (int64_t)sizeof({c_elem}) }}")
                 }
-                Type::ArrayOf(_, len) => format!("(ae_slice){{ (const void *)v{slot}, {len}, (int64_t)sizeof({c_elem}) }}"),
-                Type::Slice(_) => format!("v{slot}"),
+                Type::ArrayOf(_, len) => format!("(ae_slice){{ (const void *){base}, {len}, (int64_t)sizeof({c_elem}) }}"),
+                Type::Slice(_) => base,
                 _ => unreachable!("slice source kind"),
             };
             Emitted { text, ty: slice_type(ctx, *elem), owned: false, moves: Vec::new(), materialized: true }
@@ -595,26 +597,27 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let get = format!("(*((const {c_elem} *)ae_slice_at(v{slot}, {}, {line}, {col})))", i.text);
             Emitted { text: get, ty: *elem, owned: false, moves: i.moves, materialized: true }
         }
-        Expr::SliceRange(slot, source, elem, start, end, line, col) => {
+        Expr::SliceRange(source, source_ty, elem, start, end, line, col) => {
             // ADR-0236 rung 3: the bounds evaluate first, then the whole
             // slice is built in place and clipped by the runtime helper
             // (which owns the bounds check and names the call site).
             let st = emit_expr(start, out, next, false, ctx);
             let en = emit_expr(end, out, next, false, ctx);
             let c_elem = c_output::c_type_field(*elem, ctx);
-            let whole = match *source {
+            let base = source.c_base();
+            let whole = match *source_ty {
                 Type::Vector(_) => {
-                    out.push_str(&format!("    if (!v{slot}.data) ae_fail(\"use of moved vector\", {line}, {col});"));
+                    out.push_str(&format!("    if (!{base}.data) ae_fail(\"use of moved vector\", {line}, {col});"));
                     out.push('\n');
-                    format!("(ae_slice){{ v{slot}.data, v{slot}.len, (int64_t)sizeof({c_elem}) }}")
+                    format!("(ae_slice){{ {base}.data, {base}.len, (int64_t)sizeof({c_elem}) }}")
                 }
                 Type::VectorRef(_) => {
-                    out.push_str(&format!("    if (!v{slot}->data) ae_fail(\"use of moved vector\", {line}, {col});"));
+                    out.push_str(&format!("    if (!{base}->data) ae_fail(\"use of moved vector\", {line}, {col});"));
                     out.push('\n');
-                    format!("(ae_slice){{ v{slot}->data, v{slot}->len, (int64_t)sizeof({c_elem}) }}")
+                    format!("(ae_slice){{ {base}->data, {base}->len, (int64_t)sizeof({c_elem}) }}")
                 }
-                Type::ArrayOf(_, len) => format!("(ae_slice){{ (const void *)v{slot}, {len}, (int64_t)sizeof({c_elem}) }}"),
-                Type::Slice(_) => format!("v{slot}"),
+                Type::ArrayOf(_, len) => format!("(ae_slice){{ (const void *){base}, {len}, (int64_t)sizeof({c_elem}) }}"),
+                Type::Slice(_) => base,
                 _ => unreachable!("slice source kind"),
             };
             let text = format!("ae_slice_sub({whole}, {}, {}, {line}, {col})", st.text, en.text);
