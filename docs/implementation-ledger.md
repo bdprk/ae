@@ -234,7 +234,7 @@ Integration gate: No lost wakeup, duplicate delivery or waiter retained after ca
 
 Entry dependency: M4.2.
 
-- [ ] M4.4.01. **Define readiness/completion adapter.** Model pending, completion, cancellation and late completion with a fake I/O backend. (The deterministic adapter covers pending, completion and cancellation. Late completion still needs an independent completion source and a retention oracle.)
+- [x] M4.4.01. **Define readiness/completion adapter.** Model pending, completion, cancellation and late completion with a fake I/O backend. (`std/std/test/fake_io.ae` is pure-AE: `IoReq` readiness/would-block/edge-triggered rearm, `io_cancel` buffer retention, plus an independent `CompletionSource` (`source_track`/`source_post`/`source_poll`/`source_transferred`/`source_in_flight`) and a `RetentionOracle` (`oracle_hold`/`oracle_release`/`oracle_violations`). `tests/run/fake_io.ae` pins all four states, a completion posted after a cancel, retrieval at the poll, and a release-before-completion violation; its stdout matches `fake_io.stdout` and it runs on the pure-MIR route.)
 - [ ] M4.4.02. **Linux epoll.** Drain nonblocking reads through would-block and rearm interest correctly. (The adapter models rearming over in-memory buffers. Native Linux readiness and socket tests are pending.)
 - [ ] M4.4.03. **Windows IOCP.** Keep submitted buffers alive until final completion even after cancellation. (The adapter models cancellation in memory. Native Windows submission, completion and buffer retirement are pending.)
 - [ ] M4.4.04. **partial I/O.** Split a frame across reads and force writes to complete in fragments. (The in-memory fixture exercises chunking and fragmentation. Native partial reads and writes are pending.)
