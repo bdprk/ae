@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 159 of 202 items done.
-Charter-1.0 progress: 130 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 160 of 202 items done.
+Charter-1.0 progress: 131 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -249,7 +249,7 @@ Charter-1.0 progress: 130 of 202 items done (29 prototype-done items still name 
 
 ## M8.1 Compatibility
 
-- [ ] M8.1.01: **Freeze observable rules.** Map every frozen public behavior to a versioned conformance case.
+- [x] M8.1.01: **Freeze observable rules.** Map every frozen public behavior to a versioned conformance case. (implemented as `spec/conformance.md`, frozen at `v0.1.1`: seven groups — command line, diagnostics, runtime traps, backend agreement, editions/migration, packages, editor protocol — with the case that pins each row; `frozen_conformance_manifest_names_live_cases` verifies every named test function and fixture exists, requires at least 16 live references, and fails when the heading's version differs from the compiler's so a release must re-verify the matrix; slice 94)
 - [x] M8.1.02: **edition policy.** Compile an old-edition package consumed by a new-edition package. (implemented as an optional `[package] edition` field: a manifest without it is edition 1 and compiles deprecated aliases silently, edition 2 warns `W0703`, and the edition follows the declaring package, so a new-edition app consumes an old-edition dependency with only the app's call sites warning; `ae new`/`ae init` scaffold edition 2; pinned by `an_old_edition_package_is_consumed_by_a_new_edition_package` and `edition_field_parses_or_rejects`; slice 92)
 - [x] M8.1.03: **deprecated syntax diagnostics.** Emit a location, replacement and removal policy for one deprecated feature. (implemented as `W0703` for `strvec_new()`: `ae: line:column: warning: deprecated 'strvec_new' (W0703): use 'var v: vec[string] = vec[]' or a 'vec["text"]' literal; the alias is removed at the 1.0 boundary` while the alias still compiles; pinned by `deprecated_strvec_new_warns_with_replacement_and_removal_policy`, `spec/diagnostics.md` and `spec/stdlib.md` §4; slice 89)
 - [x] M8.1.04: **migration tool.** Apply migration twice and verify the second run produces no changes. (implemented as `ae migrate <path>...`: a token-based pass rewrites the binding form of the first deprecated alias (`var v = strvec_new();` → `var v: vec[string] = vec[];`), reports uncovered shapes with their position, and a second run over its own output is a no-op; pinned by `migrate_rewrites_the_deprecated_alias_and_a_second_run_changes_nothing` and the `src/migrate.rs` unit tests; slice 91)
