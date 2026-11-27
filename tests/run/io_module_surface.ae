@@ -1,0 +1,35 @@
+// P4.3 hosted `std/io`: the named text I/O surface. Standard input is not read
+// here (a fixture that blocks on a terminal is not a fixture); the line and
+// split views plus the write helpers are what the surface adds, and they are
+// deterministic.
+use "../../std/std/io.ae";
+
+fn body() -> i64 {
+    write_line("io module");
+    write_number(7);
+    write_bool(true);
+
+    let text = "alpha\nbeta\n\n";
+    let parts = lines_of(text);
+    // Two trailing newlines: the empty line between them is internal.
+    assert(len(parts) == 3);
+    assert(parts[0] == "alpha");
+    assert(parts[1] == "beta");
+    assert(parts[2] == "");
+    print(len(parts));
+
+    let fields = split_of("a,b,,c", ",");
+    assert(len(fields) == 4);
+    assert(fields[0] == "a");
+    assert(fields[2] == "");
+    assert(fields[3] == "c");
+    print(len(fields));
+
+    print(token_count("x;y;z", ";"));
+    print(token_count("abc", ""));
+    return 0;
+}
+
+fn main() {
+    assert(body() == 0);
+}
