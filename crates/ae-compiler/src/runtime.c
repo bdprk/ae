@@ -1295,17 +1295,52 @@ static ae_slice ae_slice_sub(ae_slice s, int64_t start, int64_t end, size_t line
     return r;
 }
 
-// In-place orderings for i64 vectors. qsort is the C library's introsort and
-// the comparator is a plain function, so no allocation and no closure state is
-// involved; vectors are at most INT64_MAX/8 elements, which qsort accepts as a
-// size_t count on both platforms.
-static int ae_cmp_i64(const void *left, const void *right) {
-    const int64_t a = *(const int64_t *)left;
-    const int64_t b = *(const int64_t *)right;
-    return (a > b) - (a < b);
+// In-place orderings for i64 vectors. qsort's comparator is an indirect call
+// per comparison, which dominates a large sort; this quicksort (median of
+// three, insertion sort below sixteen elements, the larger partition looped)
+// keeps every comparison inline. Recursion is on the smaller partition only,
+// so the depth is bounded by log2(len). Equal keys are interchangeable, which
+// is all the language promises for `sort`.
+static void ae_sort_i64_between(int64_t *a, int64_t lo, int64_t hi) {
+    while (hi - lo > 15) {
+        const int64_t mid = lo + (hi - lo) / 2;
+        if (a[mid] < a[lo]) { const int64_t t = a[mid]; a[mid] = a[lo]; a[lo] = t; }
+        if (a[hi] < a[lo]) { const int64_t t = a[hi]; a[hi] = a[lo]; a[lo] = t; }
+        if (a[hi] < a[mid]) { const int64_t t = a[hi]; a[hi] = a[mid]; a[mid] = t; }
+        const int64_t pivot = a[mid];
+        int64_t i = lo;
+        int64_t j = hi;
+        while (i <= j) {
+            while (a[i] < pivot) i++;
+            while (a[j] > pivot) j--;
+            if (i <= j) {
+                const int64_t t = a[i];
+                a[i] = a[j];
+                a[j] = t;
+                i++;
+                j--;
+            }
+        }
+        if (j - lo < hi - i) {
+            ae_sort_i64_between(a, lo, j);
+            lo = i;
+        } else {
+            ae_sort_i64_between(a, i, hi);
+            hi = j;
+        }
+    }
+    for (int64_t i = lo + 1; i <= hi; i++) {
+        const int64_t value = a[i];
+        int64_t j = i - 1;
+        while (j >= lo && a[j] > value) {
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = value;
+    }
 }
 static void ae_gvec_sort_i64(ae_gvec *v) {
-    if (v->len > 1) qsort(v->data, (size_t)v->len, sizeof(int64_t), ae_cmp_i64);
+    if (v->len > 1) ae_sort_i64_between(v->data, 0, v->len - 1);
 }
 static void ae_gvec_reverse_i64(ae_gvec *v) {
     int64_t *data = v->data;

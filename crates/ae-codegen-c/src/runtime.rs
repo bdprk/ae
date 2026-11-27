@@ -429,7 +429,56 @@ static inline int ae_vec_cmp_str(const void *a, const void *b) {
     if (order != 0) return order;
     return (x.len > y.len) - (x.len < y.len);
 }
-static inline void ae_vec_sort_i64(ae_vec *v) { qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_i64); }
+// qsort's comparator is an indirect call per comparison, which dominates a
+// large i64 sort; this quicksort (median of three, insertion sort below
+// sixteen elements, the larger partition looped) keeps comparisons inline.
+// Recursion is on the smaller partition only, so depth is bounded by
+// log2(len). Equal keys are interchangeable, which is all `sort` promises.
+static inline void ae_sort_i64_between(int64_t *a, int64_t lo, int64_t hi) {
+    while (hi - lo > 15) {
+        const int64_t mid = lo + (hi - lo) / 2;
+        if (a[mid] < a[lo]) { const int64_t t = a[mid]; a[mid] = a[lo]; a[lo] = t; }
+        if (a[hi] < a[lo]) { const int64_t t = a[hi]; a[hi] = a[lo]; a[lo] = t; }
+        if (a[hi] < a[mid]) { const int64_t t = a[hi]; a[hi] = a[mid]; a[mid] = t; }
+        const int64_t pivot = a[mid];
+        int64_t i = lo;
+        int64_t j = hi;
+        while (i <= j) {
+            while (a[i] < pivot) i++;
+            while (a[j] > pivot) j--;
+            if (i <= j) {
+                const int64_t t = a[i];
+                a[i] = a[j];
+                a[j] = t;
+                i++;
+                j--;
+            }
+        }
+        if (j - lo < hi - i) {
+            ae_sort_i64_between(a, lo, j);
+            lo = i;
+        } else {
+            ae_sort_i64_between(a, i, hi);
+            hi = j;
+        }
+    }
+    for (int64_t i = lo + 1; i <= hi; i++) {
+        const int64_t value = a[i];
+        int64_t j = i - 1;
+        while (j >= lo && a[j] > value) {
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = value;
+    }
+}
+static inline void ae_vec_sort_i64(ae_vec *v) {
+    if (v->len > 1 && v->elem_size == (int64_t)sizeof(int64_t)) {
+        ae_sort_i64_between((int64_t *)v->data, 0, v->len - 1);
+    } else if (v->len > 1) {
+        qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_i64);
+    }
+}
 static inline void ae_vec_sort_f64(ae_vec *v) { qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_f64); }
 static inline void ae_vec_sort_str(ae_vec *v) { qsort(v->data, (size_t)v->len, (size_t)v->elem_size, ae_vec_cmp_str); }
 static inline void ae_vec_reverse(ae_vec *v) {
