@@ -962,8 +962,19 @@ M5.1 and M6.2 pauses until R2 and R3a land.
   646 CLI fixture invocations on each platform. Ubuntu passed 41 generated-C
   sanitizer/leak cases with zero leaked blocks. The next step is typed body
   lowering over the resolved statements and DefIds.
-- [ ] R3d. Rebase LSP hover/definition/rename/completion on R3b/R3c; re-verify
-  M6.2.*.
+- [x] R3d. Rebase LSP hover/definition/rename/completion on R3b/R3c; re-verify
+  M6.2.*. **Done:** all four features answer from the resolver's occurrence
+  and def tables: hover renders parameter/return spellings, struct fields and
+  inferred binding types (`5514b4b`, `6cd3e87`); definition jumps to the def's
+  name range, including an imported def's own file (`0460301`); rename edits
+  the def's name range plus every occurrence targeting it, scope-exact and
+  across imported files (`0345d34`, `39db42e`); completion merges the
+  document's functions/structs, visibility-filtered locals and receiver-typed
+  member fields (`b6a037e`, `32a8b01`, `4697104`). Only builtins/prelude names
+  and buffers the shared parse rejects keep the text fallback, both by design.
+  M6.2.01-07 re-verified at `b38addd2` after R3b's imported-body resolution
+  and R3c's checker: the 33-test LSP protocol suite (including the 100k-line
+  latency probe run with `--ignored`) passes with zero failures.
 - [x] R4.1. Split the standard library into `std/core` (no allocation or OS),
   `std/alloc`, `std/compiler`, and `std/std`. The 261 modules
   are distributed across core (115), allocation (7),
