@@ -698,6 +698,14 @@ fn fold_float_binary(op: BinOp, a: f64, b: f64, fty: FloatTy) -> Option<Constant
         return Some(Constant::new(TyKind::Bool, ConstValue::Bool(cmp)));
     }
 
+    // Dividing by zero is a reported failure in this language, never a silent
+    // infinity (the runtime's f64/f32 division guards): folding it away would
+    // turn a guaranteed trap into a value, so the folder refuses and leaves
+    // the division for the backend's guarded emission.
+    if matches!(op, BinOp::Div | BinOp::Rem) && b == 0.0 {
+        return None;
+    }
+
     let res = match fty {
         FloatTy::F32 => {
             let (fa, fb) = (a as f32, b as f32);

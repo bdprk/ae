@@ -204,6 +204,7 @@ pub(super) fn lower_function_to_pure_mir(
 
 struct PureMirBuilder<'a> {
     name: String,
+    exposure: Option<String>,
     def: Option<DefId>,
     arg_count: usize,
     locals: Vec<LocalDecl>,
@@ -247,7 +248,12 @@ impl<'a> PureMirBuilder<'a> {
         copy_structs: &'a BTreeSet<usize>,
         copy_enums: &'a BTreeSet<usize>,
     ) -> Self {
-        let name = if function.is_main {
+        let exposure = ctx.exposure_name(function.id);
+        let name = if let Some(c_name) = exposure.clone() {
+            // A `#[no_mangle]` exposure (M2.12 U7): the C name IS the emitted
+            // name, with external linkage, so a real C caller can reach it.
+            c_name
+        } else if function.is_main {
             "main".to_owned()
         } else {
             format!("fn#{}", function.id)
@@ -284,6 +290,7 @@ impl<'a> PureMirBuilder<'a> {
 
         Self {
             name,
+            exposure,
             def: Some(DefId(function.id as u32)),
             arg_count: cfg.params.len(),
             locals,
@@ -489,6 +496,7 @@ impl<'a> PureMirBuilder<'a> {
             .collect();
         Body {
             name: self.name,
+            exposure: self.exposure,
             def: self.def,
             arg_count: self.arg_count,
             locals: self.locals,
@@ -509,6 +517,30 @@ impl<'a> PureMirBuilder<'a> {
         }
     }
 
+    /// Whether an rvalue still reads a place rooted at `local` (an operand
+    /// copy or a length probe). Such an rvalue must be materialized before the
+    /// local is released, or the read would land after the drop.
+    fn rvalue_reads_local(&self, rvalue: &Rvalue, local: LocalId) -> bool {
+        fn operand_reads(op: &Operand, local: LocalId) -> bool {
+            match op {
+                Operand::Copy(place) | Operand::Move(place) => place.local == local,
+                Operand::Constant(_) => false,
+            }
+        }
+        match rvalue {
+            Rvalue::Use(op) => operand_reads(op, local),
+            Rvalue::BinaryOp(_, lhs, rhs) => {
+                operand_reads(lhs, local) || operand_reads(rhs, local)
+            }
+            Rvalue::UnaryOp(_, op) => operand_reads(op, local),
+            Rvalue::Aggregate(_, ops) => ops.iter().any(|op| operand_reads(op, local)),
+            Rvalue::Ref { place, .. } | Rvalue::AddressOf(place) => place.local == local,
+            Rvalue::Len(place) => place.local == local,
+            Rvalue::Discriminant(place) => place.local == local,
+            Rvalue::Cast(_, op, _) => operand_reads(op, local),
+        }
+    }
+
     fn lower_statement(&mut self, stmt: &Statement) {
         match stmt {
             Statement::Declare(id, expr) => {
@@ -520,10 +552,32 @@ impl<'a> PureMirBuilder<'a> {
             Statement::Assign(id, expr, release_old) => {
                 let rhs_ty = expr_type(expr, self.ctx);
                 let (local, var_ty) = self.ensure_var(*id, rhs_ty);
+                // The right-hand side is lowered first: a compound assignment
+                // reads the target (`s += suffix` is `s = s + suffix`), so the
+                // old value must stay live until the new one exists. Releasing
+                // first would drop the buffer the right-hand side still reads.
+                let mut rvalue = self.lower_moving_expr(expr);
                 if *release_old && var_ty.owned() {
+                    // An rvalue that still reads the target (`q = Point{ x:
+                    // q.x + 10, y: q.y }`) keeps those reads inside the
+                    // assignment statement, which lands after the release.
+                    // Materializing the whole rvalue into a temporary moves
+                    // them ahead of the drop, so the borrow check sees every
+                    // read while the old value is alive.
+                    if self.rvalue_reads_local(&rvalue, local) {
+                        let temp = self.assign_to_temp(rhs_ty, rvalue);
+                        // An owned temporary must move into the target: a
+                        // copy would leave the temporary owning the buffer
+                        // too, and its own scope drop would free it twice.
+                        let operand = if rhs_ty.owned() && !self.is_copy_ty(rhs_ty) {
+                            Operand::Move(Place::from_local(temp))
+                        } else {
+                            Operand::Copy(Place::from_local(temp))
+                        };
+                        rvalue = Rvalue::Use(operand);
+                    }
                     self.push_stmt(StatementKind::Drop(Place::from_local(local)));
                 }
-                let rvalue = self.lower_moving_expr(expr);
                 self.assign_checked(Place::from_local(local), var_ty, rvalue, rhs_ty);
             }
             Statement::Array(id, values, elem_ty) => {
@@ -539,11 +593,11 @@ impl<'a> PureMirBuilder<'a> {
                     Rvalue::Aggregate(AggregateKind::Array(*elem_ty, arr_id), ops),
                 ));
             }
-            Statement::Store(id, len, index, value, _, _, elem_ty) => {
+            Statement::Store(id, len, index, value, line, column, elem_ty) => {
                 let arr_id = self.ctx.find_array_elem(*elem_ty).unwrap_or(0);
                 let arr_ty = TyKind::ArrayOf(arr_id, *len);
                 let (local, _) = self.ensure_var(*id, arr_ty);
-                let idx_local = self.lower_index_local(index);
+                let idx_local = self.lower_array_index(index, *len, *line, *column);
                 let val_op = self.lower_operand_moving(value);
                 let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
                 self.push_stmt(StatementKind::Assign(place, Rvalue::Use(val_op)));
@@ -684,25 +738,48 @@ impl<'a> PureMirBuilder<'a> {
                     TyKind::Unit,
                 );
             }
-            Statement::StrVecStore(id, index, value, ..) => {
+            Statement::StrVecStore(id, index, value, line, column, ..) => {
                 let vec_ty = vector_ty(self.ctx, Type::String, false);
                 let (local, _) = self.ensure_var(*id, vec_ty);
+                // The slot is resolved (bounds-checked) before the value
+                // evaluates, so `v[5] = 1 / 0` reports the index, not the
+                // division (the legacy store's order).
                 let idx_op = self.lower_operand(index);
+                self.pending_span = Some(self.span_at(*line, *column));
+                let checked = self.emit_intrinsic_call(
+                    "vec_check",
+                    vec![Operand::Copy(Place::from_local(local)), idx_op],
+                    TyKind::Int(IntTy::I64),
+                );
                 let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_store",
-                    vec![Operand::Copy(Place::from_local(local)), idx_op, val_op],
+                    vec![
+                        Operand::Copy(Place::from_local(local)),
+                        Operand::Copy(Place::from_local(checked)),
+                        val_op,
+                    ],
                     TyKind::Unit,
                 );
             }
-            Statement::GVecStore(id, index, value, elem_ty, ..) => {
+            Statement::GVecStore(id, index, value, elem_ty, line, column) => {
                 let vec_ty = vector_ty(self.ctx, *elem_ty, false);
                 let (local, _) = self.ensure_var(*id, vec_ty);
                 let idx_op = self.lower_operand(index);
+                self.pending_span = Some(self.span_at(*line, *column));
+                let checked = self.emit_intrinsic_call(
+                    "vec_check",
+                    vec![Operand::Copy(Place::from_local(local)), idx_op],
+                    TyKind::Int(IntTy::I64),
+                );
                 let val_op = self.lower_operand_moving(value);
                 self.emit_intrinsic_call(
                     "vec_store",
-                    vec![Operand::Copy(Place::from_local(local)), idx_op, val_op],
+                    vec![
+                        Operand::Copy(Place::from_local(local)),
+                        Operand::Copy(Place::from_local(checked)),
+                        val_op,
+                    ],
                     TyKind::Unit,
                 );
             }
@@ -1130,9 +1207,21 @@ impl<'a> PureMirBuilder<'a> {
                 let op = self.lower_operand(inner);
                 Rvalue::Cast(classify_cast(*from, *to), op, *to)
             }
-            Expr::ToF64(inner, ..) => {
+            Expr::ToF64(inner, line, column) => {
                 let from = expr_type(inner, self.ctx);
                 let op = self.lower_operand(inner);
+                // An i64 beyond 2^53 would round silently, so the conversion
+                // goes through a guard that traps instead (the legacy
+                // runtime's contract).
+                if matches!(from, TyKind::Int(_)) {
+                    self.pending_span = Some(self.span_at(*line, *column));
+                    let dest = self.emit_intrinsic_call(
+                        "to_f64_checked",
+                        vec![op],
+                        TyKind::Float(FloatTy::F64),
+                    );
+                    return Rvalue::Use(Operand::Copy(Place::from_local(dest)));
+                }
                 Rvalue::Cast(classify_cast(from, TyKind::Float(FloatTy::F64)), op, TyKind::Float(FloatTy::F64))
             }
             Expr::ToI64(inner, ty, line, column) => {
@@ -1203,11 +1292,11 @@ impl<'a> PureMirBuilder<'a> {
                 let place = self.lower_place(inner).project(ProjectionElem::Deref);
                 Rvalue::Use(Operand::Copy(place))
             }
-            Expr::Index(id, len, index, _, _, elem_ty) => {
+            Expr::Index(id, len, index, line, column, elem_ty) => {
                 let arr_id = self.ctx.find_array_elem(*elem_ty).unwrap_or(0);
                 let arr_ty = TyKind::ArrayOf(arr_id, *len);
                 let (local, _) = self.ensure_var(*id, arr_ty);
-                let idx_local = self.lower_index_local(index);
+                let idx_local = self.lower_array_index(index, *len, *line, *column);
                 let place = Place::from_local(local).project(ProjectionElem::Index(idx_local));
                 Rvalue::Use(Operand::Copy(place))
             }
@@ -1226,7 +1315,13 @@ impl<'a> PureMirBuilder<'a> {
                 )))
             }
             Expr::Call(fn_id, args, ret) => {
-                if let Some(name) = self.ctx.extern_name(*fn_id) {
+                // A `#[no_mangle]` exposure is registered as an extern (its C
+                // name rides the extern registry) but it has a body in this
+                // unit: the call is a local call, and the emitter links the
+                // definition under the exposure's own name (M2.12 U7).
+                if self.ctx.exposure_name(*fn_id).is_none()
+                    && let Some(name) = self.ctx.extern_name(*fn_id)
+                {
                     self.externs.insert(DefId(*fn_id as u32), name);
                 }
                 let (arg_ops, arg_drops) = self.lower_args(args);
@@ -1562,6 +1657,34 @@ impl<'a> PureMirBuilder<'a> {
         }
     }
 
+    /// An array index, bounds-checked unless the frontend can prove it in range
+    /// (M2.10): a fixed array's length is part of its type, so a constant index
+    /// inside `len` elides the check, and every other index goes through
+    /// `ae_array_index`, which traps at the access site (ADR-0240).
+    fn lower_array_index(
+        &mut self,
+        index: &Expr,
+        len: usize,
+        line: usize,
+        column: usize,
+    ) -> LocalId {
+        let idx_local = self.lower_index_local(index);
+        let constant_in_range = matches!(index, Expr::Number(n) if *n >= 0 && (*n as usize) < len);
+        if constant_in_range {
+            return idx_local;
+        }
+        let len_op = Operand::Constant(Constant::new(
+            TyKind::Int(IntTy::I64),
+            ConstValue::Int(len as i128),
+        ));
+        self.pending_span = Some(self.span_at(line, column));
+        self.emit_intrinsic_call(
+            "array_index",
+            vec![Operand::Copy(Place::from_local(idx_local)), len_op],
+            TyKind::Int(IntTy::I64),
+        )
+    }
+
     /// Appends the context fields for a spawned closure's borrow captures, after
     /// its moved value captures: the lifted function takes those views/refs in
     /// the same order.
@@ -1809,9 +1932,12 @@ impl<'a> PureMirBuilder<'a> {
                 self.pending_span = Some(self.span_at(*line, *column));
                 ("slice_view", vec![base, s, e])
             }
-            Expr::Tokens(id, field, sep, ..) => {
+            Expr::Tokens(id, field, sep, line, column) => {
                 let base = self.string_base_operand(*id, field);
                 let s = self.lower_operand(sep);
+                // The cursor carries its call site: an empty separator (and
+                // the 16-byte limit) reports the tokenize call (ADR-0240).
+                self.pending_span = Some(self.span_at(*line, *column));
                 ("tokens", vec![base, s])
             }
             Expr::Join(id, sep, ..) => {

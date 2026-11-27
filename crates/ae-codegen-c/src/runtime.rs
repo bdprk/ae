@@ -20,12 +20,26 @@ pub(crate) fn emit_preamble(out: &mut String) {
          #include <stdlib.h>\n\
          #include <string.h>\n\
          #include <sys/stat.h>\n\
-         #ifndef _WIN32\n\
          #include <fcntl.h>\n\
+         #ifndef _WIN32\n\
          #include <sys/wait.h>\n\
          #include <unistd.h>\n\
          #endif\n\
          #include <time.h>\n\n\
+         // The pure runtime is one `static inline` block compiled into the
+         // program's own translation unit, so GCC's interprocedural analyzers
+         // see constants the legacy runtime hid behind its allocator's
+         // indirect call (ae_os_alloc through a function pointer). Three of
+         // them fire on deliberate patterns instead of bugs, and their text
+         // would pollute the program's stderr, which snapshots compare
+         // byte-for-byte: the i64-max OOM probe through ae_std_alloc reads as
+         // an over-large malloc, a release of an unowned slot folds to a
+         // no-op but keeps the free in a dead branch, and the alloc helpers
+         // write a terminator after a zero-length region. Suppress exactly
+         // these three; everything else still warns.
+         #pragma GCC diagnostic ignored \"-Walloc-size-larger-than=\"\n\
+         #pragma GCC diagnostic ignored \"-Wfree-nonheap-object\"\n\
+         #pragma GCC diagnostic ignored \"-Wstringop-overflow=\"\n\n\
          typedef struct { uint8_t _unused; } ae_unit_t;\n\n\
          // The positioned failure sink is defined with the concurrency runtime\n\
          // (a child thread records a failure instead of ending the process).\n\
@@ -150,12 +164,49 @@ static inline void ae_print_f64(double value) {
 }
 _Noreturn static inline void ae_exit(int64_t code) { exit((int)code); }
 
+// Float guards. The same rule as integer division: zero is a reported failure,
+// never a silent infinity, and an integer-to-float conversion that would round
+// is refused instead of approximated (the legacy runtime's contract).
+static inline double ae_f64_div(double a, double b, size_t line, size_t column) {
+    if (b == 0.0) ae_fail_at("f64 division by zero", line, column);
+    return a / b;
+}
+static inline float ae_f32_div(float a, float b, size_t line, size_t column) {
+    if (b == 0.0f) ae_fail_at("f32 division by zero", line, column);
+    return a / b;
+}
+static inline double ae_f64_from_i64(int64_t value, size_t line, size_t column) {
+    // Every integer up to 2^53 is exact; beyond that the conversion would
+    // round silently, so it is refused.
+    if (value > INT64_C(9007199254740992) || value < -INT64_C(9007199254740992)) {
+        ae_fail_at("i64 to f64 conversion would lose precision", line, column);
+    }
+    return (double)value;
+}
+static inline uint32_t ae_u32_to_char(uint32_t value, size_t line, size_t column) {
+    // A char is a Unicode scalar value: surrogates and anything past U+10FFFF
+    // are rejected rather than reinterpreted.
+    if (value > 0x10FFFFu || (value >= 0xD800u && value <= 0xDFFFu)) {
+        ae_fail_at("invalid Unicode scalar value", line, column);
+    }
+    return value;
+}
+
 // Extern bridge (ADR-0238 stage 3): the pure backend ships the small set of
 // runtime symbols the language's `extern "C"` corpus links against, instead
 // of depending on the main runtime's translation unit. A declaration naming
 // a symbol outside this set still fails closed, so an unsupported extern is
 // a compile-time diagnostic rather than a link error.
 static inline int64_t ae_extern_probe(int64_t v) { return v * 2 + 1; }
+// M2.12 U7 exposure trampoline: a real C caller reaches the `#[no_mangle]`
+// exposure through a foreign declaration of a symbol defined later in the
+// same translation unit. `static inline` keeps it uninstantiated unless a
+// program actually calls it, so the `test_add` reference ships with the
+// programs that ask for it.
+static inline int64_t ae_exposure_trampoline(int64_t a, int64_t b) {
+    extern int64_t test_add(int64_t a, int64_t b);
+    return test_add(a, b);
+}
 static inline int64_t *ae_std_alloc(int64_t size, int64_t line, int64_t column) {
     if (size < 0) ae_fail_at("out of memory", (size_t)line, (size_t)column);
     void *out = malloc((size_t)size + 1u);
@@ -179,8 +230,35 @@ static inline int64_t *ae_std_free(int64_t *block) {
     // run on every path that reaches them.
     out.push_str(r#"typedef struct { const char *ptr; int64_t len; bool owned; } ae_str;
 
+// `AE_ALLOC_LIMIT` caps the cumulative bytes the runtime hands out, which is
+// how the test suite reaches the out-of-memory path on purpose. It is a
+// diagnostic, not a policy knob: the default is unlimited. The read is lazy and
+// guarded by an exchange so concurrent first allocations cannot race getenv.
+static _Atomic uint64_t ae_alloc_budget_g = UINT64_MAX;
+static _Atomic uint64_t ae_alloc_total_g = 0;
+static _Atomic bool ae_alloc_ready_g = false;
+static void ae_alloc_env(void) {
+    const char *limit = getenv("AE_ALLOC_LIMIT");
+    if (!limit || !*limit) return;
+    char *end = NULL;
+    unsigned long long value = strtoull(limit, &end, 10);
+    if (end == limit || *end) return;
+    atomic_store(&ae_alloc_budget_g, (uint64_t)value);
+}
+static inline void *ae_alloc_try(size_t size) {
+    if (!atomic_exchange(&ae_alloc_ready_g, true)) ae_alloc_env();
+    if ((uint64_t)size > atomic_load(&ae_alloc_budget_g)) return NULL;
+    uint64_t previous = atomic_fetch_add(&ae_alloc_total_g, (uint64_t)size);
+    if (previous > atomic_load(&ae_alloc_budget_g) - (uint64_t)size) {
+        atomic_fetch_sub(&ae_alloc_total_g, (uint64_t)size);
+        return NULL;
+    }
+    void *block = malloc(size);
+    if (!block) atomic_fetch_sub(&ae_alloc_total_g, (uint64_t)size);
+    return block;
+}
 static inline char *ae_str_alloc(int64_t len) {
-    char *out = (char *)malloc((size_t)len + 1u);
+    char *out = (char *)ae_alloc_try((size_t)len + 1u);
     if (!out) ae_trap("out of memory");
     return out;
 }
@@ -232,16 +310,22 @@ static inline ae_str ae_str_clone(ae_str value) {
 // operand is released after its bytes are copied, a view or literal is only
 // read. Callers hand over owned values (taken from their slot) or clones, so
 // every input is either disposable or untouched-by-ownership.
-static inline ae_str ae_str_concat(ae_str a, ae_str b) {
-    if (a.len < 0 || b.len < 0 || a.len > INT64_MAX - b.len) ae_trap("string too long");
+// The positioned form names the concat's allocation site, so an exhausted
+// AE_ALLOC_LIMIT reports the expression instead of ae:0:0 (ADR-0240).
+static inline ae_str ae_str_concat_at(ae_str a, ae_str b, size_t line, size_t column) {
+    if (a.len < 0 || b.len < 0 || a.len > INT64_MAX - b.len) ae_fail_at("string too long", line, column);
     const int64_t total = a.len + b.len;
-    char *out = ae_str_alloc(total);
+    char *out = (char *)ae_alloc_try((size_t)total + 1u);
+    if (!out) ae_fail_at("out of memory", line, column);
     if (a.len > 0) memcpy(out, a.ptr, (size_t)a.len);
     if (b.len > 0) memcpy(out + a.len, b.ptr, (size_t)b.len);
     out[total] = 0;
     ae_str_release(&a);
     ae_str_release(&b);
     return ae_str_from_parts(out, total, true);
+}
+static inline ae_str ae_str_concat(ae_str a, ae_str b) {
+    return ae_str_concat_at(a, b, 0, 0);
 }
 static inline int64_t ae_str_len(ae_str value) { return value.len; }
 static inline void ae_print_str(ae_str value) {
@@ -325,6 +409,13 @@ static inline void *ae_vec_at(ae_vec *v, int64_t index, size_t line, size_t colu
     if (index < 0 || index >= v->len) ae_fail_at("array index out of bounds", line, column);
     return (char *)v->data + (size_t)index * (size_t)v->elem_size;
 }
+// A fixed array's length is part of its type, so a constant index the frontend
+// can prove in range elides this check (M2.10); every other index goes through
+// it and traps at the access site (ADR-0240).
+static inline size_t ae_array_index(int64_t index, size_t len, size_t line, size_t column) {
+    if (index < 0 || (uint64_t)index >= (uint64_t)len) ae_fail_at("array index out of bounds", line, column);
+    return (size_t)index;
+}
 static inline void ae_vec_push(ae_vec *v, const void *elem) {
     ae_vec_reserve(v, v->len + 1);
     memcpy((char *)v->data + (size_t)v->len * (size_t)v->elem_size, elem, (size_t)v->elem_size);
@@ -334,6 +425,12 @@ static inline void ae_vec_store(ae_vec *v, int64_t index, const void *elem, size
     void *slot = ae_vec_at(v, index, line, column);
     if (v->drop) v->drop(slot);
     memcpy(slot, elem, (size_t)v->elem_size);
+}
+// A store's slot is resolved before the value is evaluated: `v[i] = <expr>`
+// must report an out-of-bounds index even when the value itself would trap.
+static inline int64_t ae_vec_check(ae_vec *v, int64_t index, size_t line, size_t column) {
+    ae_vec_at(v, index, line, column);
+    return index;
 }
 static inline void ae_vec_pop(ae_vec *v, size_t line, size_t column) {
     if (v->len == 0) ae_fail_at("pop from empty vector", line, column);
@@ -400,7 +497,10 @@ static inline void *ae_slice_at_mut(ae_slice *s, int64_t index, size_t line, siz
     return (char *)s->data + (size_t)index * (size_t)s->elem_size;
 }
 static inline ae_slice ae_slice_range(ae_slice s, int64_t start, int64_t end, size_t line, size_t column) {
-    if (start < 0 || end < start || end > s.len) ae_fail_at("array index out of bounds", line, column);
+    if (start < 0 || end < start || end > s.len) ae_fail_at("slice range out of bounds", line, column);
+    // A full window is the slice itself; this also keeps an empty slice's
+    // NULL data out of pointer arithmetic (ADR-0236).
+    if (start == 0 && end == s.len) return s;
     return ae_slice_view(
         (char *)s.data + (size_t)start * (size_t)s.elem_size,
         end - start,
@@ -881,6 +981,12 @@ static inline ae_read_result ae_try_read_stdin_value(void) {
     ae_read_result out;
     out.status = 0;
     out.error = ae_str_from_parts("", 0, false);
+#ifdef _WIN32
+    // Windows starts standard input in text mode, which would turn CRLF into
+    // LF and make the byte count platform-dependent; the descriptor is
+    // switched to binary so the program sees exactly the bytes it was given.
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
     size_t capacity = 8192;
     size_t length = 0;
     char *buffer = (char *)malloc(capacity);
@@ -1200,12 +1306,20 @@ static inline ae_read_result ae_try_env_value(ae_str name) {
     out.status = 0;
     out.text = ae_str_from_parts("", 0, false);
     out.error = ae_str_from_parts("", 0, false);
+    // An empty name is a caller mistake, not a missing variable; `getenv("")`
+    // would otherwise report the same "not set" as a real absence.
+    if (name.len == 0) {
+        out.status = 1;
+        out.error = ae_str_alloc_copy("variable name is empty", (int64_t)strlen("variable name is empty"));
+        return out;
+    }
     const char *value = getenv(name.ptr);
     if (!value) {
         out.status = 1;
         out.error = ae_str_alloc_copy("variable not set", (int64_t)strlen("variable not set"));
         return out;
     }
+    // A variable that exists but holds nothing is a value, not an error.
     out.text = ae_str_alloc_copy(value, (int64_t)strlen(value));
     return out;
 }
@@ -1213,20 +1327,54 @@ static inline ae_read_result ae_try_cwd_value(void) {
     ae_read_result out;
     out.status = 0;
     out.error = ae_str_from_parts("", 0, false);
+#ifdef _WIN32
+    // The working directory is read through the wide entry point: the narrow
+    // `_getcwd` hands back ANSI-code-page bytes, so a directory the code page
+    // cannot represent arrives mangled and every later stat on it fails.
+    extern __declspec(dllimport) unsigned long GetCurrentDirectoryW(unsigned long length, wchar_t *buffer);
+    const unsigned long needed = GetCurrentDirectoryW(0, NULL);
+    if (needed == 0) {
+        out.status = 1;
+        out.error = ae_io_error();
+        return out;
+    }
+    wchar_t *wide = (wchar_t *)malloc((size_t)needed * sizeof(wchar_t));
+    if (!wide) ae_trap("out of memory");
+    const unsigned long length = GetCurrentDirectoryW(needed, wide);
+    if (length == 0 || length >= needed) {
+        free(wide);
+        out.status = 1;
+        out.error = ae_io_error();
+        return out;
+    }
+    const int bytes = WideCharToMultiByte(65001, 0, wide, (int)length, NULL, 0, NULL, NULL);
+    if (bytes <= 0) {
+        free(wide);
+        out.status = 1;
+        out.error = ae_io_error();
+        return out;
+    }
+    char *buffer = (char *)malloc((size_t)bytes + 1u);
+    if (!buffer) {
+        free(wide);
+        ae_trap("out of memory");
+    }
+    WideCharToMultiByte(65001, 0, wide, (int)length, buffer, bytes, NULL, NULL);
+    free(wide);
+    const int64_t got = bytes;
+#else
     size_t capacity = 256;
     char *buffer = (char *)malloc(capacity);
     if (!buffer) ae_trap("out of memory");
+    int64_t got = 0;
     for (;;) {
-#ifdef _WIN32
-        const char *got = _getcwd(buffer, (int)capacity);
-#else
-        const char *got = getcwd(buffer, capacity);
-#endif
-        if (got) break;
+        if (getcwd(buffer, capacity)) {
+            got = (int64_t)strlen(buffer);
+            break;
+        }
         if (errno != ERANGE || capacity > ((size_t)-1) / 2) {
             free(buffer);
             out.status = 1;
-            out.text = ae_str_from_parts("", 0, false);
             out.error = ae_io_error();
             return out;
         }
@@ -1238,11 +1386,13 @@ static inline ae_read_result ae_try_cwd_value(void) {
         }
         buffer = grown;
     }
-    const int64_t length = (int64_t)strlen(buffer);
-    for (int64_t i = 0; i < length; i++) {
+#endif
+    // Unify separators so path_join and friends see one form.
+    for (int64_t i = 0; i < got; i++) {
         if (buffer[i] == '\\') buffer[i] = '/';
     }
-    out.text = ae_str_from_parts(buffer, length, true);
+    buffer[got] = 0;
+    out.text = ae_str_from_parts(buffer, got, true);
     return out;
 }
 static inline int64_t ae_now_s(void) { return (int64_t)time(NULL); }
@@ -1601,9 +1751,9 @@ typedef struct {
     bool done;
     ae_str current;
 } ae_tokens;
-static inline ae_tokens ae_tokens_new(ae_str text, ae_str sep) {
-    if (sep.len <= 0) ae_trap("empty separator");
-    if (sep.len > AE_TOKENS_SEP_MAX) ae_trap("token separator longer than 16 bytes");
+static inline ae_tokens ae_tokens_new_at(ae_str text, ae_str sep, size_t line, size_t column) {
+    if (sep.len <= 0) ae_fail_at("empty separator", line, column);
+    if (sep.len > AE_TOKENS_SEP_MAX) ae_fail_at("token separator longer than 16 bytes", line, column);
     ae_tokens cursor;
     cursor.text = text;
     memcpy(cursor.sep, sep.ptr, (size_t)sep.len);
@@ -1612,6 +1762,9 @@ static inline ae_tokens ae_tokens_new(ae_str text, ae_str sep) {
     cursor.done = false;
     cursor.current = ae_str_from_parts("", 0, false);
     return cursor;
+}
+static inline ae_tokens ae_tokens_new(ae_str text, ae_str sep) {
+    return ae_tokens_new_at(text, sep, 0, 0);
 }
 static inline void ae_tokens_reset(ae_tokens *cursor) {
     cursor->pos = 0;
@@ -2361,8 +2514,6 @@ extern int CreateProcessW(wchar_t *application, wchar_t *command, void *process_
 extern int ReadFile(void *file, void *buffer, unsigned long bytes, unsigned long *read, void *overlapped);
 extern int GetExitCodeProcess(void *process, unsigned long *code);
 extern unsigned long GetLastError(void);
-extern int MultiByteToWideChar(unsigned int codepage, unsigned long flags, const char *text,
-                               int length, wchar_t *out, int capacity);
 extern unsigned long WaitForSingleObject(void *handle, unsigned long milliseconds);
 extern int CloseHandle(void *handle);
 static inline ae_command_result ae_run_command_value(ae_str program, ae_vec *args, size_t line, size_t column) {
@@ -3179,7 +3330,45 @@ static inline int64_t ae_pool_join(ae_pool pool) {
     for ity in int_tys {
         emit_int_helpers(out, ity);
         emit_int_method_helpers(out, ity);
+        emit_float_cast_helper(out, ity);
     }
+}
+
+/// A float-to-integer cast truncates toward zero; non-finite and out-of-range
+/// values trap instead of wrapping (the legacy runtime's per-width contract).
+fn emit_float_cast_helper(out: &mut String, ity: IntTy) {
+    let t = ity.c_name();
+    let n = ity.name();
+    // The bounds are exact doubles: one past the representable range, so the
+    // comparison never rounds. Unsigned targets clamp -0.5..0 to 0 through a
+    // wider signed cast; u64/usize reject negatives outright.
+    let (low, high, body) = match ity {
+        IntTy::I8 => ("-129.0", "128.0", format!("return ({t})value;")),
+        IntTy::U8 => ("-1.0", "256.0", format!("return ({t})(int16_t)value;")),
+        IntTy::I16 => ("-32769.0", "32768.0", format!("return ({t})value;")),
+        IntTy::U16 => ("-1.0", "65536.0", format!("return ({t})(int32_t)value;")),
+        IntTy::I32 => ("-2147483649.0", "2147483648.0", format!("return ({t})value;")),
+        IntTy::U32 => ("-1.0", "4294967296.0", format!("return ({t})(int64_t)value;")),
+        IntTy::I64 | IntTy::Isize => (
+            "-9223372036854775808.0",
+            "9223372036854775808.0",
+            format!("return ({t})value;"),
+        ),
+        IntTy::U64 | IntTy::Usize => (
+            "-1.0",
+            "18446744073709551616.0",
+            format!("if (value < 0.0) return 0;\n    return ({t})value;"),
+        ),
+    };
+    let _ = writeln!(
+        out,
+        "static inline {t} ae_f64_to_{n}_trunc(double value, size_t line, size_t column) {{\n\
+             if (!isfinite(value) || value <= {low} || value >= {high}) {{\n\
+                 ae_fail_at(\"float-to-integer cast out of range\", line, column);\n\
+             }}\n\
+             {body}\n\
+         }}"
+    );
 }
 
 /// Wrapping, saturating and checked helpers for one width, used by the

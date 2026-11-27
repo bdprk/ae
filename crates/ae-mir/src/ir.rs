@@ -83,6 +83,10 @@ pub struct Body {
     /// runtime-built payload (FileInfo, CommandOutput) knows its layout
     /// without inferring it from field accesses.
     pub struct_layouts: BTreeMap<usize, Vec<TyKind>>,
+    /// A `#[no_mangle]` exposure (M2.12 U7): the body defines a symbol C code
+    /// can call, so the backend emits it under this name with external
+    /// linkage instead of the sanitized `ae_fn_*` form.
+    pub exposure: Option<String>,
     pub span: Option<Span>,
 }
 
@@ -106,6 +110,7 @@ impl Body {
             slice_elems: BTreeMap::new(),
             map_types: BTreeMap::new(),
             struct_layouts: BTreeMap::new(),
+            exposure: None,
             span: None,
         }
     }

@@ -18,7 +18,12 @@ pub(crate) fn build_fn_name_map(bodies: &[Body]) -> (Vec<String>, BTreeMap<DefId
     let mut def_map = BTreeMap::new();
 
     for body in bodies {
-        let base = sanitize_fn_name(&body.name);
+        // A `#[no_mangle]` exposure keeps its own name verbatim: the symbol
+        // is part of the unit's C interface, with external linkage (M2.12 U7).
+        let base = match &body.exposure {
+            Some(c_name) => c_name.clone(),
+            None => sanitize_fn_name(&body.name),
+        };
         let count = used.entry(base.clone()).or_insert(0);
         let unique = if *count == 0 {
             base
@@ -285,7 +290,13 @@ fn emit_terminator(
                 Operand::Constant(c) => match &c.value {
                     ConstValue::FnDef(def_id) => {
                         if let Some(symbol) = body.externs.get(def_id) {
-                            if !runtime_extern(symbol) {
+                            // A symbol this unit defines itself (a `#[no_mangle]`
+                            // exposure) is a local call: the foreign declaration
+                            // resolves to the definition later in the file, exactly
+                            // like a real C translation unit.
+                            if !def_map.values().any(|name| name == symbol)
+                                && !runtime_extern(symbol)
+                            {
                                 return Err(CodegenError::UnsupportedFeature {
                                     body_name: body.name.clone(),
                                     detail: format!(
@@ -460,7 +471,16 @@ fn emit_intrinsic(
             }
             let a = emit_owned_operand(body, &args[0], types, def_map)?;
             let b = emit_owned_operand(body, &args[1], types, def_map)?;
-            finish_value(out, body, types, destination, target, &format!("ae_str_concat({a}, {b})"))
+            // The result allocation names the concat's position, so an
+            // exhausted AE_ALLOC_LIMIT reports the expression, not ae:0:0.
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_str_concat_at({a}, {b}, (size_t){line}, (size_t){column})"),
+            )
         }
         "str_eq" | "str_ne" => {
             if args.len() != 2 {
@@ -617,6 +637,20 @@ fn emit_intrinsic(
             let _ = writeln!(out, "    ae_vec_pop({ptr}, (size_t){line}, (size_t){column});");
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
+        "vec_check" => {
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "vec_check needs a vector and an index".to_owned(),
+                });
+            }
+            let (ptr, _elem) = vector_operand(body, &args[0], types, def_map)?;
+            let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let call = format!(
+                "ae_vec_check({ptr}, (int64_t)({index}), (size_t){line}, (size_t){column})"
+            );
+            finish_value(out, body, types, destination, target, &call)
+        }
         "vec_store" => {
             if args.len() != 3 {
                 return Err(CodegenError::UnsupportedFeature {
@@ -628,9 +662,12 @@ fn emit_intrinsic(
             let c_elem = c_type_name(elem);
             let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             let value = emit_owned_operand(body, &args[2], types, def_map)?;
+            // The index is resolved (and bounds-checked) through ae_vec_at
+            // before the value is materialized: a write whose index is out of
+            // bounds must not first evaluate a trapping value expression.
             let _ = writeln!(
                 out,
-                "    {{ {c_elem} _tmp = {value}; ae_vec_store({ptr}, (int64_t)({index}), &_tmp, (size_t){line}, (size_t){column}); }}"
+                "    {{ void *_slot = ae_vec_at({ptr}, (int64_t)({index}), (size_t){line}, (size_t){column});\n      {c_elem} _tmp = {value};\n      if (({ptr})->drop) ({ptr})->drop(_slot);\n      memcpy(_slot, &_tmp, (size_t)({ptr})->elem_size); }}"
             );
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
@@ -932,6 +969,13 @@ fn emit_intrinsic(
             }
             Ok(())
         }
+        "to_f64_checked" => {
+            let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let call = format!(
+                "ae_f64_from_i64((int64_t)({value}), (size_t){line}, (size_t){column})"
+            );
+            finish_value(out, body, types, destination, target, &call)
+        }
         "to_i64" => {
             let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let dest_ty = types.infer_place_ty(body, destination);
@@ -1160,7 +1204,16 @@ fn emit_intrinsic(
             }
             let text = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let sep = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
-            finish_value(out, body, types, destination, target, &format!("ae_tokens_new({text}, {sep})"))
+            // The cursor carries its call site: an empty separator reports
+            // the tokenize call, not ae:0:0.
+            finish_value(
+                out,
+                body,
+                types,
+                destination,
+                target,
+                &format!("ae_tokens_new_at({text}, {sep}, (size_t){line}, (size_t){column})"),
+            )
         }
         "reset_tokens" => {
             let expr = cursor_operand(
@@ -2430,6 +2483,22 @@ fn emit_intrinsic(
             };
             finish_value(out, body, types, destination, target, &format!("({call}, (int64_t)0)"))
         }
+        "array_index" => {
+            // A fixed array's length is part of its type, so only an index the
+            // frontend could not prove in range reaches this call (M2.10).
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "array_index needs an index and a length".to_owned(),
+                });
+            }
+            let index = emit_operand(body, &args[0], types, def_map)?;
+            let len = emit_operand(body, &args[1], types, def_map)?;
+            let call = format!(
+                "((int64_t)ae_array_index((int64_t)({index}), (size_t)({len}), (size_t){line}, (size_t){column}))"
+            );
+            finish_value(out, body, types, destination, target, &call)
+        }
         "ptr_write" => {
             // `ptr_write(pointer, value)` stores through a raw pointer inside
             // `unsafe`. The pointee type selects the C cast, exactly like the
@@ -2530,7 +2599,13 @@ fn finish_value(
 /// Symbols the pure C backend supplies in its own runtime preamble. A
 /// declaration naming anything else still fails closed.
 fn runtime_extern(symbol: &str) -> bool {
-    matches!(symbol, "ae_std_alloc" | "ae_std_free" | "ae_extern_probe")
+    // `ae_exposure_trampoline` is the U7 rehearsal: a C caller reaching a
+    // `#[no_mangle]` exposure through a foreign declaration. The runtime
+    // defines it `static inline`, so a program that never calls it never
+    // instantiates it — and a program that calls it without defining the
+    // `test_add` exposure fails at link time, exactly like the legacy
+    // backend's pruned trampoline.
+    matches!(symbol, "ae_std_alloc" | "ae_std_free" | "ae_extern_probe" | "ae_exposure_trampoline")
 }
 
 /// String operands the lowering materialized as private temporaries are the
@@ -3090,10 +3165,31 @@ fn emit_rvalue(
             let src_ty = types.infer_operand_ty(body, operand);
             let target_c_ty = c_type_name(*target_ty);
             if matches!(kind, ae_mir::CastKind::Misc) && matches!(src_ty, Some(TyKind::Bool)) {
-                Ok(format!("(({target_c_ty})(({expr}) ? 1 : 0))"))
-            } else {
-                Ok(format!("(({target_c_ty})({expr}))"))
+                return Ok(format!("(({target_c_ty})(({expr}) ? 1 : 0))"));
             }
+            // A float-to-integer cast truncates toward zero; non-finite and
+            // out-of-range values trap instead of producing garbage (the
+            // legacy runtime's per-width trunc contract).
+            if matches!(src_ty, Some(TyKind::Float(_)))
+                && let TyKind::Int(ity) = target_ty
+            {
+                let width = ity.name();
+                let (line, column) = span
+                    .as_ref()
+                    .map(|s| (s.line, s.column))
+                    .unwrap_or((0, 0));
+                return Ok(format!(
+                    "ae_f64_to_{width}_trunc((double)({expr}), (size_t){line}, (size_t){column})"
+                ));
+            }
+            // An integer-to-char cast must land on a Unicode scalar value.
+            if matches!(src_ty, Some(TyKind::Int(_))) && matches!(target_ty, TyKind::Char) {
+                let (line, column) = span.as_ref().map(|s| (s.line, s.column)).unwrap_or((0, 0));
+                return Ok(format!(
+                    "ae_u32_to_char((uint32_t)({expr}), (size_t){line}, (size_t){column})"
+                ));
+            }
+            Ok(format!("(({target_c_ty})({expr}))"))
         }
         Rvalue::Aggregate(kind, ops) => {
             let mut op_exprs = Vec::with_capacity(ops.len());
@@ -3259,7 +3355,14 @@ fn emit_binary(
             BinOp::Add => Ok(format!("(({l}) + ({r}))")),
             BinOp::Sub => Ok(format!("(({l}) - ({r}))")),
             BinOp::Mul => Ok(format!("(({l}) * ({r}))")),
-            BinOp::Div => Ok(format!("(({l}) / ({r}))")),
+            // Zero is a reported failure, never a silent infinity.
+            BinOp::Div => {
+                let guard = match fty {
+                    FloatTy::F32 => "ae_f32_div",
+                    FloatTy::F64 => "ae_f64_div",
+                };
+                Ok(format!("{guard}(({l}), ({r}), (size_t){line}, (size_t){column})"))
+            }
             BinOp::Rem => match fty {
                 FloatTy::F32 => Ok(format!("fmodf(({l}), ({r}))")),
                 FloatTy::F64 => Ok(format!("fmod(({l}), ({r}))")),

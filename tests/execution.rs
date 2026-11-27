@@ -1064,6 +1064,10 @@ fn frontend_cache_reuses_generated_c_until_an_imported_file_changes() {
     fs::write(&source, "use \"lib.ae\";\nfn main() { print(answer() + 1); }").unwrap();
     let build = |out: &std::path::Path| Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("build").arg(&source).arg("-o").arg(out)
+        // The content-addressed cache belongs to the legacy MIR backend; a
+        // pure build bypasses it by design (README, Backends), so this test
+        // pins the backend instead of inheriting the ambient AE_BACKEND.
+        .env("AE_BACKEND", "legacy")
         .env("AE_CACHE", &cache).env("AE_TIMINGS", "1").output().unwrap();
     let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
 
@@ -3588,7 +3592,10 @@ fn main() {
 }
 #[test]
 fn allocation_failure_reports_the_operation_location() {
-    let source = "fn main() {\n    let text = \"hello\";\n    print(text);\n}";
+    // A string literal is static storage on the pure backend (zero
+    // allocations), so the program allocates through a concat instead: both
+    // backends reach the budget at the same source line.
+    let source = "fn main() {\n    let text = \"hel\" + \"lo\";\n    print(text);\n}";
     let exhausted = execute_with_env(source, &[("AE_ALLOC_LIMIT", "0")]);
     assert!(!exhausted.status.success(), "an exhausted allocation budget must fail");
     let stderr = String::from_utf8_lossy(&exhausted.stderr);
@@ -7992,14 +7999,18 @@ fn test_answer() -> i64 {
         assert!(String::from_utf8_lossy(&tests.stdout).contains("test_answer"));
     }
     let cache = dir.join("cache");
+    // The cache-hit/lockfile assertions belong to the legacy backend (a pure
+    // build bypasses the cache by design, README "Backends"), so the runs that
+    // inspect AE_TIMINGS pin the backend instead of inheriting AE_BACKEND.
     let native_run = || Command::new(cli).current_dir(&app)
+        .env("AE_BACKEND", "legacy")
         .env("AE_CACHE", &cache).env("AE_TIMINGS", "1").arg("run").output().unwrap();
     assert!(native_run().status.success());
     let cached = native_run();
     assert!(cached.status.success());
     assert!(String::from_utf8_lossy(&cached.stderr).contains("frontend-cache: hit"));
     let executable = app.join("tool.exe");
-    let build = || Command::new(cli).current_dir(&app).env("AE_CACHE", &cache).args(["build", "-o"]).arg(&executable).output().unwrap();
+    let build = || Command::new(cli).current_dir(&app).env("AE_BACKEND", "legacy").env("AE_CACHE", &cache).args(["build", "-o"]).arg(&executable).output().unwrap();
     let missing = build();
     assert!(!missing.status.success() && String::from_utf8_lossy(&missing.stderr).contains("Run ae update"));
     let update = || Command::new(cli).current_dir(&app).arg("update").output().unwrap();
