@@ -56,4 +56,22 @@ impl RangeIter {
         }
         return 0;
     }
+
+    // The next value, advancing the cursor. Call only when `done()` is false.
+    pub fn next_value(&mut self) -> i64 {
+        let value = self.current;
+        self.current = self.current + 1;
+        return value;
+    }
+}
+
+// Drain a half-open range into a vector. (A method returning an owned `vec` is
+// not on the resolved route yet, so this is a free function.)
+pub fn range_to_vec(start: i64, end: i64) -> vec {
+    var out = vec[];
+    var it = RangeIter::new(start, end);
+    while !it.done() {
+        push(out, it.next_value());
+    }
+    return out;
 }

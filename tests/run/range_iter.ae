@@ -35,5 +35,10 @@ fn main() {
     assert(down.done());
     assert(down.remaining() == 0);
 
+    // Draining a range into a vector.
+    let xs = range_to_vec(1, 4);
+    assert(len(xs) == 3);
+    assert(xs[0] == 1 && xs[1] == 2 && xs[2] == 3);
+
     print("range iter ok");
 }
