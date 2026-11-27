@@ -5601,11 +5601,6 @@ fn field_vector_loops_match_across_backends() {
             "for-in over a field needs a vec, found i64",
         ),
         (
-            "owned element field",
-            r#"struct T { n: i64 } struct G { items: vec[T] } fn main() { let g = G { items: vec[T { n: 1 }] }; for t in g.items { print(t.n); } }"#,
-            "for-in over a field of owned elements is not supported yet",
-        ),
-        (
             "write inside the field loop",
             r#"struct R { cells: vec[i64] } fn main() { var r = R { cells: vec[1] }; for x in r.cells { push(r.cells, x); } }"#,
             "cannot modify 'r' while it is borrowed",

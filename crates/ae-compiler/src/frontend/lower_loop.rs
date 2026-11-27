@@ -165,17 +165,12 @@ impl<'a> Parser<'a> {
             }
             // P2.4: a struct's vector field is a container (`for x in r.cells`).
             // The root binding is borrowed for the loop and every element reads
-            // through the field's accessor. Owned element kinds keep the slot
-            // form's in-place binding, which the field form does not carry yet.
+            // through the field's accessor; owned element kinds bind to the
+            // element's storage exactly like the slot form.
             (Expr::Field(..), Type::Vector(tid)) => {
                 let elem = self.ctx.vector_elem(tid);
                 let root = field_root_slot(&first)
                     .ok_or_else(|| self.fail("for-in over a field needs a binding root"))?;
-                if matches!(elem, Type::Vector(_))
-                    || matches!(elem, Type::Struct(sid) if !self.structs[sid].is_copy)
-                {
-                    return Err(self.fail("for-in over a field of owned elements is not supported yet"));
-                }
                 let loop_elem = self.loop_element_binding(elem);
                 (root, loop_elem, false, elem, None, Some(first.clone()))
             }
@@ -231,10 +226,16 @@ impl<'a> Parser<'a> {
                 }
             }
             // A struct field container reads its element through the field's
-            // accessor; the binding type already names the view.
+            // accessor; an owned element binds to that storage's address (the
+            // slot form's rule) and the rest bind by value/view.
             _ if field_base.is_some() => {
                 let base = field_base.expect("a field loop carries its field expression");
-                Expr::VecIndexOf(Box::new(base), Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, storage_elem)
+                let index = Expr::VecIndexOf(Box::new(base), Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, storage_elem);
+                if matches!(elem_ty, Type::VectorRef(_) | Type::StructRef(_)) {
+                    Expr::BorrowAs(Box::new(index), false, line, col)
+                } else {
+                    index
+                }
             }
             Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, by_ref),
             // An owned element binds as a reference to the element's storage

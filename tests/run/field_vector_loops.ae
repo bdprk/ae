@@ -16,6 +16,14 @@ struct Point { x: i64, y: i64 }
 
 struct Plotted { points: vec[Point] }
 
+struct Tag { name: string }
+
+struct Group { tags: vec[Tag] }
+
+struct Rows { rows: vec[vec[i64]] }
+
+fn show(t: &Tag) { print(t.name); }
+
 fn total(r: &Report) -> i64 {
     var t = 0;
     for x in r.inner.cells { t += x; }
@@ -59,4 +67,11 @@ fn main() {
     for x in r.inner.cells {
         for s in r.names { print(to_string(x) + s); }
     }
+    // Owned element kinds bind as views through the field accessor too.
+    let group = Group { tags: vec[Tag { name: "x" }, Tag { name: "y" }] };
+    for t in group.tags { show(t); }
+    let rows = Rows { rows: vec[vec[1, 2], vec[3]] };
+    var sizes = 0;
+    for row in rows.rows { sizes += len(row); }
+    print(sizes);
 }
