@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 147 of 202 items done.
-Charter-1.0 progress: 118 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 148 of 202 items done.
+Charter-1.0 progress: 119 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -136,7 +136,7 @@ Charter-1.0 progress: 118 of 202 items done (29 prototype-done items still name 
 - [x] M3.3.04: **solve graph.** Backtrack on a conflicting diamond and explain an unsatisfiable graph. [1.0-gap: P4.5] (Path-graph form: two copies of one package are rejected naming both manifests; MVS version backtracking is not applicable while every dependency is a pinned path.)
 - [x] M3.3.05: **lock hashes.** Reorder manifest entries and generate the same locked graph and checksums.
 - [x] M3.3.06: **offline build.** Disconnect network and build using only the lockfile and verified cache. [1.0-gap: P4.5] (Path dependencies only; no registry fetch exists yet.)
-- [ ] M3.3.07: **verify downloaded content.** Tamper with one cached archive and reject it before extraction or compilation. (Blocked on the registry/download path; only path dependencies exist, so there is no downloaded archive to tamper with.)
+- [x] M3.3.07: **verify downloaded content.** Tamper with one cached archive and reject it before extraction or compilation. (`src/package.rs` `verify_cached_archive` hashes the cached `.aepkg` against the `ae.lock` SHA-256 and refuses to extract on mismatch, a malformed/missing expected hash, or an archive entry path that escapes the extraction root; `tests/package_integrity_m3307.rs` pins four cases — a valid archive verifies, extracts and builds offline to `42`; a one-byte tamper fails closed with the expected/observed hashes and no executable; truncated/missing/malformed-hash archives fail closed without panicking; a `../` entry inside a correctly-hashed archive is rejected before writing. A downloaded-archive registry fetch remains phase P4.5; the verification path it would feed is in place.)
 
 ## M4.1 Threads
 
