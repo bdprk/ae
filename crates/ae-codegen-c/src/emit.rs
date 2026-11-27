@@ -1729,8 +1729,54 @@ fn emit_intrinsic(
                 &string_temp_releases(body, args),
             )
         }
+        "append_file" => {
+            // `try_append_file` reports the byte count, so its WriteResult enum
+            // shares the write_file shape rather than the status family.
+            let path = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let content = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            match dest_ty {
+                Some(TyKind::Int(_)) => finish_value_releasing(
+                    out,
+                    body,
+                    types,
+                    destination,
+                    target,
+                    &format!("ae_append_file_value({path}, {content}, (size_t){line}, (size_t){column})"),
+                    &string_temp_releases(body, args),
+                ),
+                Some(TyKind::Enum(_, eid)) => {
+                    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+                    let ok = format!(
+                        "((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _write.written }} }} }})"
+                    );
+                    let err = format!(
+                        "((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = _write.error }} }} }})"
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    {{ ae_write_result _write = ae_try_append_file_value({path}, {content});
+      if (_write.status == 0) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+                    );
+                    for release in string_temp_releases(body, args) {
+                        let _ = writeln!(out, "    {release};");
+                    }
+                    if let Some(next_bb) = target {
+                        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+                    } else {
+                        out.push_str("    ae_trap(\"diverging call returned\");
+");
+                    }
+                    Ok(())
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("append_file into {other:?} is not supported yet"),
+                }),
+            }
+        }
         "copy_file" | "rename_path" | "remove_file" | "remove_dir" | "create_dir"
-        | "append_file" | "set_cwd" => {
+        | "set_cwd" => {
             let a = arg_exprs.first().map(String::as_str).unwrap_or("0");
             let b = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             let call = match name {
@@ -1739,7 +1785,6 @@ fn emit_intrinsic(
                 "remove_file" => format!("ae_try_remove_file_value({a})"),
                 "remove_dir" => format!("ae_try_remove_dir_value({a})"),
                 "create_dir" => format!("ae_try_create_dir_value({a})"),
-                "append_file" => format!("ae_try_append_file_value({a}, {b})"),
                 _ => format!("ae_try_set_cwd_value({a})"),
             };
             let dest_ty = types.infer_place_ty(body, destination);

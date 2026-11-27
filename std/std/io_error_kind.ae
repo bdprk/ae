@@ -41,3 +41,44 @@ pub fn io_error_is_recoverable(k: IoErrorKind) -> bool {
     }
     return r;
 }
+
+// P4.3: classify the OS message a hosted call returns into the enum above, so
+// callers stop matching platform strings. The runtime still reports the OS
+// text (ADR-0244 keeps `read_file` byte- and message-exact); this is the one
+// place that maps it, with both the POSIX `strerror` spelling and the Win32
+// one for the categories whose wording differs.
+pub fn io_error_kind_of(reason: &string) -> IoErrorKind {
+    if io_has(reason, "No such file") || io_has(reason, "no such file")
+        || io_has(reason, "cannot find the file") || io_has(reason, "cannot find the path") {
+        return IoErrorKind::NotFound;
+    }
+    if io_has(reason, "Permission denied") || io_has(reason, "permission denied")
+        || io_has(reason, "Access is denied") || io_has(reason, "access is denied") {
+        return IoErrorKind::PermissionDenied;
+    }
+    if io_has(reason, "Connection refused") || io_has(reason, "connection refused")
+        || io_has(reason, "actively refused") {
+        return IoErrorKind::ConnectionRefused;
+    }
+    if io_has(reason, "Connection reset") || io_has(reason, "connection reset")
+        || io_has(reason, "forcibly closed") || io_has(reason, "was aborted") {
+        return IoErrorKind::ConnectionReset;
+    }
+    if io_has(reason, "timed out") || io_has(reason, "Timed out")
+        || io_has(reason, "timeout") {
+        return IoErrorKind::TimedOut;
+    }
+    if io_has(reason, "unexpected end") || io_has(reason, "Unexpected end")
+        || io_has(reason, "End of file") || io_has(reason, "end of file") {
+        return IoErrorKind::UnexpectedEof;
+    }
+    if io_has(reason, "Interrupted") || io_has(reason, "interrupted") {
+        return IoErrorKind::Interrupted;
+    }
+    return IoErrorKind::Other;
+}
+
+// `contains` is the byte substring test the stdlib already uses.
+fn io_has(text: &string, pattern: &string) -> bool {
+    return contains(text, pattern);
+}

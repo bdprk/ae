@@ -736,6 +736,15 @@ static inline int64_t ae_write_file_value(ae_str path, ae_str content, size_t li
     }
     return (int64_t)written;
 }
+static inline int64_t ae_append_file_value(ae_str path, ae_str content, size_t line, size_t column) {
+    FILE *file = fopen(path.ptr, "ab");
+    if (!file) ae_fail_at("cannot append file", line, column);
+    const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
+    if (fclose(file) != 0 || written != (size_t)content.len) {
+        ae_fail_at("cannot append file", line, column);
+    }
+    return (int64_t)written;
+}
 static inline bool ae_is_separator(char c) { return c == '/' || c == '\\'; }
 typedef struct { int64_t status; int64_t written; ae_str error; } ae_write_result;
 static inline ae_write_result ae_try_write_file_value(ae_str path, ae_str content) {
@@ -939,15 +948,28 @@ static inline ae_status_result ae_try_copy_file_value(ae_str from, ae_str to) {
     if (failed) return ae_status_fail_value(ae_io_error());
     return ae_status_ok_value();
 }
-static inline ae_status_result ae_try_append_file_value(ae_str path, ae_str content) {
+static inline ae_write_result ae_try_append_file_value(ae_str path, ae_str content) {
+    // Appending reports the byte count like writing does: the language's
+    // `try_append_file` returns a WriteResult, not a payload-less status.
+    ae_write_result out;
+    out.status = 0;
+    out.written = 0;
+    out.error = ae_str_from_parts("", 0, false);
     errno = 0;
     FILE *file = fopen(path.ptr, "ab");
-    if (!file) return ae_status_fail_value(ae_io_error());
+    if (!file) {
+        out.status = 1;
+        out.error = ae_io_error();
+        return out;
+    }
     const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
     if (fclose(file) != 0 || written != (size_t)content.len) {
-        return ae_status_fail_value(ae_io_error());
+        out.status = 1;
+        out.error = ae_io_error();
+        return out;
     }
-    return ae_status_ok_value();
+    out.written = (int64_t)written;
+    return out;
 }
 static inline ae_status_result ae_try_rename_path_value(ae_str from, ae_str to) {
     errno = 0;

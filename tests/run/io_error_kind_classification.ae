@@ -1,0 +1,36 @@
+// P4.3: hosted calls return the OS message; `io_error_kind_of` is the single
+// place that classifies it, so callers branch on `IoErrorKind` instead of
+// platform strings. The first half runs a real missing-file read; the second
+// feeds the classifier the spellings both platforms produce.
+use "../../std/std/io_error_kind.ae";
+
+fn main() {
+    let missing = try_read_file("ae-no-such-file-anywhere.txt");
+    match missing {
+        ReadResult::Ok(t) => { print("unexpected "); print(len(t)); }
+        ReadResult::Err(reason) => {
+            // Each call classifies independently: the kind is an owned enum,
+            // so a binding would be moved by the first call.
+            print(io_error_kind_code(io_error_kind_of(reason)));
+            print(io_error_is_recoverable(io_error_kind_of(reason)));
+        }
+    }
+
+    assert(io_error_kind_code(io_error_kind_of("No such file or directory")) == 1);
+    assert(io_error_kind_code(io_error_kind_of("The system cannot find the file specified")) == 1);
+    assert(io_error_kind_code(io_error_kind_of("Permission denied")) == 2);
+    assert(io_error_kind_code(io_error_kind_of("Access is denied")) == 2);
+    assert(io_error_kind_code(io_error_kind_of("Connection refused")) == 3);
+    assert(io_error_kind_code(io_error_kind_of("Connection reset by peer")) == 4);
+    assert(io_error_kind_code(io_error_kind_of("The connection timed out")) == 5);
+    assert(io_error_kind_code(io_error_kind_of("unexpected end of file")) == 6);
+    assert(io_error_kind_code(io_error_kind_of("Interrupted system call")) == 7);
+    assert(io_error_kind_code(io_error_kind_of("something else entirely")) == 8);
+    print("classified");
+
+    assert(io_error_is_recoverable(IoErrorKind::TimedOut));
+    assert(io_error_is_recoverable(IoErrorKind::Interrupted));
+    assert(!io_error_is_recoverable(IoErrorKind::NotFound));
+    assert(!io_error_is_recoverable(IoErrorKind::Other));
+    print("recoverable");
+}
