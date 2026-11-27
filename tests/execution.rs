@@ -11177,11 +11177,6 @@ fn slice_ranges_match_across_backends() {
 
     for (label, source, needle) in [
         (
-            "open end",
-            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[1..])); }"#,
-            "a slice range needs both bounds",
-        ),
-        (
             "non-integer bound",
             r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v["a"..2])); }"#,
             "slice range bounds must be integers",
@@ -11510,11 +11505,6 @@ fn slice_mut_match_across_backends() {
             "mutable element borrow",
             r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[0]); }"#,
             "a single element is not a mutable slice",
-        ),
-        (
-            "mutable window open bound",
-            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[1..]); }"#,
-            "a slice range needs both bounds",
         ),
         (
             "field mutable slice through a &mut parameter",

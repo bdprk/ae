@@ -67,6 +67,12 @@ fn main() {
     print(report.stats.counts.cells[1]);
     print(report.stats.counts.cells[2]);
 
+    // Open ends over a field chain read and write the same leaf vector.
+    print(sum(&report.stats.counts.cells[2..]));
+    print(sum(&report.stats.counts.cells[..2]));
+    bump(&mut report.stats.counts.cells[3..]);
+    print(report.stats.counts.cells[3]);
+
     // Owned elements through a field slice: the replaced string is released
     // and the new one lands in the caller's field.
     retitle(&mut report.stats.names[0..2]);

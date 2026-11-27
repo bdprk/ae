@@ -1180,6 +1180,12 @@ impl<'a> PureMirBuilder<'a> {
                 self.push_stmt(StatementKind::Drop(Place::from_local(temp)));
                 Rvalue::Use(Operand::Copy(Place::from_local(length)))
             }
+            // P2.4: the visible length of a slice source for an open-ended
+            // range (`&v[a..]`, `&v[..b]`); the length is an ordinary `Len`.
+            Expr::SliceSourceLen(source, source_ty, ..) => {
+                let place = self.slice_source_place(source, *source_ty);
+                Rvalue::Len(place)
+            }
             Expr::BorrowAs(inner, mutable, ..) => {
                 let place = self.lower_place(inner);
                 // `&v as *const T` names an address, not a borrow (the
@@ -1541,18 +1547,22 @@ impl<'a> PureMirBuilder<'a> {
     }
 
     // P2.4: the storage a slice argument borrows: a whole binding or a field
-    // chain of one (`&h.cells`, `&h.cells[a..b]`).
-    fn slice_source_place(&mut self, source: &SliceSource, source_ty: TyKind, elem: Type) -> Place {
+    // chain of one (`&h.cells`, `&h.cells[a..b]`). A slice parameter's element
+    // type is recovered from its interned slice type.
+    fn slice_source_place(&mut self, source: &SliceSource, source_ty: TyKind) -> Place {
         match source {
             SliceSource::Var(slot) => {
                 let ty = match source_ty {
-                    TyKind::Slice(_) => TyKind::Slice(self.ctx.find_slice_elem(elem).unwrap_or(0)),
+                    TyKind::Slice(id) => TyKind::Slice(self.ctx.find_slice_elem(self.ctx.slice_elem(id)).unwrap_or(0)),
                     other => other,
                 };
                 let (local, _) = self.ensure_var(*slot, ty);
                 Place::from_local(local)
             }
-            SliceSource::Field { root, root_ty, path } => self.field_vector_place(*root, path, *root_ty, elem),
+            SliceSource::Field { root, root_ty, path } => {
+                let (local, _) = self.ensure_var(*root, *root_ty);
+                self.build_field_path_place(local, *root_ty, path)
+            }
         }
     }
 
@@ -1776,8 +1786,8 @@ impl<'a> PureMirBuilder<'a> {
                 self.pending_span = Some(self.span_at(*line, *column));
                 ("vec_index_of", vec![b, i])
             }
-            Expr::SliceOf(source, source_ty, elem, ..) => {
-                let base = self.slice_source_place(source, *source_ty, *elem);
+            Expr::SliceOf(source, source_ty, ..) => {
+                let base = self.slice_source_place(source, *source_ty);
                 ("slice_of", vec![Operand::Copy(base)])
             }
             Expr::SliceIndex(slot, index, line, column, elem) => {
@@ -1787,8 +1797,8 @@ impl<'a> PureMirBuilder<'a> {
                 self.pending_span = Some(self.span_at(*line, *column));
                 ("slice_index", vec![Operand::Copy(Place::from_local(local)), idx_op])
             }
-            Expr::SliceRange(source, source_ty, elem, start, end, line, column) => {
-                let base = self.slice_source_place(source, *source_ty, *elem);
+            Expr::SliceRange(source, source_ty, _elem, start, end, line, column) => {
+                let base = self.slice_source_place(source, *source_ty);
                 let s = self.lower_operand(start);
                 let e = self.lower_operand(end);
                 self.pending_span = Some(self.span_at(*line, *column));

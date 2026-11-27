@@ -406,11 +406,13 @@ fn field_vector_operand(id: usize, path: &[(String, Type)], base_ty: Type, elem_
     MirOperand::Place(place)
 }
 
-fn slice_source_operand(source: &SliceSource, source_ty: Type, elem: Type, lowering: &MirLowering) -> MirOperand {
+fn slice_source_operand(source: &SliceSource, source_ty: Type, lowering: &MirLowering) -> MirOperand {
     match source {
         SliceSource::Var(slot) => {
             let ty = match source_ty {
-                Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(elem).unwrap_or(0)),
+                // A slice parameter's value keeps its element type; the big
+                // pointer is the interned slice for that element.
+                Type::Slice(id) => Type::Slice(lowering.ctx.find_slice_elem(lowering.ctx.slice_elem(id)).unwrap_or(0)),
                 other => other,
             };
             MirOperand::Place(MirPlace::Local(*slot, ty))
@@ -481,9 +483,9 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             "index_of",
             vec![lower_operand(base, bindings, lowering), lower_operand(index, bindings, lowering)],
         ),
-        Expr::SliceOf(source, source_ty, elem, ..) => (
+        Expr::SliceOf(source, source_ty, ..) => (
             "slice_of",
-            vec![slice_source_operand(source, *source_ty, *elem, lowering)],
+            vec![slice_source_operand(source, *source_ty, lowering)],
         ),
         Expr::SliceIndex(slot, index, _, _, elem) => (
             "slice_index",
@@ -492,13 +494,17 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
                 lower_operand(index, bindings, lowering),
             ],
         ),
-        Expr::SliceRange(source, source_ty, elem, start, end, ..) => (
+        Expr::SliceRange(source, source_ty, _elem, start, end, ..) => (
             "slice_range",
             vec![
-                slice_source_operand(source, *source_ty, *elem, lowering),
+                slice_source_operand(source, *source_ty, lowering),
                 lower_operand(start, bindings, lowering),
                 lower_operand(end, bindings, lowering),
             ],
+        ),
+        Expr::SliceSourceLen(source, source_ty, ..) => (
+            "slice_source_len",
+            vec![slice_source_operand(source, *source_ty, lowering)],
         ),
         Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(sep, bindings, lowering)]),
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
@@ -609,6 +615,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::VecIndexOf(_, _, _, _, ty) => *ty,
         Expr::SliceOf(_, _, elem, ..) => Type::Slice(ctx.find_slice_elem(*elem).unwrap_or(0)),
         Expr::SliceRange(_, _, elem, ..) => Type::Slice(ctx.find_slice_elem(*elem).unwrap_or(0)),
+        Expr::SliceSourceLen(..) => Type::Int(IntTy::I64),
         Expr::SliceIndex(_, _, _, _, elem) => *elem,
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,

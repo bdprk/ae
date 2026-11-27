@@ -446,6 +446,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         }
         // A slice reads its owner; its index reads are ordinary reads.
         Expr::SliceOf(source, ..) => { used.insert(source.slot()); }
+        Expr::SliceSourceLen(source, ..) => { used.insert(source.slot()); }
         Expr::SliceIndex(slot, index, ..) => {
             used.insert(*slot);
             walk_expr(index, used, mutated);

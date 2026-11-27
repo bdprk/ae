@@ -101,6 +101,13 @@ fn main() {
     let start = 1;
     set_front(&mut dynamic[start..len(dynamic)]);
     print(dynamic[1]);
+    // P2.4: an open end clips at the owner's visible length.
+    var tail = vec[1, 2, 3];
+    set_front(&mut tail[1..]);
+    print(tail[0]);
+    print(tail[1]);
+    set_front(&mut tail[..2]);
+    print(tail[0]);
     var i = 0;
     while i < len(dynamic) - 1 {
         set_front(&mut dynamic[i..i + 1]);

@@ -200,6 +200,8 @@ fn slice_source_len(source: &SliceSource, locals: &HashMap<usize, Val>) -> Resul
             Some(Val::VecS(values)) => Ok(values.len() as i64),
             Some(Val::VecG(values)) => Ok(values.len() as i64),
             Some(Val::Array(values)) => Ok(values.len() as i64),
+            Some(Val::Slice(values)) => Ok(values.len() as i64),
+            Some(Val::SliceMutRef { len, .. }) => Ok(*len),
             Some(Val::Moved) => Err(trap("use of moved vector", 0, 0)),
             _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
         },
@@ -217,6 +219,8 @@ fn slice_source_len(source: &SliceSource, locals: &HashMap<usize, Val>) -> Resul
                 Val::VecS(values) => Ok(values.len() as i64),
                 Val::VecG(values) => Ok(values.len() as i64),
                 Val::Array(values) => Ok(values.len() as i64),
+                Val::Slice(values) => Ok(values.len() as i64),
+                Val::SliceMutRef { len, .. } => Ok(*len),
                 Val::Moved => Err(trap("use of moved vector", 0, 0)),
                 _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
             }
@@ -1537,6 +1541,12 @@ fn eval_expr(
                 _ => Err(Flow::Trap("internal: slice index on non-slice".to_owned())),
             }
         }
+        // P2.4: the visible length of a slice source, used by an open-ended
+        // range. An array carries its length in the type.
+        Expr::SliceSourceLen(source, source_ty, ..) => match source_ty {
+            Type::ArrayOf(_, len) => Ok(Val::Int(*len as i64)),
+            _ => Ok(Val::Int(slice_source_len(source, locals)?)),
+        },
         Expr::SliceRange(source, source_ty, _, start, end, line, col) => {
             // ADR-0236 rung 3: the bounds evaluate first; the visible window
             // is clipped from the same snapshot a whole slice would copy.

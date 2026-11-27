@@ -592,7 +592,11 @@ enum Expr { Number(i64), FloatLit(f64), ToF64(Box<Expr>, usize, usize), ToI64(Bo
     // P2.4: the source is a whole binding or a field chain of one
     // (`&h.cells`, `&h.cells[a..b]`), boxed so `Expr` stays small.
     SliceOf(Box<SliceSource>, Type, Type, usize, usize), SliceIndex(usize, Box<Expr>, usize, usize, Type),
-    SliceRange(Box<SliceSource>, Type, Type, Box<Expr>, Box<Expr>, usize, usize) }
+    SliceRange(Box<SliceSource>, Type, Type, Box<Expr>, Box<Expr>, usize, usize),
+    // P2.4: the visible length of a slice source, used by an open-ended range
+    // (`&v[a..]`, `&v[..b]`, `&v[..]`). The source type decides `.len` versus a
+    // compile-time array length.
+    SliceSourceLen(Box<SliceSource>, Type) }
 
 // Where a slice argument comes from: a whole binding or a field chain of one
 // (the root type decides the C accessor for a `&Struct`/`&mut Struct` root).

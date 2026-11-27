@@ -471,6 +471,7 @@ pub(super) fn walk_expr(expr: &Expr, moved: &mut dyn MoveTracker) -> Option<usiz
         }
         // A slice is a read of its owner; the index is an ordinary read.
         Expr::SliceOf(source, ..) => moved.read(source.slot()),
+        Expr::SliceSourceLen(source, ..) => moved.read(source.slot()),
         Expr::SliceIndex(slot, index, ..) => {
             if let Some(violation) = moved.read(*slot) { return Some(violation); }
             walk_expr(index, moved)

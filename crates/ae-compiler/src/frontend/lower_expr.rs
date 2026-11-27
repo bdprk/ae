@@ -1413,14 +1413,18 @@ impl<'a> Parser<'a> {
                 }
                 self.mut_borrows.push((slot, self.scopes.len()));
                 if let Some((start_range, end_range)) = range_bounds {
-                    if start_range.is_empty() || end_range.is_empty() {
-                        self.seek_scalar_offset(argument.range.start);
-                        return Err(self.fail("a slice range needs both bounds; write 'start..end'"));
-                    }
-                    let start = self.lower_slice_bound(start_range, slots)?;
-                    let end = self.lower_slice_bound(end_range, slots)?;
                     self.seek_scalar_offset(argument.range.start);
                     let (line, column) = self.position();
+                    let start = if start_range.is_empty() {
+                        Expr::Number(0)
+                    } else {
+                        self.lower_slice_bound(start_range, slots)?
+                    };
+                    let end = if end_range.is_empty() {
+                        Expr::SliceSourceLen(source.clone(), source_ty)
+                    } else {
+                        self.lower_slice_bound(end_range, slots)?
+                    };
                     args.push(Argument::Value(Expr::SliceRange(source, source_ty, wanted_elem, Box::new(start), Box::new(end), line, column)));
                     continue;
                 }
@@ -1490,17 +1494,24 @@ impl<'a> Parser<'a> {
                     return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), source_ty.name(self.ctx))));
                 }
                 if let Some((start_range, end_range)) = range_bounds {
-                    if start_range.is_empty() || end_range.is_empty() {
-                        self.seek_scalar_offset(argument.range.start);
-                        return Err(self.fail("a slice range needs both bounds; write 'start..end'"));
-                    }
-                    let start = self.lower_slice_bound(start_range, slots)?;
-                    let end = self.lower_slice_bound(end_range, slots)?;
+                    self.seek_scalar_offset(argument.range.start);
+                    let (line, column) = self.position();
+                    // P2.4: an open end clips at the source's visible length
+                    // (`&v[a..]`), an open start begins at zero (`&v[..b]`),
+                    // and `&v[..]` is the whole source.
+                    let start = if start_range.is_empty() {
+                        Expr::Number(0)
+                    } else {
+                        self.lower_slice_bound(start_range, slots)?
+                    };
+                    let end = if end_range.is_empty() {
+                        Expr::SliceSourceLen(source.clone(), source_ty)
+                    } else {
+                        self.lower_slice_bound(end_range, slots)?
+                    };
                     if matches!(source_ty, Type::Vector(_) | Type::VectorRef(_)) && !self.is_borrowed(slot) {
                         self.call_borrows.push((slot, self.scopes.len()));
                     }
-                    self.seek_scalar_offset(argument.range.start);
-                    let (line, column) = self.position();
                     args.push(Argument::Value(Expr::SliceRange(source, source_ty, wanted_elem, Box::new(start), Box::new(end), line, column)));
                     continue;
                 }

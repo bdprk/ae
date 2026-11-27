@@ -591,6 +591,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted { text, ty: slice_type(ctx, *elem), owned: false, moves: Vec::new(), materialized: true }
         }
+        Expr::SliceSourceLen(source, source_ty, ..) => {
+            // P2.4: the visible length of a slice source, used by open-ended
+            // ranges. An array carries its length in the type.
+            let text = match *source_ty {
+                Type::ArrayOf(_, len) => format!("{len}"),
+                Type::VectorRef(_) => format!("{}->len", source.c_base()),
+                Type::Slice(_) | Type::Vector(_) => format!("{}.len", source.c_base()),
+                _ => unreachable!("slice source kind"),
+            };
+            Emitted { text, ty: Type::Int(IntTy::I64), owned: false, moves: Vec::new(), materialized: false }
+        }
         Expr::SliceIndex(slot, index, line, col, elem) => {
             let i = emit_expr(index, out, next, false, ctx);
             let c_elem = c_output::c_type_field(*elem, ctx);

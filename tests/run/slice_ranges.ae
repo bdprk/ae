@@ -18,6 +18,9 @@ fn inner(values: &[i64]) -> i64 { return sum(&values[1..3]); }
 
 fn inner_forward(values: &[i64]) -> i64 { return inner(&values[0..3]); }
 
+// P2.4: open ends clip at the source's visible length (`&values[1..]`).
+fn inner_open(values: &[i64]) -> i64 { return sum(&values[1..]); }
+
 fn words_total(words: &[string]) -> i64 {
     var total = 0;
     for w in words { total += len(w); }
@@ -67,9 +70,17 @@ fn main() {
     print(float_total(&floats[0..2]));
     print(inner(&v));
     print(inner_forward(&v));
+    // Open ends: `[a..]` clips at the source length, `[..b]` starts at zero,
+    // and `[..]` is the whole source (a parameter's visible window included).
+    print(sum(&v[2..]));
+    print(sum(&v[..2]));
+    print(sum(&v[..]));
+    print(inner_open(&v));
+    print(words_total(&words[..]));
     // A full window of an empty vector: the guard returns the slice itself,
     // so the NULL data never enters pointer arithmetic.
     let empty = vec[];
     print(sum(&empty[0..0]));
+    print(sum(&empty[0..]));
     print(sum(&v[tick()..tock()]));
 }
