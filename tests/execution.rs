@@ -11684,3 +11684,51 @@ fn utf8_validation_reads_files_and_reports_the_first_bad_byte() {
 fn repo_std_utf8() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/core/utf8.ae")
 }
+
+#[test]
+fn read_errors_distinguish_missing_paths_from_unreadable_ones() {
+    // M3.2.07: the caller-visible outcomes are distinguishable without parsing
+    // platform text: a missing path reports "No such file" in the OS wording,
+    // a path that exists but cannot be read as a file reports a different
+    // reason (a directory: EACCES on Windows, EISDIR on Linux), and an empty
+    // file is `Ok("")`. Directory construction is portable, so the fixture
+    // runs on both hosts.
+    let dir = std::env::temp_dir().join(format!("ae-readerr-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("a-directory")).unwrap();
+    fs::write(dir.join("empty.txt"), "").unwrap();
+    let slash = |path: std::path::PathBuf| path.display().to_string().replace('\\', "/");
+    let source = format!(
+        concat!(
+            "fn main() {{\n",
+            "    let missing = try_read_file(\"{}\");\n",
+            "    match missing {{\n",
+            "        ReadResult::Ok(t) => {{ print(\"unexpected \"); print(len(t)); }}\n",
+            "        ReadResult::Err(r) => {{ print(contains(r, \"No such file\")); }}\n",
+            "    }}\n",
+            "    let unreadable = try_read_file(\"{}\");\n",
+            "    match unreadable {{\n",
+            "        ReadResult::Ok(t) => {{ print(\"unexpected \"); print(len(t)); }}\n",
+            "        ReadResult::Err(r) => {{ print(len(r) > 0); print(contains(r, \"No such file\")); }}\n",
+            "    }}\n",
+            "    let empty = try_read_file(\"{}\");\n",
+            "    match empty {{\n",
+            "        ReadResult::Ok(t) => {{ print(len(t)); }}\n",
+            "        ReadResult::Err(r) => {{ print(\"failed \"); print(r); }}\n",
+            "    }}\n",
+            "}}\n"
+        ),
+        slash(dir.join("does-not-exist.txt")),
+        slash(dir.join("a-directory")),
+        slash(dir.join("empty.txt")),
+    );
+    let path = dir.join("main.ae");
+    fs::write(&path, source).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "true\ntrue\nfalse\n0\n"
+    );
+}

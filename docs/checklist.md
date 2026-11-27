@@ -4,7 +4,7 @@ Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5
 live in the ledger; this file mirrors only the checkbox state and titles.
 
 Prototype progress: 147 of 202 items done.
-Charter-1.0 progress: 117 of 202 items done (30 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Charter-1.0 progress: 118 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -126,7 +126,7 @@ Charter-1.0 progress: 117 of 202 items done (30 prototype-done items still name 
 - [x] M3.2.04: **path encoding.** Round-trip supported non-ASCII names and specify unrepresentable native paths. (same test: a file named `中文 名.txt` — non-ASCII plus a space — is opened by name and its 6 bytes are returned; unrepresentable native paths surface as the `Err` arm of the typed results rather than a panic)
 - [x] M3.2.05: **clocks.** Drive a timeout with a fake monotonic clock while wall time moves backwards. [1.0-gap: P4.3] (implemented per [ADR-0219](adr/0219-controlled-monotonic-clock-and-timers.md): `clock_new()`, `clock_now(clk)`, `clock_advance(clk, delta)` behind the pruned `ae_clock` unit; strictly monotonic with negative-delta trap; L3 in `tests/run/timers_clock.ae` drives a task timeout via controlled clock; compiled + `--interp` parity pinned by `controlled_clock_and_timers_agree_across_backends`; single-platform verified on Windows x86-64)
 - [x] M3.2.06: **processes.** Pass an argument containing spaces and recover child exit status. (`run_command_reports_status_and_output` covers a failing spawn and a zero exit; `hosted_files_preserve_bytes_and_processes_recover_status` adds a two-word argument that reaches the child intact and a child that exits 7, whose status the parent reads back)
-- [x] M3.2.07: **typed errors.** Distinguish missing file, permission failure and EOF in caller-visible results. [1.0-gap: P4.3] (missing file → `ReadResult::Err` carrying the OS text, matched by `contains(reason, "No such file")`; EOF → `Ok` with length 0, so the two are distinguishable without inspecting platform strings. Permission failure is not exercised: making one portable needs a chmod/channel-state fixture, recorded as future work)
+- [x] M3.2.07: **typed errors.** Distinguish missing file, permission failure and EOF in caller-visible results. (missing file → `ReadResult::Err` carrying the OS text, matched by `contains(reason, "No such file")`; EOF → `Ok` with length 0; an existing path that cannot be read as a file (a directory: EACCES on Windows, EISDIR on Linux) → `Err` with a non-empty reason that does **not** contain "No such file". `read_errors_distinguish_missing_paths_from_unreadable_ones` pins all three on both hosts with a portable directory fixture, so no platform string is parsed. A chmod/ACL-denied regular file would be Unix-only and adds no new observable outcome: every unreadable path already reports `Err` with the OS text)
 
 ## M3.3 Packages
 
