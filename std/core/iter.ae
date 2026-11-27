@@ -1,6 +1,9 @@
 // std/core/iter.ae
 // Core Iterator Trait Specification & Range Iterator (M1.8)
 
+// NOTE: this trait is a type-level specification. `next` takes the iterator by
+// value and returns only the value, so it cannot advance a cursor. For real
+// iteration use `RangeIter` below, whose `next` takes a mutable receiver.
 pub trait Iterator {
     fn next(it: T) -> Option[i64];
 }
@@ -16,5 +19,41 @@ impl Iterator for Range {
             return Option[i64]::Some(it.current);
         }
         return Option[i64]::None;
+    }
+}
+
+// A working half-open range iterator: it keeps its cursor in the struct and
+// advances it through a mutable receiver, so successive `next` calls walk
+// start, start+1, ... up to (not including) end.
+pub struct RangeIter {
+    current: i64,
+    end: i64,
+}
+
+impl RangeIter {
+    pub fn new(start: i64, end: i64) -> RangeIter {
+        return RangeIter { current: start, end: end };
+    }
+
+    pub fn next(&mut self) -> Option[i64] {
+        if self.current < self.end {
+            let value = self.current;
+            self.current = self.current + 1;
+            return Option[i64]::Some(value);
+        }
+        return Option[i64]::None;
+    }
+
+    // True when the cursor has reached the end.
+    pub fn done(&self) -> bool {
+        return self.current >= self.end;
+    }
+
+    // How many values are still to come (never negative).
+    pub fn remaining(&self) -> i64 {
+        if self.current < self.end {
+            return self.end - self.current;
+        }
+        return 0;
     }
 }

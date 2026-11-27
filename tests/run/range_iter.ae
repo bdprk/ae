@@ -1,0 +1,39 @@
+// P4.4: a range iterator that actually advances. The trait's `next` is a
+// value-level specification; `RangeIter` keeps the cursor and walks it.
+use "../../std/core/iter.ae";
+
+fn main() {
+    var it = RangeIter::new(3, 6);
+    assert(it.remaining() == 3);
+    var total = 0;
+    var count = 0;
+    var running = true;
+    while running {
+        let maybe = it.next();
+        match maybe {
+            Option::Some(v) => {
+                total = total + v;
+                count = count + 1;
+            }
+            Option::None => {
+                running = false;
+            }
+        }
+    }
+    assert(count == 3);
+    assert(total == 12);
+    assert(it.done());
+    assert(it.remaining() == 0);
+
+    // An empty range is done immediately.
+    var empty = RangeIter::new(5, 5);
+    assert(empty.done());
+    assert(empty.remaining() == 0);
+
+    // A descending range is also empty (half-open, start must be below end).
+    var down = RangeIter::new(9, 4);
+    assert(down.done());
+    assert(down.remaining() == 0);
+
+    print("range iter ok");
+}
