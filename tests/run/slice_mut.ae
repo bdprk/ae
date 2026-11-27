@@ -1,8 +1,14 @@
 // ADR-0236 rung 4: `&mut [T]` — a mutable slice over a whole vector binding.
 // The callee reads and stores through the fat pointer; the owner's mutability
-// and exclusivity are checked at the call site. Copy elements only.
+// and exclusivity are checked at the call site. Copy elements assign directly;
+// an owned string element releases the replaced slot first (P2.4).
 #[derive(Copy)]
 struct Point { x: i64, y: i64 }
+
+fn retitle(names: &mut [string]) {
+    names[0] = "zz";
+    names[1] = "ww";
+}
 
 fn double_all(items: &mut [i64]) {
     var i = 0;
@@ -76,6 +82,13 @@ fn main() {
     set_char(&mut chars);
     print(chars[0]);
     print(chars[1]);
+    // Owned elements: the store releases the replaced string and owns the new
+    // one, in a whole vector or a window.
+    var names = vec["aa", "bb", "cc"];
+    retitle(&mut names[0..2]);
+    print(names[0]);
+    print(names[1]);
+    print(names[2]);
     var windowed = vec[1, 2, 3, 4];
     fill_middle(&mut windowed[1..3]);
     print(windowed[0]);

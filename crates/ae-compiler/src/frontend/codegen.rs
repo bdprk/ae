@@ -1645,6 +1645,21 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let i = emit_expr(index, out, next, false, ctx);
                 let idx_tmp = *next; *next += 1;
                 out.push_str(&format!("    int64_t t{idx_tmp} = ae_vec_index({}, v{id}.len, {line}, {col});\n", i.text));
+                if *elem_ty == Type::String {
+                    // An owned element: copy a view or take the owned value
+                    // first (the source may borrow the destination slot), then
+                    // release the replaced string and store.
+                    let borrowed = string_expr_is_view(value);
+                    let value = emit_expr(value, out, next, !borrowed, ctx);
+                    let text = if borrowed { format!("ae_str_copy_view(AE_VIEW({}), {line}, {col})", value.text) } else { value.text.clone() };
+                    let replacement = *next; *next += 1;
+                    out.push_str(&format!("    ae_string t{replacement} = {text};\n"));
+                    out.push_str(&format!("    ae_string *s{replacement} = (ae_string *)ae_slice_mut_at(v{id}, t{idx_tmp}, {line}, {col});\n"));
+                    out.push_str(&format!("    ae_str_release(s{replacement});\n"));
+                    out.push_str(&format!("    *s{replacement} = t{replacement};\n"));
+                    null_moves(out, &value.moves, ctx);
+                    continue;
+                }
                 let value = emit_expr(value, out, next, false, ctx);
                 let val_tmp = *next; *next += 1;
                 let c_elem = c_output::c_type_field(*elem_ty, ctx);

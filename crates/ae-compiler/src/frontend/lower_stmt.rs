@@ -442,7 +442,11 @@ impl<'a> Parser<'a> {
                     // only Copy elements are writable in this rung.
                     if let Type::SliceMut(slice_id) = ty {
                         let elem_ty = self.ctx.slice_elem(slice_id);
-                        if self.is_owned(elem_ty) {
+                        // Copy elements assign directly; an owned string
+                        // element releases the replaced slot (the vector
+                        // store's rule). Other owned element kinds would need
+                        // their own release path.
+                        if self.is_owned(elem_ty) && elem_ty != Type::String {
                             self.seek_scalar_offset(base.range.start);
                             return Err(self.fail("storing through a mutable slice of owned elements is not supported yet"));
                         }

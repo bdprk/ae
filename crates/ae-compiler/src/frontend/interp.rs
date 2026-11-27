@@ -962,6 +962,10 @@ fn eval_stmts(
                         Val::Float(x) => values[abs] = x,
                         _ => return Flow::Trap("internal: slice store type".to_owned()),
                     },
+                    Val::VecS(values) => match val {
+                        Val::Str(s) => values[abs] = s,
+                        _ => return Flow::Trap("internal: slice store type".to_owned()),
+                    },
                     Val::VecG(values) => values[abs] = val,
                     Val::Array(values) => values[abs] = val,
                     Val::Moved => return trap("use of moved value", *line, *col),

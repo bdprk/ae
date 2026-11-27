@@ -11527,6 +11527,11 @@ fn slice_mut_match_across_backends() {
             "slice elements must be i64",
         ),
         (
+            "string slice view store",
+            r#"fn f(s: &mut [string]) { s[0] = s[1]; } fn main() {}"#,
+            "slice elements must be string",
+        ),
+        (
             "mutable borrow inside a loop over the owner",
             r#"fn touch(m: &mut [i64]) { m[0] = 0; } fn main() { var v = vec[1, 2]; for x in v { print(x); touch(&mut v); } }"#,
             "cannot borrow 'v' mutably while it is borrowed in this statement",
