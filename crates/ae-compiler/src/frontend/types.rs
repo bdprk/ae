@@ -705,6 +705,33 @@ impl Parser<'_> {
         if self.enum_names.contains_key(&name) || self.generics.names.contains_key(&name) { return Err(self.fail(&format!("'{}' is already an enum", name))); }
         let params = self.type_params()?;
         self.take(Kind::LBrace)?;
+        // A NON-generic struct reserves its id and registers its name before
+        // the fields: a field may reference the struct itself through a
+        // pointer (`next: *mut Node`), and the slot must already be occupied
+        // so the field loop and any nested instantiation during it cannot
+        // take it. The definition is patched into the same slot below (the
+        // layout is not final until every field type has resolved). A generic
+        // declaration registers nothing here — a self-reference spells as a
+        // nested instantiation (`next: *mut List[T]`), which the field-type
+        // reader defers as a shape, so the generic branch below stays the
+        // sole registration.
+        let id = if params.is_empty() {
+            let reserved = self.structs.len();
+            self.struct_names.insert(name.clone(), reserved);
+            self.structs.push(StructDef {
+                name: name.clone(),
+                fields: Vec::new(),
+                file: self.file.clone(),
+                public,
+                repr_c,
+                is_copy,
+                drop_fn: None,
+                drop_returns_unit: false,
+            });
+            Some(reserved)
+        } else {
+            None
+        };
         let mut fields: Vec<(String, Payload)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         while *self.current() != Kind::RBrace {
@@ -741,9 +768,7 @@ impl Parser<'_> {
             // A non-generic struct may still carry nested instantiations
             // (`entries: Pair[i64, Pair[string, f64]]`); their arguments are
             // all concrete, so they resolve immediately with no parameters.
-            // Resolution happens BEFORE the struct's own id is reserved: a
-            // nested instantiation registers its own layout, and taking the
-            // id first would hand Ledger's slot to the inner type.
+            // The id is already reserved above; the fields patch into it.
             let mut concrete = Vec::new();
             for (fname, payload) in fields {
                 let ty = match payload {
@@ -762,9 +787,9 @@ impl Parser<'_> {
                 }
                 concrete.push((fname, ty));
             }
-            let id = self.structs.len();
-            self.struct_names.insert(name.clone(), id);
-            self.structs.push(StructDef { name, fields: concrete, file: self.file.clone(), public, repr_c, is_copy, drop_fn: None, drop_returns_unit: false });
+            if let Some(id) = id {
+                self.structs[id].fields = concrete;
+            }
         } else {
             if repr_c {
                 return Err(self.fail(&format!("'{}' is generic, so it has no single C layout; '#[repr(C)]' belongs on a concrete struct", name)));

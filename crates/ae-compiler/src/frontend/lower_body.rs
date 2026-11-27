@@ -46,7 +46,10 @@ impl<'a> Parser<'a> {
         // concrete method) routes like any function: a body that spells `Self`
         // in a way the marking pass cannot classify falls back at the scan.
         let impl_body_supported = true;
-        let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String | Type::Fn(_))
+        // A raw pointer is a copy-semantics value: returning one moves no
+        // ownership and releases nothing, so any pointee routes (`*mut Node`
+        // out of a builder, for instance).
+        let return_supported = scalar_type(self.return_type) || matches!(self.return_type, Type::Enum(..) | Type::String | Type::Fn(_) | Type::Ptr(_) | Type::PtrMut(_))
             || matches!(self.return_type, Type::Vector(_) | Type::MapOf(_))
             || matches!(self.return_type, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
             || (matches!(self.return_type, Type::Struct(_))
@@ -76,7 +79,11 @@ impl<'a> Parser<'a> {
                 // cursor (the capture form is the cursor itself), and the
                 // loop's borrow rules apply inside.
                 || matches!(ty, Type::Tokens)
-                || matches!(ty, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(self.ctx.ptr_pointee(id)))
+                // A raw pointer slot is copy-semantics whatever the pointee:
+                // binding, comparing, passing and deref-reading it releases
+                // nothing (the pointee's own ownership stays with the block
+                // the pointer came from).
+                || matches!(ty, Type::Ptr(_) | Type::PtrMut(_))
                 || ty == Type::StrView
                 // A handle is a copy-semantics value: passing one never
                 // moves or releases anything, so a body whose locals are
@@ -353,11 +360,12 @@ impl<'a> Parser<'a> {
                     && (scalar_type(signature.ret) || owned_plain_struct(signature.ret, self.structs)
                         || matches!(signature.ret, Type::String | Type::Enum(..) | Type::Vector(_) | Type::MapOf(_) | Type::Fn(_))
                         || matches!(signature.ret, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool)
-                        // A scalar-pointee pointer (`extern "C" fn
-                        // ae_std_alloc(..) -> *mut i64`): the binding holds a
+                        // A raw pointer of any pointee (`extern "C" fn
+                        // ae_std_alloc(..) -> *mut i64`, or a builder
+                        // returning `*mut Node`): the binding holds a
                         // copy-semantics handle the pointer ops consume, the
                         // same shape the slot guard admits.
-                        || matches!(signature.ret, Type::Ptr(id) | Type::PtrMut(id) if scalar_type(self.ctx.ptr_pointee(id)))
+                        || matches!(signature.ret, Type::Ptr(_) | Type::PtrMut(_))
                         || owned_field_struct(signature.ret, self.structs)
                         || plain_drop_struct(signature.ret, self.structs)
                         || matches!(signature.ret, Type::Struct(sid) if self.generics.closure_envs.contains_key(&sid)))

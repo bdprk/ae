@@ -1,0 +1,53 @@
+// P4.1 foundation: a struct may reference itself through a pointer field.
+// The nodes live in heap blocks from the allocator bridge; each hop binds
+// the pointer it walks to (the resolved route's chained-deref gap is
+// recorded separately), so both backends agree on a three-node walk.
+#[repr(C)]
+struct Node {
+    val: i64,
+    next: *mut Node,
+}
+
+extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
+
+fn node(val: i64, next: *mut Node) -> *mut Node {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[Node](), 1, 1) as *mut Node;
+        let made = Node { val: val, next: next };
+        var _w = ptr_write(raw, made);
+        return raw;
+    }
+}
+
+fn val_at(head: *mut Node) -> i64 {
+    unsafe {
+        return head.deref().val;
+    }
+}
+
+fn next_of(head: *mut Node) -> *mut Node {
+    unsafe {
+        return head.deref().next;
+    }
+}
+
+fn main() {
+    unsafe {
+        // Build 3 -> 2 -> 1 as a ring: the tail's next points at its own
+        // block (written after the allocation), so no null pointer literal
+        // is needed to exercise the self-reference in a field type.
+        let tail_raw = ae_std_alloc(c_size_of[Node](), 1, 1) as *mut Node;
+        var _t = ptr_write(tail_raw, Node { val: 1, next: tail_raw });
+        let tail = node(2, tail_raw);
+        let head = node(3, tail);
+        print(val_at(head));
+        let mid = next_of(head);
+        print(val_at(mid));
+        let last = next_of(mid);
+        print(val_at(last));
+        // The tail's own next field is the block written earlier; the first
+        // node's next is the raw pointer it was written with.
+        let again = next_of(last);
+        print(val_at(again));
+    }
+}

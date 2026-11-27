@@ -750,6 +750,11 @@ impl StructDef {
                     let (inner_size, inner_align, _) = structs[*k].c_layout(structs)?;
                     (inner_size, inner_align)
                 }
+                // A raw pointer is 8 bytes at 8-byte alignment on the
+                // supported targets, whatever it points at: the layout does
+                // not recurse into the pointee, so a self-referential struct
+                // (`next: *mut Node`) lays out finitely.
+                Type::Ptr(_) | Type::PtrMut(_) => (8, 8),
                 _ => return None,
             };
             offset = (offset + align - 1) / align * align;

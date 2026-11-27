@@ -876,6 +876,14 @@ impl Walker<'_> {
     /// their field up in the declaration; borrowed receivers read through
     /// (the compiler auto-borrows `&self` fields).
     fn field_shape(&mut self, base_shape: &TypeSpelling, name: &str) -> Option<TypeSpelling> {
+        // `p.deref()` is spelled as a field on a pointer (the resolved
+        // route's form of the method call); it yields the pointee's shape,
+        // so a following field read chains through it (`p.deref().val`).
+        if let TypeSpelling::Pointer { pointee, .. } = base_shape {
+            if name == "deref" {
+                return Some((**pointee).clone());
+            }
+        }
         let def = match base_shape {
             TypeSpelling::Named { def } => Some(*def),
             TypeSpelling::Borrow { inner, .. } => match &**inner {

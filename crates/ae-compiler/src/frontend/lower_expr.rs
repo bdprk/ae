@@ -127,7 +127,16 @@ impl<'a> Parser<'a> {
                 }
                 let name = self.source.get(pointee.clone())
                     .ok_or_else(|| self.error_at(pointee.start, "cannot read the pointer's pointee type"))?;
-                let pointee_type = self.subst.get(name).copied().or_else(|| super::types::scalar_type(name))
+                let pointee_type = self.subst.get(name).copied()
+                    .or_else(|| super::types::scalar_type(name))
+                    // spec/unsafe.md 2.1 promises a retag to any T with a
+                    // known layout: a `#[repr(C)]` struct qualifies (its
+                    // fields are scalars or other repr(C) structs, so a read
+                    // cannot duplicate an owned value). A tracked layout
+                    // stays out — its bytes cannot gain a second owner.
+                    .or_else(|| self.struct_names.get(name).and_then(|&sid| {
+                        self.structs[sid].repr_c.then_some(Type::Struct(sid))
+                    }))
                     .ok_or_else(|| self.error_at(pointee.start, "a pointer cast retags to a scalar pointee here"))?;
                 let end = self.tokens.partition_point(|token| token.offset < expression.range.end);
                 let token = self.tokens.get(end).ok_or_else(|| self.fail("expected the end of the pointer cast"))?;

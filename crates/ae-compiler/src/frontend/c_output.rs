@@ -87,11 +87,20 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         Type::Exec => "ae_exec".to_owned(),
         Type::TaskScope => "ae_task_scope".to_owned(),
         Type::Pool => "ae_pool".to_owned(),
-        // Unreachable: no syntax for a pointer-typed field (M2.12 pointers
-        // bind as locals only); the value keeps the pointer shape so a future
-        // slip prints valid C.
-        Type::Ptr(id) => format!("const {} *", c_type_field(ctx.ptr_pointee(id), ctx)),
-        Type::PtrMut(id) => format!("{} *", c_type_field(ctx.ptr_pointee(id), ctx)),
+        // A pointer to a named type spells the C tag form (`struct ae_t2 *`),
+        // so a struct may reference itself through a pointer field: inside
+        // the tagged typedef the tag is already declared, while the typedef
+        // name is not complete until the closing brace.
+        Type::Ptr(id) => match ctx.ptr_pointee(id) {
+            Type::Struct(k) => format!("const struct ae_t{k} *"),
+            Type::Enum(_, k) => format!("const struct ae_e{k} *"),
+            other => format!("const {} *", c_type_field(other, ctx)),
+        },
+        Type::PtrMut(id) => match ctx.ptr_pointee(id) {
+            Type::Struct(k) => format!("struct ae_t{k} *"),
+            Type::Enum(_, k) => format!("struct ae_e{k} *"),
+            other => format!("{} *", c_type_field(other, ctx)),
+        },
     }
 }
 pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContext) -> String {
@@ -644,7 +653,7 @@ pub(super) fn prelude_enum_pieces(enums: &[EnumDef], eid: usize, structs: &[Stru
 /// struct) the release/forfeit helpers the enum's own helpers call.
 fn emit_payload_struct(out: &mut String, k: usize, structs: &[StructDef], ctx: &CompileContext) {
     let def = &structs[k];
-    let _ = writeln!(out, "\ntypedef struct {{");
+    let _ = writeln!(out, "\ntypedef struct ae_t{k} {{");
     for (name, ty) in &def.fields {
         let _ = writeln!(out, "    {} {name};", c_type_field(*ty, ctx));
     }
@@ -717,7 +726,45 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
     // The prelude payload structs (ADR-0234) ride with the prelude enum layout
     // that stores them, so they are emitted there and skipped here.
     let prelude_payloads = structs.iter().take_while(|def| def.file == PRELUDE).count();
-    for (sid, def) in structs.iter().enumerate().skip(prelude_payloads) {
+    // Emission order: a struct whose field holds another struct BY VALUE
+    // needs the inner typedef and its release/forfeit helpers emitted first
+    // (C reads the typedef name at the field declaration and the helpers at
+    // the release body). Declaration order used to guarantee that; the
+    // self-reference registration reserves the outer slot before its fields
+    // resolve, so a nested instantiation can now land after the container.
+    // Walk the by-value edges in DFS post-order; pointer fields impose no
+    // order (they spell the struct's tag) and by-value cycles cannot exist
+    // (the layout would never terminate).
+    let mut order = Vec::with_capacity(structs.len() - prelude_payloads);
+    {
+        let mut done = vec![false; structs.len()];
+        let mut visiting = vec![false; structs.len()];
+        fn visit(
+            sid: usize,
+            structs: &[StructDef],
+            start: usize,
+            done: &mut [bool],
+            visiting: &mut [bool],
+            order: &mut Vec<usize>,
+        ) {
+            if sid < start || done[sid] { return; }
+            if visiting[sid] { return; }
+            visiting[sid] = true;
+            for (_, ty) in &structs[sid].fields {
+                if let Type::Struct(k) = ty {
+                    visit(*k, structs, start, done, visiting, order);
+                }
+            }
+            visiting[sid] = false;
+            done[sid] = true;
+            order.push(sid);
+        }
+        for sid in prelude_payloads..structs.len() {
+            visit(sid, structs, prelude_payloads, &mut done, &mut visiting, &mut order);
+        }
+    }
+    for sid in order {
+        let def = &structs[sid];
         let mut layout = String::new();
         for (n, ty) in &def.fields {
             let _ = writeln!(layout, "    {} {n};", c_type_field(*ty, &program.ctx));
@@ -787,7 +834,7 @@ pub(super) fn emit_program(program: &mut Program) -> Result<GeneratedC, String> 
                 }
             }
         }
-        let _ = writeln!(out, "\ntypedef struct {{\n{layout}}} ae_t{sid};");
+        let _ = writeln!(out, "\ntypedef struct ae_t{sid} {{\n{layout}}} ae_t{sid};");
         if let Some(drop_id) = def.drop_fn {
             let ret = if def.drop_returns_unit { "void" } else { "int64_t" };
             let _ = writeln!(out, "static {ret} ae_fn_{drop_id}(ae_t{sid} *v);");
