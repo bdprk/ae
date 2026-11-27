@@ -173,30 +173,58 @@ enum MapVal<'a> {
     Missing,
 }
 
+// Walk a struct field path; every step must be a struct field.
+fn field_path_mut<'a>(value: &'a mut Val, path: &[&str]) -> Option<&'a mut Val> {
+    let mut current = value;
+    for name in path {
+        current = match current {
+            Val::Struct(_, fields) => fields.get_mut(*name)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// The storage a map place names: a bare map slot, or the struct field chain a
+/// field place carries. A `&mut` root (`Val::Ref`) resolves through the lender's
+/// frame, exactly like the vector field write.
+fn map_place_slot<'a>(
+    place: &MapPlace,
+    locals: &'a mut HashMap<usize, Val>,
+    caller_locals: &'a mut Option<&mut HashMap<usize, Val>>,
+) -> Option<&'a mut Val> {
+    match place {
+        MapPlace::Var(id, _) => match locals.get_mut(id) {
+            Some(value) => Some(value),
+            None => caller_locals.as_deref_mut()?.get_mut(id),
+        },
+        MapPlace::Field(root, field, _) => {
+            let names: Vec<&str> = field.path.iter().map(|(name, _)| name.as_str()).collect();
+            match locals.get_mut(root) {
+                Some(Val::Ref(target)) => {
+                    let target = *target;
+                    let value = caller_locals.as_deref_mut()?.get_mut(&target)?;
+                    field_path_mut(value, &names)
+                }
+                Some(value) => field_path_mut(value, &names),
+                None => {
+                    let value = caller_locals.as_deref_mut()?.get_mut(root)?;
+                    field_path_mut(value, &names)
+                }
+            }
+        }
+    }
+}
+
 fn map_val_ref<'a>(
     place: &MapPlace,
     locals: &'a mut HashMap<usize, Val>,
     caller_locals: &'a mut Option<&mut HashMap<usize, Val>>,
 ) -> Result<MapVal<'a>, Flow> {
-    let slot: Option<&mut Val> = match place {
-        MapPlace::Var(id, _) => locals.get_mut(id),
-        MapPlace::Field(id, fname, _) => match locals.get_mut(id) {
-            Some(Val::Struct(_, fields)) => fields.get_mut(fname),
-            _ => None,
-        },
-    };
-    let slot = slot.or_else(|| match (place, caller_locals.as_deref_mut()) {
-        (MapPlace::Var(id, _), Some(caller)) => caller.get_mut(id),
-        (MapPlace::Field(id, fname, _), Some(caller)) => match caller.get_mut(id) {
-            Some(Val::Struct(_, fields)) => fields.get_mut(fname),
-            _ => None,
-        },
-        _ => None,
-    });
-    match (place, slot) {
-        (_, Some(Val::Map(m))) => Ok(MapVal::MapI(m)),
-        (_, Some(Val::MapF(m))) => Ok(MapVal::MapF(m)),
-        (_, Some(Val::Moved)) => Err(trap("use of moved map", 0, 0)),
+    match map_place_slot(place, locals, caller_locals) {
+        Some(Val::Map(m)) => Ok(MapVal::MapI(m)),
+        Some(Val::MapF(m)) => Ok(MapVal::MapF(m)),
+        Some(Val::Moved) => Err(trap("use of moved map", 0, 0)),
         _ => Ok(MapVal::Missing),
     }
 }
@@ -254,31 +282,6 @@ fn path_parent(path: &str) -> String {
     match path.rfind(is_separator) {
         Some(idx) => path[..idx].to_owned(),
         None => String::new(),
-    }
-}
-
-// The map a place names, resolved through the locals: whether the key is
-// present, looked up through the same place resolution as the value above.
-fn m_contains_ref(place: &MapPlace, locals: &HashMap<usize, Val>, caller_locals: &Option<&mut HashMap<usize, Val>>, key: &str) -> bool {
-    let slot: Option<&Val> = match place {
-        MapPlace::Var(id, _) => locals.get(id),
-        MapPlace::Field(id, fname, _) => match locals.get(id) {
-            Some(Val::Struct(_, fields)) => fields.get(fname),
-            _ => None,
-        },
-    };
-    let slot = slot.or_else(|| match (place, caller_locals.as_deref()) {
-        (MapPlace::Var(id, _), Some(caller)) => caller.get(id),
-        (MapPlace::Field(id, fname, _), Some(caller)) => match caller.get(id) {
-            Some(Val::Struct(_, fields)) => fields.get(fname),
-            _ => None,
-        },
-        _ => None,
-    });
-    match slot {
-        Some(Val::Map(m)) => m.contains_key(key),
-        Some(Val::MapF(m)) => m.contains_key(key),
-        _ => false,
     }
 }
 
@@ -806,29 +809,20 @@ fn eval_stmts(
                     Ok(Val::Float(x)) => Some(x),
                     _ => None,
                 };
-                match place {
-                    MapPlace::Var(id, MapKind::Int) => match locals.get_mut(id) {
-                        Some(Val::Map(m)) => { if let Some(n) = int_value { m.insert(key, n); } }
-                        _ => return Flow::Trap("internal: map put on non-map".to_owned()),
-                    },
-                    MapPlace::Var(id, MapKind::Float) => match locals.get_mut(id) {
-                        Some(Val::MapF(m)) => { if let Some(x) = float_value { m.insert(key, x); } }
-                        _ => return Flow::Trap("internal: map put on non-map".to_owned()),
-                    },
-                    MapPlace::Field(id, fname, MapKind::Int) => match locals.get_mut(id) {
-                        Some(Val::Struct(_, fields)) => match fields.get_mut(fname) {
-                            Some(Val::Map(m)) => { if let Some(n) = int_value { m.insert(key, n); } }
-                            _ => return Flow::Trap("internal: map put on non-map field".to_owned()),
-                        },
-                        _ => return Flow::Trap("internal: map put on non-struct".to_owned()),
-                    },
-                    MapPlace::Field(id, fname, MapKind::Float) => match locals.get_mut(id) {
-                        Some(Val::Struct(_, fields)) => match fields.get_mut(fname) {
-                            Some(Val::MapF(m)) => { if let Some(x) = float_value { m.insert(key, x); } }
-                            _ => return Flow::Trap("internal: map put on non-map field".to_owned()),
-                        },
-                        _ => return Flow::Trap("internal: map put on non-struct".to_owned()),
-                    },
+                let Some(slot) = map_place_slot(place, locals, caller_locals) else {
+                    return Flow::Trap("internal: map put on a missing map".to_owned());
+                };
+                match slot {
+                    Val::Map(m) => {
+                        let Some(n) = int_value else { return Flow::Trap("internal: map put type".to_owned()) };
+                        m.insert(key, n);
+                    }
+                    Val::MapF(m) => {
+                        let Some(x) = float_value else { return Flow::Trap("internal: map put type".to_owned()) };
+                        m.insert(key, x);
+                    }
+                    Val::Moved => return trap("use of moved map", 0, 0),
+                    _ => return Flow::Trap("internal: map put on non-map".to_owned()),
                 }
             }
             Statement::StrVecStore(id, idx_expr, val_expr, line, col, _) => {
@@ -2129,18 +2123,16 @@ fn eval_expr(
                 _ => return Err(Flow::Trap("internal: map key type".to_owned())),
             };
             let float_result = matches!(ty, Type::Enum(name, _) if *name == "FloatResult");
-            let (result_name, ok_value) = match map_val_ref(place, locals, caller_locals)? {
-                MapVal::MapI(m) => ("IntResult", Val::Int(*m.get(&key).unwrap_or(&0))),
-                MapVal::MapF(m) => ("FloatResult", Val::Float(*m.get(&key).unwrap_or(&0.0))),
+            let (result_name, found) = match map_val_ref(place, locals, caller_locals)? {
+                MapVal::MapI(m) => ("IntResult", m.get(&key).copied().map(Val::Int)),
+                MapVal::MapF(m) => ("FloatResult", m.get(&key).copied().map(Val::Float)),
                 _ => return Err(Flow::Trap("internal: map get on non-map".to_owned())),
             };
             let _ = float_result;
             let (eid, ok, err) = result_enum_of(env, result_name).ok_or_else(|| Flow::Trap("internal: result enum missing".to_owned()))?;
-            if m_contains_ref(place, locals, caller_locals, &key) {
-                Ok(Val::Enum(eid, ok, vec![ok_value]))
-            } else {
-                let _ = err;
-                Ok(Val::Enum(eid, err, vec![Val::Str("key not found".to_owned())]))
+            match found {
+                Some(value) => Ok(Val::Enum(eid, ok, vec![value])),
+                None => Ok(Val::Enum(eid, err, vec![Val::Str("key not found".to_owned())])),
             }
         }
         Expr::ParseInt(inner, ty, line, col) => {

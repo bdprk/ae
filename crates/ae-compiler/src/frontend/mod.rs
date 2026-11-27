@@ -661,23 +661,41 @@ impl IntMethodKind {
 // Which value type a map holds: the builtins dispatch on it (ADR-65).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MapKind { Int, Float }
-// A map reachable without a move: either a variable slot or a field of one.
+// A field chain and each step's declared type (`a.b.table`).
+type FieldPath = Vec<(String, Type)>;
+
+// A map reachable without a move: either a variable slot or a field chain of
+// one (P2.4: `a.b.table` nests like the vector field receivers). The root type
+// decides the C accessor (`->` for a `&Struct`/`&mut Struct` parameter). The
+// chain is boxed so the recursive `Expr`/`Statement` enums stay small.
 #[derive(Debug, Clone)]
-enum MapPlace { Var(usize, MapKind), Field(usize, String, MapKind) }
+struct MapField { root_ty: Type, path: FieldPath }
+
+#[derive(Debug, Clone)]
+enum MapPlace { Var(usize, MapKind), Field(usize, Box<MapField>, MapKind) }
 impl MapPlace {
     fn text(&self) -> String {
         match self {
             MapPlace::Var(id, _) => format!("v{id}"),
-            MapPlace::Field(id, name, _) => format!("v{id}.{name}"),
+            MapPlace::Field(root, field, _) => {
+                let mut text = format!("v{root}");
+                text.push_str(if matches!(field.root_ty, Type::StructMut(_) | Type::StructRef(_)) { "->" } else { "." });
+                let names: Vec<&str> = field.path.iter().map(|(name, _)| name.as_str()).collect();
+                text.push_str(&names.join("."));
+                text
+            }
         }
     }
     fn slot(&self) -> usize {
         match self {
-            MapPlace::Var(id, _) | MapPlace::Field(id, _, _) => *id,
+            MapPlace::Var(id, _) => *id,
+            MapPlace::Field(root, _, _) => *root,
         }
     }
     fn f64_value(&self) -> bool {
-        matches!(self, MapPlace::Var(_, MapKind::Float) | MapPlace::Field(_, _, MapKind::Float))
+        match self {
+            MapPlace::Var(_, kind) | MapPlace::Field(_, _, kind) => *kind == MapKind::Float,
+        }
     }
 }
 fn map_kind_of(ty: Type, ctx: &CompileContext) -> MapKind {

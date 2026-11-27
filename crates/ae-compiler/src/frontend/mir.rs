@@ -409,7 +409,13 @@ fn field_vector_operand(id: usize, path: &[(String, Type)], base_ty: Type, elem_
 fn map_place_operand(place: &MapPlace, ctx: &CompileContext) -> MirOperand {
     match place {
         MapPlace::Var(id, kind) => MirOperand::Place(MirPlace::Local(*id, map_kind_type(kind, ctx))),
-        MapPlace::Field(id, name, kind) => MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(*id, map_kind_type(kind, ctx))), name.clone(), map_kind_type(kind, ctx))),
+        MapPlace::Field(root, field, _) => {
+            let mut place = MirPlace::Local(*root, field.root_ty);
+            for (name, step_ty) in &field.path {
+                place = MirPlace::Field(Box::new(place), name.clone(), *step_ty);
+            }
+            MirOperand::Place(place)
+        }
     }
 }
 

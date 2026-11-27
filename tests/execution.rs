@@ -10652,11 +10652,6 @@ fn nested_field_receiver_writes_match_across_backends() {
             r#"struct C { cells: vec } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { cells: vec[1] } }, }; push(a.b.missing.cells, 2); }"#,
             "struct 'B' has no field 'missing'",
         ),
-        (
-            "nested map field store",
-            r#"struct M { counts: map[string, i64] } struct A { m: M } fn main() { var a = A { m: M { counts: map_new() } }; a.m.counts["k"] = 2; }"#,
-            "a nested map field store is not supported yet",
-        ),
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-nested-field-writes-bad-{}-{}.ae",
@@ -10740,6 +10735,86 @@ fn nested_field_stores_match_across_backends() {
     ] {
         let path = std::env::temp_dir().join(format!(
             "ae-nested-field-stores-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: map receivers through a field chain. `r.stats.counts.hits[k]`,
+/// `map_get(r.stats.ratio, k)` and the other map builtins resolve the whole
+/// path, and a `&Struct`/`&mut Struct` root reads/writes the caller's table
+/// (the C accessor follows the root's declared type).
+#[test]
+fn nested_map_receivers_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_map_receivers.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "map builtin on a non-map field",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { var h = H { i: I { n: 1 } }; let v = map_get(h.i.n, "a"); }"#,
+            "map_get expects a map variable or a field of one",
+        ),
+        (
+            "index store on a non-map field",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { var h = H { i: I { n: 1 } }; h.i.n["a"] = 1; }"#,
+            "cannot index-assign a value of type i64",
+        ),
+        (
+            "immutable root",
+            r#"struct H { table: map[string, i64] } fn main() { let h = H { table: map_new() }; h.table["a"] = 1; }"#,
+            "cannot assign to immutable variable 'h'",
+        ),
+        (
+            "moved root",
+            r#"struct H { table: map[string, i64] } fn main() { var h = H { table: map_new() }; let m = h; h.table["a"] = 1; }"#,
+            "cannot use 'h' because it was moved",
+        ),
+        (
+            "missing intermediate field",
+            r#"struct H { table: map[string, i64] } fn main() { var h = H { table: map_new() }; h.missing.table["a"] = 1; }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-map-receivers-bad-{}-{}.ae",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

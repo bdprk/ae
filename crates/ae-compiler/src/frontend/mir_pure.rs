@@ -1681,23 +1681,10 @@ impl<'a> PureMirBuilder<'a> {
                 let (local, _) = self.ensure_var(*id, ty);
                 Operand::Copy(Place::from_local(local))
             }
-            MapPlace::Field(id, fname, kind) => {
-                let ty = map_kind_ty(kind, self.ctx);
-                let (local, base_ty) = self.ensure_var(*id, ty);
-                let mut p = Place::from_local(local);
-                match base_ty {
-                    TyKind::StructRef(sid) | TyKind::StructMut(sid) => {
-                        p.projection.push(ProjectionElem::Deref);
-                        p.projection
-                            .push(ProjectionElem::Field(self.resolve_field_index(sid, fname)));
-                    }
-                    TyKind::Struct(sid) => {
-                        p.projection
-                            .push(ProjectionElem::Field(self.resolve_field_index(sid, fname)));
-                    }
-                    _ => p.projection.push(ProjectionElem::Field(0)),
-                }
-                Operand::Copy(p)
+            MapPlace::Field(root, field, _) => {
+                let (local, _) = self.ensure_var(*root, field.root_ty);
+                let place = self.build_field_path_place(local, field.root_ty, &field.path);
+                Operand::Copy(place)
             }
         }
     }

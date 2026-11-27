@@ -322,6 +322,15 @@ impl<'a> Parser<'a> {
                     } else {
                         return Err(self.error_at(base.range.start, "an index store needs a named container"));
                     };
+                    // A write through a moved container reads storage the move
+                    // already handed away (the scalar field store's rule).
+                    if self.moved.contains(&slot) {
+                        self.seek_scalar_offset(base.range.start);
+                        return Err(moved_value_hint(self.binding_label(
+                            self.fail(&format!("cannot use '{root_name}' because it was moved")).with_code("E0102"),
+                            slot,
+                        )));
+                    }
                     // `m[key] = v` inserts or overwrites in a map: the key is
                     // copied by the runtime, the value must match the map's
                     // element type, and the store is statement-scoped.
@@ -351,10 +360,17 @@ impl<'a> Parser<'a> {
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;
                         let place = match field_place {
-                            // The map place carries one field name; a deeper
-                            // chain has no lowering yet.
-                            Some(field) if field.len() == 1 => MapPlace::Field(slot, field[0].0.clone(), kind),
-                            Some(_) => return Err(self.error_at(base.range.start, "a nested map field store is not supported yet")),
+                            // P2.4: the map place carries the whole field chain
+                            // (`a.b.table`) and the root's declared type, so the
+                            // C accessor and the MIR/interp walk agree.
+                            Some(path) => MapPlace::Field(
+                                slot,
+                                Box::new(MapField {
+                                    root_ty: field_base_ty.expect("a field place has a root type"),
+                                    path,
+                                }),
+                                kind,
+                            ),
                             None => MapPlace::Var(slot, kind),
                         };
                         return Ok(Statement::MapPut(place, key, stored, line, column));
@@ -451,7 +467,8 @@ impl<'a> Parser<'a> {
                         return Err(self.fail("a read-only slice cannot be written; take the parameter as '&mut [T]'"));
                     }
                     let Type::ArrayOf(elem_id, len) = ty else {
-                        unreachable!("resolved array store");
+                        self.seek_scalar_offset(base.range.start);
+                        return Err(self.fail(&format!("cannot index-assign a value of type {}", ty.name(self.ctx))));
                     };
                     let expected_ty = self.ctx.array_elem(elem_id);
                     if !self.names[&root_name].1 {

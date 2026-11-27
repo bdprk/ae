@@ -173,6 +173,7 @@ FILES = [
     "tests/run/mutex_guard.ae",
     "tests/run/native_layout_abi.ae",
     "tests/run/nested_generics.ae",
+    "tests/run/nested_map_receivers.ae",
     "tests/run/num_traits.ae",
     "tests/run/ops_traits.ae",
     "tests/run/option_prelude.ae",

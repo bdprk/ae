@@ -3,6 +3,22 @@ use super::*;
 use super::parser::moved_value_hint;
 use super::route_marks::resolved_builtin;
 
+/// Decompose a lowered field chain into its root binding, the root's declared
+/// type and the `(field, field type)` path. The map builtins accept a chain of
+/// any depth (P2.4: `o.inner.table`), and the root type decides the C accessor
+/// for a `&Struct`/`&mut Struct` parameter.
+fn map_field_chain(expr: &Expr) -> Option<(usize, Type, FieldPath)> {
+    match expr {
+        Expr::Variable(id, ty, ..) => Some((*id, *ty, Vec::new())),
+        Expr::Field(base, name, ty) => {
+            let (root, root_ty, mut path) = map_field_chain(base)?;
+            path.push((name.clone(), *ty));
+            Some((root, root_ty, path))
+        }
+        _ => None,
+    }
+}
+
 /// Structured registry of runtime-object intrinsics frozen by ADR-0224.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeIntrinsic {
@@ -249,23 +265,27 @@ impl<'a> Parser<'a> {
                 "map_get" | "map_has" | "map_remove" | "map_inc" | "keys" => {
                     let expected = if matches!(name, "map_inc") { 3 } else if matches!(name, "keys") { 1 } else { 2 };
                     self.expect_resolved_builtin_arity(expression, arguments, expected)?;
-                    // The map argument is a bare map variable, or a map field of
-                    // a struct *variable* (the borrow stays statement-scoped).
+                    // The map argument is a bare map variable, or a field chain
+                    // rooted at one (`table`, `o.inner.table`; the borrow stays
+                    // statement-scoped).
                     let (map, map_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
                     let kind = map_kind_of(map_ty, self.ctx);
-                    let place = match (&map, map_ty) {
-                        (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::MapOf(_)) => MapPlace::Var(*id, kind),
-                        (Expr::Field(base, fname, t), _) if matches!(*t, Type::MapOf(_)) => match **base {
-                            Expr::Variable(id, ..) => MapPlace::Field(id, fname.clone(), kind),
+                    let place = if let Expr::Variable(id, inner, ..) = &map
+                        && *inner == map_ty && matches!(map_ty, Type::MapOf(_)) {
+                        MapPlace::Var(*id, kind)
+                    } else if matches!(map_ty, Type::MapOf(_)) {
+                        match map_field_chain(&map) {
+                            Some((root, root_ty, path)) if !path.is_empty() => {
+                                MapPlace::Field(root, Box::new(MapField { root_ty, path }), kind)
+                            }
                             _ => {
                                 self.seek_scalar_offset(arguments[0].range.end);
                                 return Err(self.fail(&format!("{name} needs a map variable or a field of one")));
                             }
-                        },
-                        _ => {
-                            self.seek_scalar_offset(arguments[0].range.end);
-                            return Err(self.fail(&format!("{name} expects a map variable or a field of one")));
                         }
+                    } else {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a map variable or a field of one")));
                     };
                     if self.moved.contains(&place.slot()) {
                         return Err(self.binding_label(self.fail(&format!("cannot use '{name}' on a moved map")).with_code("E0102"), place.slot()));

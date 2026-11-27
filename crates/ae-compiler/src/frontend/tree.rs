@@ -335,9 +335,14 @@ impl<'a> TreePrinter<'a> {
     }
 
     fn map_place_text(&self, place: &MapPlace) -> String {
+        let kind = if place.f64_value() { "f64" } else { "i64" };
         match place {
-            MapPlace::Var(id, kind) => format!("v{}[{}]", id, if *kind == MapKind::Float { "f64" } else { "i64" }),
-            MapPlace::Field(id, fname, kind) => format!("v{}.{}[{}]", id, fname, if *kind == MapKind::Float { "f64" } else { "i64" }),
+            MapPlace::Var(id, _) => format!("v{}[{}]", id, kind),
+            MapPlace::Field(root, field, _) => {
+                let names: Vec<&str> = field.path.iter().map(|(name, _)| name.as_str()).collect();
+                let accessor = if matches!(field.root_ty, Type::StructMut(_) | Type::StructRef(_)) { "->" } else { "." };
+                format!("v{}{}{}[{}]", root, accessor, names.join("."), kind)
+            }
         }
     }
 

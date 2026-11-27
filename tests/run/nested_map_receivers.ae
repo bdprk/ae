@@ -1,0 +1,48 @@
+// P2.4 container rung: a map behind a field chain (`r.stats.counts.hits`) and
+// a `&Struct` / `&mut Struct` root. The map builtins, the `m[k] = v` store and
+// the map place walk the chain; the root's declared type decides the accessor,
+// so a borrow parameter writes the caller's table.
+struct Counters { hits: map[string, i64] }
+struct Stats { counts: Counters, ratio: map[string, f64] }
+struct Report { stats: Stats, label: string }
+
+fn record(r: &mut Report, name: string, delta: i64) {
+    r.stats.counts.hits[name] = map_inc(r.stats.counts.hits, name, delta);
+}
+
+fn lookup(r: &Report, name: string) -> i64 {
+    let found = map_get(r.stats.counts.hits, name);
+    match found {
+        IntResult::Ok(value) => { return value; }
+        IntResult::Err(reason) => { return -1; }
+    }
+}
+
+fn main() {
+    var report = Report {
+        stats: Stats { counts: Counters { hits: map_new() }, ratio: f64map_new() },
+        label: "r",
+    };
+    record(&mut report, "a", 2);
+    record(&mut report, "a", 3);
+    record(&mut report, "b", 7);
+    print(report.label);
+    print(lookup(&report, "a"));
+    print(lookup(&report, "b"));
+    print(lookup(&report, "c"));
+    print(map_has(report.stats.counts.hits, "c"));
+    print(len(keys(report.stats.counts.hits)));
+
+    // A nested f64 map uses the same place walk and the FloatResult family.
+    report.stats.ratio["pi"] = 3.5;
+    let ratio = map_get(report.stats.ratio, "pi");
+    match ratio {
+        FloatResult::Ok(value) => { print(value); }
+        FloatResult::Err(reason) => { print(-1.0); }
+    }
+
+    // Removal sees the same nested storage the store wrote.
+    print(map_remove(report.stats.counts.hits, "b"));
+    print(map_has(report.stats.counts.hits, "b"));
+    print(len(keys(report.stats.counts.hits)));
+}
