@@ -1,0 +1,115 @@
+// std/std/path.ae
+// Hosted path surface (P4.3): separator-aware inspection and editing over the
+// byte-level path builtins (`path_join`, `path_name`, `path_parent`). Paths are
+// UTF-8 strings; the helpers scan bytes only where a separator or dot decides
+// the split, and never cut a multi-byte character.
+
+// 47 is '/', 92 is '\\', 46 is '.', 58 is ':'.
+fn path_byte_is_separator(b: i64) -> bool {
+    return b == 47 || b == 92;
+}
+
+// An absolute path starts at a separator, or at a drive letter (`C:`).
+pub fn is_absolute(path: &string) -> bool {
+    let size = len(path);
+    if size == 0 {
+        return false;
+    }
+    let raw = bytes(path);
+    if path_byte_is_separator(raw[0]) {
+        return true;
+    }
+    return size >= 2 && raw[1] == 58;
+}
+
+// The byte offset of the last separator, or -1. `path_name`/`path_parent` use
+// the same rule in the runtime; this exposes it for the helpers below.
+pub fn last_separator(path: &string) -> i64 {
+    let raw = bytes(path);
+    var at = len(path) - 1;
+    while at >= 0 {
+        if path_byte_is_separator(raw[at]) {
+            return at;
+        }
+        at = at - 1;
+    }
+    return -1;
+}
+
+// The offset of the final extension dot in the last component, or -1. A dot at
+// the start of a component (".gitignore") is a name, not an extension.
+pub fn extension_offset(path: &string) -> i64 {
+    let raw = bytes(path);
+    let size = len(path);
+    var at = size - 1;
+    while at >= 0 {
+        let b = raw[at];
+        if b == 46 {
+            // Only a dot after the component start and not immediately after a
+            // separator counts.
+            if at == 0 || at == last_separator(path) + 1 {
+                return -1;
+            }
+            return at;
+        }
+        if path_byte_is_separator(b) {
+            return -1;
+        }
+        at = at - 1;
+    }
+    return -1;
+}
+
+// The extension including its dot ("txt" without the dot, like the paths the
+// language already uses: an absent extension is the empty string).
+pub fn extension(path: &string) -> string {
+    let dot = extension_offset(path);
+    if dot < 0 {
+        return "";
+    }
+    return slice(path, dot + 1, len(path));
+}
+
+// The path without its final extension; the whole path when there is none.
+pub fn without_extension(path: &string) -> string {
+    let dot = extension_offset(path);
+    if dot < 0 {
+        return slice(path, 0, len(path));
+    }
+    return slice(path, 0, dot);
+}
+
+// Replace (or add) the final extension. An empty `ext` removes it.
+pub fn with_extension(path: &string, ext: &string) -> string {
+    // The base is rebuilt per branch: the move in the first branch would
+    // otherwise poison the merge point (a documented conservative rule).
+    if len(ext) == 0 {
+        return without_extension(path);
+    }
+    return without_extension(path) + "." + ext;
+}
+
+// Split into components, dropping empty segments so repeated or trailing
+// separators do not produce empty names. An absolute path keeps a leading "/"
+// component so joining the pieces cannot silently lose it.
+pub fn components(path: &string) -> vec[string] {
+    var parts = strvec_new();
+    let raw = bytes(path);
+    let size = len(path);
+    if size > 0 && path_byte_is_separator(raw[0]) {
+        push(parts, "/");
+    }
+    var at = 0;
+    var start = 0;
+    while at <= size {
+        let end = at == size || path_byte_is_separator(raw[at]);
+        if end {
+            if at > start {
+                push(parts, slice(path, start, at));
+            }
+            start = at + 1;
+        }
+        at = at + 1;
+    }
+    return parts;
+}

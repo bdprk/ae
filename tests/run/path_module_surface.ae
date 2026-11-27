@@ -1,0 +1,52 @@
+// P4.3 hosted `std/path`: separator-aware inspection and editing. The fixture
+// pins both separator families, the dot-name rule and the component split.
+use "../../std/std/path.ae";
+
+fn body() -> i64 {
+    assert(is_absolute("/etc/hosts"));
+    assert(is_absolute("\\server\\share"));
+    assert(is_absolute("C:/work/file.txt"));
+    assert(!is_absolute("work/file.txt"));
+    assert(!is_absolute(""));
+    print("absolute");
+
+    assert(last_separator("a/b/c.txt") == 3);
+    assert(last_separator("a\\b\\c.txt") == 3);
+    assert(last_separator("plain") == -1);
+    print("separator");
+
+    assert(extension("notes.txt") == "txt");
+    assert(extension("a/b/notes.txt") == "txt");
+    assert(extension("a.b/c") == "");
+    assert(extension(".gitignore") == "");
+    assert(extension("archive.tar.gz") == "gz");
+    assert(extension("plain") == "");
+    print("extension");
+
+    assert(without_extension("notes.txt") == "notes");
+    assert(without_extension("a/b/notes.txt") == "a/b/notes");
+    assert(without_extension("plain") == "plain");
+    assert(without_extension(".gitignore") == ".gitignore");
+    print("base");
+
+    assert(with_extension("notes.txt", "md") == "notes.md");
+    assert(with_extension("a/b/notes", "txt") == "a/b/notes.txt");
+    assert(with_extension("notes.txt", "") == "notes");
+    print("replace");
+
+    let parts = components("a/b//c/");
+    assert(len(parts) == 3);
+    assert(parts[0] == "a");
+    assert(parts[1] == "b");
+    assert(parts[2] == "c");
+    let rooted = components("/a/b");
+    assert(len(rooted) == 3);
+    assert(rooted[0] == "/");
+    assert(rooted[2] == "b");
+    print("components");
+    return 0;
+}
+
+fn main() {
+    assert(body() == 0);
+}
