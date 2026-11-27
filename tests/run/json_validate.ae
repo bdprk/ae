@@ -1,0 +1,55 @@
+// P4.4: the pure-AE JSON validator (the reader half beside the writer). Each
+// case is a whole document; `json_valid` must accept exactly one well-formed
+// value and reject anything else (bad escapes, leading zeros, trailing junk...).
+use "../../std/std/json.ae";
+
+fn main() {
+    // Accepted.
+    assert(json_valid("null"));
+    assert(json_valid("true"));
+    assert(json_valid("false"));
+    assert(json_valid("0"));
+    assert(json_valid("-42"));
+    assert(json_valid("3.14"));
+    assert(json_valid("1e10"));
+    assert(json_valid("-2.5E-3"));
+    assert(json_valid("\"hello\""));
+    assert(json_valid("\"a\\\"b\""));
+    assert(json_valid("\"a\\/b\""));
+    assert(json_valid("\"\\u00e9\""));
+    assert(json_valid("[]"));
+    assert(json_valid("[1,2,3]"));
+    assert(json_valid("[ 1 , 2 ]"));
+    assert(json_valid("{}"));
+    assert(json_valid("{\"a\":1}"));
+    assert(json_valid("{\"a\":1,\"b\":[true,null]}"));
+    assert(json_valid("{\"a\":[1,{\"b\":true}],\"c\":null}"));
+    assert(json_valid("  { }  "));
+
+    // Rejected.
+    assert(!json_valid(""));
+    assert(!json_valid("   "));
+    assert(!json_valid("nul"));
+    assert(!json_valid("tru"));
+    assert(!json_valid("truex"));
+    assert(!json_valid("01"));
+    assert(!json_valid("1."));
+    assert(!json_valid(".5"));
+    assert(!json_valid("-"));
+    assert(!json_valid("1e"));
+    assert(!json_valid("1e+"));
+    assert(!json_valid("\"unterminated"));
+    assert(!json_valid("\"bad\\q\""));
+    assert(!json_valid("\"raw\tcontrol\""));
+    assert(!json_valid("[1,]"));
+    assert(!json_valid("[1 2]"));
+    assert(!json_valid("["));
+    assert(!json_valid("{"));
+    assert(!json_valid("{\"a\"}"));
+    assert(!json_valid("{\"a\":}"));
+    assert(!json_valid("{\"a\":1,}"));
+    assert(!json_valid("{a:1}"));
+    assert(!json_valid("[1] extra"));
+
+    print("json-validate ok");
+}
