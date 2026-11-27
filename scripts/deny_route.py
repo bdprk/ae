@@ -125,6 +125,7 @@ FILES = [
     "tests/run/batch_core_unwind.ae",
     "tests/run/batch_core_wire_protocol.ae",
     "tests/run/bitwise_traits.ae",
+    "tests/run/blocking_pool.ae",
     "tests/run/borrow_move_after_last_use.ae",
     "tests/run/borrow_mut_arg_after_last_use.ae",
     "tests/run/borrow_mut_call_after_cursor.ae",

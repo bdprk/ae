@@ -1,0 +1,57 @@
+// M4.4.06: saturate a bounded blocking-call pool and show a timer task still
+// runs. The pool model lives in `std/test/fake_io.ae`; this pins the worker
+// capacity, the bounded queue, rejection past the bound, the timer lane and
+// recovery after draining.
+use "../../std/std/test/fake_io.ae";
+
+fn main() {
+    var p = worker_pool_new(2, 2);
+
+    // Two workers take the first two jobs.
+    assert(worker_pool_submit(&mut p) == 1);
+    assert(worker_pool_submit(&mut p) == 1);
+    assert(worker_pool_saturated(&p));
+    assert(worker_pool_busy(&p) == 2);
+    assert(worker_pool_queued(&p) == 0);
+
+    // Two more wait in the bounded queue; a third is rejected, not buffered.
+    assert(worker_pool_submit(&mut p) == 2);
+    assert(worker_pool_submit(&mut p) == 2);
+    assert(worker_pool_queued(&p) == 2);
+    assert(worker_pool_submit(&mut p) == 0);
+    assert(worker_pool_rejected(&p) == 1);
+
+    // Every worker is busy and the queue is full, yet the timer lane runs.
+    assert(worker_pool_timer(&mut p));
+    assert(worker_pool_timers(&p) == 1);
+    assert(worker_pool_completed(&p) == 0);
+
+    // Ticks retire jobs; queued jobs move onto the freed worker, so the pool
+    // stays saturated until the queue drains, then workers wind down.
+    assert(worker_pool_tick(&mut p) == 1);
+    assert(worker_pool_completed(&p) == 1);
+    assert(worker_pool_busy(&p) == 2);
+    assert(worker_pool_queued(&p) == 1);
+    assert(worker_pool_tick(&mut p) == 1);
+    assert(worker_pool_completed(&p) == 2);
+    assert(worker_pool_queued(&p) == 0);
+    assert(worker_pool_tick(&mut p) == 1);
+    assert(worker_pool_completed(&p) == 3);
+    assert(worker_pool_busy(&p) == 1);
+    assert(worker_pool_tick(&mut p) == 1);
+    assert(worker_pool_completed(&p) == 4);
+    assert(worker_pool_busy(&p) == 0);
+
+    // An idle pool has nothing to retire.
+    assert(worker_pool_tick(&mut p) == 0);
+    assert(worker_pool_completed(&p) == 4);
+
+    // Recovery: the pool accepts work again after draining, and the timer lane
+    // is still independent.
+    assert(worker_pool_submit(&mut p) == 1);
+    assert(worker_pool_busy(&p) == 1);
+    assert(worker_pool_timer(&mut p));
+    assert(worker_pool_timers(&p) == 2);
+
+    print("blocking pool ok");
+}

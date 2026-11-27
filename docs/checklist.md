@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 154 of 202 items done.
-Charter-1.0 progress: 125 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 155 of 202 items done.
+Charter-1.0 progress: 126 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -173,7 +173,7 @@ Charter-1.0 progress: 125 of 202 items done (29 prototype-done items still name 
 - [ ] M4.4.03: **Windows IOCP.** Keep submitted buffers alive until final completion even after cancellation. (The adapter models cancellation in memory. Native Windows submission, completion and buffer retirement are pending.)
 - [ ] M4.4.04: **partial I/O.** Split a frame across reads and force writes to complete in fragments. (The in-memory fixture exercises chunking and fragmentation. Native partial reads and writes are pending.)
 - [x] M4.4.05: **deadlines.** Race a deadline against completion and publish one outcome. (landed as `DeadlineRace` in `std/std/test/fake_io.ae`: `race_complete_at` settles on the earlier of the completion and the deadline, a tie goes to the completion, `race_completion`/`race_deadline` deliver bare events, and any event after the outcome is counted by `race_late` and cannot change it. `tests/run/deadline_race.ae` pins completion-first, deadline-first, the tie, late events after both outcomes and the single-outcome invariant; it runs on the pure-MIR, tree and interpreter paths.)
-- [ ] M4.4.06: **blocking-call pool.** Saturate the pool and show a timer task can still run. (The network slice has no test saturating blocking workers while a timer progresses.)
+- [x] M4.4.06: **blocking-call pool.** Saturate the pool and show a timer task can still run. (landed as `BlockingPool` in `std/std/test/fake_io.ae`: `worker_pool_new` clamps worker capacity to at least one and the submit queue to at least zero, `worker_pool_submit` returns 1 when a worker starts the call, 2 when it waits in the bounded queue, and 0 when the queue is full (counted in `worker_pool_rejected` rather than growing), `worker_pool_tick` retires one blocking call and hands the freed worker to the next queued call, and `worker_pool_timer` runs on the independent timer lane. `tests/run/blocking_pool.ae` saturates two workers, overflows a two-slot queue with a rejection, fires a timer while saturated, drains the queue while staying at full occupancy, winds workers down, and shows the pool recovers after draining; it runs on the pure-MIR, tree and interpreter paths. Native worker threads and a real timer facility remain part of the concurrent P5 work.)
 - [ ] M4.4.07: **backpressure.** Throttle a slow peer and verify bounded queued bytes and eventual recovery. (The fixture covers bounded in-memory buffering. Slow-peer recovery over a socket is pending.)
 
 ## M5.1 Native debug

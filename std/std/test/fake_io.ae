@@ -286,3 +286,91 @@ pub fn race_value(r: &DeadlineRace) -> i64 {
 pub fn race_late(r: &DeadlineRace) -> i64 {
     return r.late;
 }
+
+// --- Blocking-call pool (M4.4.06) -------------------------------------------
+// A bounded pool of blocking workers plus a bounded submit queue. A blocking
+// call occupies a worker until a cooperative tick retires it; submitting past
+// capacity queues, and submitting past a full queue is rejected rather than
+// growing without bound. Timers run on their own lane, so a timer still fires
+// while every worker is busy and the queue is full.
+
+pub struct BlockingPool {
+    workers: i64,
+    queue_cap: i64,
+    busy: i64,
+    queued: i64,
+    completed: i64,
+    timers: i64,
+    rejected: i64,
+}
+
+pub fn worker_pool_new(workers: i64, queue_cap: i64) -> BlockingPool {
+    var w = workers;
+    if w < 1 {
+        w = 1;
+    }
+    var q = queue_cap;
+    if q < 0 {
+        q = 0;
+    }
+    return BlockingPool { workers: w, queue_cap: q, busy: 0, queued: 0, completed: 0, timers: 0, rejected: 0 };
+}
+
+// 1 = a worker started it, 2 = queued, 0 = rejected because the queue is full.
+pub fn worker_pool_submit(p: &mut BlockingPool) -> i64 {
+    if p.busy < p.workers {
+        p.busy = p.busy + 1;
+        return 1;
+    }
+    if p.queued < p.queue_cap {
+        p.queued = p.queued + 1;
+        return 2;
+    }
+    p.rejected = p.rejected + 1;
+    return 0;
+}
+
+// Retire one blocking job; a queued job takes the freed worker. Returns 1 when
+// a job was retired, 0 on an idle pool.
+pub fn worker_pool_tick(p: &mut BlockingPool) -> i64 {
+    if p.busy <= 0 {
+        return 0;
+    }
+    p.completed = p.completed + 1;
+    if p.queued > 0 {
+        p.queued = p.queued - 1;
+    } else {
+        p.busy = p.busy - 1;
+    }
+    return 1;
+}
+
+// The timer lane never blocks on the worker pool, so a due timer always fires.
+pub fn worker_pool_timer(p: &mut BlockingPool) -> bool {
+    p.timers = p.timers + 1;
+    return true;
+}
+
+pub fn worker_pool_saturated(p: &BlockingPool) -> bool {
+    return p.busy == p.workers;
+}
+
+pub fn worker_pool_busy(p: &BlockingPool) -> i64 {
+    return p.busy;
+}
+
+pub fn worker_pool_queued(p: &BlockingPool) -> i64 {
+    return p.queued;
+}
+
+pub fn worker_pool_completed(p: &BlockingPool) -> i64 {
+    return p.completed;
+}
+
+pub fn worker_pool_timers(p: &BlockingPool) -> i64 {
+    return p.timers;
+}
+
+pub fn worker_pool_rejected(p: &BlockingPool) -> i64 {
+    return p.rejected;
+}

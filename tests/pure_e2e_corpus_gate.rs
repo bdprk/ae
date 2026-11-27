@@ -21,7 +21,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Fixtures the pipeline can emit, compile and run with matching output at
 /// this slice. Raise when coverage grows; never lower without a ledger entry.
-const PASS_FLOOR: usize = 183;
+const PASS_FLOOR: usize = 184;
 
 fn repo_path(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
