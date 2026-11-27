@@ -5426,6 +5426,48 @@ fn deprecated_strvec_new_warns_with_replacement_and_removal_policy() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn migrate_rewrites_the_deprecated_alias_and_a_second_run_changes_nothing() {
+    // M8.1.04: the migration pass rewrites the binding form of the first
+    // deprecated alias, reports the shapes it cannot rewrite, and a second
+    // run over its own output is a no-op.
+    let dir = unique_temp_dir("migrate");
+    let first = dir.join("one.ae");
+    let second = dir.join("two.ae");
+    fs::write(&first, "fn main() {\n    var names = strvec_new();\n    push(names, \"a\");\n    print(names[0]);\n}\n").unwrap();
+    fs::write(&second, "fn helper() -> vec[string] {\n    let empty = strvec_new();\n    return empty;\n}\nfn main() { print(len(helper())); }\n").unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("migrate").arg(&dir).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let stdout = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    assert_eq!(stdout.trim_end(), "migrated 2 call site(s) in 2 file(s)", "{stdout}");
+    let once = (fs::read_to_string(&first).unwrap(), fs::read_to_string(&second).unwrap());
+    assert!(once.0.contains("var names: vec[string] = vec[];"), "{}", once.0);
+    assert!(once.1.contains("let empty: vec[string] = vec[];"), "{}", once.1);
+    let again = Command::new(env!("CARGO_BIN_EXE_ae")).arg("migrate").arg(&dir).output().unwrap();
+    assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
+    assert!(String::from_utf8_lossy(&again.stdout).contains("nothing to migrate"));
+    assert_eq!(
+        (fs::read_to_string(&first).unwrap(), fs::read_to_string(&second).unwrap()),
+        once,
+        "the second run changes nothing"
+    );
+    // The migrated program builds and runs like the alias did.
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&first).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "a\n");
+
+    // A shape the rule does not cover is reported, not rewritten.
+    let manual = dir.join("manual.ae");
+    fs::write(&manual, "fn main() { print(strvec_new()); }\n").unwrap();
+    let reported = Command::new(env!("CARGO_BIN_EXE_ae")).arg("migrate").arg(&manual).output().unwrap();
+    assert!(!reported.status.success());
+    let stderr = String::from_utf8_lossy(&reported.stderr);
+    assert!(stderr.contains("is not a binding initializer"), "{stderr}");
+    assert!(stderr.contains("manual.ae:1:19"), "the call site is named: {stderr}");
+    assert_eq!(fs::read_to_string(&manual).unwrap(), "fn main() { print(strvec_new()); }\n");
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[allow(dead_code)] // kept as the documented M2.4 propagate-elision probe; superseded by the MIR differential suite
 fn mir_drop_elision_thins_propagate_error_path_releases() {
     // M2.4: a `?`'s releases ride the error path, which exits the function,

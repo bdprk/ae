@@ -4,8 +4,9 @@ use ae_compiler::{fmt, frontend, harness, sha256};
 mod package;
 mod render;
 mod frontend_cache;
+mod migrate;
 
-const USAGE: &str = "usage: ae <check|emit-c|emit-pure-c|emit-pure-mir|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [--pure] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug] [--pure]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
+const USAGE: &str = "usage: ae <check|emit-c|emit-pure-c|emit-pure-mir|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [--pure] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug] [--pure]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae migrate <source.ae|directory>...\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
 
 /// A toolchain failure with the exit code it maps to. Usage errors exit 2 and
 /// everything else exits 1, so a script can tell "you called it wrong" from
@@ -401,9 +402,9 @@ fn locate_message(input: &Path, message: &str) -> String {
 fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if args.is_empty() { return Err(Failure::usage(USAGE)); }
     let cmd = args[0].to_str().ok_or(Failure::usage("command must be UTF-8"))?.to_owned();
-    const COMMANDS: [&str; 25] = [
+    const COMMANDS: [&str; 26] = [
         "check", "emit-c", "emit-pure-c", "emit-pure-mir", "emit-tree", "emit-cfg", "emit-mir", "emit-resolve", "emit-types", "emit-hir", "run", "build", "test",
-        "fmt", "cache", "new", "init", "update", "deps", "version", "doc", "explain",
+        "fmt", "cache", "new", "init", "update", "deps", "version", "doc", "explain", "migrate",
         "add", "remove", "lsp",
     ];
     if !COMMANDS.contains(&cmd.as_str()) {
@@ -456,6 +457,23 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
             Some(text) => { println!("{code}: {text}"); Ok(0) }
             None => Err(Failure::usage(format!("unknown error code '{code}'; run ae explain with a code from a diagnostic\n{USAGE}"))),
         };
+    }
+    if cmd == "migrate" {
+        if args.len() < 2 { return Err(Failure::usage(USAGE)); }
+        let inputs: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
+        let outcome = migrate::run(&inputs);
+        for site in &outcome.manual {
+            eprintln!("ae: {site}");
+        }
+        for failure in &outcome.failed {
+            eprintln!("ae: {failure}");
+        }
+        if outcome.changed_files > 0 {
+            println!("migrated {} call site(s) in {} file(s)", outcome.rewritten, outcome.changed_files);
+        } else if outcome.ok() {
+            println!("nothing to migrate");
+        }
+        return Ok(if outcome.ok() { 0 } else { 1 });
     }
     if cmd == "doc" {
         let mut test = false;

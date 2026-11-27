@@ -57,6 +57,7 @@ The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-comp
 3. The alias layer is written in the language itself (wrapper functions/methods), not in the compiler — so removal deletes library code, not compiler surface.
 4. `examples/` migrates per slice; the Go-comparison set (M1.13) runs only after the last alias is gone.
 5. Performance gate (M1.14): map/text/sum workloads after migration must be within 10% of the pre-freeze baseline (benchmark report per change batch).
+6. `ae migrate <path>...` rewrites the binding form of each deprecated alias (`var v = strvec_new();` → `var v: vec[string] = vec[];`), reports the shapes it cannot rewrite with their position, and a second run over its own output is a no-op (M8.1.04; `src/migrate.rs`).
 
 ## 5. Acceptance Criteria
 

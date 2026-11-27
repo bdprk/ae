@@ -349,7 +349,7 @@ No `set_env`: `setenv` is POSIX-specific and invisible under `-std=c11 -pedantic
 
 ## Empty String Vectors and Child Process Execution
 
-`var v: vec[string] = vec[];` is the current spelling of an empty `vec[string]`: the local annotation (P2.5.1) fixes the element type, and `vec["a", "b"]` covers a literal. `strvec_new()` still constructs the same value, but it is the first deprecated alias (`W0703`): it compiles, warns with this replacement and is removed at the 1.0 boundary (`spec/stdlib.md` §4). A bare `let v = vec[];` defaults to an `i64` vector when element types cannot be inferred.
+`var v: vec[string] = vec[];` is the current spelling of an empty `vec[string]`: the local annotation (P2.5.1) fixes the element type, and `vec["a", "b"]` covers a literal. `strvec_new()` still constructs the same value, but it is the first deprecated alias (`W0703`): it compiles, warns with this replacement and is removed at the 1.0 boundary (`spec/stdlib.md` §4). `ae migrate <path>` rewrites the binding form automatically and a second run changes nothing. A bare `let v = vec[];` defaults to an `i64` vector when element types cannot be inferred.
 
 `run_command(program, args) -> CommandResult` spawns a child process and waits for its termination: `program` is a `string`/view, and `args` must be a **bare `vec[string]` variable** that has not been moved (no copying, no taking views, borrowed during the call). On success, it returns `CommandResult::Ok(status, output)`, where `status` is the exit code and `output` is all text with stdout and stderr **combined** (no upper limit, reads until EOF). If the program fails to start altogether (file not found, missing execution permissions), it returns `Err(reason)`—this is the only case considered a "failure".
 
