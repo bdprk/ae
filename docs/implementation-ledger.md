@@ -248,7 +248,7 @@ Integration gate: Disconnect during read and cancel during write release all han
 
 Entry dependency: M2.3.
 
-- [ ] M5.1.01. **Freeze layout API.** Pin size, alignment and field offsets for scalar, struct and enum per target.
+- [x] M5.1.01. **Freeze layout API.** Pin size, alignment and field offsets for scalar, struct and enum per target. (landed in `crates/ae-layout`: `TargetSpec` carries pointer size/align and `c_long` per target; `tests/layout_tests.rs` pins every primitive, pointer/reference/slice/array/`fn`/thread layout, `repr(C)`/packed/nested struct `field_offsets`, and `tag_offset`/`tag_size` enum layouts across `X86_64WindowsMsvc`, `X86_64LinuxGnu` and `Aarch64LinuxGnu` — 6 tests green)
 - [ ] M5.1.02. **lower scalars.** Compare signed, unsigned and floating boundary operations with the reference path.
 - [ ] M5.1.03. **calls.** Exercise a call with enough arguments to spill beyond register arguments.
 - [ ] M5.1.04. **aggregates.** Pass and return a mixed-layout struct and check every field.

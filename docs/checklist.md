@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 151 of 202 items done.
-Charter-1.0 progress: 122 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 152 of 202 items done.
+Charter-1.0 progress: 123 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -178,7 +178,7 @@ Charter-1.0 progress: 122 of 202 items done (29 prototype-done items still name 
 
 ## M5.1 Native debug
 
-- [ ] M5.1.01: **Freeze layout API.** Pin size, alignment and field offsets for scalar, struct and enum per target.
+- [x] M5.1.01: **Freeze layout API.** Pin size, alignment and field offsets for scalar, struct and enum per target. (landed in `crates/ae-layout`: `TargetSpec` carries pointer size/align and `c_long` per target; `tests/layout_tests.rs` pins every primitive, pointer/reference/slice/array/`fn`/thread layout, `repr(C)`/packed/nested struct `field_offsets`, and `tag_offset`/`tag_size` enum layouts across `X86_64WindowsMsvc`, `X86_64LinuxGnu` and `Aarch64LinuxGnu` — 6 tests green)
 - [ ] M5.1.02: **lower scalars.** Compare signed, unsigned and floating boundary operations with the reference path.
 - [ ] M5.1.03: **calls.** Exercise a call with enough arguments to spill beyond register arguments.
 - [ ] M5.1.04: **aggregates.** Pass and return a mixed-layout struct and check every field.
