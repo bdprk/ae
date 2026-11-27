@@ -130,29 +130,29 @@ impl<'a> Parser<'a> {
         // immutable element declaration per iteration.
         // Borrowed string vectors iterate the same way, with
         // element access going through the pointer.
-        let (v_id, elem_ty, by_ref, storage_elem, array_len) = match (&first, first_ty) {
+        let (v_id, elem_ty, by_ref, storage_elem, array_len, field_base) = match (&first, first_ty) {
             (Expr::Variable(id, Type::Vector(vid), _, _), Type::Vector(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem, None)
+                (*id, loop_elem, false, elem, None, None)
             }
             (Expr::Variable(id, Type::VectorRef(vid), _, _), Type::VectorRef(tid)) if *vid == tid => {
                 let elem = self.ctx.vector_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, elem == Type::String, elem, None)
+                (*id, loop_elem, elem == Type::String, elem, None, None)
             }
             // `for x in slice` iterates a `&[T]` parameter (ADR-0236).
             (Expr::Variable(id, Type::Slice(vid), _, _), Type::Slice(tid)) if *vid == tid => {
                 let elem = self.ctx.slice_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem, None)
+                (*id, loop_elem, false, elem, None, None)
             }
             // The same loop reads a mutable slice (`&mut [T]`, rung 4); the
             // loop variable is a copy/view, so iteration itself never writes.
             (Expr::Variable(id, Type::SliceMut(vid), _, _), Type::SliceMut(tid)) if *vid == tid => {
                 let elem = self.ctx.slice_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem, None)
+                (*id, loop_elem, false, elem, None, None)
             }
             // A fixed array iterates too: the length is the type's constant,
             // and the element is a Copy value read by index.
@@ -161,7 +161,26 @@ impl<'a> Parser<'a> {
             {
                 let elem = self.ctx.array_elem(tid);
                 let loop_elem = self.loop_element_binding(elem);
-                (*id, loop_elem, false, elem, Some(*alen))
+                (*id, loop_elem, false, elem, Some(*alen), None)
+            }
+            // P2.4: a struct's vector field is a container (`for x in r.cells`).
+            // The root binding is borrowed for the loop and every element reads
+            // through the field's accessor. Owned element kinds keep the slot
+            // form's in-place binding, which the field form does not carry yet.
+            (Expr::Field(..), Type::Vector(tid)) => {
+                let elem = self.ctx.vector_elem(tid);
+                let root = field_root_slot(&first)
+                    .ok_or_else(|| self.fail("for-in over a field needs a binding root"))?;
+                if matches!(elem, Type::Vector(_))
+                    || matches!(elem, Type::Struct(sid) if !self.structs[sid].is_copy)
+                {
+                    return Err(self.fail("for-in over a field of owned elements is not supported yet"));
+                }
+                let loop_elem = self.loop_element_binding(elem);
+                (root, loop_elem, false, elem, None, Some(first.clone()))
+            }
+            (Expr::Field(..), other) => {
+                return Err(self.fail(&format!("for-in over a field needs a vec, found {}", other.name(self.ctx))));
             }
             _ => return Err(self.fail("for-in needs a bare vec, slice or array variable or an int range (start..end)")),
         };
@@ -210,6 +229,12 @@ impl<'a> Parser<'a> {
                 } else {
                     index
                 }
+            }
+            // A struct field container reads its element through the field's
+            // accessor; the binding type already names the view.
+            _ if field_base.is_some() => {
+                let base = field_base.expect("a field loop carries its field expression");
+                Expr::VecIndexOf(Box::new(base), Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, storage_elem)
             }
             Type::StrView => Expr::StrVecIndex(v_id, Box::new(Expr::Variable(counter, Type::Int(IntTy::I64), line, col)), line, col, by_ref),
             // An owned element binds as a reference to the element's storage
@@ -317,5 +342,14 @@ impl Parser<'_> {
             Type::Struct(sid) if !self.structs[sid].is_copy => Type::StructRef(sid),
             other => other,
         }
+    }
+}
+
+/// The binding slot a lowered field chain roots at (`r.cells` -> `r`).
+fn field_root_slot(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Field(base, ..) => field_root_slot(base),
+        Expr::Variable(id, ..) => Some(*id),
+        _ => None,
     }
 }

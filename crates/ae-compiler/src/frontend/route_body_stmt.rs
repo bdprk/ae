@@ -357,20 +357,28 @@ pub(super) fn scalar_body_statement(statement: &ae_syntax::statement::Statement,
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::ForIn { binding_range, iterable, body, .. } => {
-            resolved.scalar_definitions.contains_key(&binding_range.start)
-                // A bare local is the fast path. A call iterable (a temporary
-                // cursor, `for t in tokenize(..)`) is admitted so the
-                // lowering's loop check reports the typed route's own
-                // diagnostic instead of denying the body.
-                && matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))
-                    | ae_syntax::expression::ExpressionKind::Call { .. })
-                && (matches!(iterable.kind, ae_syntax::expression::ExpressionKind::Call { .. })
-                    || resolved.scalar_reads.get(&iterable.range.start)
+            // P2.4: a struct's vector field is a container too (`for x in
+            // r.cells`). It is admitted permissively when the chain roots at a
+            // live binding; the lowering's loop check answers by the leaf's
+            // type and refuses the element kinds it cannot bind.
+            let iterable_ok = match &iterable.kind {
+                ae_syntax::expression::ExpressionKind::Call { .. } => true,
+                ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_)) => {
+                    resolved.scalar_reads.get(&iterable.range.start)
                         .is_some_and(|id| resolved.vector_definitions.contains(id) || resolved.token_cursor_definitions.contains(id))
-                    // A slice parameter (or a local the marks do not
-                    // classify) iterates permissively: the lowering's loop
-                    // check answers by the slot's type.
-                    || resolved.scalar_reads.contains_key(&iterable.range.start))
+                        // A slice parameter (or a local the marks do not
+                        // classify) iterates permissively: the lowering's loop
+                        // check answers by the slot's type.
+                        || resolved.scalar_reads.contains_key(&iterable.range.start)
+                }
+                ae_syntax::expression::ExpressionKind::Field { .. } => {
+                    super::route_marks::field_chain_root(iterable)
+                        .is_some_and(|root| resolved.scalar_reads.contains_key(&root.range.start))
+                }
+                _ => false,
+            };
+            resolved.scalar_definitions.contains_key(&binding_range.start)
+                && iterable_ok
                 && body.iter().all(|statement| scalar_body_statement(statement, resolved, supports_call, supports_field))
         }
         StatementKind::Match { subject, arms } => {

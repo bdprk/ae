@@ -1,0 +1,62 @@
+// P2.4: a struct's vector field is a loop container. The field chain may
+// nest and may root at a `&`/`&mut` parameter; the root binding is borrowed
+// for the loop (a write to it inside the body is rejected). Copy and string
+// elements bind by value/view like the bare-binding loop; owned element kinds
+// keep the slot form for now.
+struct Inner { cells: vec[i64] }
+
+struct Report {
+    inner: Inner,
+    names: vec[string],
+    flags: vec[bool],
+}
+
+#[derive(Copy)]
+struct Point { x: i64, y: i64 }
+
+struct Plotted { points: vec[Point] }
+
+fn total(r: &Report) -> i64 {
+    var t = 0;
+    for x in r.inner.cells { t += x; }
+    return t;
+}
+
+fn total_mut(r: &mut Report) -> i64 {
+    var t = 0;
+    for x in r.inner.cells { t += x; }
+    return t;
+}
+
+fn main() {
+    var r = Report {
+        inner: Inner { cells: vec[1, 2, 3] },
+        names: vec["a", "bc"],
+        flags: vec[true, false],
+    };
+    var total = 0;
+    for x in r.inner.cells { total += x; }
+    print(total);
+    print(total(&r));
+    print(total_mut(&mut r));
+    for s in r.names { print(s); }
+    for f in r.flags { print(f); }
+    // break and continue behave like the binding form.
+    for x in r.inner.cells {
+        if x == 2 { continue; }
+        print(x);
+    }
+    for x in r.inner.cells {
+        if x == 2 { break; }
+        print(x);
+    }
+    // A Copy-struct element reads its fields inline.
+    var p = Plotted { points: vec[Point { x: 4, y: 5 }, Point { x: 6, y: 7 }] };
+    var sum = 0;
+    for point in p.points { sum += point.x + point.y; }
+    print(sum);
+    // Two field containers nest like two binding loops.
+    for x in r.inner.cells {
+        for s in r.names { print(to_string(x) + s); }
+    }
+}

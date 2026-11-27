@@ -5563,6 +5563,80 @@ fn pinned_downstream_packages_rebuild_and_match_baselines() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn field_vector_loops_match_across_backends() {
+    // P2.4: `for x in r.cells` iterates a struct's vector field (a nested
+    // chain and a `&`/`&mut` root included); the four paths agree, and the
+    // shapes the field loop does not carry are named.
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("field_vector_loops.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "non-vector field",
+            r#"struct R { n: i64 } fn main() { let r = R { n: 1 }; for x in r.n { print(x); } }"#,
+            "for-in over a field needs a vec, found i64",
+        ),
+        (
+            "owned element field",
+            r#"struct T { n: i64 } struct G { items: vec[T] } fn main() { let g = G { items: vec[T { n: 1 }] }; for t in g.items { print(t.n); } }"#,
+            "for-in over a field of owned elements is not supported yet",
+        ),
+        (
+            "write inside the field loop",
+            r#"struct R { cells: vec[i64] } fn main() { var r = R { cells: vec[1] }; for x in r.cells { push(r.cells, x); } }"#,
+            "cannot modify 'r' while it is borrowed",
+        ),
+        (
+            "moved root",
+            r#"struct R { cells: vec[i64] } fn main() { let r = R { cells: vec[1] }; let s = r; for x in r.cells { print(x); } }"#,
+            "cannot use 'r' because it was moved",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-field-loop-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
 #[allow(dead_code)] // kept as the documented M2.4 propagate-elision probe; superseded by the MIR differential suite
 fn mir_drop_elision_thins_propagate_error_path_releases() {
     // M2.4: a `?`'s releases ride the error path, which exits the function,
