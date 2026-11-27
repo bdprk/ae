@@ -69,6 +69,12 @@ def find_executable() -> Path:
     the script honest on both layouts.
     """
     name = "ae.exe" if os.name == "nt" else "ae"
+    # A long campaign must survive a rebuild: cargo replaces the target
+    # binary, and a worker spawning it in that window sees a transient
+    # failure. AE_FUZZ_BIN points the campaign at a private copy instead.
+    override = os.environ.get("AE_FUZZ_BIN")
+    if override:
+        return Path(override)
     legacy = ROOT / "target" / "debug" / name
     if legacy.exists():
         return legacy

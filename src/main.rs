@@ -385,6 +385,19 @@ fn cache_command(subcommand: Option<&OsString>) -> Result<u8, String> {
     }
 }
 
+/// A compiler error from the pure pipeline already carries its own
+/// `file:line:column` prefix when it comes from a frontend diagnostic; a
+/// lowering/backend message has none, so name the input once here. The
+/// command's own `ae: ` prefix supplies the rest, which keeps the text
+/// comparable to `check`.
+fn locate_message(input: &Path, message: &str) -> String {
+    let named = input.display().to_string();
+    if message.contains(&format!("{named}:")) {
+        return message.to_owned();
+    }
+    format!("{named}: {message}")
+}
+
 fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if args.is_empty() { return Err(Failure::usage(USAGE)); }
     let cmd = args[0].to_str().ok_or(Failure::usage("command must be UTF-8"))?.to_owned();
@@ -813,7 +826,7 @@ fn run_source(
             emit_main_wrapper: true,
         };
         let c = ae_compiler::compile_path_pure_mir_to_c(input, &config)
-            .map_err(|e| format!("{}: {e}", input.display()))?;
+            .map_err(|e| locate_message(input, &e))?;
         print!("{c}");
         return Ok(0);
     }
@@ -822,7 +835,7 @@ fn run_source(
         // the C backend consumes, so a backend bug can be told apart from a
         // lowering bug.
         let text = ae_compiler::format_pure_mir_path(input)
-            .map_err(|e| format!("{}: {e}", input.display()))?;
+            .map_err(|e| locate_message(input, &e))?;
         print!("{text}");
         return Ok(0);
     }

@@ -64,8 +64,13 @@ existing gates:
 
 Stage 1 is met: `tests/pure_borrowck_calibration.rs` now requires **164
 checked / 0 skips** (`skipped.is_empty()`), and every one of the 164 run
-fixtures lowers, validates and borrow-checks. To be recorded per later
-stage: the negative-fixture parity report,
+fixtures lowers, validates and borrow-checks.
+
+Stage 2 is met: `tests/pure_diagnostic_parity.rs` runs all 137 negative
+fixtures (`tests/ui`, `tests/types`, `tests/resolve`, `tests/hir`) through
+both routes and requires the identical message and position, plus a
+positioned diagnostic for every rejection — zero divergences. To be
+recorded per later stage:
 the workspace suite and clippy on both hosts, the corpus and examples gates,
 and the fuzz summaries for both generators. This ADR stays Proposed until
 stage 3 lands.
