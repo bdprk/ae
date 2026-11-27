@@ -1,0 +1,30 @@
+// P4.4: typed environment access. The parsing helpers are pinned on literal
+// strings; the wrappers are exercised on a name that is guaranteed unset, so
+// each falls back deterministically on every host.
+use "../../std/std/env.ae";
+
+fn main() {
+    // Integer parsing.
+    assert(parse_env_i64("42", 0) == 42);
+    assert(parse_env_i64("-7", 0) == -7);
+    assert(parse_env_i64("abc", 5) == 5);
+    assert(parse_env_i64("", 9) == 9);
+
+    // Boolean spellings and the fallback for anything else.
+    assert(parse_env_bool("1", false));
+    assert(parse_env_bool("true", false));
+    assert(parse_env_bool("YES", false));
+    assert(!parse_env_bool("0", true));
+    assert(!parse_env_bool("false", true));
+    assert(!parse_env_bool("No", true));
+    assert(parse_env_bool("maybe", true));
+    assert(!parse_env_bool("maybe", false));
+
+    // A missing variable always takes the fallback.
+    assert(env_i64("AE_TEST_UNSET_VAR_XYZ", 42) == 42);
+    assert(env_bool("AE_TEST_UNSET_VAR_XYZ", true));
+    assert(!env_bool("AE_TEST_UNSET_VAR_XYZ", false));
+    assert(env_or("AE_TEST_UNSET_VAR_XYZ", "dflt") == "dflt");
+
+    print("env ok");
+}

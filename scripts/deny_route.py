@@ -150,6 +150,7 @@ FILES = [
     "tests/run/duration_primitives.ae",
     "tests/run/enum_generic_impls.ae",
     "tests/run/enum_methods.ae",
+    "tests/run/env_typed.ae",
     "tests/run/error_trait.ae",
     "tests/run/extern_alloc_ok.ae",
     "tests/run/extern_alloc_oom.ae",
