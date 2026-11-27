@@ -214,3 +214,75 @@ pub fn oracle_release(o: &mut RetentionOracle) -> bool {
 pub fn oracle_violations(o: &RetentionOracle) -> i64 {
     return o.violations;
 }
+
+// --- Deadline vs completion race (M4.4.05) ----------------------------------
+// A deadline and a completion race to settle one request: whichever arrives
+// first publishes the single terminal outcome, and any later event is counted
+// as late and cannot change that outcome. Times are scalar ticks; a tie
+// (completion `at == deadline`) is won by the completion, which matches the
+// usual "already done when the timer fires" reading.
+
+pub struct DeadlineRace {
+    done: bool,
+    outcome: i64, // 0 none, 1 completed, 2 timed out
+    value: i64,
+    late: i64,
+}
+
+pub fn race_new() -> DeadlineRace {
+    return DeadlineRace { done: false, outcome: 0, value: 0, late: 0 };
+}
+
+// Deliver one completion that arrived at `at` against a deadline at `deadline`.
+// Settles on the earliest of the two and returns the terminal outcome code.
+pub fn race_complete_at(r: &mut DeadlineRace, at: i64, deadline: i64, value: i64) -> i64 {
+    if r.done {
+        r.late = r.late + 1;
+        return r.outcome;
+    }
+    r.done = true;
+    if at <= deadline {
+        r.outcome = 1;
+        r.value = value;
+    } else {
+        r.outcome = 2;
+        r.value = -1;
+    }
+    return r.outcome;
+}
+
+// A bare completion event; false once the race is already settled.
+pub fn race_completion(r: &mut DeadlineRace, value: i64) -> bool {
+    if r.done {
+        r.late = r.late + 1;
+        return false;
+    }
+    r.done = true;
+    r.outcome = 1;
+    r.value = value;
+    return true;
+}
+
+// A bare deadline event; false once the race is already settled.
+pub fn race_deadline(r: &mut DeadlineRace) -> bool {
+    if r.done {
+        r.late = r.late + 1;
+        return false;
+    }
+    r.done = true;
+    r.outcome = 2;
+    r.value = -1;
+    return true;
+}
+
+pub fn race_outcome(r: &DeadlineRace) -> i64 {
+    return r.outcome;
+}
+
+pub fn race_value(r: &DeadlineRace) -> i64 {
+    return r.value;
+}
+
+pub fn race_late(r: &DeadlineRace) -> i64 {
+    return r.late;
+}

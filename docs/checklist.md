@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 153 of 202 items done.
-Charter-1.0 progress: 124 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 154 of 202 items done.
+Charter-1.0 progress: 125 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -172,7 +172,7 @@ Charter-1.0 progress: 124 of 202 items done (29 prototype-done items still name 
 - [ ] M4.4.02: **Linux epoll.** Drain nonblocking reads through would-block and rearm interest correctly. (The adapter models rearming over in-memory buffers. Native Linux readiness and socket tests are pending.)
 - [ ] M4.4.03: **Windows IOCP.** Keep submitted buffers alive until final completion even after cancellation. (The adapter models cancellation in memory. Native Windows submission, completion and buffer retirement are pending.)
 - [ ] M4.4.04: **partial I/O.** Split a frame across reads and force writes to complete in fragments. (The in-memory fixture exercises chunking and fragmentation. Native partial reads and writes are pending.)
-- [ ] M4.4.05: **deadlines.** Race a deadline against completion and publish one outcome. (A deadline and completion race with a single terminal outcome still needs end-to-end verification.)
+- [x] M4.4.05: **deadlines.** Race a deadline against completion and publish one outcome. (landed as `DeadlineRace` in `std/std/test/fake_io.ae`: `race_complete_at` settles on the earlier of the completion and the deadline, a tie goes to the completion, `race_completion`/`race_deadline` deliver bare events, and any event after the outcome is counted by `race_late` and cannot change it. `tests/run/deadline_race.ae` pins completion-first, deadline-first, the tie, late events after both outcomes and the single-outcome invariant; it runs on the pure-MIR, tree and interpreter paths.)
 - [ ] M4.4.06: **blocking-call pool.** Saturate the pool and show a timer task can still run. (The network slice has no test saturating blocking workers while a timer progresses.)
 - [ ] M4.4.07: **backpressure.** Throttle a slow peer and verify bounded queued bytes and eventual recovery. (The fixture covers bounded in-memory buffering. Slow-peer recovery over a socket is pending.)
 

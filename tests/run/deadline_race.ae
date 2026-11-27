@@ -1,0 +1,45 @@
+// M4.4.05: race a deadline against a completion and publish exactly one
+// terminal outcome. The race lives in `std/test/fake_io.ae`; this pins the
+// "earliest wins, later events are late and ignored" rule.
+use "../../std/std/test/fake_io.ae";
+
+fn main() {
+    // Completion before the deadline wins.
+    var a = race_new();
+    assert(race_complete_at(&mut a, 3, 10, 42) == 1);
+    assert(race_outcome(&a) == 1);
+    assert(race_value(&a) == 42);
+    assert(race_late(&a) == 0);
+    // A later deadline event cannot change the outcome; it is counted late.
+    assert(!race_deadline(&mut a));
+    assert(race_late(&a) == 1);
+    assert(race_outcome(&a) == 1);
+    assert(race_value(&a) == 42);
+
+    // Deadline fires first: one timeout outcome.
+    var b = race_new();
+    assert(race_complete_at(&mut b, 12, 10, 7) == 2);
+    assert(race_outcome(&b) == 2);
+    assert(race_value(&b) == -1);
+    // A late completion after the timeout is ignored.
+    assert(!race_completion(&mut b, 99));
+    assert(race_late(&b) == 1);
+    assert(race_outcome(&b) == 2);
+    assert(race_value(&b) == -1);
+
+    // A tie (at == deadline) is won by the completion.
+    var t = race_new();
+    assert(race_complete_at(&mut t, 10, 10, 5) == 1);
+    assert(race_value(&t) == 5);
+
+    // Exactly one outcome across repeated events.
+    var c = race_new();
+    assert(race_completion(&mut c, 5));
+    assert(!race_completion(&mut c, 6));
+    assert(!race_deadline(&mut c));
+    assert(race_late(&c) == 2);
+    assert(race_outcome(&c) == 1);
+    assert(race_value(&c) == 5);
+
+    print("deadline race ok");
+}
