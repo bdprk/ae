@@ -161,6 +161,7 @@ FILES = [
     "tests/run/generic_owned.ae",
     "tests/run/hash_trait.ae",
     "tests/run/iterator_trait.ae",
+    "tests/run/json_encode.ae",
     "tests/run/methods.ae",
     "tests/run/mut_param_fields.ae",
     "tests/run/mutex_guard.ae",

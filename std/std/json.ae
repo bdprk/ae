@@ -1,0 +1,164 @@
+// std/std/json.ae
+// Pure-AE JSON writer (P4.4). The runtime only reads JSON today (json_get and
+// its typed siblings); this module is the other half a caller needs to emit a
+// document. It composes: encode each scalar with its own encoder, assemble
+// arrays and objects out of the encoded pieces, and the result is a string a
+// file or socket can carry.
+//
+// `string` is a byte container (ADR-0244), so encoding walks the raw bytes:
+// the ASCII characters JSON must escape (`"`, `\`, the control bytes) are all
+// single-byte, and every other byte is copied together with the whole UTF-8
+// sequence it starts so a multibyte character is never split.
+
+use "../core/utf8.ae";
+
+// Two lower-case hex digits for a byte value in 0..255, used by the `\u00XX`
+// escape for control characters without a short form.
+fn hex2(value: i64) -> string {
+    let digits = "0123456789abcdef";
+    let hi = (value >> 4) & 15;
+    let lo = value & 15;
+    return slice(digits, hi, hi + 1) + slice(digits, lo, lo + 1);
+}
+
+// A JSON string: surrounding double quotes, with `"`, `\`, and the control
+// characters escaped. Multibyte UTF-8 is copied through unchanged (JSON allows
+// raw UTF-8). A byte that is not a valid UTF-8 lead is copied on its own so an
+// invalid buffer still round-trips instead of trapping.
+pub fn encode_string(text: &string) -> string {
+    let raw = bytes(text);
+    let size = len(raw);
+    var out = "";
+    var at = 0;
+    while at < size {
+        let b = raw[at];
+        if b == 34 {
+            // '"' -> \"
+            let grown = out + "\\\"";
+            out = grown;
+            at = at + 1;
+        } else if b == 92 {
+            // '\\' -> \\
+            let grown = out + "\\\\";
+            out = grown;
+            at = at + 1;
+        } else if b == 8 {
+            // backspace
+            let grown = out + "\\b";
+            out = grown;
+            at = at + 1;
+        } else if b == 12 {
+            // form feed
+            let grown = out + "\\f";
+            out = grown;
+            at = at + 1;
+        } else if b == 10 {
+            // newline
+            let grown = out + "\\n";
+            out = grown;
+            at = at + 1;
+        } else if b == 13 {
+            // carriage return
+            let grown = out + "\\r";
+            out = grown;
+            at = at + 1;
+        } else if b == 9 {
+            // tab
+            let grown = out + "\\t";
+            out = grown;
+            at = at + 1;
+        } else if b < 32 {
+            // Any other control character has only the \u00XX spelling.
+            let grown = out + "\\u00" + hex2(b);
+            out = grown;
+            at = at + 1;
+        } else {
+            // Copy the whole UTF-8 sequence this byte starts.
+            var width = utf8_sequence_length(b);
+            if width == 0 {
+                width = 1;
+            }
+            if at + width > size {
+                width = 1;
+            }
+            let piece = slice(text, at, at + width);
+            let grown = out + piece;
+            out = grown;
+            at = at + width;
+        }
+    }
+    return "\"" + out + "\"";
+}
+
+pub fn encode_bool(value: bool) -> string {
+    if value {
+        return "true";
+    }
+    return "false";
+}
+
+pub fn encode_i64(value: i64) -> string {
+    return to_string(value);
+}
+
+// A finite float renders with `to_string`; NaN and the infinities have no JSON
+// number spelling, so they are written as `null` (the usual choice a JSON
+// encoder makes rather than emitting invalid JSON).
+pub fn encode_f64(value: f64) -> string {
+    if value != value {
+        return "null";
+    }
+    let text = to_string(value);
+    if contains(text, "inf") || contains(text, "Inf") || contains(text, "nan") || contains(text, "NaN") {
+        return "null";
+    }
+    return text;
+}
+
+pub fn encode_null() -> string {
+    return "null";
+}
+
+// `[ item, item, ... ]` from already-encoded element strings. Each element is
+// copied in, so a borrowed vector of encoded pieces works.
+pub fn encode_array(items: &vec[string]) -> string {
+    var out = "[";
+    var first = true;
+    for item in items {
+        if first {
+            first = false;
+        } else {
+            let comma = out + ",";
+            out = comma;
+        }
+        let grown = out + slice(item, 0, len(item));
+        out = grown;
+    }
+    return out + "]";
+}
+
+// `"key": value` from an encoded key text (without quotes) and an already
+// encoded value string. The key is quoted and escaped here; the value is
+// inserted verbatim, so a caller passes `encode_i64(..)`, `encode_string(..)`
+// or a nested `encode_object(..)`.
+pub fn encode_field(key: &string, encoded_value: &string) -> string {
+    return encode_string(key) + ":" + slice(encoded_value, 0, len(encoded_value));
+}
+
+// `{ member, member, ... }` from already-encoded member strings (each one a
+// `"key":value` pair produced by `encode_field`).
+pub fn encode_object(members: &vec[string]) -> string {
+    var out = "{";
+    var first = true;
+    for member in members {
+        if first {
+            first = false;
+        } else {
+            let comma = out + ",";
+            out = comma;
+        }
+        let grown = out + slice(member, 0, len(member));
+        out = grown;
+    }
+    return out + "}";
+}

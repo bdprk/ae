@@ -1,0 +1,41 @@
+// P4.4: the pure-AE JSON writer. The runtime has readers (json_get and the
+// typed siblings); this pins the emitting half — scalar encoders, string
+// escaping (including multibyte text), and array/object assembly.
+use "../../std/std/json.ae";
+
+fn main() {
+    // Scalars.
+    assert(encode_i64(0) == "0");
+    assert(encode_i64(-42) == "-42");
+    assert(encode_bool(true) == "true");
+    assert(encode_bool(false) == "false");
+    assert(encode_f64(2.5) == "2.5");
+    assert(encode_null() == "null");
+
+    // String escaping: quote, backslash, the short control forms, and a
+    // multibyte character copied through unchanged.
+    assert(encode_string("plain") == "\"plain\"");
+    assert(encode_string("a\"b") == "\"a\\\"b\"");
+    assert(encode_string("a\\b") == "\"a\\\\b\"");
+    assert(encode_string("line\nbreak") == "\"line\\nbreak\"");
+    assert(encode_string("tab\there") == "\"tab\\there\"");
+    assert(encode_string("héllo") == "\"héllo\"");
+
+    // Arrays: encoded elements joined with commas.
+    var values = strvec_new();
+    push(values, encode_i64(1));
+    push(values, encode_i64(2));
+    push(values, encode_i64(3));
+    let array = encode_array(&values);
+    print(array);
+    assert(array == "[1,2,3]");
+
+    // Objects: each member is a quoted key plus an already-encoded value.
+    var members = strvec_new();
+    push(members, encode_field("name", encode_string("gateway")));
+    push(members, encode_field("workers", encode_i64(4)));
+    push(members, encode_field("debug", encode_bool(true)));
+    let object = encode_object(&members);
+    print(object);
+    assert(object == "{\"name\":\"gateway\",\"workers\":4,\"debug\":true}");
+}
