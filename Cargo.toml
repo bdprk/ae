@@ -14,3 +14,15 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout", "crates/ae-query", "crates/ae-codegen-c", "crates/ae-lsp"]
 default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout", "crates/ae-query", "crates/ae-codegen-c", "crates/ae-lsp"]
 resolver = "3"
+
+# Keep build artifacts small. The full debuginfo + incremental cache in the dev
+# profile was dominating disk usage (~6 GB for this small workspace). Line-table
+# debuginfo is enough for backtraces, and dependencies do not need debuginfo at
+# all. Incremental is disabled to avoid the multi-GB `debug/incremental` cache;
+# re-enable locally with `CARGO_INCREMENTAL=1` if you want faster edit loops.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
