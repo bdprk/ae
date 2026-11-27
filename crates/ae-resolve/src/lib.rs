@@ -175,6 +175,36 @@ mod tests {
     }
 
     #[test]
+    fn imported_modules_walk_their_own_bodies_with_a_file_tag() {
+        // R3b: an imported module keeps its own def table and body walk, so a
+        // function index is per file (the file name is the tag).
+        let lib = parse_module(
+            "lib.ae",
+            "pub fn helper(a: i64) -> i64 {\n    let doubled = a * 2;\n    return doubled;\n}\n",
+        ).expect("the library parses");
+        let entry = parse_module(
+            "main.ae",
+            "use \"lib.ae\";\nfn main() {\n    let x = helper(2);\n    print(x);\n}\n",
+        ).expect("the entry parses");
+        let resolution = crate::resolve::resolve_with_imports(&entry, &[("lib.ae".to_owned(), lib)]);
+        assert_eq!(resolution.imported.len(), 1);
+        let (file, imported) = &resolution.imported[0];
+        assert_eq!(file, "lib.ae");
+        assert_eq!(imported.functions.len(), 1, "the imported body is walked");
+        let helper_def = imported.functions[0].function_def;
+        assert!(imported.defs.iter().any(|def| def.kind.is_local() && def.owner == Some(helper_def) && def.name == "doubled"));
+        assert!(imported.diagnostics.is_empty(), "{:?}", imported.diagnostics);
+        // Each file numbers its own functions; the file tag keeps the two
+        // DefId(0) names apart, and neither table leaks a local into the other.
+        assert_eq!(imported.functions[0].function, resolution.functions[0].function);
+        assert!(resolution.defs.iter().any(|def| def.kind.is_local() && def.name == "x"));
+        assert!(!imported.defs.iter().any(|def| def.name == "x"));
+        let text = dump(&entry, &resolution);
+        assert!(text.contains("imported bodies:\nfile lib.ae:\n"), "{text}");
+        assert!(text.contains("locals in #0 helper:"), "{text}");
+    }
+
+    #[test]
     fn impl_methods_own_their_receiver_and_join_the_impl() {
         let source = "struct Counter { count: i64 }\nimpl Counter {\n    fn peek(&self) -> i64 { return self.count; }\n}\n";
         let resolution = resolve_source(source);

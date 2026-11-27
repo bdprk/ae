@@ -56,6 +56,29 @@ pub fn dump(module: &Module, resolution: &Resolution) -> String {
             ));
         }
     }
+    function_blocks(&mut out, resolution);
+    // R3b: imported modules' bodies are walked too, each with its own file
+    // tag and def table. The section is omitted when nothing is imported, so
+    // single-file snapshots keep their exact text.
+    if !resolution.imported.is_empty() {
+        out.push_str("imported bodies:\n");
+        for (file, imported) in &resolution.imported {
+            out.push_str(&format!("file {file}:\n"));
+            function_blocks(&mut out, imported);
+        }
+    }
+    if resolution.diagnostics.is_empty() {
+        out.push_str("diagnostics: none\n");
+    } else {
+        out.push_str("diagnostics:\n");
+        for diagnostic in &resolution.diagnostics {
+            out.push_str(&format!("  {diagnostic}\n"));
+        }
+    }
+    out
+}
+
+fn function_blocks(out: &mut String, resolution: &Resolution) {
     for function in &resolution.functions {
         let name = def_name(resolution, function.function_def);
         out.push_str(&format!("locals in #{} {name}:\n", function.function_def.0));
@@ -90,15 +113,6 @@ pub fn dump(module: &Module, resolution: &Resolution) -> String {
             ));
         }
     }
-    if resolution.diagnostics.is_empty() {
-        out.push_str("diagnostics: none\n");
-    } else {
-        out.push_str("diagnostics:\n");
-        for diagnostic in &resolution.diagnostics {
-            out.push_str(&format!("  {diagnostic}\n"));
-        }
-    }
-    out
 }
 
 fn def_name(resolution: &Resolution, id: DefId) -> String {

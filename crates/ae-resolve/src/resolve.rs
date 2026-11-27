@@ -29,6 +29,10 @@ pub struct Resolution {
     /// variant payloads first, then functions in module order).
     pub spellings: Vec<SpellingEntry>,
     pub diagnostics: Vec<Diagnostic>,
+    /// R3b: each imported module's own body walk, in import order, tagged by
+    /// the module's file name. Function indices are per file, and the def ids
+    /// inside an entry belong to that module's own table.
+    pub imported: Vec<(String, Box<Resolution>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,12 +107,27 @@ pub fn resolve_with_tokens(
     imports: &[(String, Module)],
     tokens: &[Token],
 ) -> Resolution {
+    let mut resolution = resolve_entry(module, imports, tokens, None);
+    // R3b: every imported module keeps its own def table and body walk, so a
+    // function index is per file. The same transitive import list seeds each
+    // module's visible names (minus the module itself, whose own items are
+    // registered first); the entry's own items never leak into them.
+    resolution.imported = imports.iter().enumerate()
+        .map(|(index, (_, imported))| {
+            let tokens = ae_syntax::lex_diagnostic(&imported.source).unwrap_or_default();
+            (imported.file.clone(), Box::new(resolve_entry(imported, imports, &tokens, Some(index))))
+        })
+        .collect();
+    resolution
+}
+
+fn resolve_entry(module: &Module, imports: &[(String, Module)], tokens: &[Token], skip_import: Option<usize>) -> Resolution {
     let mut pass = Pass::new(module, tokens);
     pass.items();
-    pass.seed_imports(imports);
+    pass.seed_imports(imports, skip_import);
     pass.spellings();
     pass.bodies();
-    Resolution { defs: pass.defs, functions: pass.functions, spellings: pass.spellings, diagnostics: pass.diagnostics }
+    Resolution { defs: pass.defs, functions: pass.functions, spellings: pass.spellings, diagnostics: pass.diagnostics, imported: Vec::new() }
 }
 
 struct Pass<'m> {
@@ -260,8 +279,13 @@ impl<'m> Pass<'m> {
 
     /// Make the imports' `pub` items visible under free names. Ranges come
     /// from the imported module's own source, so each import is lexed once.
-    fn seed_imports(&mut self, imports: &[(String, Module)]) {
-        for (_, imported) in imports {
+    /// `skip_import` names the import whose own items are being resolved (its
+    /// own registration already claimed them).
+    fn seed_imports(&mut self, imports: &[(String, Module)], skip_import: Option<usize>) {
+        for (index, (_, imported)) in imports.iter().enumerate() {
+            if Some(index) == skip_import {
+                continue;
+            }
             let Ok(tokens) = ae_syntax::lex_diagnostic(&imported.source) else { continue };
             for declaration in &imported.declarations {
                 if !declaration.public {

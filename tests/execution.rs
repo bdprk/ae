@@ -8989,23 +8989,31 @@ fn resolver_agrees_with_the_compiler_on_accepted_programs() {
                     }
                 };
                 let _ = &source;
-                for diagnostic in &resolution.diagnostics {
-                    failures.push(format!("{label}: {}", diagnostic.message));
-                }
-                for function in &resolution.functions {
-                    for occurrence in &function.occurrences {
-                        if matches!(occurrence.role, ae_resolve::Role::Write | ae_resolve::Role::Borrow) && occurrence.target.is_none() {
-                            failures.push(format!("{label}: write or borrow of '{}' resolves to nothing", occurrence.name));
+                // R3b: imported modules walk their own bodies too; a file tag
+                // keeps each module's function indices and def table apart.
+                let mut pending = vec![(&resolution, label.clone())];
+                while let Some((current, scope)) = pending.pop() {
+                    for diagnostic in &current.diagnostics {
+                        failures.push(format!("{scope}: {}", diagnostic.message));
+                    }
+                    for function in &current.functions {
+                        for occurrence in &function.occurrences {
+                            if matches!(occurrence.role, ae_resolve::Role::Write | ae_resolve::Role::Borrow) && occurrence.target.is_none() {
+                                failures.push(format!("{scope}: write or borrow of '{}' resolves to nothing", occurrence.name));
+                            }
                         }
                     }
-                }
-                // ADR-0228: every type spelling of an accepted program
-                // classifies — an unknown name would mean the compiler
-                // accepted a type the resolver cannot see (an imported
-                // type, or a drift bug).
-                for entry in &resolution.spellings {
-                    if entry.spelled.spelling.is_unknown() {
-                        failures.push(format!("{label}: type spelling of '{}' is unknown", entry.name));
+                    // ADR-0228: every type spelling of an accepted program
+                    // classifies — an unknown name would mean the compiler
+                    // accepted a type the resolver cannot see (an imported
+                    // type, or a drift bug).
+                    for entry in &current.spellings {
+                        if entry.spelled.spelling.is_unknown() {
+                            failures.push(format!("{scope}: type spelling of '{}' is unknown", entry.name));
+                        }
+                    }
+                    for (file, imported) in &current.imported {
+                        pending.push((imported, format!("{scope} -> {file}")));
                     }
                 }
                 checked += 1;
