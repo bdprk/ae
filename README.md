@@ -1,92 +1,103 @@
 # ae
 
-ae is an independently developed, experimental native programming language whose initial target platforms are Windows and Linux x86-64. Its design aims to match Go's compilation speed, Rust's runtime performance and safety, while minimizing CPU, memory, and disk footprint. General-purpose capabilities and ecosystem development are secondary but long-term essential goals (see [Design Roadmap](docs/design.md)).
+ae is an independently developed, experimental native programming language, currently
+targeting Windows and Linux x86-64.
 
-Priorities: Safety and correctness are non-negotiable bottom lines; runtime CPU and memory are optimized jointly; both compilation speed and disk footprint must meet future benchmark-based budgets. Features may be sacrificed to serve these goals.
+It aims to combine Go's compile speed with Rust's runtime performance and safety, while
+keeping CPU, memory and disk footprint small. Safety and correctness are non-negotiable;
+runtime cost, compile speed and binary size are optimized jointly against benchmark
+budgets. A broad ecosystem is a long-term but secondary goal.
 
-Subsets currently supported by the prototype: `fn main()` and user-defined functions (`i64`/`bool`/`f64`/`string`/`vec` parameters and return values, including `&vec` read-only borrows and `&[i64; N]` array borrows), `let`/`var`, assignments, integer, floating-point and boolean literals, string literals and escapes, parentheses, `+ - * / %` and unary `-`/`!`, checked arithmetic (overflows and division by zero report their source location and exit), **`f64` (IEEE 754 binary64, no implicit conversions, division-by-zero checks, cross-platform canonical text representation)**, comparisons (including string content equality) and `&&`/`||` short-circuiting, `if`/`else if`/`else`, `while`, `for i in a..b` (half-open range, bounds evaluated exactly once), `break`/`continue`, `assert`, `print`, `len`, fixed-size arrays and **dynamic vectors `vec`** (`push`/`pop`/indexing, with full bounds checking), **move semantics and deterministic deallocation for owned strings and vectors**, **`exit(status_code)` (flushes output and deallocates surviving owned values prior to termination)**, **modules (`use` imports, explicit `pub` exports, cycle detection, rejection of duplicate names across files)**, **structs (owned fields, field borrowing, deterministic deallocation)**, **enums and exhaustive `match`** (variant payloads `i64`/`bool`/`string`, payloads deallocated deterministically alongside the enum), **generic functions** (`fn identity[T](x: T) -> T`, invoked as `identity[i64](41)`, monomorphized per argument, instantiable across files, generic bodies can further instantiate other generics, cyclic instantiation errors out at the closure point), **type parameter constraints** (`fn add[T: Add](a: T, b: T)`, built-ins `Add`/`Eq`/`Ord`/`Copy`, checks argument shapes at call sites, checks constraint and function body capability coverage at declaration sites, unknown or duplicate constraints error out at declaration sites), **traits and impls (static dispatch)** (`trait Area { fn area(shape: T) -> i64; }` + `impl Area for Rect { ... }`, trait methods called directly within generic bodies, resolved to impl functions upon instantiation—no vtables; coherence rules: impl and trait/type must be in the same file, `(trait, type)` pair must be globally unique per program), **generic structs** (`struct Pair[K, V] { left: K, right: V }`, share a single layout for the same argument list, different arguments yield distinct types, fields can be any named type, budget of 256 struct types per program), **generic enums and `Option[T]`** (`enum Either[T, U] { ... }` monomorphized by argument list, share a single layout for the same argument list, pre-preset `Option[T]` for return values that "may be absent", budget of 256 enum types per program), **error and `None` propagation `?`** (`let x = call()?;` and `call()?;`, deallocates bound values and propagates `Err`/`None` as-is to the caller, binds or deallocates payloads for `Ok`/`Some`; result enums and `Option[T]` follow the same rules), **recoverable errors** (pre-preset `ReadResult`/`WriteResult`/`IntResult`/`DirResult`/`FileResult`/`StatusResult`/`BoolResult`/`CommandResult` along with `try_read_file`/`try_write_file`/`try_list_dir`/`try_file_info`/`parse_int`/`to_string`, failures are returned as values rather than terminating the process), **directory traversal and path queries** (`try_list_dir`/`path_exists`/`path_is_dir`), **path algebra** (`path_join`/`path_name`/`path_parent`, uniform `/` across both platforms), **file maintenance operations** (`try_copy_file`/`try_rename_path`/`try_remove_file`/`try_create_dir`/`try_remove_dir`, all recoverable), **file metadata** (`try_file_info` returns byte count, Unix timestamp in seconds, and directory flags), **in-place sorting and reversal** (`sort`/`reverse`, numeric order for `i64`, lexicographical byte order for `vec[string]`), **wall-clock time** (`now_s`/`now_ms`, sharing the same unit as file mtime), **environment variables** (`env` returns a `ReadResult`, distinguishing between "empty value" and "unset"), **append writing** (`try_append_file`), **standard input and working directory** (`read_stdin` reads all input as binary, `cwd` returns a `/`-normalized absolute path, both return result values; `set_cwd` changes the process working directory affecting subsequent relative paths and child processes), **JSON path queries** (`json_get`/`json_int`/`json_bool`/`json_len`/`json_has`, paths like `key.sub[2]`, returning values instead of sentinel values; read-only, schema-less, unescaping `\uXXXX` and surrogate pairs), **empty string vectors and child process execution** (`strvec_new()` creates an empty `vec[string]`; `run_command(program, args)` captures combined stdout/stderr, exit code returned in `Ok`, launch failures yield `Err`, signals reported as `128 + signal_number`, without implicit shell invocation), **hash maps `map[string, i64]`** (`map_new`/`map_get`/`map_has`/`map_remove`/`keys`, missing keys return `Err` instead of a `0` sentinel, `keys` copied in lexicographical byte order, **`map_inc` single-lookup counting starting from zero on missing keys**), **read-only borrowing parameters** (`&string`/`&vec[string]`, no movement or copying), **UTF-8 character boundaries** (`slice` prohibits splitting characters, `utf8_len`/`utf8_prefix` count and truncate by code points), **`for x in vec` element iteration**, **file reading and writing `read_file`/`write_file`** (UTF-8 paths; supports both source literals and non-ASCII paths passed via the command line—`args()` converts ANSI command lines to UTF-8 via UTF-16 on Windows, ADR-54; characters unrepresentable in the code page are still lost prior to program entry), `bytes()`/`contains()`/`starts_with()`/`ends_with()`/`trim()`/`slice()`/`split()`/`join()`/`lines()`/`count_lines_with()`/`args()` and `vec[string]` string vectors alongside **borrowed string views** (`slice_view` for zero-copy slicing with borrow tracking), **`find(text, needle) -> IntResult`** (byte index of the first match, returns `Err` instead of a `-1` sentinel on miss, zero allocations on success path), **read-only views of struct string fields** (`slice_view(p.name, 0, 5)`, borrows the entire variable: moving, wholesale assignment, or writing to any field will be rejected, ADR-52), **single-chunk arena for `split`/`lines`** (ADR-49: allocation count per split is independent of token count, text payload 1.84x compared to control), **streaming token cursor `tokenize`** (ADR-53: shares boundaries with `split` but performs zero-allocations per token, 9.24 → 3.56 ms and peak memory 12.52 → 3.88 MB for 2.5 MB of text), **console output encoding** (ADR-55: converts UTF-8 to UTF-16 when writing to the console for wide-character APIs, resolving garbled Chinese characters in Windows terminals; writes to pipes and files remain raw UTF-8 bytes, unrepresentable console characters rendered as `U+FFFD`), **generic borrowing parameters `&T`** (monomorphized at each instantiation site into existing `string view`/`&vec`/`&vec[string]`, introducing no new lifetimes) and **read-only borrow forwarding** (`&vec` parameters can be passed as-is to another read-only parameter). Expressions are evaluated from left to right; string and vector assignments, argument passing, and returns are handled as moves, with post-move usages rejected by the compiler backed by runtime null checks; block exits, early returns, and jump paths all have idempotent deallocations inserted.
+Status: a working prototype with concurrency (OS threads, channels, atomic
+cells, a cooperative executor and a worker pool), not yet a complete
+memory-safe language (no formal safety proof). Exact rules and limits live in
+[Current Language Semantics](docs/current-language.md).
 
-Diagnostics display row and column numbers; generics are currently monomorphized per argument (enums, structs, functions). `trait`/`impl` now supports **static dispatch** (ADR-47, cross-platform): dispatch is resolved at instantiation into a direct call, with no method table. However, this is a v1 implementation—it lacks method call syntax, `&T` trait parameters, generic `impl`s, default methods, and dynamic dispatch; trait methods also cannot be called directly outside of generic bodies. Capability coverage checking at the declaration site (ADR-40) is merely an early rejection mechanism, not static dispatch, and cannot prove the validity of a generic body. Concurrency and formal safety proofs are not yet implemented; therefore, it cannot be claimed that a complete memory-safe language is finished. `&T` is only available for the three existing borrowing shapes; `find` counts by bytes and behaves differently from `contains` when embedding NULs; `f64` lacks implicit conversions, a math library, and cannot yet be stored in containers (`vec` and `map` remain integer-only containers). See [Current Language Semantics](docs/current-language.md) for rules and limitations.
+## What works
+
+- **Core language**: functions, `let`/`var`, integers/`f64`/`bool`/`string`,
+  checked arithmetic (overflow and division-by-zero trap with source location),
+  `if`/`else`, `while`, `for i in a..b`, `break`/`continue`, `assert`.
+- **Data**: fixed arrays and dynamic `vec`, both fully bounds-checked; structs;
+  enums with exhaustive `match`; slices `&[T]` and `&mut [T]`.
+- **Memory**: move semantics with deterministic deallocation; borrow checking for
+  `&T`, `&vec`, `&string` and zero-copy string views.
+- **Abstraction**: modules (`use`/`pub`), monomorphized generics with constraints
+  (`Add`/`Eq`/`Ord`/`Copy`), traits and impls with static dispatch, `Option[T]` and
+  `?` propagation, plus a family of recoverable `*Result` types.
+- **Strings**: `split`/`join`/`lines`/`slice`/`find`/`trim`/`contains`/
+  `starts_with`/`ends_with`/`count_lines_with`, plus zero-copy `slice_view` and the
+  zero-allocation streaming cursor `tokenize`.
+- **Containers**: `vec[T]`, `map[string, i64]`, `vec[f64]`, `map[string, f64]`.
+- **Concurrency**: `spawn`/`wait`, channels (bounded, rendezvous, `select`),
+  `atomic` cells, shared boxes, mutexes with guards, `exec`/`task_spawn`/
+  `task_yield`, scoped tasks and a worker pool.
+- **Files, process, system**: `read_file`/`write_file` and recoverable `try_*`
+  variants, path algebra, directory traversal, file metadata, `run_command`,
+  `args`, stdin, `cwd`, environment variables, wall-clock time.
+- **Standard library**: `std/core`, `std/alloc`, `std/compiler` and hosted
+  `std/std` modules, including the `fs`/`path`/`time`/`process`/`io` surfaces and
+  a UTF-8 validator (`is_utf8`, `utf8_error_offset`).
+- **Other**: JSON path queries, math built-ins (`sqrt`, `abs`, `floor`, `ceil`,
+  `round`, `exp`, `log`, `sin`, `cos`, `pow`, `atan2`, `min`, `max`).
+
+## Backends
+
+Two C11 backends emit the same language semantics:
+
+- the **legacy MIR backend** (the default for `build`/`run`);
+- the **pure-MIR backend** (`emit-pure-c`, or `build --pure` / `run --pure`):
+  a separate lowering with an independent C runtime. It is at output parity on
+  the whole accepted corpus and the examples, and it is faster on
+  recursion/index-heavy code (fib 1.7×, fannkuch 2.9×, spectralnorm 1.4× on the
+  recorded host; see [the backend comparison](bench/reports/2026-11-27-pure-vs-legacy-windows.md)).
 
 ## Usage
 
-Exit codes are part of the interface: `0` success, `2` the command line itself was wrong (unknown command, missing argument, bad flag), `1` the tool ran but the program or package was rejected (diagnostics, I/O, a stale lockfile), and a compiled program's own `exit(n)` status is passed through unchanged.
-
-Requires Rust and a C11-compatible GCC; use `AE_CC` to specify an alternative compatible compiler executable. Both Windows (GCC/MinGW) and Linux (GCC) have been verified natively: all tests pass on both platforms, and Linux sanitizer checks pass. Example outputs are consistent after normalizing line endings (Windows stdout uses CRLF, Linux uses LF; output to the Windows console is converted to UTF-16 according to the console code page, see ADR-55; for details, see the [Platform Support Matrix](docs/platform-matrix.md)).
+Exit codes are part of the interface: `0` success, `2` bad command line, `1` the
+program or package was rejected (diagnostics, I/O), and a compiled program's own
+`exit(n)` is passed through. Requires Rust and a C11 GCC (`AE_CC` to override).
+Verified natively on Windows (MinGW) and Linux.
 
 ```sh
 cargo test
 cargo run -- check examples/hello.ae
-cargo run -- check --json examples/hello.ae   # For editors: stdout is exactly a JSON array
-cargo run -- emit-c examples/hello.ae
-cargo run -- fmt examples/hello.ae
-cargo run -- doc examples/hello.ae            # Render /// doc comments as Markdown
-cargo run -- doc --test examples/hello.ae     # Compile and run fenced examples in doc comments
-cargo run -- explain E0102                     # Stable explanation for a diagnostic code
-cargo run -- test tests_demo/strings_test.ae   # Convention: fn test_<name>() -> i64, 0 for pass
+cargo run -- check --json examples/hello.ae   # stdout is exactly a JSON array
 cargo run -- run examples/hello.ae
-cargo run -- run examples/heart.ae
-cargo run -- run examples/enums.ae
-cargo run -- run examples/concat.ae
-cargo run -- run examples/sum_numbers.ae -- file_path
-cargo run -- run examples/find_files.ae -- . txt
-cargo run -- run examples/file_tidy.ae
-cargo run -- run examples/copy_notes.ae
-cargo run -- run examples/word_count.ae
-cargo run -- run examples/maybe.ae
-cargo run -- run examples/option_propagate.ae
-cargo run -- run examples/generic_borrow.ae
-cargo run -- run examples/find_text.ae
-cargo run -- run examples/float_math.ae
-cargo run -- run examples/dir_report.ae
-cargo run -- run examples/json_report.ae
-cargo run -- run examples/pairs.ae
-cargo run -- run examples/generic_fn.ae
-cargo run -- run examples/tokens.ae   # Streaming token cursor: zero-allocation per token
-cargo run -- run examples/constraints.ae
-cargo run -- run examples/generic_constraints.ae
-cargo run -- run examples/run_tool.ae -- git --version   # Forward arguments to subprocess
-cargo run -- run examples/text_preview.ae
-cargo run -- run examples/modules/main.ae
-cargo run -- run examples/strings.ae
-cargo run -- run examples/vectors.ae
-cargo run -- run examples/grep.ae
-cargo run -- run examples/loops.ae
-cargo run -- run examples/arrays.ae
-cargo run -- run examples/functions.ae
-cargo run -- run examples/borrow.ae
-cargo run -- build examples/arithmetic.ae -o arithmetic.exe
-cargo run -- run examples/arithmetic.ae --release
-cargo run -- cache stats            # Entry count, byte size, limit
-cargo run -- deps examples/modules/main.ae   # Module dependency graph and public interface summary
-cargo run -- version
+cargo run -- run examples/hello.ae --pure                    # pure-MIR C backend
+cargo run -- build examples/arithmetic.ae -o arithmetic.exe   # -O2 (add --debug for -O0)
+cargo run -- build examples/arithmetic.ae -o arithmetic.exe --pure
+cargo run -- run examples/hello.ae --release                  # -O2
+cargo run -- test tests_demo/strings_test.ae
+cargo run -- emit-c examples/hello.ae
+cargo run -- emit-pure-c examples/hello.ae
+cargo run -- fmt examples/hello.ae
 ```
 
-`build` produces artifacts for user execution, defaulting to `-O2`; append `--debug` to revert to fast `-O0`. `run` is for the development loop, defaulting to `-O0`; append `--release` to use `-O2` (ADR-59). Both modes retain all checks; optimization flags must be placed at the end of the line, before the `--` forwarding separator; unknown flags will trigger an error. Artifacts from `build` and `run` are stored in a content-addressed cache (keys cover generated C, mode, C compiler identity, compiler version, and platform); identical inputs reuse the existing executable. `AE_CACHE` overrides the cache location; `cache dir|clear|stats` manages it. `run` compiles and executes in the system temporary directory; `build` writes to the specified path and refuses to overwrite existing files. On Linux, the output can be named `arithmetic`.
+`build` and `run` share a content-addressed cache (`AE_CACHE` overrides the
+location; `cache dir|clear|stats` manages it). The generated C keeps only the
+runtime functions the program reaches, so emitted size varies by program.
+`--pure` compiles through the pure-MIR backend and bypasses that cache (the
+cached C belongs to the legacy backend).
 
-The generated C code only retains runtime functions reachable by the program (via a conservative transitive closure based on symbol references), so the byte size of `emit-c` varies based on the built-ins used; do not treat it as a fixed value. `deps` outputs the module dependency graph and a hash of the public interface summary; modifying a function body does not change the summary, but modifying a `pub` signature does, though this **does not yet participate in cache invalidation**—user modules remain a single translation unit. Generated C also omits `<windows.h>` when the program does not touch the Win32 layer at all (ADR-39): it is retained as usual when using files, directories, clocks, environment variables, working directories, or subprocesses; pure computational programs no longer parse it. This does not change any declarations or introduce ABI assumptions; the generated C text is identical across both platforms, with benefits realized only on Windows. See [Current Language Semantics](docs/current-language.md) and ADR-38/39 for rules and empirical trade-offs. The suite includes four workloads: `sum`, `text` (materialized tokens: `split`/`strings.Split`), `textlazy` (lazy scanning: `tokenize`/manual index scanning/Rust's `split(' ')`), and `map`. `bench/tokens_timings.py` compares the two tokenization forms of the same program and provides peak memory usage. Timing and peak memory are measured in two separate passes (the sampler previously inflated each number by approximately 15 ms on Windows). `bench/build_timings.py` can re-run timings for four scenarios: cold build, no modifications, modified implementation, and modified interface; adding `--header-baseline` alternates timing within the same run after restoring `<windows.h>` to the generated C, avoiding non-comparable wall-clock figures across sessions.
+## Limitations
 
-Generic functions with constraints also undergo capability coverage checking at **declaration time** (ADR-40): the intersection of constraint whitelists is taken as the set of valid types. If the function body performs an operation on `T` that is not supported by any valid type in this set, an error is reported at the type parameter declaration. For example, `fn f[T: Copy](a: T, b: T) -> T { return a + b; }` will be rejected (since `Copy` allows `bool`), which can be fixed by changing it to `T: Add`. This is a **tightening**: previously, errors were only reported at instantiation time. It only rejects and does not permit; per-instantiation full type checking remains unchanged, unconstrained generic behavior remains unchanged, and this is **not a trait/impl**. `bench/constraint_audit_timings.py` uses two source files of identical byte size to alternately measure `check`, and asserts that their `emit-c` outputs are byte-for-byte identical—this round does not alter any generated C, executable, or cache.
+- No formal safety proof yet; the borrow checker is calibrated against the
+  accepted corpus but a machine-checked model is future work.
+- No async networking/reactor yet (`std/std/net` is not implemented).
+- Traits are v1: static dispatch only — no method-call syntax, no `&T` trait
+  parameters, no dynamic dispatch.
+- `f64` has no implicit conversions; `vec`/`map` are otherwise integer-oriented.
+- Module interface hashes do not yet participate in cache invalidation.
+- Performance is benchmarked, not claimed: `fib` pays for checked arithmetic
+  that the comparison languages do not perform. Numbers and caveats live in
+  [the backend comparison](bench/reports/2026-11-27-pure-vs-legacy-windows.md).
 
-The compiler frontend shares lexical results across source files (ADR-41): `GenericFn` no longer duplicates the entire token stream and source code for every generic declaration. Files containing a large number of generic declarations now `check` noticeably faster, while the generated C and diagnostics remain completely unchanged. `bench/shared_tokens_timings.py` uses two binaries before and after the change within the same script to alternately measure `check`, asserting that their `emit-c` outputs are byte-for-byte identical and declaration-site diagnostics match; `bench/constraint_audit_timings.py` is used to measure the upper bound of the capability audit itself.
+## Docs
 
-`run` supports forwarding program arguments to the executed program after `--` (which can then be retrieved via `args()`): `cargo run -- run examples/find_files.ae -- examples txt`. Setting `AE_TIMINGS=1` outputs the elapsed times for the frontend, C compilation, linking, and cache hit status. Setting `AE_ALLOC_LIMIT=N` limits the cumulative allocated bytes at runtime to N, which is used to deterministically verify allocation failure diagnostics (terminating with "out of memory" and providing a location once exceeded, rather than acting as a memory quota). `check` performs only lexical, syntactic, and semantic checks and does not require a C compiler.
-
-`check --json` emits one JSON array on stdout: `[]` with exit code 0 on success, or one or more diagnostics with exit code 1. Each diagnostic contains `file`, `line`, `column`, `message`, `byte_start`, `byte_end`, `code`, `suggestions`, and `secondary`; byte offsets form a zero-based, half-open UTF-8 source range and are `null` when no range is available. Lines and columns are one-based; columns count Unicode scalar values. The error code is a stable string where assigned, otherwise `null`. Suggestions are optional human-readable guidance and must not be applied automatically. Secondary labels identify related source ranges when known. Consumers should tolerate additional fields. Text-mode `check` retains its first-error behavior.
-
-Math built-ins v1 (ADR-60): `sqrt`, `abs`, `floor`, `ceil`, `round`, `exp`, `log`, `sin`, `cos`, `pow`, and `atan2`. Both parameters and return values are `f64`, mapped 1:1 to the C library. Domain errors return IEEE values (e.g., `sqrt(-1.0)` is `nan`) rather than terminating, and `round` rounds away from zero at 0.5. Names are reserved, and no implicit conversions are performed (e.g., `sqrt(4)` causes an error). Example: `cargo run -- run examples/math_basics.ae`. `min`/`max` (ADR-64) are implemented at runtime: NaNs are ignored, and ±0 ties are resolved according to total ordering, producing platform-deterministic printed output.
-
-`ae test file.ae [filter]` (ADR-62) supports test name substring filtering, where empty matches result in an error rather than passing silently.
-
-`map[string, f64]` (ADR-65): `f64map_new()` creates an empty table, `m[k] = v` performs writes, `map_get` returns a `FloatResult` (missing keys return a shared read-only constant with zero allocations on misses), and `map_inc`, `keys`, `map_has`, `map_remove`, and `len` share the same shape as i64 maps. Example: `cargo run -- run examples/sensor_stats.ae`.
-
-`vec[f64]` (ADR-61): An owned vector of `f64` elements—literals are inferred by element (`vec[1.0, 2.0]`), checked indexing for read/write, `push`/`pop`, value-based for-in loops, and `&vec[f64]` read-only borrows. Empty vectors are created using `f64vec_new()`. `sort` and `reverse` are explicitly rejected for it (due to NaNs lacking a total order). Example: `cargo run -- run examples/float_stats.ae` (combining statistics with `sqrt`).
-
-The generated C contains only the runtime functions actually used by the program **along with their comments** (ADR-50): the `//` comments above functions are pruned alongside the functions themselves, reducing the generated C for `print(1)` from 25,134 to 11,105 bytes, with end-to-end cold build times dropping from 390.66 to 346.12 ms in practice. `/* */` section comments and `win32-header` markers remain unaffected. On Windows, `ae build` can also handle outputs whose absolute paths contain non-ASCII characters (ADR-51): the C compiler runs inside a temporary directory using relative file names, bypassing the `cannot open output file` error caused by MinGW command line conversions via ANSI code pages.
-
-Verifying the generated C: after running `cargo build`, execute `python scripts/verify_generated_c.py`. On Linux, `--sanitize` can be added to enable address and undefined behavior sanitizers. When MinGW lacks `libasan`, use `--leak` to route through `-Wl,--wrap` for allocation counting (which requires that each program's exit allocation block count equals the empty program baseline). This detection covers limited cases and does not prove that the implementation is completely safe.
-
-For the complete rules of the existing subset, see [Current Language Semantics](docs/current-language.md). For the formal specification of ownership, borrowing, and drops, see [Resource Model](docs/resource-model.md). For design decision records, see [docs/decisions.md](docs/decisions.md). For exploratory measurement tools and limitations, see [Benchmark Notes](bench/README.md). At present, this does not constitute any claim of superior performance over Go, Rust, Gojo, or Python.
+- [Current Language Semantics](docs/current-language.md) · [Resource Model](docs/resource-model.md)
+- [Design Roadmap](docs/design.md) · [Decision Records](docs/decisions.md)
+- [Platform Support Matrix](docs/platform-matrix.md) · [Benchmark Notes](bench/README.md)
 
 ## License
 
