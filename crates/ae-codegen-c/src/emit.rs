@@ -2312,6 +2312,44 @@ fn emit_intrinsic(
             let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
             finish_value(out, body, types, destination, target, &format!("((void *){value})"))
         }
+        "ptr_drop_in_place" => {
+            // The pointer is `void *`; the pointee type decides which release
+            // helper runs, exactly like a drop of a local of that type. A
+            // scalar pointee has nothing to release.
+            let pointer = emit_operand(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "ptr_drop_in_place needs a pointer".to_owned(),
+                })?,
+                types,
+                def_map,
+            )?;
+            let pointee = match types.infer_operand_ty(
+                body,
+                args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "ptr_drop_in_place needs a pointer".to_owned(),
+                })?,
+            ) {
+                Some(TyKind::Ptr(id) | TyKind::PtrMut(id)) => types.pointees.get(&id).copied(),
+                _ => None,
+            };
+            let call = match pointee {
+                Some(TyKind::String) => format!("ae_str_release((ae_str *)({pointer}))"),
+                Some(TyKind::Vector(_)) => format!("ae_vec_release((ae_vec *)({pointer}))"),
+                Some(TyKind::MapOf(_)) => format!("ae_map_release((ae_map *)({pointer}))"),
+                Some(TyKind::Struct(id)) if types.structs.contains_key(&id) => {
+                    format!("ae_rel_struct_{id}((ae_struct_{id} *)({pointer}))")
+                }
+                Some(TyKind::Enum(_, id)) if types.enums.contains_key(&id) => {
+                    format!("ae_rel_enum_{id}((ae_enum_{id} *)({pointer}))")
+                }
+                // A scalar (or an unknown pointee) has no owned state.
+                _ => format!("((void)({pointer}))"),
+            };
+            finish_value(out, body, types, destination, target, &format!("({call}, (int64_t)0)"))
+        }
         other => Err(CodegenError::UnsupportedFeature {
             body_name: body.name.clone(),
             detail: format!("intrinsic '{other}' is not supported by the pure C backend yet"),

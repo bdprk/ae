@@ -62,7 +62,7 @@ existing gates:
 
 ## Evidence
 
-Stage 1 is met: `tests/pure_borrowck_calibration.rs` now requires **164
+Stage 1 is met: `tests/pure_borrowck_calibration.rs` now requires **165
 checked / 0 skips** (`skipped.is_empty()`), and every one of the 164 run
 fixtures lowers, validates and borrow-checks.
 
