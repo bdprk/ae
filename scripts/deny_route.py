@@ -179,6 +179,7 @@ FILES = [
     "tests/run/ptr_retag.ae",
     "tests/run/rand_minstd.ae",
     "tests/run/range_iter.ae",
+    "tests/run/regex_match.ae",
     "tests/run/self_type.ae",
     "tests/run/shared_box.ae",
     "tests/run/slice_view.ae",

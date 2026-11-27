@@ -1,0 +1,96 @@
+// P4.4: the pure-AE regular-expression matcher. Both the pattern and the
+// subject are code points, so `.` and classes advance by one character and a
+// multi-byte UTF-8 letter counts as one. `regex_match` searches anywhere;
+// `regex_full_match` requires the whole subject.
+use "../../std/std/regex.ae";
+
+fn main() {
+    // Literals, searched anywhere.
+    assert(regex_match("abc", "xxabcyy"));
+    assert(!regex_match("abc", "ab"));
+    assert(regex_match("abc", "abc"));
+    assert(regex_match("", "anything"));
+    assert(!regex_match("a", ""));
+
+    // `.` matches exactly one code point.
+    assert(regex_match("a.c", "abc"));
+    assert(!regex_match("a.c", "ac"));
+    assert(regex_match("h.llo", "hello"));
+    assert(regex_match("^.$", "x"));
+    assert(!regex_match("^.$", "xy"));
+
+    // `*` zero or more, `+` one or more, `?` zero or one.
+    assert(regex_match("ab*c", "ac"));
+    assert(regex_match("ab*c", "abbbc"));
+    assert(!regex_match("ab*c", "abx"));
+    assert(!regex_match("ab+c", "ac"));
+    assert(regex_match("ab+c", "abc"));
+    assert(regex_match("ab+c", "abbbc"));
+    assert(regex_match("ab?c", "ac"));
+    assert(regex_match("ab?c", "abc"));
+    assert(!regex_match("ab?c", "abbc"));
+
+    // Greedy repetition backtracks to the last usable match.
+    assert(regex_match("a.*z", "abcz"));
+    assert(regex_match("a.*z", "abczz"));
+    assert(!regex_match("a.*z", "abc"));
+    assert(regex_match("a.*b", "axbxb"));
+    assert(regex_match("a.*z$", "abcz"));
+    assert(!regex_match("a.*z$", "abczx"));
+
+    // Anchors.
+    assert(regex_match("^abc", "abc"));
+    assert(!regex_match("^abc", "xabc"));
+    assert(regex_match("abc$", "xabc"));
+    assert(!regex_match("abc$", "abcx"));
+    assert(regex_match("^abc$", "abc"));
+    assert(!regex_match("^abc$", "abcd"));
+
+    // Character classes, ranges and negation.
+    assert(regex_match("[abc]", "zzbzz"));
+    assert(!regex_match("[abc]", "zzz"));
+    assert(regex_match("[a-z]+", "HELLO lower"));
+    assert(regex_match("[^0-9]", "123a"));
+    assert(!regex_match("[^0-9]", "1234"));
+    assert(regex_match("[0-9][0-9]", "x42y"));
+    assert(regex_match("[0-9]+", "abc123def"));
+    assert(!regex_match("[0-9]+", "abcdef"));
+
+    // Escaped metacharacters and the escape classes.
+    assert(regex_match("a\\.b", "a.b"));
+    assert(!regex_match("a\\.b", "axb"));
+    assert(regex_match("\\*", "a*b"));
+    assert(!regex_match("\\*", "ab"));
+    assert(regex_match("\\\\", "a\\b"));
+    assert(regex_match("\\d+", "abc123"));
+    assert(!regex_match("\\d+", "abc"));
+    assert(regex_match("\\w+", "--hi--"));
+    assert(regex_match("\\s", "a b"));
+    assert(!regex_match("\\s", "ab"));
+    assert(regex_match("\\D", "12a34"));
+    assert(!regex_match("\\D", "1234"));
+
+    // Alternation, split at the top level only.
+    assert(regex_match("cat|dog", "hotdog"));
+    assert(regex_match("cat|dog", "a cat here"));
+    assert(!regex_match("cat|dog", "cow"));
+    assert(regex_match("^cat$|^dog$", "dog"));
+    assert(!regex_match("^cat$|^dog$", "hotdog"));
+
+    // UTF-8: one code point is one character for `.`, literals and classes.
+    assert(regex_match(".", "é"));
+    assert(regex_match("^.$", "é"));
+    assert(!regex_match("^..$", "é"));
+    assert(regex_match("café", "le café"));
+    assert(regex_match("^caf.$", "café"));
+
+    // Full match requires the whole subject and respects alternation.
+    assert(regex_full_match("[0-9]+", "12345"));
+    assert(!regex_full_match("[0-9]+", "123x"));
+    assert(regex_full_match("cat|dog", "dog"));
+    assert(!regex_full_match("cat|dog", "hotdog"));
+    assert(regex_full_match("", ""));
+    assert(!regex_full_match("", "x"));
+
+    print("regex ok");
+}

@@ -1,0 +1,352 @@
+// std/std/regex.ae
+// Pure-AE regular expressions (P4.4). The `std` blueprint lists `regex` beside
+// `json` and `csv`; this is the first cut: an unanchored boolean matcher over
+// UTF-8 text. Both the pattern and the subject are decoded to code points
+// (ADR-0244: a `string` is a byte container), so `.`, classes and literals all
+// work on characters and never split a multi-byte sequence.
+//
+// Supported syntax:
+//   literal        any code point matches itself
+//   .              any single code point
+//   [abc] [a-z]    character class, ranges, [^...] negation
+//   \d \w \s       digit / word / whitespace; \D \W \S are their negations
+//   \x             an escaped literal (\\ \. \* \| ...)
+//   * + ?          greedy repetition of the preceding atom (0+, 1+, 0-1)
+//   ^ $            start-of-text and end-of-text anchors
+//   a|b            alternation, split at top level (never inside a class)
+//
+// Not yet supported: capture groups, counted repetition `{m,n}`, back
+// references, lazy quantifiers. `*` / `+` / `?` always take a precedable atom;
+// a quantifier with nothing before it is matched as a literal.
+//
+// The matcher is a small backtracking interpreter over code-point indices. A
+// greedy quantifier first runs to its maximum and then gives back one code
+// point at a time until the rest of the pattern matches, which is the same
+// semantics a fixed-order backtracking engine has.
+
+use "../core/utf8.ae";
+
+// '.'  '^'  '$'  '\\'  '['  ']'  '|'  '*'  '+'  '?'  '-'
+// 46   94   36   92    91   93   124  42   43   63   45
+
+// A word character for `\w`: ASCII letter, digit or underscore.
+fn regex_is_word(c: i64) -> bool {
+    let digit = c >= 48 && c <= 57;
+    let upper = c >= 65 && c <= 90;
+    let lower = c >= 97 && c <= 122;
+    let under = c == 95;
+    return digit || upper || lower || under;
+}
+
+// Whitespace for `\s`: space, tab, line feed, vertical tab, form feed, CR.
+fn regex_is_space(c: i64) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13;
+}
+
+// Decode `text` to code points. An invalid sequence is copied byte by byte so
+// the matcher still terminates; the bytes of one code point stay together.
+fn regex_decode(text: &string) -> vec {
+    let raw = bytes(text);
+    let size = len(raw);
+    var out = vec[];
+    var at = 0;
+    while at < size {
+        let lead = raw[at];
+        var width = utf8_sequence_length(lead);
+        if width == 0 || at + width > size {
+            width = 1;
+        }
+        var cp = lead;
+        if width == 2 {
+            cp = (lead - 192) * 64 + (raw[at + 1] - 128);
+        } else if width == 3 {
+            cp = (lead - 224) * 4096 + (raw[at + 1] - 128) * 64 + (raw[at + 2] - 128);
+        } else if width == 4 {
+            cp = (lead - 240) * 262144 + (raw[at + 1] - 128) * 4096 + (raw[at + 2] - 128) * 64 + (raw[at + 3] - 128);
+        }
+        push(out, cp);
+        at = at + width;
+    }
+    return out;
+}
+
+// The index of the `]` that closes a class opened at `pi`, or -1 when the
+// class is unterminated. A backslash escapes the next code point.
+fn regex_class_end(pat: &vec, pi: i64, pend: i64) -> i64 {
+    var i = pi + 1;
+    while i < pend {
+        let c = pat[i];
+        if c == 92 {
+            i = i + 1;
+        } else if c == 93 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// The index just past the atom that starts at `pi`: a plain code point is one,
+// `\x` is two, `[...]` runs through its closing `]`. An unterminated class and
+// a dangling backslash fall back to a one-code-point atom.
+fn regex_atom_end(pat: &vec, pi: i64, pend: i64) -> i64 {
+    let c = pat[pi];
+    if c == 92 {
+        if pi + 1 < pend {
+            return pi + 2;
+        }
+        return pi + 1;
+    }
+    if c == 91 {
+        let close = regex_class_end(pat, pi, pend);
+        if close >= 0 {
+            return close + 1;
+        }
+        return pi + 1;
+    }
+    return pi + 1;
+}
+
+// Whether a single code point `tc` is matched by the class whose body lies in
+// `[pi + 1, atom_end - 1)`; `atom_end - 1` is the closing `]`.
+fn regex_class_matches(pat: &vec, pi: i64, atom_end: i64, tc: i64) -> bool {
+    let content_end = atom_end - 1;
+    var i = pi + 1;
+    var negate = false;
+    if i < content_end && pat[i] == 94 {
+        negate = true;
+        i = i + 1;
+    }
+    var hit = false;
+    while i < content_end {
+        let a = pat[i];
+        if a == 92 {
+            i = i + 1;
+            if i < content_end {
+                let e = pat[i];
+                if e == 100 {
+                    if tc >= 48 && tc <= 57 {
+                        hit = true;
+                    }
+                } else if e == 119 {
+                    if regex_is_word(tc) {
+                        hit = true;
+                    }
+                } else if e == 115 {
+                    if regex_is_space(tc) {
+                        hit = true;
+                    }
+                } else if tc == e {
+                    hit = true;
+                }
+                i = i + 1;
+            }
+        } else if i + 2 < content_end && pat[i + 1] == 45 {
+            let lo = pat[i];
+            let hi = pat[i + 2];
+            if tc >= lo && tc <= hi {
+                hit = true;
+            }
+            i = i + 3;
+        } else {
+            if tc == a {
+                hit = true;
+            }
+            i = i + 1;
+        }
+    }
+    if negate {
+        return !hit;
+    }
+    return hit;
+}
+
+// Whether the atom `pat[pi..atom_end]` matches the single code point `tc`.
+fn regex_atom_matches(pat: &vec, pi: i64, atom_end: i64, tc: i64) -> bool {
+    let c = pat[pi];
+    if c == 46 {
+        return true;
+    }
+    if c == 92 {
+        if pi + 1 >= atom_end {
+            return tc == 92;
+        }
+        let e = pat[pi + 1];
+        if e == 100 {
+            return tc >= 48 && tc <= 57;
+        }
+        if e == 68 {
+            return !(tc >= 48 && tc <= 57);
+        }
+        if e == 119 {
+            return regex_is_word(tc);
+        }
+        if e == 87 {
+            return !regex_is_word(tc);
+        }
+        if e == 115 {
+            return regex_is_space(tc);
+        }
+        if e == 83 {
+            return !regex_is_space(tc);
+        }
+        return tc == e;
+    }
+    if c == 91 {
+        return regex_class_matches(pat, pi, atom_end, tc);
+    }
+    return tc == c;
+}
+
+// Match `pat[pi..pend]` against `txt` from code-point index `ti`. Anchors read
+// the whole subject, so `^` needs `ti == 0` and `$` needs `ti == len(txt)`.
+fn regex_match_seq(pat: &vec, pi: i64, pend: i64, txt: &vec, ti: i64) -> bool {
+    if pi >= pend {
+        return true;
+    }
+    let c = pat[pi];
+    if c == 94 {
+        if ti != 0 {
+            return false;
+        }
+        return regex_match_seq(pat, pi + 1, pend, txt, ti);
+    }
+    if c == 36 {
+        if ti != len(txt) {
+            return false;
+        }
+        return regex_match_seq(pat, pi + 1, pend, txt, ti);
+    }
+    let atom_end = regex_atom_end(pat, pi, pend);
+    // 0 none, 1 '*', 2 '+', 3 '?'
+    var quant = 0;
+    var next_pi = atom_end;
+    if atom_end < pend {
+        let q = pat[atom_end];
+        if q == 42 {
+            quant = 1;
+            next_pi = atom_end + 1;
+        } else if q == 43 {
+            quant = 2;
+            next_pi = atom_end + 1;
+        } else if q == 63 {
+            quant = 3;
+            next_pi = atom_end + 1;
+        }
+    }
+    let n = len(txt);
+    if quant == 0 {
+        if ti >= n || !regex_atom_matches(pat, pi, atom_end, txt[ti]) {
+            return false;
+        }
+        return regex_match_seq(pat, next_pi, pend, txt, ti + 1);
+    }
+    if quant == 3 {
+        if ti < n && regex_atom_matches(pat, pi, atom_end, txt[ti]) {
+            if regex_match_seq(pat, next_pi, pend, txt, ti + 1) {
+                return true;
+            }
+        }
+        return regex_match_seq(pat, next_pi, pend, txt, ti);
+    }
+    // '*' or '+': run greedily, then give code points back.
+    var reach = ti;
+    while reach < n && regex_atom_matches(pat, pi, atom_end, txt[reach]) {
+        reach = reach + 1;
+    }
+    var base = ti;
+    if quant == 2 {
+        if reach == ti {
+            return false;
+        }
+        base = ti + 1;
+    }
+    var k = reach;
+    while k >= base {
+        if regex_match_seq(pat, next_pi, pend, txt, k) {
+            return true;
+        }
+        k = k - 1;
+    }
+    return false;
+}
+
+// Try one top-level alternative `pat[bstart..bend]` at every start position.
+fn regex_branch_match(pat: &vec, bstart: i64, bend: i64, txt: &vec) -> bool {
+    let n = len(txt);
+    var s = 0;
+    while s <= n {
+        if regex_match_seq(pat, bstart, bend, txt, s) {
+            return true;
+        }
+        s = s + 1;
+    }
+    return false;
+}
+
+// Split the pattern on top-level `|` (never inside a class, never escaped) and
+// try each alternative in order. In `full` mode a branch must match from the
+// start and consume the whole subject, expressed by matching the branch code
+// points followed by an implicit `$` from index 0 — this keeps alternation
+// (`a|b`) honest under a full match, where a textual `^...$` wrapper would not.
+fn regex_try_alts(pat: &vec, txt: &vec, full: bool) -> bool {
+    let n = len(pat);
+    var bstart = 0;
+    var i = 0;
+    var in_class = false;
+    while i <= n {
+        var is_sep = i == n;
+        if !is_sep {
+            let c = pat[i];
+            if in_class {
+                if c == 92 {
+                    i = i + 1;
+                } else if c == 93 {
+                    in_class = false;
+                }
+            } else if c == 92 {
+                i = i + 1;
+            } else if c == 91 {
+                in_class = true;
+            } else if c == 124 {
+                is_sep = true;
+            }
+        }
+        if is_sep {
+            var matched = false;
+            if full {
+                var anchored = vec[];
+                var j = bstart;
+                while j < i {
+                    push(anchored, pat[j]);
+                    j = j + 1;
+                }
+                push(anchored, 36);
+                matched = regex_match_seq(&anchored, 0, len(anchored), txt, 0);
+            } else {
+                matched = regex_branch_match(pat, bstart, i, txt);
+            }
+            if matched {
+                return true;
+            }
+            bstart = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Whether `pattern` matches anywhere inside `text`.
+pub fn regex_match(pattern: &string, text: &string) -> bool {
+    let pat = regex_decode(pattern);
+    let txt = regex_decode(text);
+    return regex_try_alts(&pat, &txt, false);
+}
+
+// Whether the whole of `text` matches, i.e. an implicit `^...$` per
+// alternative. A caller that wants the unanchored search uses `regex_match`.
+pub fn regex_full_match(pattern: &string, text: &string) -> bool {
+    let pat = regex_decode(pattern);
+    let txt = regex_decode(text);
+    return regex_try_alts(&pat, &txt, true);
+}
