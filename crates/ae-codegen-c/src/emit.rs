@@ -346,10 +346,23 @@ fn emit_terminator(
             let cond_expr = emit_operand(body, cond, types, def_map)?;
             let expected_str = if *expected { "true" } else { "false" };
             let msg_str = escape_c_string(&format_assert_message(msg));
-            let _ = writeln!(
-                out,
-                "    if (({cond_expr}) != {expected_str}) {{ ae_trap(\"{msg_str}\"); }}"
-            );
+            // A span on the terminator names the trap site (ADR-0240); without
+            // one the trap reports the historical `ae:0:0`.
+            match &term.span {
+                Some(span) => {
+                    let _ = writeln!(
+                        out,
+                        "    if (({cond_expr}) != {expected_str}) {{ ae_fail_at(\"{msg_str}\", (size_t){}, (size_t){}); }}",
+                        span.line, span.column
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "    if (({cond_expr}) != {expected_str}) {{ ae_trap(\"{msg_str}\"); }}"
+                    );
+                }
+            }
             let _ = writeln!(out, "    goto bb{};", target.0);
         }
         TerminatorKind::Return => {
@@ -796,7 +809,7 @@ fn emit_intrinsic(
                 }),
             }
         }
-        "sort" | "reverse" | "sort_field" | "reverse_field" => {
+        "sort" | "reverse" | "sort_field" | "reverse_field" | "sort_strings" | "reverse_strings" => {
             let (ptr, elem) = vector_operand(
                 body,
                 args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
@@ -2178,6 +2191,30 @@ fn emit_intrinsic(
                     detail: "thread_spawn needs a callable".to_owned(),
                 });
             }
+            let callable_ty = args.last().and_then(|op| types.infer_operand_ty(body, op));
+            let dest_ty = types.infer_place_ty(body, destination);
+            let dest_expr = emit_place(body, destination, types, dest_ty)?;
+            // A `fn() -> T` value spawns through a signature-wide context:
+            // the pointer rides the context and the trampoline calls through
+            // it. A closure literal names its own lifted function instead.
+            if let Some(TyKind::Fn(sig)) = callable_ty {
+                let callable = args.last().map(|op| emit_operand(body, op, types, def_map)).transpose()?;
+                let callable = callable.unwrap_or_else(|| "0".to_owned());
+                let ctx = format!("ae_thread_fncall_{sig}");
+                let entry = format!("ae_thread_entry_f{sig}");
+                let mut text = format!("    {{ {ctx} *_ctx = ({ctx} *)malloc(sizeof * _ctx);\n");
+                text.push_str(&format!("      _ctx->fn = {callable};\n"));
+                text.push_str(&format!(
+                    "      {dest_expr} = ae_thread_spawn_ctx({entry}, (void *)_ctx);\n      if (!{dest_expr}) ae_trap(\"out of memory\"); }}"
+                ));
+                let _ = writeln!(out, "{text}");
+                if let Some(next_bb) = target {
+                    let _ = writeln!(out, "    goto bb{};", next_bb.0);
+                } else {
+                    out.push_str("    ae_trap(\"diverging call returned\");\n");
+                }
+                return Ok(());
+            }
             let callable = match args.last() {
                 Some(Operand::Constant(c)) => match &c.value {
                     ConstValue::FnDef(id) => *id,
@@ -2204,8 +2241,6 @@ fn emit_intrinsic(
             let id = callable.0;
             let ctx = format!("ae_thread_ctx_{id}");
             let entry = format!("ae_thread_entry_{id}");
-            let dest_ty = types.infer_place_ty(body, destination);
-            let dest_expr = emit_place(body, destination, types, dest_ty)?;
             let mut text = format!(
                 "    {{ {ctx} *_ctx = ({ctx} *)malloc(sizeof * _ctx);\n"
             );
@@ -2394,6 +2429,27 @@ fn emit_intrinsic(
                 _ => format!("((void)({pointer}))"),
             };
             finish_value(out, body, types, destination, target, &format!("({call}, (int64_t)0)"))
+        }
+        "ptr_write" => {
+            // `ptr_write(pointer, value)` stores through a raw pointer inside
+            // `unsafe`. The pointee type selects the C cast, exactly like the
+            // pointer-deref assignment the MIR lowering already produces for
+            // `*p = v`.
+            if args.len() != 2 {
+                return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "ptr_write needs a pointer and a value".to_owned(),
+                });
+            }
+            let pointer = emit_operand(body, &args[0], types, def_map)?;
+            let value = emit_operand(body, &args[1], types, def_map)?;
+            let pointee = match types.infer_operand_ty(body, &args[0]) {
+                Some(TyKind::Ptr(id) | TyKind::PtrMut(id)) => types.pointees.get(&id).copied(),
+                _ => None,
+            };
+            let c_pointee = pointee.map(c_type_name).unwrap_or_else(|| "int64_t".to_owned());
+            let _ = writeln!(out, "    *(({c_pointee} *)({pointer})) = {value};");
+            finish_value(out, body, types, destination, target, "((int64_t)0)")
         }
         other => Err(CodegenError::UnsupportedFeature {
             body_name: body.name.clone(),

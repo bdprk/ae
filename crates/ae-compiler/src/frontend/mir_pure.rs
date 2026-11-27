@@ -615,13 +615,16 @@ impl<'a> PureMirBuilder<'a> {
                     }
                 }
             }
-            Statement::Assert(cond, ..) => {
+            Statement::Assert(cond, line, column) => {
                 let cond_op = self.lower_operand(cond);
                 let next_bb = self.new_block();
+                // The trap site carries the assert's own position (ADR-0240),
+                // so a failing `assert` reports `ae:<line>:<col>`.
+                self.pending_span = Some(self.span_at(*line, *column));
                 self.set_terminator(TerminatorKind::Assert {
                     cond: cond_op,
                     expected: true,
-                    msg: AssertMessage::Custom("assert".to_owned()),
+                    msg: AssertMessage::Custom("assertion failed".to_owned()),
                     target: next_bb,
                 });
                 self.cur_bb = next_bb;
@@ -2045,7 +2048,10 @@ impl<'a> PureMirBuilder<'a> {
             Expr::PtrDropInPlace(p, ..) => ("ptr_drop_in_place", vec![self.lower_operand(p)]),
             Expr::PtrWrite(p, v, ..) => {
                 let p_op = self.lower_operand(p);
-                let v_op = self.lower_operand(v);
+                // The written slot becomes the owner of the value, so this is
+                // a moving position: a temporary the caller materialized must
+                // not also be dropped at scope exit.
+                let v_op = self.lower_operand_moving(v);
                 ("ptr_write", vec![p_op, v_op])
             }
             // All other expressions are handled directly in `lower_expr`.

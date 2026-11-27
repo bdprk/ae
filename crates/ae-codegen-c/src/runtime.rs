@@ -679,6 +679,59 @@ static int64_t ae_argc_g = 0;
 static char **ae_argv_g = NULL;
 static inline ae_vec ae_args_value(void) {
     ae_vec out = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
+#ifdef _WIN32
+    // ADR-0054: the CRT hands `main` the command line decoded into the ANSI
+    // code page, so text the code page cannot represent arrives with '?'
+    // placeholders. The command line itself is always UTF-16, so the arguments
+    // are re-derived from it once, in UTF-8. The declarations match
+    // <windows.h> exactly (including the `dllimport` storage), so a program
+    // that also includes the header compiles without a redeclaration warning.
+    // Conversion happens on the first read, so a program that never reads its
+    // arguments allocates nothing for them (M3.1.01).
+    extern __declspec(dllimport) wchar_t *GetCommandLineW(void);
+    extern __declspec(dllimport) wchar_t **CommandLineToArgvW(const wchar_t *text, int *count);
+    extern __declspec(dllimport) void *LocalFree(void *mem);
+    extern __declspec(dllimport) int lstrlenW(const wchar_t *text);
+    extern __declspec(dllimport) int WideCharToMultiByte(unsigned page, unsigned long flags, const wchar_t *wide, int units, char *narrow, int bytes, const char *default_char, int *used_default);
+    static int converted = 0;
+    if (!converted) {
+        converted = 1;
+        int count = 0;
+        wchar_t **tokens = CommandLineToArgvW(GetCommandLineW(), &count);
+        if (tokens && count == (int)ae_argc_g) {
+            size_t total = 0;
+            for (int i = 0; i < count; i++) {
+                const int units = lstrlenW(tokens[i]);
+                const int bytes = WideCharToMultiByte(65001, 0, tokens[i], units, NULL, 0, NULL, NULL);
+                total += (size_t)(bytes > 0 ? bytes : 0) + 1;
+            }
+            // The conversion blocks live for the program's whole run, like
+            // argv itself; the process exit reclaims them (ADR-0016).
+            char **utf8 = (char **)malloc((size_t)count * sizeof(char *));
+            char *text_block = (char *)malloc(total);
+            if (utf8 && text_block) {
+                char *cursor = text_block;
+                for (int i = 0; i < count; i++) {
+                    const int units = lstrlenW(tokens[i]);
+                    const int bytes = WideCharToMultiByte(65001, 0, tokens[i], units, NULL, 0, NULL, NULL);
+                    if (bytes <= 0) { utf8[i] = ae_argv_g[i]; continue; }
+                    WideCharToMultiByte(65001, 0, tokens[i], units, cursor, bytes, NULL, NULL);
+                    cursor[bytes] = 0;
+                    utf8[i] = cursor;
+                    cursor += (size_t)bytes + 1;
+                }
+                ae_argv_g = utf8;
+            } else {
+                free(utf8);
+                free(text_block);
+            }
+        }
+        if (tokens) LocalFree(tokens);
+    }
+#endif
+    // argv is UTF-8 on every platform by the time this runs: POSIX `main`
+    // receives UTF-8 directly and the Windows branch above converts the UTF-16
+    // command line once, on first read.
     for (int64_t i = 0; i < ae_argc_g; i++) {
         const char *arg = ae_argv_g[i] ? ae_argv_g[i] : "";
         ae_str value = ae_str_alloc_copy(arg, (int64_t)strlen(arg));
@@ -686,6 +739,100 @@ static inline ae_vec ae_args_value(void) {
     }
     return out;
 }
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#else
+#include <dirent.h>
+#include <unistd.h>
+#endif
+// ADR-0054: every path in the language is UTF-8. The Windows CRT decodes a
+// narrow path with the ANSI code page, so a path the code page cannot
+// represent (a Chinese directory, an emoji) cannot be opened through `fopen`
+// or `stat`. These wrappers widen the UTF-8 path to UTF-16 and call the
+// wide-character entry point; on POSIX they are the plain calls.
+#ifdef _WIN32
+extern __declspec(dllimport) int MultiByteToWideChar(unsigned int codepage, unsigned long flags, const char *text, int length, wchar_t *out, int capacity);
+extern __declspec(dllimport) int WideCharToMultiByte(unsigned int codepage, unsigned long flags, const wchar_t *wide, int length, char *narrow, int bytes, const char *default_char, int *used_default);
+static inline wchar_t *ae_path_wide(ae_str path) {
+    // CP_UTF8 is 65001. One extra unit for the terminator; the caller frees.
+    const int units = MultiByteToWideChar(65001, 0, path.ptr, (int)path.len, NULL, 0);
+    if (units < 0) return NULL;
+    wchar_t *wide = (wchar_t *)malloc(((size_t)units + 1) * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (units > 0 && MultiByteToWideChar(65001, 0, path.ptr, (int)path.len, wide, units) != units) {
+        free(wide);
+        return NULL;
+    }
+    wide[units] = 0;
+    return wide;
+}
+static inline FILE *ae_path_fopen(ae_str path, const wchar_t *mode) {
+    wchar_t *wide = ae_path_wide(path);
+    if (!wide) { errno = EINVAL; return NULL; }
+    FILE *file = _wfopen(wide, mode);
+    free(wide);
+    return file;
+}
+static inline int ae_path_stat(ae_str path, struct _stat64 *info) {
+    wchar_t *wide = ae_path_wide(path);
+    if (!wide) { errno = EINVAL; return -1; }
+    const int status = _wstat64(wide, info);
+    free(wide);
+    return status;
+}
+static inline int ae_path_rename(ae_str from, ae_str to) {
+    wchar_t *wide_from = ae_path_wide(from);
+    wchar_t *wide_to = ae_path_wide(to);
+    int status = -1;
+    if (wide_from && wide_to) {
+        status = _wrename(wide_from, wide_to);
+    } else {
+        errno = EINVAL;
+    }
+    free(wide_from);
+    free(wide_to);
+    return status;
+}
+static inline int ae_path_remove(ae_str path) {
+    wchar_t *wide = ae_path_wide(path);
+    if (!wide) { errno = EINVAL; return -1; }
+    const int status = _wremove(wide);
+    free(wide);
+    return status;
+}
+static inline int ae_path_rmdir(ae_str path) {
+    wchar_t *wide = ae_path_wide(path);
+    if (!wide) { errno = EINVAL; return -1; }
+    const int status = _wrmdir(wide);
+    free(wide);
+    return status;
+}
+static inline int ae_path_mkdir(ae_str path) {
+    wchar_t *wide = ae_path_wide(path);
+    if (!wide) { errno = EINVAL; return -1; }
+    const int status = _wmkdir(wide);
+    free(wide);
+    return status;
+}
+static inline int ae_path_chdir(ae_str path) {
+    wchar_t *wide = ae_path_wide(path);
+    if (!wide) { errno = EINVAL; return -1; }
+    const int status = _wchdir(wide);
+    free(wide);
+    return status;
+}
+#define ae_path_stat_local(info) struct _stat64 info
+#else
+#define ae_path_fopen(path, mode) fopen((path).ptr, mode)
+#define ae_path_stat(path, info) stat((path).ptr, info)
+#define ae_path_rename(from, to) rename((from).ptr, (to).ptr)
+#define ae_path_remove(path) remove((path).ptr)
+#define ae_path_rmdir(path) rmdir((path).ptr)
+#define ae_path_mkdir(path) mkdir((path).ptr, 0777)
+#define ae_path_chdir(path) chdir((path).ptr)
+#define ae_path_stat_local(info) struct stat info
+#endif
 typedef struct { int64_t status; ae_str text; ae_str error; } ae_read_result;
 static inline ae_str ae_io_error(void) {
     const char *text = strerror(errno);
@@ -697,7 +844,7 @@ static inline ae_read_result ae_try_read_file_value(ae_str path) {
     out.status = 0;
     out.text = ae_str_from_parts("", 0, false);
     out.error = ae_str_from_parts("", 0, false);
-    FILE *file = fopen(path.ptr, "rb");
+    FILE *file = ae_path_fopen(path, L"rb");
     if (!file) {
         out.status = 1;
         out.error = ae_io_error();
@@ -777,7 +924,7 @@ static inline ae_str ae_read_file_value(ae_str path, size_t line, size_t column)
     return out.text;
 }
 static inline int64_t ae_write_file_value(ae_str path, ae_str content, size_t line, size_t column) {
-    FILE *file = fopen(path.ptr, "wb");
+    FILE *file = ae_path_fopen(path, L"wb");
     if (!file) ae_fail_at("cannot write file", line, column);
     const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
     if (fclose(file) != 0 || written != (size_t)content.len) {
@@ -786,7 +933,7 @@ static inline int64_t ae_write_file_value(ae_str path, ae_str content, size_t li
     return (int64_t)written;
 }
 static inline int64_t ae_append_file_value(ae_str path, ae_str content, size_t line, size_t column) {
-    FILE *file = fopen(path.ptr, "ab");
+    FILE *file = ae_path_fopen(path, L"ab");
     if (!file) ae_fail_at("cannot append file", line, column);
     const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
     if (fclose(file) != 0 || written != (size_t)content.len) {
@@ -801,7 +948,7 @@ static inline ae_write_result ae_try_write_file_value(ae_str path, ae_str conten
     out.status = 0;
     out.written = 0;
     out.error = ae_str_from_parts("", 0, false);
-    FILE *file = fopen(path.ptr, "wb");
+    FILE *file = ae_path_fopen(path, L"wb");
     if (!file) {
         out.status = 1;
         out.error = ae_io_error();
@@ -856,12 +1003,12 @@ static inline ae_str ae_path_parent_value(ae_str path) {
     return ae_str_alloc_copy(path.ptr, stop);
 }
 static inline bool ae_path_exists_value(ae_str path) {
-    struct stat info;
-    return stat(path.ptr, &info) == 0;
+    ae_path_stat_local(info);
+    return ae_path_stat(path, &info) == 0;
 }
 static inline bool ae_path_is_dir_value(ae_str path) {
-    struct stat info;
-    if (stat(path.ptr, &info) != 0) return false;
+    ae_path_stat_local(info);
+    if (ae_path_stat(path, &info) != 0) return false;
 #ifdef _WIN32
     return (info.st_mode & _S_IFDIR) != 0;
 #else
@@ -871,13 +1018,6 @@ static inline bool ae_path_is_dir_value(ae_str path) {
 
 // Directory listing, metadata and the mutation family. Results use small
 // status structs so the emitter can build DirResult/FileResult/StatusResult.
-#ifdef _WIN32
-#include <direct.h>
-#include <io.h>
-#else
-#include <dirent.h>
-#include <unistd.h>
-#endif
 static inline int ae_name_compare(const void *a, const void *b) {
     const ae_str x = *(const ae_str *)a;
     const ae_str y = *(const ae_str *)b;
@@ -894,8 +1034,16 @@ static inline ae_dir_result ae_try_list_dir_value(ae_str path) {
     out.names = ae_vec_new((int64_t)sizeof(ae_str), ae_str_release_elem);
     ae_str pattern = ae_path_join_value(path, ae_str_from_parts("*", 1, false));
 #ifdef _WIN32
-    struct _finddata_t entry;
-    intptr_t walk = _findfirst(pattern.ptr, &entry);
+    struct _wfinddata_t entry;
+    wchar_t *wide_pattern = ae_path_wide(pattern);
+    if (!wide_pattern) {
+        out.status = 1;
+        out.error = ae_io_error();
+        ae_str_release(&pattern);
+        return out;
+    }
+    intptr_t walk = _wfindfirst(wide_pattern, &entry);
+    free(wide_pattern);
     if (walk == -1) {
         out.status = 1;
         out.error = ae_io_error();
@@ -903,10 +1051,16 @@ static inline ae_dir_result ae_try_list_dir_value(ae_str path) {
         return out;
     }
     do {
-        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0) continue;
-        ae_str name = ae_str_alloc_copy(entry.name, (int64_t)strlen(entry.name));
+        if (wcscmp(entry.name, L".") == 0 || wcscmp(entry.name, L"..") == 0) continue;
+        // The entry name is UTF-16; the language stores UTF-8.
+        const int bytes = WideCharToMultiByte(65001, 0, entry.name, -1, NULL, 0, NULL, NULL);
+        if (bytes <= 0) continue;
+        char *narrow = (char *)malloc((size_t)bytes);
+        if (!narrow) { out.status = 1; out.error = ae_io_error(); break; }
+        WideCharToMultiByte(65001, 0, entry.name, -1, narrow, bytes, NULL, NULL);
+        ae_str name = ae_str_from_parts(narrow, (int64_t)(bytes - 1), true);
         ae_vec_push(&out.names, &name);
-    } while (_findnext(walk, &entry) == 0);
+    } while (_wfindnext(walk, &entry) == 0);
     _findclose(walk);
 #else
     DIR *walk = opendir(path.ptr);
@@ -945,8 +1099,8 @@ static inline ae_file_info_result ae_try_file_info_value(ae_str path) {
     out.is_dir = false;
     out.error = ae_str_from_parts("", 0, false);
     errno = 0;
-    struct stat info;
-    if (stat(path.ptr, &info) != 0) {
+    ae_path_stat_local(info);
+    if (ae_path_stat(path, &info) != 0) {
         out.status = 1;
         out.error = ae_io_error();
         return out;
@@ -975,9 +1129,9 @@ static inline ae_status_result ae_status_fail_value(ae_str error) {
 }
 static inline ae_status_result ae_try_copy_file_value(ae_str from, ae_str to) {
     errno = 0;
-    FILE *source = fopen(from.ptr, "rb");
+    FILE *source = ae_path_fopen(from, L"rb");
     if (!source) return ae_status_fail_value(ae_io_error());
-    FILE *target = fopen(to.ptr, "wb");
+    FILE *target = ae_path_fopen(to, L"wb");
     if (!target) {
         fclose(source);
         return ae_status_fail_value(ae_io_error());
@@ -1005,7 +1159,7 @@ static inline ae_write_result ae_try_append_file_value(ae_str path, ae_str conte
     out.written = 0;
     out.error = ae_str_from_parts("", 0, false);
     errno = 0;
-    FILE *file = fopen(path.ptr, "ab");
+    FILE *file = ae_path_fopen(path, L"ab");
     if (!file) {
         out.status = 1;
         out.error = ae_io_error();
@@ -1022,7 +1176,7 @@ static inline ae_write_result ae_try_append_file_value(ae_str path, ae_str conte
 }
 static inline ae_status_result ae_try_rename_path_value(ae_str from, ae_str to) {
     errno = 0;
-    if (rename(from.ptr, to.ptr) != 0) return ae_status_fail_value(ae_io_error());
+    if (ae_path_rename(from, to) != 0) return ae_status_fail_value(ae_io_error());
     return ae_status_ok_value();
 }
 static inline ae_status_result ae_try_remove_file_value(ae_str path) {
@@ -1033,16 +1187,12 @@ static inline ae_status_result ae_try_remove_file_value(ae_str path) {
         ));
     }
     errno = 0;
-    if (remove(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
+    if (ae_path_remove(path) != 0) return ae_status_fail_value(ae_io_error());
     return ae_status_ok_value();
 }
 static inline ae_status_result ae_try_remove_dir_value(ae_str path) {
     errno = 0;
-#ifdef _WIN32
-    if (_rmdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
-#else
-    if (rmdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
-#endif
+    if (ae_path_rmdir(path) != 0) return ae_status_fail_value(ae_io_error());
     return ae_status_ok_value();
 }
 static inline ae_read_result ae_try_env_value(ae_str name) {
@@ -1129,11 +1279,7 @@ static inline ae_status_result ae_try_create_dir_value(ae_str path) {
 #endif
         if (!skip) {
             if (!ae_path_is_dir_value(ae_str_from_parts(buffer, at, false))) {
-#ifdef _WIN32
-                if (_mkdir(buffer) != 0) {
-#else
-                if (mkdir(buffer, 0777) != 0) {
-#endif
+                if (ae_path_mkdir(ae_str_from_parts(buffer, at, false)) != 0) {
                     if (errno != EEXIST) {
                         out = ae_status_fail_value(ae_io_error());
                         buffer[at] = saved;
@@ -1149,11 +1295,7 @@ static inline ae_status_result ae_try_create_dir_value(ae_str path) {
 }
 static inline ae_status_result ae_try_set_cwd_value(ae_str path) {
     errno = 0;
-#ifdef _WIN32
-    if (_chdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
-#else
-    if (chdir(path.ptr) != 0) return ae_status_fail_value(ae_io_error());
-#endif
+    if (ae_path_chdir(path) != 0) return ae_status_fail_value(ae_io_error());
     return ae_status_ok_value();
 }
 

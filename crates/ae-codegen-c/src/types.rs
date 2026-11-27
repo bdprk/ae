@@ -108,6 +108,10 @@ pub(crate) struct ModuleTypes {
     pub task_spawns: BTreeMap<DefId, Vec<TyKind>>,
     /// Thread spawn sites: closure DefId -> (captured slots, return type).
     pub thread_spawns: BTreeMap<DefId, (Vec<TyKind>, TyKind)>,
+    /// Thread spawn sites whose callable is a `fn() -> T` value rather than a
+    /// closure literal. The callable rides the context, so each signature
+    /// needs its own context struct and trampoline (ADR-0214).
+    pub thread_fn_spawns: BTreeSet<usize>,
 }
 
 impl ModuleTypes {
@@ -256,7 +260,17 @@ impl ModuleTypes {
         let Some(name) = body.intrinsics.get(def_id) else { return };
         if name == "thread_spawn" {
             // Thread spawn passes the callable last: [slots..., callable].
-            let Some(Operand::Constant(callable)) = args.last() else { return };
+            // A `fn() -> T` callable is a value, not a DefId: the trampoline
+            // calls through the packaged pointer instead of naming a function.
+            let Some(callable) = args.last() else { return };
+            if let Some(sig) = self.infer_operand_ty(body, callable).and_then(|ty| match ty {
+                TyKind::Fn(sig) => Some(sig),
+                _ => None,
+            }) {
+                self.thread_fn_spawns.insert(sig);
+                return;
+            }
+            let Operand::Constant(callable) = callable else { return };
             let ConstValue::FnDef(closure_id) = &callable.value else { return };
             let slots: Vec<TyKind> = args[..args.len().saturating_sub(1)]
                 .iter()
@@ -643,6 +657,24 @@ impl ModuleTypes {
             let _ = writeln!(out, "}}");
         }
         if !self.thread_spawns.is_empty() {
+            out.push('\n');
+        }
+        // A spawned `fn() -> T` value rides the context next to the return
+        // slot; the trampoline calls through the packaged pointer. A spawn
+        // callable takes no parameters, so the call passes none.
+        for &sig in &self.thread_fn_spawns {
+            let Some((_, ret)) = self.fn_sigs.get(&sig) else { continue };
+            let ret_c = c_type_name(*ret);
+            let _ = writeln!(out, "typedef struct {{");
+            let _ = writeln!(out, "    {ret_c} ret;");
+            let _ = writeln!(out, "    ae_fn_t{sig} fn;");
+            let _ = writeln!(out, "}} ae_thread_fncall_{sig};");
+            let _ = writeln!(out, "static void ae_thread_entry_f{sig}(void *raw) {{");
+            let _ = writeln!(out, "    ae_thread_fncall_{sig} *c = (ae_thread_fncall_{sig} *)raw;");
+            let _ = writeln!(out, "    c->ret = c->fn();");
+            let _ = writeln!(out, "}}");
+        }
+        if !self.thread_fn_spawns.is_empty() {
             out.push('\n');
         }
         Ok(())
