@@ -1,0 +1,24 @@
+// P4.4: pure-AE CSV. Encode a row with a comma field and an embedded quote,
+// then read it back to the same fields; also read simple and quoted rows.
+use "../../std/std/csv.ae";
+
+fn main() {
+    var fields = strvec_new();
+    push(fields, "a");
+    push(fields, "b,c");
+    push(fields, "d\"e");
+    let row = encode_row(&fields);
+    print(row);
+    assert(row == "a,\"b,c\",\"d\"\"e\"");
+
+    let parsed = parse_row(row);
+    let count = len(parsed);
+    print(join(parsed, "|"));
+    assert(count == 3);
+
+    let plain = parse_row("x,y,z");
+    print(join(plain, "|"));
+
+    let quoted = parse_row("\"one,two\",\"say \"\"hi\"\"\"");
+    print(join(quoted, "|"));
+}

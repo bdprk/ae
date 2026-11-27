@@ -143,6 +143,7 @@ FILES = [
     "tests/run/closures.ae",
     "tests/run/cmp_traits.ae",
     "tests/run/convert_traits.ae",
+    "tests/run/csv_roundtrip.ae",
     "tests/run/default_trait.ae",
     "tests/run/display_trait.ae",
     "tests/run/divide_by_zero.ae",
