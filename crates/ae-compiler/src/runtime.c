@@ -1420,13 +1420,16 @@ static ae_strvec ae_args(size_t line, size_t column) { /* win32-declared */
     ae_strvec out = ae_strvec_new(line, column);
 #ifdef _WIN32
     // Each declaration matches <windows.h> exactly, so a program that keeps
-    // the header for something else (a file API) still compiles.
-    extern wchar_t *GetCommandLineW(void);
-    extern wchar_t **CommandLineToArgvW(const wchar_t *text, int *count);
-    extern void *LocalFree(void *mem);
-    extern int lstrlenW(const wchar_t *text);
+    // the header for something else (a file API) still compiles. The
+    // `dllimport` storage matches the header's declaration too; without it
+    // MinGW warns that the earlier dllimport is ignored, and that warning
+    // lands on a program's stderr whenever the runtime is built with -W.
+    extern __declspec(dllimport) wchar_t *GetCommandLineW(void);
+    extern __declspec(dllimport) wchar_t **CommandLineToArgvW(const wchar_t *text, int *count);
+    extern __declspec(dllimport) void *LocalFree(void *mem);
+    extern __declspec(dllimport) int lstrlenW(const wchar_t *text);
     // CP_UTF8 is 65001; the literal avoids pulling <windows.h> for the macro.
-    extern int WideCharToMultiByte(unsigned page, unsigned long flags, const wchar_t *wide, int units, char *narrow, int bytes, const char *default_char, int *used_default);
+    extern __declspec(dllimport) int WideCharToMultiByte(unsigned page, unsigned long flags, const wchar_t *wide, int units, char *narrow, int bytes, const char *default_char, int *used_default);
     // The UTF-16 command line is converted here, on first read: a program
     // that never reads arguments allocates nothing for them (M3.1.01).
     // Until this runs, ae_argv_g holds the narrow argv main received,
