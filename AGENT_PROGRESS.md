@@ -1,4 +1,4 @@
-# AGENT_PROGRESS.md
+﻿# AGENT_PROGRESS.md
 
 ## 目标（用户原话）
 @[d:\用户\trevv\桌面\ae] @[d:\用户\trevv\桌面\自主编程语言完整方案.md] 继续
@@ -499,6 +499,6 @@
 
 - 2026-11-28 00:10 (+08:00): **P4.4 slice 8: counted repetition in `std/regex`.** Quantifier handling generalised to `(q_lo, q_hi)` (`q_hi=-1` unbounded), so `?`/`*`/`+` and the new `{m}`/`{m,}`/`{m,n}` share one greedy-reach/give-back loop; counts clamp at 1e9 (no overflow), a too-large count fails `reach < base`, and a malformed brace is a literal. Fixture adds exact/bounded/at-least cases and three malformed-brace literals in dev+release across pure-MIR, tree, interpreter. Corpus gate stays 180/180, deny 183/183, route `fallbacks=0 typed=0`, layering green.
 
-- 2026-11-28 00:45 (+08:00): **P4.4 slice 9: pure-AE `std/test`.** `std/std/test/test.ae` is an in-program tally: `TestTally { ok_count, fail_count }` + free `tally_new`/`tally_passed`/`tally_failed`/`tally_total` and `tally_check`/`tally_check_i64`/`tally_check_str` printing `ok NAME`/`FAIL NAME: detail`. Free functions over `&mut TestTally` (a method with any non-receiver argument is not on the route yet; receiverless `&self` is). Fixture `tests/run/test_tally.ae` pins 3 passes + 3 failures, the exact lines and 3/3/6 totals in dev+release across pure-MIR, tree, interpreter. Corpus gate 180 -> 181/181, route `fallbacks=0 typed=0`, deny 183 -> 184/184, layering green.
+- 2026-11-28 00:45 (+08:00): **P4.4 slice 9: pure-AE `std/test`.** `std/std/test/test.ae` is an in-program tally: `TestTally { ok_count, fail_count }` + free `tally_new`/`tally_passed`/`tally_failed`/`tally_total` and `tally_check`/`tally_check_i64`/`tally_check_str` printing `ok NAME`/`FAIL NAME: detail`. Free functions over `&mut TestTally` (the stdlib shape, not methods). Fixture `tests/run/test_tally.ae` pins 3 passes + 3 failures, the exact lines and 3/3/6 totals in dev+release across pure-MIR, tree, interpreter. Corpus gate 180 -> 181/181, route `fallbacks=0 typed=0`, deny 183 -> 184/184, layering green.
 
 - 2026-11-28 01:20 (+08:00): **P4.4 slice 10: typed `std/env`.** `std/std/env.ae` turns the `env` builtin's raw `ReadResult` into typed access: `env_i64`/`env_bool`/`env_or` with a default, split into `parse_env_i64`/`parse_env_bool` (1/true/yes and 0/false/no, lower/upper/title case). Fixture `tests/run/env_typed.ae` pins parsing on literals and the wrappers on a guaranteed-unset name in dev+release across pure-MIR, tree, interpreter. Corpus gate 181 -> 182/182, route `fallbacks=0 typed=0`, deny 184 -> 185/185, layering green.

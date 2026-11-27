@@ -6,12 +6,13 @@
 // bumps a counter, so a suite can report how many checks passed and failed and
 // a caller can assert the totals.
 //
-// The operations are free functions over a `&mut TestTally` rather than
-// methods: a method that takes any argument besides its receiver is not on the
-// resolved body route yet, while a free function with `&mut T` and `&string`
-// parameters is. The record shape is fixed and pinned by a fixture; printing
-// goes through the console bridge (`print`, stdout), the same sink `std/log`
-// uses.
+// The operations are free functions over `&mut TestTally` rather than methods:
+// the state stays in one place and a multi-argument `&mut T` + `&string`
+// free-function signature is the shape the rest of the stdlib already uses
+// (`std/log`, `std/json`), so a method layer would only add receiver plumbing
+// around the same counter bump. The record shape is fixed and pinned by a
+// fixture; printing goes through the console bridge (`print`, stdout), the same
+// sink `std/log` uses.
 
 // Running counts for a suite of checks.
 pub struct TestTally {
