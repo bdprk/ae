@@ -1689,6 +1689,21 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                     null_moves(out, &value.moves, ctx);
                     continue;
                 }
+                if let Type::Vector(elem_id) = elem_ty {
+                    // An owned nested vector: release the replaced inner
+                    // vector through its family before the new one lands.
+                    let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                    let release = c_output::vector_family(ctx, *elem_id);
+                    let value = emit_expr(value, out, next, true, ctx);
+                    let val_tmp = *next; *next += 1;
+                    out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));
+                    let ptr_tmp = *next; *next += 1;
+                    out.push_str(&format!("    {c_elem} *p{ptr_tmp} = ({c_elem} *)ae_slice_mut_at(v{id}, t{idx_tmp}, {line}, {col});\n"));
+                    out.push_str(&format!("    {release}_release(p{ptr_tmp});\n"));
+                    out.push_str(&format!("    *p{ptr_tmp} = t{val_tmp};\n"));
+                    null_moves(out, &value.moves, ctx);
+                    continue;
+                }
                 let value = emit_expr(value, out, next, false, ctx);
                 let val_tmp = *next; *next += 1;
                 let c_elem = c_output::c_type_field(*elem_ty, ctx);

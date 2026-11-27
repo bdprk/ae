@@ -443,14 +443,9 @@ impl<'a> Parser<'a> {
                     if let Type::SliceMut(slice_id) = ty {
                         let elem_ty = self.ctx.slice_elem(slice_id);
                         // Copy elements assign directly; an owned element
-                        // releases the replaced slot first. A string release
-                        // is the string store's rule and an owned struct
-                        // releases through `ae_t<k>_release`; a nested vector
-                        // element has no release path in a slice yet.
-                        if self.is_owned(elem_ty) && elem_ty != Type::String && !matches!(elem_ty, Type::Struct(_)) {
-                            self.seek_scalar_offset(base.range.start);
-                            return Err(self.fail("storing through a mutable slice of owned elements is not supported yet"));
-                        }
+                        // releases the replaced slot first (a string, an
+                        // owned struct or a nested vector). A field cannot be
+                        // moved out of its struct.
                         if self.is_owned(elem_ty) && elem_ty != Type::String
                             && matches!(&value.kind, ae_syntax::expression::ExpressionKind::Field { .. })
                         {

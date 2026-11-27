@@ -26,6 +26,15 @@ fn take_tag(items: &mut [Tagged], t: Tagged) {
     items[0] = t;
 }
 
+fn show_row(row: &vec[Tagged]) {
+    print(row[0].name);
+    print(row[0].n);
+}
+
+fn replace_row(rows: &mut [vec[Tagged]]) {
+    rows[0] = vec[Tagged { name: "z", n: 9 }];
+}
+
 fn retitle(names: &mut [string]) {
     names[0] = "zz";
     names[1] = "ww";
@@ -146,4 +155,9 @@ fn main() {
     take_tag(&mut tags[1..2], moved);
     print(tags[1].name);
     print(tags[1].n);
+    // A nested vector element: the replaced inner vector is released (so its
+    // owned elements drop) before the new one lands.
+    var rows = vec[vec[Tagged { name: "a", n: 1 }], vec[Tagged { name: "b", n: 2 }]];
+    replace_row(&mut rows);
+    show_row(&rows[0]);
 }

@@ -11653,11 +11653,6 @@ fn slice_mut_match_across_backends() {
             "a read-only slice cannot be written; take the parameter as '&mut [T]'",
         ),
         (
-            "nested vector element store",
-            r#"fn f(m: &mut [vec[i64]]) { m[0] = vec[1, 2]; } fn main() {}"#,
-            "storing through a mutable slice of owned elements is not supported yet",
-        ),
-        (
             "field moved into a slice",
             r#"struct T { n: i64 } struct H { t: T } fn f(m: &mut [T], h: H) { m[0] = h.t; } fn main() {}"#,
             "cannot move a field out of a struct; use it where a borrow works",

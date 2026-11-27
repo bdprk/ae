@@ -31,5 +31,10 @@ z
 drop b
 c
 3
+drop a
+z
+9
+drop z
+drop b
 drop z
 drop c
