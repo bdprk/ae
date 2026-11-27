@@ -166,13 +166,12 @@ class Gen:
             return [f"print({self.int_expr(vars)});"]
         kind = self.rnd() % 31
         if self.pure_subset:
-            # The pure backend now covers the container, pointer, spawn and
-            # string-vector surfaces, so the subset draws from every kind that
-            # needs no `Doc`/slice helper: arithmetic, branches, loops, prints,
-            # strings, vectors (incl. fields), enums, annotations, pointers,
-            # spawn and string vectors. Kinds 14-17 (Doc borrow surface) and
-            # 22 (atomic cells) stay out until their preambles are mirrored.
-            kind = self.pick([0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 18, 19, 20, 21, 23, 24, 25, 26, 27])
+            # Every kind the generator draws from. The pure subset used to be a
+            # narrowed list; the backend now covers the whole surface (owned
+            # containers, slices incl. `&mut`, the Doc borrow face, pointers,
+            # spawn, atomic cells), so the fifth mode compares the same shapes
+            # the other four do and `unsupported subset` skips are a regression.
+            kind = self.pick(list(range(0, 31)))
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -651,14 +650,42 @@ class Gen:
             # nested-receiver shapes (kinds 24/26).
             lines = [
                 "struct Pt { a: i64, b: i64 }",
+                "struct Doc { name: string, note: string }",
                 "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
                 "struct FuzzTag { name: string, n: i64 }",
+                "impl Doc {",
+                "    fn rename(&mut self, to: string) -> i64 {",
+                "        self.name = to;",
+                "        return len(self.name);",
+                "    }",
+                "}",
+                "fn doc_bump(d: &mut Doc, to: string) -> i64 {",
+                "    d.name = to;",
+                "    return len(d.name);",
+                "}",
+                "fn doc_combine(a: i64, b: i64) -> i64 {",
+                "    return a + b;",
+                "}",
                 "impl Drop for FuzzTag {",
                 '    fn drop(&mut self) { print("d" + self.name); }',
                 "}",
                 "struct FuzzBox { cells: vec, tags: vec[FuzzTag] }",
                 "struct FuzzOuter { box: FuzzBox }",
                 "fn fuzz_tag_n(t: &FuzzTag) -> i64 { return t.n; }",
+                "fn fuzz_slice_sum(v: &[i64]) -> i64 { var t = 0; for x in v { t += x; } return t; }",
+                "fn fuzz_slice_forward(v: &[i64]) -> i64 { return fuzz_slice_sum(v); }",
+                "fn fuzz_slice_first(v: &[i64]) -> i64 { return v[0]; }",
+                "fn fuzz_slice_words(v: &[string]) -> i64 { var t = 0; for w in v { t += len(w); } return t; }",
+                "fn fuzz_slice_word_len(v: &[string]) -> i64 { return len(v[0]); }",
+                "fn fuzz_slice_tags(v: &[FuzzTag]) -> i64 { var t = 0; for x in v { t += x.n; } return t; }",
+                "fn fuzz_slice_tag0(v: &[FuzzTag]) -> i64 { return v[0].n; }",
+                "fn fuzz_slice_rows(v: &[vec]) -> i64 { var t = 0; for r in v { t += len(r); } return t; }",
+                "fn fuzz_slice_borrow_tag(v: &[FuzzTag]) -> i64 { return fuzz_tag_n(&v[0]); }",
+                "fn fuzz_vec_len(v: &vec) -> i64 { return len(v); }",
+                "fn fuzz_slice_borrow_row(v: &[vec]) -> i64 { return fuzz_vec_len(&v[0]); }",
+                "fn fuzz_slice_mut_double(m: &mut [i64]) { var i = 0; while i < len(m) { m[i] = m[i] * 2; i += 1; } }",
+                "fn fuzz_slice_mut_fill(m: &mut [i64], v: i64) { m[0] = v; }",
+                "fn eat(t: string) -> i64 { return len(t); }",
                 "fn main() {",
             ]
             vars = ["seed0"]
