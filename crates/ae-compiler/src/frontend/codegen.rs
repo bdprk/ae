@@ -1671,6 +1671,24 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                     null_moves(out, &value.moves, ctx);
                     continue;
                 }
+                if let Type::Struct(k) = elem_ty
+                    && is_owned_type(*elem_ty, ctx.structs, ctx.enums)
+                {
+                    // An owned struct element: the replaced value releases
+                    // through its own release path, then the new bytes land
+                    // (the vector store's drop-hook rule, named directly
+                    // because a slice carries no hook).
+                    let c_elem = c_output::c_type_field(*elem_ty, ctx);
+                    let value = emit_expr(value, out, next, true, ctx);
+                    let val_tmp = *next; *next += 1;
+                    out.push_str(&format!("    {c_elem} t{val_tmp} = {};\n", value.text));
+                    let ptr_tmp = *next; *next += 1;
+                    out.push_str(&format!("    {c_elem} *p{ptr_tmp} = ({c_elem} *)ae_slice_mut_at(v{id}, t{idx_tmp}, {line}, {col});\n"));
+                    out.push_str(&format!("    ae_t{k}_release(p{ptr_tmp});\n"));
+                    out.push_str(&format!("    *p{ptr_tmp} = t{val_tmp};\n"));
+                    null_moves(out, &value.moves, ctx);
+                    continue;
+                }
                 let value = emit_expr(value, out, next, false, ctx);
                 let val_tmp = *next; *next += 1;
                 let c_elem = c_output::c_type_field(*elem_ty, ctx);

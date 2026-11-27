@@ -442,13 +442,20 @@ impl<'a> Parser<'a> {
                     // only Copy elements are writable in this rung.
                     if let Type::SliceMut(slice_id) = ty {
                         let elem_ty = self.ctx.slice_elem(slice_id);
-                        // Copy elements assign directly; an owned string
-                        // element releases the replaced slot (the vector
-                        // store's rule). Other owned element kinds would need
-                        // their own release path.
-                        if self.is_owned(elem_ty) && elem_ty != Type::String {
+                        // Copy elements assign directly; an owned element
+                        // releases the replaced slot first. A string release
+                        // is the string store's rule and an owned struct
+                        // releases through `ae_t<k>_release`; a nested vector
+                        // element has no release path in a slice yet.
+                        if self.is_owned(elem_ty) && elem_ty != Type::String && !matches!(elem_ty, Type::Struct(_)) {
                             self.seek_scalar_offset(base.range.start);
                             return Err(self.fail("storing through a mutable slice of owned elements is not supported yet"));
+                        }
+                        if self.is_owned(elem_ty) && elem_ty != Type::String
+                            && matches!(&value.kind, ae_syntax::expression::ExpressionKind::Field { .. })
+                        {
+                            self.seek_scalar_offset(value.range.end);
+                            return Err(self.fail("cannot move a field out of a struct; use it where a borrow works"));
                         }
                         self.seek_scalar_offset(base.range.end);
                         let (line, column) = self.position();
@@ -461,6 +468,13 @@ impl<'a> Parser<'a> {
                         if value_ty != elem_ty {
                             self.seek_scalar_offset(value.range.end);
                             return Err(self.fail(&format!("slice elements must be {}", elem_ty.name(self.ctx))));
+                        }
+                        // An owned struct element moves in: the source binding
+                        // is forfeited after the store, like the vector store.
+                        if self.is_owned(elem_ty) && elem_ty != Type::String
+                            && let Expr::Variable(source, ..) = &stored
+                        {
+                            self.moved.insert(*source);
                         }
                         self.seek_scalar_offset(value.range.end);
                         self.take(Kind::Semi)?;

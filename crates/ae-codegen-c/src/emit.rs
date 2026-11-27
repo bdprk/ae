@@ -776,10 +776,31 @@ fn emit_intrinsic(
             let c_elem = c_type_name(elem);
             let index = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
             let value = emit_owned_operand(body, &args[2], types, def_map)?;
-            let _ = writeln!(
-                out,
-                "    {{ {c_elem} _tmp = {value}; *(({c_elem} *)ae_slice_at_mut(&{slice_expr}, (int64_t)({index}), (size_t){line}, (size_t){column})) = _tmp; }}"
-            );
+            // An owned element releases the replaced slot before the new bytes
+            // land (the vector store's rule). A struct helper is a no-op for a
+            // Copy struct, so every struct element releases unconditionally.
+            let release = match elem {
+                TyKind::String => Some("ae_str_release".to_owned()),
+                TyKind::Vector(_) => Some("ae_vec_release".to_owned()),
+                TyKind::MapOf(_) => Some("ae_map_release".to_owned()),
+                TyKind::Struct(id) if types.structs.contains_key(&id) => Some(format!("ae_rel_struct_{id}")),
+                TyKind::Enum(_, id) if types.enums.contains_key(&id) => Some(format!("ae_rel_enum_{id}")),
+                _ => None,
+            };
+            match release {
+                Some(release) => {
+                    let _ = writeln!(
+                        out,
+                        "    {{ {c_elem} _tmp = {value}; {c_elem} *_slot = ({c_elem} *)ae_slice_at_mut(&{slice_expr}, (int64_t)({index}), (size_t){line}, (size_t){column}); {release}(_slot); *_slot = _tmp; }}"
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "    {{ {c_elem} _tmp = {value}; *(({c_elem} *)ae_slice_at_mut(&{slice_expr}, (int64_t)({index}), (size_t){line}, (size_t){column})) = _tmp; }}"
+                    );
+                }
+            }
             finish_value(out, body, types, destination, target, "((ae_unit_t){ 0 })")
         }
         "bytes" => {

@@ -5,6 +5,27 @@
 #[derive(Copy)]
 struct Point { x: i64, y: i64 }
 
+// An owned struct element: the store releases the replaced value through its
+// own release path (the user's Drop first) before the new bytes land.
+struct Tagged {
+    name: string,
+    n: i64,
+}
+
+impl Drop for Tagged {
+    fn drop(&mut self) {
+        print("drop " + self.name);
+    }
+}
+
+fn swap_tag(items: &mut [Tagged]) {
+    items[0] = Tagged { name: "z", n: 9 };
+}
+
+fn take_tag(items: &mut [Tagged], t: Tagged) {
+    items[0] = t;
+}
+
 fn retitle(names: &mut [string]) {
     names[0] = "zz";
     names[1] = "ww";
@@ -115,4 +136,14 @@ fn main() {
     }
     print(dynamic[0]);
     print(dynamic[1]);
+    // Owned struct elements: the replaced element's Drop runs before the new
+    // one lands, in a whole vector and in a window; a variable store moves.
+    var tags = vec[Tagged { name: "a", n: 1 }, Tagged { name: "b", n: 2 }];
+    swap_tag(&mut tags);
+    print(tags[0].name);
+    print(tags[0].n);
+    var moved = Tagged { name: "c", n: 3 };
+    take_tag(&mut tags[1..2], moved);
+    print(tags[1].name);
+    print(tags[1].n);
 }

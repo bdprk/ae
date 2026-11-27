@@ -927,7 +927,7 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: strvec store on non-vec".to_owned()),
                 }
             }
-            Statement::SliceStore(id, idx_expr, val_expr, _elem_ty, line, col) => {
+            Statement::SliceStore(id, idx_expr, val_expr, elem_ty, line, col) => {
                 // ADR-0236 rung 4: the write goes to the owner's slot in the
                 // calling frame, through the mutable slice's window.
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
@@ -942,7 +942,8 @@ fn eval_stmts(
                 };
                 if idx < 0 || idx >= len { return trap("vector index out of bounds", *line, *col); }
                 let abs = (start + idx) as usize;
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let val = match eval_expr(env, val_expr, locals, caller_locals, moving) {
                     Ok(v) => v,
                     Err(f) => return f,
                 };
@@ -970,7 +971,16 @@ fn eval_stmts(
                         Val::Str(s) => values[abs] = s,
                         _ => return Flow::Trap("internal: slice store type".to_owned()),
                     },
-                    Val::VecG(values) => values[abs] = val,
+                    Val::VecG(values) => {
+                        let old = std::mem::replace(&mut values[abs], val);
+                        // An owned struct element releases the replaced value
+                        // exactly once, like the compiled store's release.
+                        if moving
+                            && let Err(flow) = release_val(env, old, *elem_ty)
+                        {
+                            return flow;
+                        }
+                    }
                     Val::Array(values) => values[abs] = val,
                     Val::Moved => return trap("use of moved value", *line, *col),
                     _ => return Flow::Trap("internal: slice store on non-vector owner".to_owned()),
