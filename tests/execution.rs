@@ -11732,3 +11732,45 @@ fn read_errors_distinguish_missing_paths_from_unreadable_ones() {
         "true\ntrue\nfalse\n0\n"
     );
 }
+
+#[test]
+fn pure_backend_flag_builds_and_runs_the_same_program() {
+    // ADR-0237: `build --pure` / `run --pure` select the pure-MIR C backend.
+    // The program's observable behaviour is the same C contract as the default
+    // backend: the same stdout for a completed program and the same positioned
+    // overflow trap for a checked operation.
+    let dir = std::env::temp_dir().join(format!("ae-pure-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("input.ae");
+    fs::write(&source, "fn main() { var x = 2; while x < 5 { x = x + 1; } print(x); }").unwrap();
+
+    let output = dir.join(if cfg!(windows) { "pure.exe" } else { "pure" });
+    let build = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("build").arg(&source).arg("-o").arg(&output).arg("--pure")
+        .output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&output).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5");
+
+    // `run --pure` reaches the same answer as the default route.
+    let pure_run = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("run").arg(&source).arg("--pure")
+        .output().unwrap();
+    assert!(pure_run.status.success(), "{}", String::from_utf8_lossy(&pure_run.stderr));
+    assert_eq!(String::from_utf8_lossy(&pure_run.stdout).trim(), "5");
+
+    // Checked arithmetic keeps its contract through the pure backend.
+    fs::write(&source, "fn main() { var x = 9223372036854775807; print(x + 1); }").unwrap();
+    let pure_trap = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("run").arg(&source).arg("--pure")
+        .output().unwrap();
+    assert!(!pure_trap.status.success());
+    assert!(
+        String::from_utf8_lossy(&pure_trap.stderr).contains("integer overflow"),
+        "{}",
+        String::from_utf8_lossy(&pure_trap.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

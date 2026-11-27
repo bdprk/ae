@@ -5,7 +5,7 @@ mod package;
 mod render;
 mod frontend_cache;
 
-const USAGE: &str = "usage: ae <check|emit-c|emit-pure-c|emit-pure-mir|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
+const USAGE: &str = "usage: ae <check|emit-c|emit-pure-c|emit-pure-mir|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [--pure] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug] [--pure]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
 
 /// A toolchain failure with the exit code it maps to. Usage errors exit 2 and
 /// everything else exits 1, so a script can tell "you called it wrong" from
@@ -619,6 +619,11 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
             }
         }
     }
+    // `build --pure` / `run --pure` compile through the pure-MIR C backend
+    // (ADR-0237). The flag is removed before the positional parsing below, so
+    // `-o`, `--release` and `--debug` keep their existing shapes.
+    let pure = matches!(cmd.as_str(), "build" | "run") && args.iter().any(|a| a.to_str() == Some("--pure"));
+    if pure { args.retain(|a| a.to_str() != Some("--pure")); }
     let first = args.get(1).and_then(|arg| arg.to_str());
     let implicit_project = match cmd.as_str() {
         "check" | "emit-c" | "emit-pure-c" | "emit-pure-mir" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" => args.len() == 1,
@@ -682,7 +687,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     };
     let package::PackageEntry { path: input, imports, lock } = package::entry_path(Path::new(&args[1]))?;
     let import_key = sha256::hex(format!("{imports:?}").as_bytes());
-    run_source(&cmd, &input, output, &program_args, release, &import_key, &imports, lock.filter(|_| cmd == "build"))
+    run_source(&cmd, &input, output, &program_args, release, pure, &import_key, &imports, lock.filter(|_| cmd == "build"))
         .map_err(Failure::from)
 }
 
@@ -782,6 +787,7 @@ fn run_source(
     output: Option<PathBuf>,
     program_args: &[OsString],
     release: bool,
+    pure: bool,
     import_key: &str,
     imports: &frontend::PackageImports,
     lock: Option<package::PackageLock>,
@@ -868,7 +874,9 @@ fn run_source(
     // previous build, the frontend work is skipped entirely. `emit-c` and
     // `check` always run the frontend, because their output *is* the
     // frontend's answer.
-    let cacheable = matches!(cmd, "build" | "run");
+    // The frontend cache stores the legacy backend's C, so a pure build never
+    // reads or writes it.
+    let cacheable = matches!(cmd, "build" | "run") && !pure;
     let c = match if cacheable { frontend_cache::lookup(&cache_root(), input, import_key) } else { None } {
         Some(hit) => {
             if let Some(lock) = &lock { lock.verify(&hit.units)?; }
@@ -877,6 +885,23 @@ fn run_source(
                 eprintln!("ae timing: frontend_and_codegen_ms=0.000 (frontend cache hit)");
             }
             hit.c
+        }
+        None if pure => {
+            // The pure-MIR C pipeline (ADR-0237): lower -> optimize -> validate
+            // -> borrow-check -> C11. Relative imports are followed; package
+            // imports are resolved through the same map the frontend uses.
+            let config = ae_compiler::ae_codegen_c::EmitConfig {
+                target: ae_compiler::ae_layout::TargetSpec::host(),
+                emit_main_wrapper: true,
+            };
+            let bodies = ae_compiler::compile_path_pure_mir_bodies_with_imports(input, imports)?;
+            let c = ae_compiler::ae_codegen_c::emit_module_c(&bodies, &config)
+                .map_err(|e| format!("{e}"))?;
+            if timings_enabled() {
+                eprintln!("ae backend: pure MIR -> C11");
+                eprintln!("ae timing: frontend_and_codegen_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+            }
+            c
         }
         None => {
             let tracked = frontend::compile_path_tracked_with_imports(input, imports)?;

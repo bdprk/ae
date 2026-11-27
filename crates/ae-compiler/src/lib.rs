@@ -2,7 +2,7 @@ pub mod frontend;
 pub use ae_codegen_c;
 pub use ae_layout;
 pub use ae_mir;
-pub use frontend::mir_pure::{compile_path_pure_mir_bodies, compile_path_pure_mir_to_c};
+pub use frontend::mir_pure::{compile_path_pure_mir_bodies, compile_path_pure_mir_bodies_with_imports, compile_path_pure_mir_to_c};
 pub use frontend::{format_pure_mir_path, lower_path_to_pure_mir, RUNTIME_OBJECT_INTRINSICS, RuntimeIntrinsic};
 pub use ae_syntax::fmt;
 pub mod harness;
