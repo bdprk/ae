@@ -1,0 +1,62 @@
+// std/std/log.ae
+// Pure-AE logging (P4.4). The severity levels already live in `std/core/log.ae`
+// (`LogLevel`, `log_level_code`, `log_is_enabled`); this hosted module turns a
+// level, a tag and a message into one line and writes it out. The record shape
+// is fixed — `LEVEL tag: message` — so a test can pin it and a consumer can
+// grep it, and the formatting is kept separate from emission (`log_record`
+// returns the string, `log_write` prints it).
+//
+// The sink is the console bridge (`print`, stdout). A log stream should prefer
+// stderr so it does not pollute program output; that waits on an `eprintln`
+// intrinsic, which the language does not have yet. Until then a caller that
+// wants stderr silence can use `log_record` and route the string itself.
+
+use "../core/log.ae";
+
+// The upper-case name of a level.
+pub fn log_level_name(level: LogLevel) -> string {
+    match level {
+        LogLevel::Debug => { return "DEBUG"; }
+        LogLevel::Info => { return "INFO"; }
+        LogLevel::Warn => { return "WARN"; }
+        LogLevel::Error => { return "ERROR"; }
+    }
+}
+
+// One formatted record: `LEVEL tag: message`. The tag and message are copied
+// in, because a `&string` is read only and the caller's buffers outlive the
+// record; nothing here aliases a caller's storage.
+pub fn log_record(level: LogLevel, tag: &string, message: &string) -> string {
+    let name = log_level_name(level);
+    let tag_copy = slice(tag, 0, len(tag));
+    let message_copy = slice(message, 0, len(message));
+    var line = name + " ";
+    let with_tag = line + tag_copy;
+    line = with_tag;
+    let with_colon = line + ": ";
+    line = with_colon;
+    let with_message = line + message_copy;
+    line = with_message;
+    return line;
+}
+
+// Format a record and write it to the console bridge.
+pub fn log_write(level: LogLevel, tag: &string, message: &string) {
+    print(log_record(level, tag, message));
+}
+
+pub fn log_debug(tag: &string, message: &string) {
+    log_write(LogLevel::Debug, tag, message);
+}
+
+pub fn log_info(tag: &string, message: &string) {
+    log_write(LogLevel::Info, tag, message);
+}
+
+pub fn log_warn(tag: &string, message: &string) {
+    log_write(LogLevel::Warn, tag, message);
+}
+
+pub fn log_error(tag: &string, message: &string) {
+    log_write(LogLevel::Error, tag, message);
+}

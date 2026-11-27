@@ -1,0 +1,31 @@
+// P4.4: the hosted logging module. The severity levels live in core; this
+// module formats `LEVEL tag: message` and writes it through the console
+// bridge. The record shape is pinned first, then one line per level is emitted.
+use "../../std/core/log.ae";
+use "../../std/std/log.ae";
+
+fn main() {
+    assert(log_level_code(LogLevel::Debug) == 10);
+    assert(log_level_code(LogLevel::Info) == 20);
+    assert(log_level_code(LogLevel::Warn) == 30);
+    assert(log_level_code(LogLevel::Error) == 40);
+
+    assert(log_level_name(LogLevel::Debug) == "DEBUG");
+    assert(log_level_name(LogLevel::Info) == "INFO");
+    assert(log_level_name(LogLevel::Warn) == "WARN");
+    assert(log_level_name(LogLevel::Error) == "ERROR");
+
+    assert(log_is_enabled(LogLevel::Warn, LogLevel::Error));
+    assert(!log_is_enabled(LogLevel::Warn, LogLevel::Info));
+
+    assert(log_record(LogLevel::Info, "app", "started") == "INFO app: started");
+    assert(log_record(LogLevel::Error, "db", "timeout") == "ERROR db: timeout");
+    assert(log_record(LogLevel::Debug, "net", "") == "DEBUG net: ");
+
+    log_debug("net", "connecting");
+    log_info("app", "started");
+    log_warn("db", "slow query");
+    log_error("io", "missing file");
+
+    print("log ok");
+}

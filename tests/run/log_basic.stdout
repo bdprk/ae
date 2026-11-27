@@ -1,0 +1,5 @@
+DEBUG net: connecting
+INFO app: started
+WARN db: slow query
+ERROR io: missing file
+log ok
