@@ -2025,8 +2025,19 @@ mod tests {
         let mut declared = 0usize;
         for line in sources[0].1.lines().map(|line| line.trim_start()) {
             if !line.starts_with("extern ") { continue; }
-            let name = line[..line.find('(').expect("declaration has a parameter list")]
-                .rsplit(' ').next().unwrap().trim_start_matches('*');
+            // A `__declspec(dllimport)` attribute carries parentheses of its
+            // own; strip it before looking for the parameter list (whose
+            // parentheses may also be preceded by a function-pointer
+            // parameter's `(*name)` shape, so the first one after the
+            // attribute is the declaration's own list only for the plain
+            // prototypes this runtime writes).
+            let mut head = line;
+            if let Some(at) = head.find("__declspec(") {
+                let close = head[at..].find(')').expect("attribute has a closing parenthesis");
+                head = &head[at + close + 1..];
+            }
+            let open = head.find('(').expect("declaration has a parameter list");
+            let name = head[..open].rsplit(' ').next().unwrap().trim_start_matches('*');
             assert!(WIN32_DECLS.contains(&name), "self-declared Win32 symbol not in the audit list: {name}");
             declared += 1;
         }
