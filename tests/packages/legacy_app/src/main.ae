@@ -1,0 +1,9 @@
+use "@legacy_lib";
+
+fn main() {
+    // Edition 1: the deprecated alias compiles silently here too.
+    var list = strvec_new();
+    push(list, "legacy");
+    print(join(list, ","));
+    print(joined("app"));
+}

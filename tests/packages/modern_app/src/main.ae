@@ -1,0 +1,10 @@
+use "@legacy_lib";
+
+fn main() {
+    // Edition 2: this call site warns, while the edition-1 dependency stays
+    // silent (the behavior is the same on every path).
+    var list = strvec_new();
+    push(list, "legacy");
+    print(join(list, ","));
+    print(joined("app"));
+}

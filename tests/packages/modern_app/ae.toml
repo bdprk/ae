@@ -1,0 +1,8 @@
+[package]
+name = "modern_app"
+version = "0.1.0"
+ae = "0.1"
+edition = "2"
+
+[dependencies]
+legacy_lib = { path = "../legacy_lib" }

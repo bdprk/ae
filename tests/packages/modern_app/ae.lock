@@ -1,0 +1,5 @@
+ae-lock-v1
+manifest 65a3c5e0a11bda9fb6d5effdad6e925cfe507ddcf2ac05e8c1d7dae6eaa98cb1 "../legacy_lib/ae.toml"
+manifest 57e7c21be856c4c0e7750fc21fc2a5ea6798547e32ae97e764274b0a1bfa32bf "ae.toml"
+source acaf8b541aa975e0487e952999ad461685711b50d718a4ee95273833d272af47 "../legacy_lib/src/lib.ae"
+source 1d78695e401a90e415bcd1ebde886f1dc536dde00d372eaa2e5ee9173776887f "src/main.ae"

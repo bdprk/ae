@@ -1,0 +1,15 @@
+// A pinned downstream library from before editions: the manifest has no
+// `edition` field, so this is edition 1 and the deprecated alias compiles
+// silently (`spec/packages.md` §2). Consumers see this behavior even when
+// they declare the current edition.
+pub fn make_list(tag: string) -> vec[string] {
+    var values = strvec_new();
+    push(values, tag);
+    push(values, "lib");
+    return values;
+}
+
+pub fn joined(tag: string) -> string {
+    let values = make_list(tag);
+    return join(values, "-");
+}

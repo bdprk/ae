@@ -51,6 +51,8 @@ Use `use "@alias";` to load a declared path dependency's src/lib.ae. Each import
 
 For an application package, ae test reads src/test.ae and uses the same dependency aliases as src/main.ae. Test entry files use the existing test harness convention and omit main. The --interp option runs the same tests in the interpreter.
 
+`tests/packages/` is the vendored downstream corpus (M8.1.05): one shared edition-1 library and two applications, one per edition, each with a committed lockfile and a saved baseline. The corpus test rebuilds them through `ae build` (verifying every lock hash), compares the compiled and interpreted output against the baseline, and fails closed when a source is edited without `ae update`.
+
 ## 3. Lockfile (`ae.lock`)
 
 The locked graph is independent of the order dependencies are declared in and of the working directory `ae update` runs from; the graph, not the text, is what resolution produces. The root manifest is still content-addressed, so any edit to `ae.toml` — including moving one dependency line — makes an existing lock stale and requires `ae update`.

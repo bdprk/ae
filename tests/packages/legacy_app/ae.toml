@@ -1,0 +1,7 @@
+[package]
+name = "legacy_app"
+version = "0.1.0"
+ae = "0.1"
+
+[dependencies]
+legacy_lib = { path = "../legacy_lib" }

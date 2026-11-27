@@ -5508,6 +5508,61 @@ fn an_old_edition_package_is_consumed_by_a_new_edition_package() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &destination);
+        } else {
+            fs::copy(&path, &destination).unwrap();
+        }
+    }
+}
+
+#[test]
+fn pinned_downstream_packages_rebuild_and_match_baselines() {
+    // M8.1.05: the vendored package corpus is pinned by its committed
+    // ae.lock files; rebuilding verifies each lock, and every app must
+    // produce its saved baseline on the compiled and interpreted paths.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = unique_temp_dir("pinned_packages");
+    copy_tree(&repo.join("tests").join("packages"), &dir);
+    let cli = env!("CARGO_BIN_EXE_ae");
+    for (app, warnings) in [("legacy_app", 0usize), ("modern_app", 1usize)] {
+        let app_dir = dir.join(app);
+        let expected = fs::read_to_string(app_dir.join("expected.stdout")).unwrap().replace("\r\n", "\n");
+        let exe = dir.join(format!("{app}.exe"));
+        let build = Command::new(cli).arg("build").arg(&app_dir).arg("-o").arg(&exe).output().unwrap();
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(build.status.success(), "{app}: {stderr}");
+        assert_eq!(stderr.matches("W0703").count(), warnings, "{app} warnings: {stderr}");
+        let run = Command::new(&exe).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), expected, "{app} baseline");
+        let interp = Command::new(cli).arg("run").arg(&app_dir).arg("--interp").output().unwrap();
+        assert!(interp.status.success(), "{app}: {}", String::from_utf8_lossy(&interp.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&interp.stdout).replace("\r\n", "\n"),
+            expected,
+            "{app} interpreter baseline"
+        );
+    }
+    // The lock pins the sources: an edit without `ae update` fails closed.
+    let app_dir = dir.join("legacy_app");
+    let main = app_dir.join("src").join("main.ae");
+    fs::write(&main, fs::read_to_string(&main).unwrap() + "\n").unwrap();
+    let stale = Command::new(cli).arg("build").arg(&app_dir).arg("-o").arg(dir.join("stale.exe")).output().unwrap();
+    assert!(!stale.status.success(), "an edited source must fail the pinned lock");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("Run ae update"),
+        "{}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[allow(dead_code)] // kept as the documented M2.4 propagate-elision probe; superseded by the MIR differential suite
 fn mir_drop_elision_thins_propagate_error_path_releases() {
     // M2.4: a `?`'s releases ride the error path, which exits the function,
