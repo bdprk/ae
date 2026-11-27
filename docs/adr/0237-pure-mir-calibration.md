@@ -43,6 +43,10 @@ authority.
    and bound the skip set (≤5 fixtures), so a new unsupported shape is a
    failure rather than a silent pass.
 
+> Update 2026-11-27: ADR-0243 stage 1 retires the skip allowance below — the
+> gate now requires every accepted fixture to lower and check (164/164, zero
+> skips). The calibration decision itself stands.
+
 ## Calibration gate
 
 `tests/pure_borrowck_calibration.rs` runs

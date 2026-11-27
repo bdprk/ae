@@ -62,8 +62,10 @@ existing gates:
 
 ## Evidence
 
-To be recorded per stage: the calibration count (currently 164 fixtures, the
-skip set must be empty before stage 3), the negative-fixture parity report,
+Stage 1 is met: `tests/pure_borrowck_calibration.rs` now requires **164
+checked / 0 skips** (`skipped.is_empty()`), and every one of the 164 run
+fixtures lowers, validates and borrow-checks. To be recorded per later
+stage: the negative-fixture parity report,
 the workspace suite and clippy on both hosts, the corpus and examples gates,
 and the fuzz summaries for both generators. This ADR stays Proposed until
 stage 3 lands.

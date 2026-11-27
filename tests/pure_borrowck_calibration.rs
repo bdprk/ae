@@ -1,8 +1,8 @@
 //! P3.3 calibration gate: the pure-MIR borrow checker must accept every
-//! standalone program the existing compiler accepts, minus the shapes the
-//! pure pipeline documents as unsupported (token cursors today). Divergences
-//! here are either a lowering bug or a checker bug and must be fixed, not
-//! silently allowlisted.
+//! standalone program the existing compiler accepts. Skips are retired
+//! (ADR-0243 stage 1): a shape the pure pipeline cannot lower or check is a
+//! failure here, not an allowlist entry. Divergences are either a lowering
+//! bug or a checker bug and must be fixed, not silently allowlisted.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,14 +44,17 @@ fn pure_mir_borrowck_agrees_on_the_accepted_run_corpus() {
         failures.join("\n")
     );
     assert!(
-        checked >= 150,
-        "expected >=150 calibrated fixtures, got {checked} (skipped {})",
+        checked >= 164,
+        "expected >=164 calibrated fixtures, got {checked} (skipped {})",
         skipped.len()
     );
+    // ADR-0243 stage 1: every accepted fixture lowers, validates and
+    // borrow-checks. The skip allowance from ADR-0237 is retired; a new
+    // unsupported shape must be implemented or removed from the corpus with
+    // an ADR, not skipped.
     assert!(
-        skipped.len() <= 5,
-        "unsupported-construct set grew to {} fixtures:\n{}",
-        skipped.len(),
+        skipped.is_empty(),
+        "the pure pipeline must lower and check every accepted fixture; skips:\n{}",
         skipped.join("\n")
     );
 }
