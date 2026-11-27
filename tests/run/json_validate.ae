@@ -25,9 +25,13 @@ fn main() {
     assert(json_valid("{\"a\":1,\"b\":[true,null]}"));
     assert(json_valid("{\"a\":[1,{\"b\":true}],\"c\":null}"));
     assert(json_valid("  { }  "));
+    assert(json_valid("\n[1,\t2]\r\n"));
+    assert(json_valid("\t{\"a\" : 1}\n"));
 
     // Rejected.
     assert(!json_valid(""));
+    assert(!json_valid(" \t\r\n"));
+    assert(!json_valid("[] x"));
     assert(!json_valid("   "));
     assert(!json_valid("nul"));
     assert(!json_valid("tru"));
