@@ -11635,3 +11635,52 @@ fn emit_pure_c_owns_and_releases_vectors() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn utf8_validation_reads_files_and_reports_the_first_bad_byte() {
+    // ADR-0244: `read_file` is byte-exact (binary files must round-trip), so
+    // text validation is the caller's job and lives in std/core/utf8.ae. A
+    // valid file validates; a file with one broken sequence reports the byte
+    // offset where it stops being UTF-8.
+    let dir = std::env::temp_dir().join(format!("ae-utf8-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("good.txt");
+    let bad = dir.join("bad.txt");
+    fs::write(&good, "héllo 😀").unwrap();
+    // 0x61 'a', then 0xE2 0x82 (a valid lead with a missing final byte).
+    fs::write(&bad, [b'a', 0xE2, 0x82]).unwrap();
+    let source = format!(
+        concat!(
+            "use \"{}\";\n",
+            "fn main() {{\n",
+            "    let ok = read_file(\"{}\");\n",
+            "    print(is_utf8(ok));\n",
+            "    print(utf8_error_offset(ok));\n",
+            "    let broken = read_file(\"{}\");\n",
+            "    print(is_utf8(broken));\n",
+            "    print(utf8_error_offset(broken));\n",
+            "    print(len(broken));\n",
+            "}}\n"
+        ),
+        // The lexer reads a backslash as an escape, so the use path is spelled
+        // with forward slashes on every host; Windows file APIs accept them.
+        repo_std_utf8().display().to_string().replace('\\', "/"),
+        good.display().to_string().replace('\\', "/"),
+        bad.display().to_string().replace('\\', "/"),
+    );
+    let path = dir.join("main.ae");
+    fs::write(&path, source).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "true\n-1\nfalse\n1\n3\n"
+    );
+}
+
+/// The stdlib module path used by source strings the tests write into a
+/// temporary directory: `use` paths resolve relative to the importing file.
+fn repo_std_utf8() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/core/utf8.ae")
+}

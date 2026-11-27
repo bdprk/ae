@@ -46,10 +46,12 @@ be recorded before either side changes.
    `write_file` unchanged; the existing hosted-file test is the pin.
 3. **The boundary checks are the guarantee.** A program that wants to know
    whether a file is text validates it explicitly with the standard
-   library's `utf8` helpers (`std/core/utf8.ae` exposes
-   `utf8_sequence_length`, `is_utf8_continuation_byte`, and the batch
-   fixtures already exercise them). A future `is_utf8(s)` helper belongs in
-   `std/core`, not in the runtime.
+   library: `std/core/utf8.ae` exposes `is_utf8(text)`,
+   `utf8_error_offset(text)` (the first byte where the buffer stops being
+   UTF-8, or -1), `utf8_sequence_length` and
+   `is_utf8_continuation_byte`. The validator rejects overlong forms,
+   surrogates and code points above U+10FFFF — the same contract
+   `utf8_len` assumes — and lives in `std/core`, not in the runtime.
 4. **Documentation follows.** `spec/` and `docs/current-language.md` state
    the byte-container contract; the ledger's P4.3 gap entry is rewritten to
    record the decision instead of an open hole.
@@ -69,6 +71,11 @@ be recorded before either side changes.
 - The pure backend mirrors both (`ae_str` carries `ptr`/`len`/`owned`;
   `ae_str_slice` traps on a split sequence; the corpus gate compares the
   trap's position and message).
+- `tests/run/utf8_validation.ae` pins `is_utf8`/`utf8_error_offset` on valid
+  multi-byte text, an emoji and the empty string, plus the classifiers the
+  validator is built from; `utf8_validation_reads_files_and_reports_the_
+  first_bad_byte` writes `a` + `0xE2 0x82` to disk and asserts the read is
+  byte-exact (`len == 3`), invalid, and reported at offset 1.
 
 ## Consequences
 

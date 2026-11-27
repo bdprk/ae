@@ -1,0 +1,39 @@
+// ADR-0244: `string` is a byte container. The string API refuses to *create*
+// invalid text (`slice` traps on a split character), so a program sees invalid
+// bytes only through a file or stdin — and validates them explicitly with the
+// std/core/utf8 helpers. This fixture pins the validator on text it can build,
+// plus the byte classification the validator is made of; the invalid-input
+// half lives in `utf8_validation_reads_files` (tests/execution.rs), which can
+// put arbitrary bytes on disk.
+use "../../std/core/utf8.ae";
+
+fn main() {
+    // "héllo" is h + two bytes for é + llo.
+    let good = "héllo";
+    assert(is_utf8(good));
+    assert(utf8_error_offset(good) == -1);
+    print("valid");
+
+    // An emoji is one four-byte sequence.
+    let emoji = "😀";
+    assert(is_utf8(emoji));
+    assert(utf8_error_offset(emoji) == -1);
+    print("emoji");
+
+    // The pieces the validator is built from.
+    assert(utf8_sequence_length(65) == 1);
+    assert(utf8_sequence_length(195) == 2);
+    assert(utf8_sequence_length(228) == 3);
+    assert(utf8_sequence_length(240) == 4);
+    assert(utf8_sequence_length(128) == 0);
+    assert(is_utf8_continuation_byte(128));
+    assert(is_utf8_continuation_byte(191));
+    assert(!is_utf8_continuation_byte(192));
+    assert(!is_utf8_continuation_byte(65));
+    print("bytes");
+
+    // Empty text is valid UTF-8.
+    assert(is_utf8(""));
+    assert(utf8_error_offset("") == -1);
+    print("empty");
+}
