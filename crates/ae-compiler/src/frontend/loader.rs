@@ -4,7 +4,54 @@ use std::path::PathBuf;
 
 // Leading `use "path";` headers. Parsed from tokens before the Parser owns
 // the shared function table, so imports can be loaded depth-first.
-pub type PackageImports = std::collections::BTreeMap<PathBuf, std::collections::BTreeMap<String, PathBuf>>;
+//
+// M8.1.02: beside the alias table (`@name` -> resolved `lib.ae` per declaring
+// package's `src` directory), the map records each package's edition. The
+// parser reads the edition of the file it is lowering, so a package without
+// the manifest field keeps the pre-edition behavior while the current
+// edition enables deprecation warnings.
+#[derive(Debug, Clone, Default)]
+pub struct PackageImports {
+    aliases: std::collections::BTreeMap<PathBuf, std::collections::BTreeMap<String, PathBuf>>,
+    editions: std::collections::BTreeMap<PathBuf, u32>,
+}
+
+/// The edition of a loose file (no manifest): the current edition.
+pub const CURRENT_EDITION: u32 = 2;
+
+impl PackageImports {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.aliases.is_empty()
+    }
+
+    pub fn insert(&mut self, src: PathBuf, aliases: std::collections::BTreeMap<String, PathBuf>) {
+        self.aliases.insert(src, aliases);
+    }
+
+    /// Register a package's edition keyed by its `src` directory.
+    pub fn set_edition(&mut self, src: PathBuf, edition: u32) {
+        self.editions.insert(src, edition);
+    }
+
+    /// The edition a file is compiled under: its package's edition, or the
+    /// current edition for a file that belongs to no manifest.
+    pub fn file_edition(&self, file: &Path) -> u32 {
+        let canonical = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        canonical
+            .parent()
+            .and_then(|dir| self.editions.get(dir))
+            .copied()
+            .unwrap_or(CURRENT_EDITION)
+    }
+
+    fn aliases(&self) -> impl Iterator<Item = (&PathBuf, &std::collections::BTreeMap<String, PathBuf>)> {
+        self.aliases.iter()
+    }
+}
 
 fn resolve_import(file: &Path, canonical: &Path, import: &str, imports: &PackageImports) -> Result<PathBuf, FrontendError> {
     let Some(alias) = import.strip_prefix('@') else {
@@ -13,7 +60,7 @@ fn resolve_import(file: &Path, canonical: &Path, import: &str, imports: &Package
     if imports.is_empty() {
         return Ok(file.parent().unwrap_or(Path::new(".")).join(import));
     }
-    imports.iter()
+    imports.aliases()
         .filter(|(root, _)| canonical.starts_with(root))
         .max_by_key(|(root, _)| root.components().count())
         .and_then(|(_, aliases)| aliases.get(alias))

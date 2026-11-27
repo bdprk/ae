@@ -22,6 +22,7 @@ Status: The CLI builds dependency-free packages and inspects local path dependen
 name = "log-analyzer"
 version = "0.3.1"
 ae = "1.0"          # toolchain compatibility floor
+edition = "2"       # source edition; absent = 1
 
 [dependencies]
 json = "1.2"            # registry dependency, MVS-compatible range
@@ -35,6 +36,7 @@ posix = "1.0"
 ```
 
 - `[package]` requires `name` (lowercase, `[a-z0-9_-]`, ≤64 bytes), `version` (three-number semver, no prerelease in this cycle), and the `ae` floor.
+- `[package] edition` is optional. `"2"` is the current edition and `"1"` is what a manifest without the field means: edition 1 keeps the pre-edition behavior (deprecated aliases compile silently, `spec/stdlib.md` §4), edition 2 warns. The edition follows the declaring package, so a new-edition package may consume an old-edition one; a file compiled without a manifest is edition 2, and `ae new`/`ae init` scaffold `edition = "2"`.
 - A path dependency table accepts `path` and an optional `version` caret range (`0.3` admits `0.3.0` through `0.3.9` but not `0.4.0`; `0.0.3` admits only `0.0.3`). Resolution rejects a dependency whose manifest version falls outside the range, naming the alias, the requirement and the version found; unknown dependency keys are rejected rather than ignored.
 - Registry dependencies take an MVS range; git deps pin a `rev` (branch/tag names are rejected — the lockfile must be reproducible without consulting the remote's mutable state); path deps are for in-repo development and are **rejected in `publish`**.
 - Platform-conditional dependencies select per target; the condition subset is `{windows, unix, x86_64, arm64}` until M7 needs more.

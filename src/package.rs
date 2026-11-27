@@ -15,7 +15,7 @@ const HELLO: &str = "fn main() {\n    print(\"Hello, ae!\");\n}\n";
 
 fn manifest_text(name: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nae = \"{}\"\n",
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nae = \"{}\"\nedition = \"2\"\n",
         env!("CARGO_PKG_VERSION"),
     )
 }
@@ -96,6 +96,10 @@ pub(super) fn entry_path(input: &Path) -> Result<PackageEntry, String> {
         lock_path: Some(lock_path.clone()),
         ..PathGraph::default()
     };
+    // The root package's edition is registered even when the graph is not
+    // walked (no dependencies, no lock): the entry file still belongs to it.
+    let canonical_manifest = manifest.canonicalize().unwrap_or_else(|_| manifest.clone());
+    graph.imports.set_edition(canonical_manifest.with_file_name("src"), package.edition);
     let has_lock = lock_path.try_exists().map_err(|error| format!("{}: {error}", lock_path.display()))?;
     let lock = if package.dependencies.is_empty() && !has_lock {
         None
@@ -214,6 +218,9 @@ pub(super) fn update_lock(manifest: &Path) -> Result<(), String> {
 struct Manifest {
     name: String,
     version: Version,
+    /// The package's source edition: 1 for a manifest that predates the
+    /// field, 2 for the current edition (`ae new`/`ae init` scaffold it).
+    edition: u32,
     dependencies: toml::Table,
     digest: String,
 }
@@ -299,6 +306,17 @@ fn parse_manifest_str(manifest: &Path, source: &str) -> Result<Manifest, String>
     if minimum > current {
         return Err(fail(&format!("package requires ae {floor} or later, installed version is {current}")));
     }
+    // M8.1.02: the edition is optional so every pre-edition manifest keeps
+    // edition 1; only the two published editions are accepted.
+    let edition = match package.get("edition") {
+        None => 1,
+        Some(toml::Value::String(text)) => match text.as_str() {
+            "1" => 1,
+            "2" => 2,
+            other => return Err(fail(&format!("package.edition must be \"1\" or \"2\", found \"{other}\""))),
+        },
+        Some(_) => return Err(fail("package.edition must be a string")),
+    };
 
     let name = name.to_owned();
     let mut dependencies = match document.remove("dependencies") {
@@ -328,7 +346,7 @@ fn parse_manifest_str(manifest: &Path, source: &str) -> Result<Manifest, String>
             }
         }
     }
-    Ok(Manifest { name, version, dependencies, digest: ae_compiler::sha256::hex(source.as_bytes()) })
+    Ok(Manifest { name, version, edition, dependencies, digest: ae_compiler::sha256::hex(source.as_bytes()) })
 }
 
 fn platform_matches(platform: &str) -> Option<bool> {
@@ -686,6 +704,9 @@ impl PathGraph {
         } else {
             self.packages.insert(package.name.clone(), (package.version, path.clone()));
         }
+        // M8.1.02: the edition follows the declaring package, not its
+        // consumer; a new-edition package may depend on an old-edition one.
+        self.imports.set_edition(path.with_file_name("src"), package.edition);
         self.visiting.push(path.clone());
         let mut edges = Vec::new();
         let mut imports = std::collections::BTreeMap::new();
@@ -1044,6 +1065,21 @@ mod fuzz_tests {
             }
         }
         chars.into_iter().collect()
+    }
+
+    #[test]
+    fn edition_field_parses_or_rejects() {
+        // M8.1.02: a manifest without the field keeps edition 1; only the two
+        // published editions are accepted.
+        let path = Path::new("edition/ae.toml");
+        let parse = |extra: &str| {
+            parse_manifest_str(path, &format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nae = \"0.1\"\n{extra}"))
+        };
+        assert_eq!(parse("").unwrap().edition, 1);
+        assert_eq!(parse("edition = \"1\"\n").unwrap().edition, 1);
+        assert_eq!(parse("edition = \"2\"\n").unwrap().edition, 2);
+        assert!(parse("edition = \"3\"\n").is_err());
+        assert!(parse("edition = 2\n").is_err());
     }
 
     #[test]

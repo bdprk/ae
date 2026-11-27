@@ -5468,6 +5468,46 @@ fn migrate_rewrites_the_deprecated_alias_and_a_second_run_changes_nothing() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn an_old_edition_package_is_consumed_by_a_new_edition_package() {
+    // M8.1.02: edition 2 (the current edition) warns on a deprecated alias;
+    // a manifest without the field stays edition 1, so a new-edition package
+    // can depend on it without the dependency's files warning.
+    let dir = unique_temp_dir("editions");
+    let oldlib = dir.join("oldlib");
+    fs::create_dir_all(oldlib.join("src")).unwrap();
+    fs::write(oldlib.join("ae.toml"), "[package]\nname = \"oldlib\"\nversion = \"0.1.0\"\nae = \"0.1\"\n").unwrap();
+    fs::write(
+        oldlib.join("src/lib.ae"),
+        "pub fn names() -> vec[string] {\n    var list = strvec_new();\n    push(list, \"lib\");\n    return list;\n}\n",
+    ).unwrap();
+    let app = dir.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("ae.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nae = \"0.1\"\nedition = \"2\"\n\n[dependencies]\noldlib = { path = \"../oldlib\" }\n",
+    ).unwrap();
+    fs::write(
+        app.join("src/main.ae"),
+        "use \"@oldlib\";\nfn main() {\n    let from_lib = names();\n    print(from_lib[0]);\n    var own = strvec_new();\n    push(own, \"app\");\n    print(own[0]);\n}\n",
+    ).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&app).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(stderr.matches("W0703").count(), 1, "only the new-edition file warns: {stderr}");
+    assert!(stderr.contains("ae: 5:15: warning: deprecated 'strvec_new' (W0703)"), "the consumer's call site warns: {stderr}");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "lib\napp\n");
+
+    // A loose file belongs to no manifest: it is the current edition and warns.
+    let loose = dir.join("loose.ae");
+    fs::write(&loose, "fn main() { var v = strvec_new(); push(v, \"x\"); print(v[0]); }\n").unwrap();
+    let loose_run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&loose).output().unwrap();
+    assert!(loose_run.status.success(), "{}", String::from_utf8_lossy(&loose_run.stderr));
+    assert!(String::from_utf8_lossy(&loose_run.stderr).contains("W0703"), "a loose file is the current edition");
+    assert_eq!(String::from_utf8_lossy(&loose_run.stdout).replace("\r\n", "\n"), "x\n");
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[allow(dead_code)] // kept as the documented M2.4 propagate-elision probe; superseded by the MIR differential suite
 fn mir_drop_elision_thins_propagate_error_path_releases() {
     // M2.4: a `?`'s releases ride the error path, which exits the function,

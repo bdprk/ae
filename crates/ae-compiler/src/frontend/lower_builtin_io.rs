@@ -78,10 +78,13 @@ impl<'a> Parser<'a> {
                 }
                 "strvec_new" | "f64vec_new" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 0)?;
-                    // M8.1.03: `strvec_new` is the first deprecated alias
-                    // (spec/stdlib.md §4). The spelling still compiles; the
-                    // warning names the replacement and the removal policy.
-                    if name == "strvec_new" {
+                    // M8.1.03/M8.1.02: `strvec_new` is the first deprecated
+                    // alias, and edition 1 (a manifest without the field)
+                    // keeps the pre-deprecation silence while the current
+                    // edition warns with the replacement and removal policy.
+                    if name == "strvec_new"
+                        && self.ctx.package_imports().file_edition(std::path::Path::new(&self.file)) >= 2
+                    {
                         eprintln!("ae: {line}:{column}: warning: deprecated 'strvec_new' (W0703): use 'var v: vec[string] = vec[]' or a 'vec[\"text\"]' literal; the alias is removed at the 1.0 boundary");
                     }
                     self.seek_scalar_offset(expression.range.end);
