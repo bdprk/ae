@@ -166,9 +166,13 @@ class Gen:
             return [f"print({self.int_expr(vars)});"]
         kind = self.rnd() % 31
         if self.pure_subset:
-            # Kinds 0/1/3/4/5 are arithmetic, branches, loops and prints;
-            # 8 is a two-field struct; 9 is a fully covered enum match.
-            kind = self.pick([0, 1, 3, 4, 5, 8, 9])
+            # The pure backend now covers the container, pointer, spawn and
+            # string-vector surfaces, so the subset draws from every kind that
+            # needs no `Doc`/slice helper: arithmetic, branches, loops, prints,
+            # strings, vectors (incl. fields), enums, annotations, pointers,
+            # spawn and string vectors. Kinds 14-17 (Doc borrow surface) and
+            # 22 (atomic cells) stay out until their preambles are mirrored.
+            kind = self.pick([0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 18, 19, 20, 21, 23, 24, 25, 26, 27])
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -642,9 +646,19 @@ class Gen:
         # struct Pt and its two scalar fields are fixed: field reads borrow.
         # The Op enum exercises match dispatch and payload bindings.
         if self.pure_subset:
+            # The declarations the drawn kinds reference: the struct and enum
+            # every seed has, plus the owned-struct vector's Drop glue and the
+            # nested-receiver shapes (kinds 24/26).
             lines = [
                 "struct Pt { a: i64, b: i64 }",
                 "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
+                "struct FuzzTag { name: string, n: i64 }",
+                "impl Drop for FuzzTag {",
+                '    fn drop(&mut self) { print("d" + self.name); }',
+                "}",
+                "struct FuzzBox { cells: vec, tags: vec[FuzzTag] }",
+                "struct FuzzOuter { box: FuzzBox }",
+                "fn fuzz_tag_n(t: &FuzzTag) -> i64 { return t.n; }",
                 "fn main() {",
             ]
             vars = ["seed0"]
