@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 148 of 202 items done.
-Charter-1.0 progress: 119 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 149 of 202 items done.
+Charter-1.0 progress: 120 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -293,4 +293,4 @@ Charter-1.0 progress: 119 of 202 items done (29 prototype-done items still name 
 - [x] R3c: Type checker over the resolved tree emitting the existing typed …
 - [ ] R3d: Rebase LSP hover/definition/rename/completion on R3b/R3c; re-verify …
 - [x] R4.1: Split the standard library into `std/core` (no allocation or OS), …
-- [ ] R5.1: Generate the master checklist from this ledger; CI checks that a …
+- [x] R5.1: Generate the master checklist from this ledger; CI checks that a …

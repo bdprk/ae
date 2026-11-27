@@ -934,12 +934,15 @@ M5.1 and M6.2 pauses until R2 and R3a land.
   dependencies. `bytes` allocates a vector, and `cell_new` allocates process
   storage. Hosted wrappers for atomic cells and timers live in `std/std`.
   Pure record models and arithmetic remain eligible for core.
-- [ ] R5.1. Generate the master checklist from this ledger; CI checks that a
+- [x] R5.1. Generate the master checklist from this ledger; CI checks that a
   commit title's item IDs are flipped in that commit. **Progress:** the
   generator exists (`scripts/gen_checklist.py` -> `docs/checklist.md`,
   regenerated and diff-checked in CI), with unit tests in
   `scripts/test_gen_checklist.py`; `scripts/check_commit_ids.py` enforces
-  locally that a commit title claiming item IDs edits the ledger in the
+  that a commit title claiming item IDs edits the ledger in the
   same commit (range default `@{u}..HEAD`, `--base` for anything else).
-  Remaining: history-level CI wiring once the workflow fetches full
-  history, and flipping the item in this commit.
+  The history-level wiring is in `.github/workflows/test.yml`: checkout uses
+  `fetch-depth: 0`, the "Master checklist is current (R5.1)" step runs
+  `gen_checklist.py` then `git diff --exit-code docs/checklist.md`, and the
+  "Commit titles record their ledger work (R5.1)" step runs
+  `check_commit_ids.py --base origin/<base>` on pull requests. Done.
