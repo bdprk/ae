@@ -37,7 +37,7 @@ enum Val {
     // are copied and reads never reach across a frame. A mutable slice names
     // the owner slot in the calling frame instead, so stores write back.
     Slice(Vec<Val>),
-    SliceMutRef { owner: usize, start: i64, len: i64 },
+    SliceMutRef { owner: usize, path: Vec<String>, start: i64, len: i64 },
     VecI(Vec<i64>),
     VecS(Vec<String>),
     VecF(Vec<f64>),
@@ -173,8 +173,8 @@ enum MapVal<'a> {
     Missing,
 }
 
-// Walk a struct field path immutably and clone the leaf.
-fn field_path_get(value: &Val, path: &[&str]) -> Option<Val> {
+// Walk a struct field path (names only) immutably.
+fn field_names_ref<'a>(value: &'a Val, path: &[&str]) -> Option<&'a Val> {
     let mut current = value;
     for name in path {
         current = match current {
@@ -182,7 +182,54 @@ fn field_path_get(value: &Val, path: &[&str]) -> Option<Val> {
             _ => return None,
         };
     }
-    Some(current.clone())
+    Some(current)
+}
+
+// Walk a struct field path (names only) immutably and clone the leaf.
+fn field_names_get(value: &Val, path: &[&str]) -> Option<Val> {
+    field_names_ref(value, path).cloned()
+}
+
+// The visible length of the storage a mutable slice borrows.
+fn slice_source_len(source: &SliceSource, locals: &HashMap<usize, Val>) -> Result<i64, Flow> {
+    let owner = source.slot();
+    match source {
+        SliceSource::Var(_) => match locals.get(&owner) {
+            Some(Val::VecI(values)) => Ok(values.len() as i64),
+            Some(Val::VecF(values)) => Ok(values.len() as i64),
+            Some(Val::VecS(values)) => Ok(values.len() as i64),
+            Some(Val::VecG(values)) => Ok(values.len() as i64),
+            Some(Val::Array(values)) => Ok(values.len() as i64),
+            Some(Val::Moved) => Err(trap("use of moved vector", 0, 0)),
+            _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
+        },
+        SliceSource::Field { path, .. } => {
+            let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
+            let Some(root) = locals.get(&owner) else {
+                return Err(Flow::Trap("internal: slice owner missing".to_owned()));
+            };
+            let Some(leaf) = field_names_ref(root, &names) else {
+                return Err(Flow::Trap("internal: slice field path".to_owned()));
+            };
+            match leaf {
+                Val::VecI(values) => Ok(values.len() as i64),
+                Val::VecF(values) => Ok(values.len() as i64),
+                Val::VecS(values) => Ok(values.len() as i64),
+                Val::VecG(values) => Ok(values.len() as i64),
+                Val::Array(values) => Ok(values.len() as i64),
+                Val::Moved => Err(trap("use of moved vector", 0, 0)),
+                _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
+            }
+        }
+    }
+}
+
+// The field names a slice source names (empty for a whole binding).
+fn slice_source_path(source: &SliceSource) -> Vec<String> {
+    match source {
+        SliceSource::Var(_) => Vec::new(),
+        SliceSource::Field { path, .. } => path.iter().map(|(name, _)| name.clone()).collect(),
+    }
 }
 
 // P2.4: the value a slice argument reads: a whole binding or the struct field
@@ -199,7 +246,7 @@ fn read_slice_source(
         SliceSource::Field { root, path, .. } => {
             let value = read_var(locals, caller_locals, *root, line, col)?;
             let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
-            field_path_get(&value, &names).ok_or_else(|| Flow::Trap("internal: slice field path".to_owned()))
+            field_names_get(&value, &names).ok_or_else(|| Flow::Trap("internal: slice field path".to_owned()))
         }
     }
 }
@@ -884,8 +931,8 @@ fn eval_stmts(
                     Ok(_) => return Flow::Trap("internal: slice store index type".to_owned()),
                     Err(f) => return f,
                 };
-                let (owner, start, len) = match read_var(locals, caller_locals, *id, *line, *col) {
-                    Ok(Val::SliceMutRef { owner, start, len }) => (owner, start, len),
+                let (owner, path, start, len) = match read_var(locals, caller_locals, *id, *line, *col) {
+                    Ok(Val::SliceMutRef { owner, path, start, len }) => (owner, path, start, len),
                     Ok(_) => return Flow::Trap("internal: slice store on a read-only slice".to_owned()),
                     Err(f) => return f,
                 };
@@ -898,18 +945,26 @@ fn eval_stmts(
                 let Some(caller) = caller_locals.as_mut() else {
                     return Flow::Trap("internal: dangling mutable slice".to_owned());
                 };
-                match caller.get_mut(&owner) {
-                    Some(Val::VecI(values)) => match val {
+                let Some(root) = caller.get_mut(&owner) else {
+                    return Flow::Trap("internal: dangling mutable slice".to_owned());
+                };
+                let names: Vec<&str> = path.iter().map(|name| name.as_str()).collect();
+                let target = if path.is_empty() { Some(root) } else { field_path_mut(root, &names) };
+                let Some(target) = target else {
+                    return Flow::Trap("internal: slice store on a non-vector field".to_owned());
+                };
+                match target {
+                    Val::VecI(values) => match val {
                         Val::Int(n) => values[abs] = n,
                         _ => return Flow::Trap("internal: slice store type".to_owned()),
                     },
-                    Some(Val::VecF(values)) => match val {
+                    Val::VecF(values) => match val {
                         Val::Float(x) => values[abs] = x,
                         _ => return Flow::Trap("internal: slice store type".to_owned()),
                     },
-                    Some(Val::VecG(values)) => values[abs] = val,
-                    Some(Val::Array(values)) => values[abs] = val,
-                    Some(Val::Moved) => return trap("use of moved value", *line, *col),
+                    Val::VecG(values) => values[abs] = val,
+                    Val::Array(values) => values[abs] = val,
+                    Val::Moved => return trap("use of moved value", *line, *col),
                     _ => return Flow::Trap("internal: slice store on non-vector owner".to_owned()),
                 }
             }
@@ -1451,7 +1506,7 @@ fn eval_expr(
                 }
                 // A mutable slice reads through to the owner's storage in the
                 // calling frame (ADR-0236 rung 4).
-                Val::SliceMutRef { owner, start, len } => {
+                Val::SliceMutRef { owner, path, start, len } => {
                     if idx < 0 || idx >= len {
                         return Err(trap("vector index out of bounds", *line, *col));
                     }
@@ -1459,7 +1514,12 @@ fn eval_expr(
                     let Some(caller) = caller_locals.as_ref() else {
                         return Err(Flow::Trap("internal: dangling mutable slice".to_owned()));
                     };
-                    let value = match caller.get(&owner) {
+                    let Some(root) = caller.get(&owner) else {
+                        return Err(Flow::Trap("internal: dangling mutable slice".to_owned()));
+                    };
+                    let names: Vec<&str> = path.iter().map(|name| name.as_str()).collect();
+                    let leaf = if path.is_empty() { Some(root) } else { field_names_ref(root, &names) };
+                    let value = match leaf {
                         Some(Val::VecI(values)) => values.get(abs).copied().map(Val::Int),
                         Some(Val::VecF(values)) => values.get(abs).copied().map(Val::Float),
                         Some(Val::VecS(values)) => values.get(abs).cloned().map(Val::Str),
@@ -2746,21 +2806,10 @@ fn invoke_call(
             // window, not a snapshot: the callee's reads and (rung 4b)
             // stores go through the calling frame (ADR-0236 rung 4).
             Argument::Value(e) if matches!(param_ty, Type::SliceMut(_)) => {
-                let owner_len = |locals: &HashMap<usize, Val>, slot: &usize| -> Result<i64, Flow> {
-                    match locals.get(slot) {
-                        Some(Val::VecI(values)) => Ok(values.len() as i64),
-                        Some(Val::VecF(values)) => Ok(values.len() as i64),
-                        Some(Val::VecS(values)) => Ok(values.len() as i64),
-                        Some(Val::VecG(values)) => Ok(values.len() as i64),
-                        Some(Val::Array(values)) => Ok(values.len() as i64),
-                        Some(Val::Moved) => Err(trap("use of moved vector", 0, 0)),
-                        _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
-                    }
-                };
                 match e {
                     Expr::SliceOf(source, Type::Vector(_), ..) => {
                         let owner = source.slot();
-                        Val::SliceMutRef { owner, start: 0, len: owner_len(locals, &owner)? }
+                        Val::SliceMutRef { owner, path: slice_source_path(source), start: 0, len: slice_source_len(source, locals)? }
                     }
                     // `&mut v[start..end]` (ADR-0236 rung 4): the bounds run in
                     // the caller's frame; the window keeps the owner's slot.
@@ -2774,11 +2823,11 @@ fn invoke_call(
                             Val::Int(n) => n,
                             _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
                         };
-                        let len = owner_len(locals, &owner)?;
+                        let len = slice_source_len(source, locals)?;
                         if start < 0 || end < start || end > len {
                             return Err(trap("slice range out of bounds", *line, *col));
                         }
-                        Val::SliceMutRef { owner, start, len: end - start }
+                        Val::SliceMutRef { owner, path: slice_source_path(source), start, len: end - start }
                     }
                     _ => eval_expr(env, e, locals, caller_locals, true)?,
                 }

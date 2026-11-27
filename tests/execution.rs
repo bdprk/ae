@@ -10868,9 +10868,14 @@ fn field_slices_match_across_backends() {
 
     for (label, source, needle) in [
         (
-            "mutable field slice",
-            r#"struct H { cells: vec[i64] } fn bump(s: &mut [i64]) { s[0] = 9; } fn main() { var h = H { cells: vec[1, 2] }; bump(&mut h.cells); }"#,
-            "mutable field slices are not supported yet",
+            "mutable field slice through a &mut parameter",
+            r#"struct H { cells: vec[i64] } fn bump(s: &mut [i64]) { s[0] = 9; } fn via(h: &mut H) { bump(&mut h.cells); } fn main() { var h = H { cells: vec[1, 2] }; via(&mut h); }"#,
+            "a mutable field slice through a '&mut' parameter is not supported yet",
+        ),
+        (
+            "immutable root mutable slice",
+            r#"struct H { cells: vec[i64] } fn bump(s: &mut [i64]) { s[0] = 9; } fn main() { let h = H { cells: vec[1, 2] }; bump(&mut h.cells); }"#,
+            "cannot borrow 'h' mutably: it was declared without 'var'",
         ),
         (
             "moved root",
@@ -10891,6 +10896,16 @@ fn field_slices_match_across_backends() {
             "missing field",
             r#"struct H { cells: vec[i64] } fn peek(s: &[i64]) -> i64 { return s[0]; } fn main() { let h = H { cells: vec[1] }; print(peek(&h.missing)); }"#,
             "struct 'H' has no field 'missing'",
+        ),
+        (
+            "mutable missing field",
+            r#"struct H { cells: vec[i64] } fn bump(s: &mut [i64]) { s[0] = 9; } fn main() { var h = H { cells: vec[1] }; bump(&mut h.missing); }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+        (
+            "mutable wrong element",
+            r#"struct H { cells: vec[f64] } fn bump(s: &mut [i64]) { s[0] = 9; } fn main() { var h = H { cells: vec[1.5] }; bump(&mut h.cells); }"#,
+            "argument must be &mut [i64], found vec[f64]",
         ),
     ] {
         let path = std::env::temp_dir().join(format!(
@@ -11502,9 +11517,9 @@ fn slice_mut_match_across_backends() {
             "a slice range needs both bounds",
         ),
         (
-            "field mutable slice",
-            r#"struct R { cells: vec } fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var r = R { cells: vec[1] }; f(&mut r.cells); }"#,
-            "mutable field slices are not supported yet",
+            "field mutable slice through a &mut parameter",
+            r#"struct R { cells: vec[i64] } fn f(m: &mut [i64]) { m[0] = 1; } fn via(r: &mut R) { f(&mut r.cells); } fn main() { var r = R { cells: vec[1] }; via(&mut r); }"#,
+            "a mutable field slice through a '&mut' parameter is not supported yet",
         ),
         (
             "wrong store type",

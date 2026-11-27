@@ -1360,10 +1360,6 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(name_range.start);
                     return Err(self.fail("this parameter borrows mutably; write the argument as '&mut name'"));
                 }
-                if !fields.is_empty() {
-                    self.seek_scalar_offset(argument.range.start);
-                    return Err(self.fail("a mutable slice argument borrows a whole vector; mutable field slices are not supported yet"));
-                }
                 // `&mut name[start..end]` windows the exclusive borrow; a single
                 // element is not a slice.
                 let range_bounds = index.as_ref().and_then(|index| ae_syntax::expression::split_range_argument(&self.tokens, index));
@@ -1388,12 +1384,26 @@ impl<'a> Parser<'a> {
                     return Err(moved_value_hint(self.binding_label(
                         self.fail(&format!("cannot borrow '{borrowed}' because it was moved")).with_code("E0102"), slot)));
                 }
-                let matches_element = match actual {
+                // P2.4: a field chain (`&mut h.cells`) windows the leaf vector.
+                // A `&mut` root would need the slice owner to cross the lender
+                // frame, which the interpreter's owner model does not carry.
+                let (source, source_ty) = if fields.is_empty() {
+                    (Box::new(SliceSource::Var(slot)), actual)
+                } else {
+                    if matches!(actual, Type::StructMut(_) | Type::StructRef(_)) {
+                        self.seek_scalar_offset(argument.range.start);
+                        return Err(self.fail("a mutable field slice through a '&mut' parameter is not supported yet"));
+                    }
+                    let path = field_path_types(self, actual, fields)?;
+                    let leaf = path.last().map(|(_, ty)| *ty).unwrap_or(actual);
+                    (Box::new(SliceSource::Field { root: slot, root_ty: actual, path }), leaf)
+                };
+                let matches_element = match source_ty {
                     Type::Vector(id) => self.ctx.vector_elem(id) == wanted_elem,
                     _ => false,
                 };
                 if !matches_element {
-                    return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), actual.name(self.ctx))));
+                    return Err(self.fail(&format!("argument must be {}, found {}", expected.name(self.ctx), source_ty.name(self.ctx))));
                 }
                 if self.is_borrowed(slot) {
                     if !self.only_view_borrows_active(slot) {
@@ -1411,12 +1421,12 @@ impl<'a> Parser<'a> {
                     let end = self.lower_slice_bound(end_range, slots)?;
                     self.seek_scalar_offset(argument.range.start);
                     let (line, column) = self.position();
-                    args.push(Argument::Value(Expr::SliceRange(Box::new(SliceSource::Var(slot)), actual, wanted_elem, Box::new(start), Box::new(end), line, column)));
+                    args.push(Argument::Value(Expr::SliceRange(source, source_ty, wanted_elem, Box::new(start), Box::new(end), line, column)));
                     continue;
                 }
                 self.seek_scalar_offset(argument.range.start);
                 let (line, column) = self.position();
-                args.push(Argument::Value(Expr::SliceOf(Box::new(SliceSource::Var(slot)), actual, wanted_elem, line, column)));
+                args.push(Argument::Value(Expr::SliceOf(source, source_ty, wanted_elem, line, column)));
                 continue;
             }
             // A `&[T]` argument builds the fat pointer from a whole vector or
