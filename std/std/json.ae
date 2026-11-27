@@ -162,3 +162,39 @@ pub fn encode_object(members: &vec[string]) -> string {
     }
     return out + "}";
 }
+
+// An array of integers encoded straight from a numeric vector — the common
+// "list of ids/counts" payload, without first building a string vector.
+pub fn encode_i64_array(values: &vec) -> string {
+    var out = "[";
+    var first = true;
+    for value in values {
+        if first {
+            first = false;
+        } else {
+            let comma = out + ",";
+            out = comma;
+        }
+        let grown = out + encode_i64(value);
+        out = grown;
+    }
+    return out + "]";
+}
+
+// An array of floats, with the same non-finite rule as `encode_f64` (NaN and
+// the infinities become `null`).
+pub fn encode_f64_array(values: &vec[f64]) -> string {
+    var out = "[";
+    var first = true;
+    for value in values {
+        if first {
+            first = false;
+        } else {
+            let comma = out + ",";
+            out = comma;
+        }
+        let grown = out + encode_f64(value);
+        out = grown;
+    }
+    return out + "]";
+}

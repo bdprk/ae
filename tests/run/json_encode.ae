@@ -38,4 +38,15 @@ fn main() {
     let object = encode_object(&members);
     print(object);
     assert(object == "{\"name\":\"gateway\",\"workers\":4,\"debug\":true}");
+
+    // Numeric arrays encode straight from a vector.
+    var ints = vec[1, 2, 3];
+    let int_array = encode_i64_array(&ints);
+    print(int_array);
+    assert(int_array == "[1,2,3]");
+
+    var floats = vec[2.5, 0.5];
+    let float_array = encode_f64_array(&floats);
+    print(float_array);
+    assert(float_array == "[2.5,0.5]");
 }
