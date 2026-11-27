@@ -3,8 +3,8 @@
 Generated from `docs/implementation-ledger.md` by `scripts/gen_checklist.py` (R5.1): do not edit by hand. Item bodies, evidence links and progress notes
 live in the ledger; this file mirrors only the checkbox state and titles.
 
-Prototype progress: 149 of 202 items done.
-Charter-1.0 progress: 120 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
+Prototype progress: 151 of 202 items done.
+Charter-1.0 progress: 122 of 202 items done (29 prototype-done items still name an open gap, marked `[1.0-gap: …]`).
 
 ## Start here
 
@@ -199,8 +199,8 @@ Charter-1.0 progress: 120 of 202 items done (29 prototype-done items still name 
 ## M5.3 Incremental
 
 - [x] M5.3.01: **Stable query keys.** Keep query identity stable across unrelated edits and distinct across targets. (frontend_cache unit tests: `key_ignores_unit_order` for stability, `different_compiler_identity_invalidates` and `entry_for_another_root_is_not_served` for distinctness; the key is the source-unit digest list plus the tool identity)
-- [ ] M5.3.02: **dependency recording.** Capture direct dependencies for a function referring to an imported type. (not yet: the cache is keyed per compilation unit set, not per query — a function referring to an imported type invalidates the whole unit set. Per-function dependency edges arrive with the query-based engine)
-- [ ] M5.3.03: **fingerprints.** Change a public field and show that its interface fingerprint changes. (not yet: there is no interface fingerprint; a public field edit changes the unit digest and therefore the whole key. Introducing fingerprints is part of the same query-engine slice as M5.3.02)
+- [x] M5.3.02: **dependency recording.** Capture direct dependencies for a function referring to an imported type. (landed in the `ae-query` engine: `QueryDb::check_file` records a `ParseFile(self)` edge plus a `PublicInterfaceFingerprint` edge for every imported file — both `use`-header imports and `register_import` edges. `crates/ae-query/tests/query_tests.rs::m5_3_02_dependency_recording_captures_cross_file_edges` asserts all three edges, and `ae-lsp` consumes the crate)
+- [x] M5.3.03: **fingerprints.** Change a public field and show that its interface fingerprint changes. (landed: `public_interface_fingerprint` hashes the public declarations. `m5_3_03_early_cutoff_on_private_body_and_whitespace_edits` shows a private-body/comment edit leaves the fingerprint unchanged, while a public fn signature change and a public struct field change each change it (`assert_ne!` on the struct-field case) and force `check_file(B)` to recompute)
 - [x] M5.3.04: **invalidation.** Change a private body and compare recomputed queries with a clean build. [1.0-gap: P6.4] (`changed_unit_invalidates` and `missing_unit_invalidates` in frontend_cache; end to end, `build_cache_serves_identical_executables_and_rebuilds_on_corruption` proves a cached build produces the same executable as a clean one)
 - [x] M5.3.05: **atomic cache writes.** Interrupt a cache write and run two writers against one key. (`store` stages both files under a per-process name and renames C before the entry, so a crash between the renames leaves a pair the digest check rejects; `concurrent_cache_writers_leave_one_usable_entry` runs two builds against one cache directory and then a third that reuses the survivor)
 - [x] M5.3.06: **corruption recovery.** Truncate an entry and rebuild only affected work with clean-build-equivalent output. (`damaged_c_invalidates` truncates the C and the next lookup misses; `build_cache_serves_identical_executables_and_rebuilds_on_corruption` compares the rebuilt executable with the clean one)
