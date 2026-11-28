@@ -1,0 +1,59 @@
+// std/alloc/rc.ae
+// Core Rc[T] shared ownership (P4.1).
+//
+// An `Rc[T]` owns one heap slot holding a `T` plus a reference count. Clones
+// copy the handle and bump the count; the last handle's drop releases the
+// slot. The count cell itself is the runtime's process-lifetime atomic
+// (`cell_new`), which the corpus's leak budget exempts by design.
+//
+// Reading: `rc_get` copies a Copy `T` out; an owned `T` reads through the
+// slot as a value the field rules govern (fields can never move out), so
+// owned payloads should stay Copy until the deref-view slice lands.
+
+use "./bridge.ae";
+
+pub struct Rc[T] {
+    refs: atomic,
+    slot: *mut T,
+}
+
+impl Rc[T] {
+    // The last reference releases the slot. `cell_add` returns the previous
+    // count, so `previous == 1` means this handle held the last ownership.
+    fn drop(&mut self) {
+        unsafe {
+            let previous = cell_add(self.refs, -1);
+            if previous == 1 {
+                let _f = ae_std_free(self.slot as *mut i64);
+            }
+        }
+    }
+}
+
+// Allocate the slot, move `val` into it, and start the count at one.
+pub fn rc_new[T](val: T) -> Rc[T] {
+    unsafe {
+        let refs = cell_new(1);
+        let raw = ae_std_alloc(c_size_of[T](), 1, 1) as *mut T;
+        var _w = ptr_write(raw, val);
+        return Rc[T] { refs: refs, slot: raw };
+    }
+}
+
+// Another handle to the same slot: the count goes up, nothing is copied.
+pub fn rc_clone[T](r: &Rc[T]) -> Rc[T] {
+    let _bump = cell_add(r.refs, 1);
+    return Rc[T] { refs: r.refs, slot: r.slot };
+}
+
+// Read the shared value. A Copy `T` copies; the slot itself is untouched.
+pub fn rc_get[T](r: &Rc[T]) -> T {
+    unsafe {
+        return r.slot.deref();
+    }
+}
+
+// The reference count, for tests and diagnostics.
+pub fn rc_count[T](r: &Rc[T]) -> i64 {
+    return cell_load(r.refs);
+}

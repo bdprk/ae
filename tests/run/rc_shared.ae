@@ -1,0 +1,34 @@
+// P4.1: Rc[T] shared ownership. Clones share one slot; the count tracks the
+// live handles; the generic drop releases the slot exactly once when the
+// count reaches zero. `box_shared.ae` covers the same allocation shape for
+// Box; here the two handles stay independently usable.
+use "../../std/alloc/rc.ae";
+
+#[repr(C)]
+pub struct Counter {
+    hits: i64,
+}
+
+fn main() {
+    let r = rc_new(41);
+    print(rc_get(&r) + 1);
+    print(rc_count(&r));
+
+    let c = rc_clone(&r);
+    print(rc_count(&c));
+
+    // Both handles observe the same slot.
+    let taken = doubled(rc_get(&r));
+    print(taken);
+
+    // A struct instance shares the same way.
+    let shared = rc_new(Counter { hits: 3 });
+    let twin = rc_clone(&shared);
+    print(rc_get(&twin).hits);
+    print(rc_count(&shared));
+    print(rc_count(&twin));
+}
+
+fn doubled(v: i64) -> i64 {
+    return v * 2;
+}

@@ -523,7 +523,12 @@ impl<'a> Parser<'a> {
                                         // view (print, a borrow argument, a
                                         // comparison); binding it as a value
                                         // is the binding arm's own move check.
-                                        || matches!(field, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_) | Type::String)
+                                        || matches!(field, Type::Ptr(_) | Type::PtrMut(_) | Type::Fn(_) | Type::String
+                                            // A copy-semantics handle reads as a value
+                                            // through the same rule the slot guard
+                                            // applies to handle locals.
+                                            | Type::Atomic | Type::Shared(_) | Type::Mutex
+                                            | Type::Chan | Type::Exec | Type::Pool | Type::Guard)
                                         // A struct field is a chain step
                                         // (`v[0].inner.radius`): the outer
                                         // link decides whether the final value
@@ -553,6 +558,11 @@ impl<'a> Parser<'a> {
                         // borrow argument, a comparison); binding it as a value
                         // is the binding arm's own move rejection.
                         || (role == ae_resolve::Role::Read && matches!(field, Type::String))
+                        // A copy-semantics handle field reads as a value
+                        // (`cell_add(r.refs, 1)` through a borrowed receiver):
+                        // passing one never moves or releases anything, the
+                        // same rule the slot guard applies to handle locals.
+                        || (role == ae_resolve::Role::Read && matches!(field, Type::Atomic | Type::Shared(_) | Type::Mutex | Type::Chan | Type::Exec | Type::Pool | Type::Guard))
                         // A struct field is a chain step too (`v[0].inner.radius`).
                         || (role == ae_resolve::Role::Read && matches!(field, Type::Struct(_)))
                         || (role == ae_resolve::Role::Write

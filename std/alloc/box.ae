@@ -7,12 +7,11 @@
 // the slot. Auto-drop of the slot itself lands with the Drop-through-Box
 // slice; until then callers free explicitly with `box_free`.
 
+use "./bridge.ae";
+
 pub struct Box[T] {
     ptr: *mut T,
 }
-
-extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
-extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;
 
 // Allocate one slot and move `val` into it.
 pub fn box_new[T](val: T) -> Box[T] {

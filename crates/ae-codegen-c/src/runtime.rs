@@ -10,6 +10,7 @@ use crate::types::int_c_bounds;
 pub(crate) fn emit_preamble(out: &mut String) {
     out.push_str(
         "#include <inttypes.h>\n\
+         #include <limits.h>\n\
          #include <math.h>\n\
          #include <stdbool.h>\n\
          #include <stddef.h>\n\
@@ -852,6 +853,13 @@ static inline ae_vec ae_args_value(void) {
 // or `stat`. These wrappers widen the UTF-8 path to UTF-16 and call the
 // wide-character entry point; on POSIX they are the plain calls.
 #ifdef _WIN32
+// fopen modes: the wide entry point takes wchar_t literals, the POSIX
+// macro passes narrow ones straight to fopen (GCC 14 rejects the wide
+// form as an incompatible pointer, so the mode travels through a macro
+// instead of a spelled literal).
+#define AE_FMODE_RB L"rb"
+#define AE_FMODE_WB L"wb"
+#define AE_FMODE_AB L"ab"
 extern __declspec(dllimport) int MultiByteToWideChar(unsigned int codepage, unsigned long flags, const char *text, int length, wchar_t *out, int capacity);
 extern __declspec(dllimport) int WideCharToMultiByte(unsigned int codepage, unsigned long flags, const wchar_t *wide, int length, char *narrow, int bytes, const char *default_char, int *used_default);
 static inline wchar_t *ae_path_wide(ae_str path) {
@@ -932,6 +940,9 @@ static inline int ae_path_chdir(ae_str path) {
 #define ae_path_mkdir(path) mkdir((path).ptr, 0777)
 #define ae_path_chdir(path) chdir((path).ptr)
 #define ae_path_stat_local(info) struct stat info
+#define AE_FMODE_RB "rb"
+#define AE_FMODE_WB "wb"
+#define AE_FMODE_AB "ab"
 #endif
 typedef struct { int64_t status; ae_str text; ae_str error; } ae_read_result;
 static inline ae_str ae_io_error(void) {
@@ -944,7 +955,7 @@ static inline ae_read_result ae_try_read_file_value(ae_str path) {
     out.status = 0;
     out.text = ae_str_from_parts("", 0, false);
     out.error = ae_str_from_parts("", 0, false);
-    FILE *file = ae_path_fopen(path, L"rb");
+    FILE *file = ae_path_fopen(path, AE_FMODE_RB);
     if (!file) {
         out.status = 1;
         out.error = ae_io_error();
@@ -985,7 +996,7 @@ static inline const char *ae_read_file_bytes_into(ae_str path, int64_t offset, i
     *result = ae_vec_new(sizeof(int64_t), NULL);
     if (offset < 0) return "negative file read offset";
     if (limit < 0) return "negative file read limit";
-    FILE *file = ae_path_fopen(path, L"rb");
+    FILE *file = ae_path_fopen(path, AE_FMODE_RB);
     if (!file) return "cannot open file";
 #ifdef _WIN32
     const bool seek_failed = _fseeki64(file, offset, SEEK_SET) != 0;
@@ -1076,7 +1087,7 @@ static inline ae_str ae_read_file_value(ae_str path, size_t line, size_t column)
     return out.text;
 }
 static inline int64_t ae_write_file_value(ae_str path, ae_str content, size_t line, size_t column) {
-    FILE *file = ae_path_fopen(path, L"wb");
+    FILE *file = ae_path_fopen(path, AE_FMODE_WB);
     if (!file) ae_fail_at("cannot write file", line, column);
     const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
     if (fclose(file) != 0 || written != (size_t)content.len) {
@@ -1085,7 +1096,7 @@ static inline int64_t ae_write_file_value(ae_str path, ae_str content, size_t li
     return (int64_t)written;
 }
 static inline int64_t ae_append_file_value(ae_str path, ae_str content, size_t line, size_t column) {
-    FILE *file = ae_path_fopen(path, L"ab");
+    FILE *file = ae_path_fopen(path, AE_FMODE_AB);
     if (!file) ae_fail_at("cannot append file", line, column);
     const size_t written = fwrite(content.ptr, 1, (size_t)content.len, file);
     if (fclose(file) != 0 || written != (size_t)content.len) {
@@ -1100,7 +1111,7 @@ static inline ae_write_result ae_try_write_file_value(ae_str path, ae_str conten
     out.status = 0;
     out.written = 0;
     out.error = ae_str_from_parts("", 0, false);
-    FILE *file = ae_path_fopen(path, L"wb");
+    FILE *file = ae_path_fopen(path, AE_FMODE_WB);
     if (!file) {
         out.status = 1;
         out.error = ae_io_error();
@@ -1281,9 +1292,9 @@ static inline ae_status_result ae_status_fail_value(ae_str error) {
 }
 static inline ae_status_result ae_try_copy_file_value(ae_str from, ae_str to) {
     errno = 0;
-    FILE *source = ae_path_fopen(from, L"rb");
+    FILE *source = ae_path_fopen(from, AE_FMODE_RB);
     if (!source) return ae_status_fail_value(ae_io_error());
-    FILE *target = ae_path_fopen(to, L"wb");
+    FILE *target = ae_path_fopen(to, AE_FMODE_WB);
     if (!target) {
         fclose(source);
         return ae_status_fail_value(ae_io_error());
@@ -1311,7 +1322,7 @@ static inline ae_write_result ae_try_append_file_value(ae_str path, ae_str conte
     out.written = 0;
     out.error = ae_str_from_parts("", 0, false);
     errno = 0;
-    FILE *file = ae_path_fopen(path, L"ab");
+    FILE *file = ae_path_fopen(path, AE_FMODE_AB);
     if (!file) {
         out.status = 1;
         out.error = ae_io_error();

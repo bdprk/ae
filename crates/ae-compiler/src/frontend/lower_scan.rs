@@ -551,11 +551,28 @@ impl<'a> Parser<'a> {
                                 let field_shape = field_owner_struct(base, &expressions, self.struct_names, self.structs)
                                     .and_then(|sid| field_ty_in(sid, name, self.structs))
                                     .map(ShapeArg::Value)
-                                    .or_else(|| resolved_field_shape(base, name, &expressions, self.struct_names, self.structs, self.generics));
+                                    .or_else(|| resolved_field_shape(base, name, &expressions, self.struct_names, self.structs, self.generics))
+                                    // A parameter or local of struct type answers
+                                    // its declaration's field table through the
+                                    // name slot (a `&Box[T]` receiver's handle
+                                    // fields, for instance): the binding's type
+                                    // is resolved even when the registry walk
+                                    // above cannot name it.
+                                    .or_else(|| {
+                                        let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(root)) = &base.kind else {
+                                            return None;
+                                        };
+                                        let &(_, _, root_ty) = self.names.get(root.as_str())?;
+                                        let sid = match root_ty {
+                                            Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+                                            _ => return None,
+                                        };
+                                        field_ty_in(sid, name, self.structs).map(ShapeArg::Value)
+                                    });
                                 let has_shape = field_shape.is_some();
                                 if let Some(field_shape) = field_shape {
                                     match field_shape {
-                                        ShapeArg::Value(field_ty) if scalar_type(field_ty) || matches!(field_ty, Type::Fn(_)) => {
+                                        ShapeArg::Value(field_ty) if scalar_type(field_ty) || matches!(field_ty, Type::Fn(_) | Type::Ptr(_) | Type::PtrMut(_)) => {
                                             expressions.struct_field_reads.insert(expression.range.start);
                                         }
                                         // A struct-typed field (or a nested generic

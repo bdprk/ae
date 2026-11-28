@@ -1,0 +1,11 @@
+// std/alloc/bridge.ae
+// The allocator bridge every std/alloc container shares (P4.1).
+//
+// The declarations are `pub` so importing box.ae and rc.ae in one program
+// resolves to this single definition instead of colliding on the same C
+// symbols. `ae_std_alloc`/`ae_std_free` are the runtime's allocator bridge:
+// size is a byte count, the returned block is uninitialized, and every block
+// is released exactly once.
+
+pub extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
+pub extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;
