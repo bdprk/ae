@@ -165,3 +165,13 @@ mixed 段汇总即 mixed 证据；pure-subset 需重跑（`cd /data/home/ae-r3 &
 python3 scripts/diff_fuzz.py --pure-subset --seeds 20000 --jobs 2`，混合段
 完成后）。ADR-0242 前置的本地+服务器套件绿已齐；5 万种子目标按双模式累计
 （本地 900 + 服务器段）。
+
+## 13. 本地 fuzz 总额（ADR-0242 账目）
+
+本会话本地段（均为当前 main 或近版，0 失败）：mixed 300（kind 31 首验）+
+pure 300（同）+ mixed 200 + pure 200（修正键后）+ mixed 100 + pure 100（发
+射器臂后冒烟）+ mixed 100 + pure 100（写穿/MapRef 后冒烟）= **mixed 900 +
+pure 900 = 1800 seeds 本地**。历史段（先前会话）：pure-subset 5000 + 各冒烟
+~1000。ADR-0242 的 50k 双模式目标：服务器段（relay + campaign3 + 哨兵）累
+计为主，本地 1800 为冒烟层。relay 段被沙箱周期性 Terminated——按段累计、
+汇总行缺失时以日志 ok 行计数为准。
