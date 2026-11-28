@@ -39,11 +39,12 @@ pub fn box_take[T](b: Box[T]) -> T {
     }
 }
 
-// Free the slot without reading the value: for `T`s whose bytes need no
-// drop. A `T` with owned fields needs `box_take` plus explicit field drops
-// until the Drop-through-Box slice lands.
+// Release the pointee in place, then free the slot: the drop-through for
+// every `T` (scalars are a no-op release, owned pointees run their release
+// chain), so the slot frees completely (ADR-0245 stage 2).
 pub fn box_free[T](b: Box[T]) {
     unsafe {
+        let _d = ptr_drop_in_place(b.ptr);
         let _f = ae_std_free(b.ptr as *mut i64);
         return;
     }

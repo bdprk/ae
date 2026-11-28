@@ -34,7 +34,16 @@ impl Parser<'_> {
                 _ => None,
             },
         };
-        if name != "c_offset_of" && let Some((size, align)) = scalar {
+        // `string` has a promised layout too (ADR-0245): the pure runtime's
+        // `ae_str {ptr, len, owned}` — 24 bytes at pointer alignment. The
+        // legacy backend stores 16 and over-allocates in the slot until its
+        // retirement; the constant is one number for both.
+        let string_layout = match self.subst.get(&type_name) {
+            Some(Type::String) | Some(Type::StrView) => Some((24, 8)),
+            None if type_name == "string" => Some((24, 8)),
+            _ => None,
+        };
+        if name != "c_offset_of" && let Some((size, align)) = string_layout.or(scalar) {
             self.take(Kind::RBracket)?;
             self.take(Kind::LParen)?;
             if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Type]()"))); }

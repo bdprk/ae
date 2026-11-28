@@ -1,0 +1,23 @@
+// ADR-0245 stage 1: a heap slot holds an owned string. The layout query
+// answers the pure runtime's 24-byte ae_str; ptr_write transfers ownership
+// to the slot; ptr_drop_in_place runs the release chain; the slot frees.
+// The Windows leak gate verifies the string bytes and the block each free
+// exactly once, and Box[string] rides the same pieces through box_free.
+use "../../std/alloc/box.ae";
+
+fn main() {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[string](), 1, 1) as *mut string;
+        var keep = "owned in heap";
+        let _w = ptr_write(raw, keep);
+        print("written");
+        let dropped = ptr_drop_in_place(raw);
+        print(dropped);
+        let _f = ae_std_free(raw as *mut i64);
+    }
+
+    // The container spelling: allocate, release through box_free.
+    let b = box_new("boxed string");
+    let _f = box_free(b);
+    print("freed");
+}

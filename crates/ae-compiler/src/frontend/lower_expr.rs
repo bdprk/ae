@@ -129,6 +129,10 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error_at(pointee.start, "cannot read the pointer's pointee type"))?;
                 let pointee_type = self.subst.get(name).copied()
                     .or_else(|| super::types::scalar_type(name))
+                    // `string` is a promised layout (ADR-0245): a heap slot may
+                    // hold one, with the slot-level ownership contract of
+                    // spec/unsafe.md 2.4 on the author of the unsafe block.
+                    .or_else(|| (name == "string").then_some(Type::String))
                     // spec/unsafe.md 2.1 promises a retag to any T with a
                     // known layout: a `#[repr(C)]` struct qualifies (its
                     // fields are scalars or other repr(C) structs, so a read
@@ -770,6 +774,7 @@ impl<'a> Parser<'a> {
                             .trim().to_owned();
                         let pointee_ty = self.subst.get(spelling.as_str()).copied()
                             .or_else(|| super::types::scalar_type(&spelling))
+                            .or_else(|| (spelling == "string").then_some(Type::String))
                             .or_else(|| self.struct_names.get(&spelling).map(|&sid| Type::Struct(sid)))
                             .or_else(|| self.enum_names.get(&spelling).map(|&eid| Type::Enum(self.enums[eid].name, eid)))
                             .ok_or_else(|| self.error_at(type_arguments[0].start, &format!("'ptr::null' needs a pointee type; '{spelling}' is not one")))?;
