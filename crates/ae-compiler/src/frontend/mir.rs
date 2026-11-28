@@ -653,10 +653,11 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::DerefPtr(p, ..) => match expr_type(p, ctx) {
             Type::Ptr(id) | Type::PtrMut(id) => match ctx.ptr_pointee(id) {
                 // An owned pointee reads as a view (ADR-0245 stage 2): a
-                // value read would copy the string header and give the
+                // value read would copy the owning header and give the
                 // allocation a second owner, so `p.deref()` on `*mut string`
-                // is a `StrView`.
+                // is a `StrView` and on `*mut vec[E]` a `VectorRef`.
                 Type::String => Type::StrView,
+                Type::Vector(id) => Type::VectorRef(id),
                 other => other,
             },
             other => other,

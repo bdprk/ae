@@ -133,6 +133,14 @@ impl<'a> Parser<'a> {
                     // hold one, with the slot-level ownership contract of
                     // spec/unsafe.md 2.4 on the author of the unsafe block.
                     .or_else(|| (name == "string").then_some(Type::String))
+                    // The container families too: a heap slot may hold a
+                    // vector. The pointee interning needs the element type —
+                    // scalar spellings first (named elements are future work).
+                    .or_else(|| {
+                        let inner = name.strip_prefix("vec[")?.strip_suffix(']')?.trim();
+                        let elem = super::types::scalar_type(inner)?;
+                        Some(Type::Vector(self.ctx.intern_vector_elem(elem)))
+                    })
                     // spec/unsafe.md 2.1 promises a retag to any T with a
                     // known layout: a `#[repr(C)]` struct qualifies (its
                     // fields are scalars or other repr(C) structs, so a read
@@ -583,7 +591,11 @@ impl<'a> Parser<'a> {
                             // stage 2): the header must not gain a second
                             // owner through a value copy.
                             let pointee = self.ctx.ptr_pointee(id);
-                            let ty = if pointee == Type::String { Type::StrView } else { pointee };
+                            let ty = match pointee {
+                                Type::String => Type::StrView,
+                                Type::Vector(id) => Type::VectorRef(id),
+                                other => other,
+                            };
                             return Ok((Expr::DerefPtr(Box::new(operand), line, column), ty));
                         }
                     }
@@ -764,7 +776,11 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(expression.range.end);
                     let (line, column) = self.position();
                     let pointee = self.ctx.ptr_pointee(id);
-                    let ty = if pointee == Type::String { Type::StrView } else { pointee };
+                    let ty = match pointee {
+                        Type::String => Type::StrView,
+                        Type::Vector(id) => Type::VectorRef(id),
+                        other => other,
+                    };
                     return Ok((Expr::DerefPtr(Box::new(operand), line, column), ty));
                 }
                 if let ExpressionKind::BracketedCallTarget { base, arguments: type_arguments } = &callee.kind {

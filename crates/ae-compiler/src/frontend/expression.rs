@@ -19,7 +19,31 @@ impl Parser<'_> {
     #[inline(never)]
     pub(super) fn c_layout_expr(&mut self, name: &str, field: Option<&ae_syntax::expression::Expression>) -> Result<(Expr, Type), ae_span::Diagnostic> {
         self.pos += 1;
-        let type_name = self.identifier()?;
+        // The spelling may nest brackets (`vec[i64]`, `map[string, f64]`):
+        // consume through the matching close and answer as text, the same
+        // way the scalar names are matched below.
+        let spelling_start = self.tokens[self.pos].offset;
+        let mut depth = 0usize;
+        loop {
+            match self.tokens[self.pos].kind {
+                Kind::LBracket => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Kind::RBracket => {
+                    if depth == 0 {
+                        // The query's own closing bracket: leave it for the
+                        // take() calls downstream, which consume it.
+                        break;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                Kind::Eof => return Err(self.fail("expected ']' after the layout query's type spelling")),
+                _ => self.pos += 1,
+            }
+        }
+        let type_name = self.source[spelling_start..self.tokens[self.pos].offset].trim().to_owned();
         // A type parameter inside a generic body resolves through the
         // substitution table first (ADR-0209 step A): at instantiation the
         // body is re-parsed with T bound to the concrete struct, so
@@ -37,13 +61,21 @@ impl Parser<'_> {
         // `string` has a promised layout too (ADR-0245): the pure runtime's
         // `ae_str {ptr, len, owned}` — 24 bytes at pointer alignment. The
         // legacy backend stores 16 and over-allocates in the slot until its
-        // retirement; the constant is one number for both.
-        let string_layout = match self.subst.get(&type_name) {
+        // retirement; the constant is one number for both. The container
+        // layouts are the same deal: the pure runtime's `ae_vec` (five
+        // pointer-or-int fields, 40 bytes) and the legacy `ae_strvec` agree
+        // on the size, so a heap slot is opaque 40 bytes to the author.
+        let owned_layout = match self.subst.get(&type_name) {
             Some(Type::String) | Some(Type::StrView) => Some((24, 8)),
-            None if type_name == "string" => Some((24, 8)),
-            _ => None,
+            Some(Type::Vector(_)) | Some(Type::VectorRef(_)) => Some((40, 8)),
+            Some(_) => None,
+            None => match type_name.as_str() {
+                "string" => Some((24, 8)),
+                s if s.starts_with("vec[") => Some((40, 8)),
+                _ => None,
+            },
         };
-        if name != "c_offset_of" && let Some((size, align)) = string_layout.or(scalar) {
+        if name != "c_offset_of" && let Some((size, align)) = owned_layout.or(scalar) {
             self.take(Kind::RBracket)?;
             self.take(Kind::LParen)?;
             if *self.current() != Kind::RParen { return Err(self.fail(&format!("{name} takes no arguments; write {name}[Type]()"))); }
