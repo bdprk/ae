@@ -338,6 +338,7 @@ impl<'a> TreePrinter<'a> {
         match place {
             MapPlace::Var(id, kind) | MapPlace::VarBorrow(id, kind) => format!("v{}[{}]", id, if *kind == MapKind::Float { "f64" } else { "i64" }),
             MapPlace::Field(id, fname, kind) => format!("v{}.{}[{}]", id, fname, if *kind == MapKind::Float { "f64" } else { "i64" }),
+            MapPlace::Pointer(..) => "*map".to_owned(),
         }
     }
 

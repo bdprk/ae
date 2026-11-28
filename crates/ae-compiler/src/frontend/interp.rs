@@ -183,6 +183,9 @@ fn map_val_ref<'a>(
 ) -> Result<MapVal<'a>, Flow> {
     let slot: Option<&mut Val> = match place {
         MapPlace::Var(id, _) | MapPlace::VarBorrow(id, _) => locals.get_mut(id),
+        MapPlace::Pointer(..) => {
+            return Err(Flow::Trap("map calls over a heap slot cannot run in the interpreter; run the compiled program".to_owned()))
+        }
         MapPlace::Field(id, fname, _) => match locals.get_mut(id) {
             Some(Val::Struct(_, fields)) => fields.get_mut(fname),
             _ => None,
@@ -265,6 +268,9 @@ fn path_parent(path: &str) -> String {
 fn m_contains_ref(place: &MapPlace, locals: &HashMap<usize, Val>, caller_locals: &Option<&mut HashMap<usize, Val>>, key: &str) -> bool {
     let slot: Option<&Val> = match place {
         MapPlace::Var(id, _) | MapPlace::VarBorrow(id, _) => locals.get(id),
+        // A heap-slot map cannot construct here (externs trap); the read
+        // answer is simply no.
+        MapPlace::Pointer(..) => None,
         MapPlace::Field(id, fname, _) => match locals.get(id) {
             Some(Val::Struct(_, fields)) => fields.get(fname),
             _ => None,
@@ -810,6 +816,7 @@ fn eval_stmts(
                     _ => None,
                 };
                 match place {
+                    MapPlace::Pointer(..) => return Flow::Trap("map put over a heap slot cannot run in the interpreter; run the compiled program".to_owned()),
                     MapPlace::Var(id, MapKind::Int) | MapPlace::VarBorrow(id, MapKind::Int) => match locals.get_mut(id) {
                         Some(Val::Map(m)) => { if let Some(n) = int_value { m.insert(key, n); } }
                         _ => return Flow::Trap("internal: map put on non-map".to_owned()),

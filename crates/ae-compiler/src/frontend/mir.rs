@@ -322,7 +322,7 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
         // bytes), so it names the intrinsic instead of posing as a direction.
         Statement::Sort(id, strings, ..) => (if *strings { "sort_strings" } else { "sort" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),
         Statement::Reverse(id, strings, ..) => (if *strings { "reverse_strings" } else { "reverse" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),
-        Statement::MapPut(place, key, value, ..) => ("put", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::MapPut(place, key, value, ..) => ("put", vec![map_place_operand(place, bindings, lowering), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Statement::Assert(condition, ..) => ("assert", vec![lower_operand(condition, bindings, lowering)]),
         Statement::Print(Printed::Text(text)) => ("print", vec![MirOperand::Str(Rc::from(text.as_str()), 0, 0)]),
         // The match subject rides the switch terminator, so the payload
@@ -406,10 +406,13 @@ fn field_vector_operand(id: usize, path: &[(String, Type)], base_ty: Type, elem_
     MirOperand::Place(place)
 }
 
-fn map_place_operand(place: &MapPlace, ctx: &CompileContext) -> MirOperand {
+fn map_place_operand(place: &MapPlace, bindings: &mut Vec<MirBinding>, lowering: &mut MirLowering) -> MirOperand {
     match place {
-        MapPlace::Var(id, kind) | MapPlace::VarBorrow(id, kind) => MirOperand::Place(MirPlace::Local(*id, map_kind_type(kind, ctx))),
-        MapPlace::Field(id, name, kind) => MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(*id, map_kind_type(kind, ctx))), name.clone(), map_kind_type(kind, ctx))),
+        MapPlace::Var(id, kind) | MapPlace::VarBorrow(id, kind) => MirOperand::Place(MirPlace::Local(*id, map_kind_type(kind, lowering.ctx))),
+        MapPlace::Field(id, name, kind) => MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(*id, map_kind_type(kind, lowering.ctx))), name.clone(), map_kind_type(kind, lowering.ctx))),
+        // An unbound deref chain (ADR-0245 rung 5): the deref expression
+        // lowers as the operand (its own intrinsic renders the borrow).
+        MapPlace::Pointer(expr, _) => lower_operand(expr, bindings, lowering),
     }
 }
 
@@ -498,7 +501,7 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::ToI64(e, ..) => ("to_i64", vec![lower_operand(e, bindings, lowering)]),
         Expr::FloatToString(e, ..) => ("float_to_string", vec![lower_operand(e, bindings, lowering)]),
         Expr::StrEq(a, b, ..) => ("str_eq", vec![lower_operand(a, bindings, lowering), lower_operand(b, bindings, lowering)]),
-        Expr::MapKeys(place, ..) => ("keys", vec![map_place_operand(place, lowering.ctx)]),
+        Expr::MapKeys(place, ..) => ("keys", vec![map_place_operand(place, bindings, lowering)]),
         Expr::RunCommand(program, vid, ..) => ("run_command", vec![lower_operand(program, bindings, lowering), MirOperand::Place(MirPlace::Local(*vid, vector_type(lowering.ctx, Type::String, false)))]),
         Expr::ToString(e, ..) => ("to_string", vec![lower_operand(e, bindings, lowering)]),
         Expr::Lines(e, ..) => ("lines", vec![lower_operand(e, bindings, lowering)]),
@@ -520,10 +523,10 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::TryCreateDir(path, ..) => ("create_dir", vec![lower_operand(path, bindings, lowering)]),
         Expr::SetCwd(path, ..) => ("set_cwd", vec![lower_operand(path, bindings, lowering)]),
         Expr::MapNew(..) => ("map_new", vec![]),
-        Expr::MapGet(place, key, ..) => ("map_get", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering)]),
-        Expr::MapHas(place, key, ..) => ("map_has", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering)]),
-        Expr::MapRemove(place, key, ..) => ("map_remove", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering)]),
-        Expr::MapInc(place, key, value, ..) => ("map_inc", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Expr::MapGet(place, key, ..) => ("map_get", vec![map_place_operand(place, bindings, lowering), lower_operand(key, bindings, lowering)]),
+        Expr::MapHas(place, key, ..) => ("map_has", vec![map_place_operand(place, bindings, lowering), lower_operand(key, bindings, lowering)]),
+        Expr::MapRemove(place, key, ..) => ("map_remove", vec![map_place_operand(place, bindings, lowering), lower_operand(key, bindings, lowering)]),
+        Expr::MapInc(place, key, value, ..) => ("map_inc", vec![map_place_operand(place, bindings, lowering), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Expr::Utf8Len(e, ..) => ("utf8_len", vec![lower_operand(e, bindings, lowering)]),
         Expr::Utf8Prefix(e, n, ..) => ("utf8_prefix", vec![lower_operand(e, bindings, lowering), lower_operand(n, bindings, lowering)]),
         Expr::Trim(e, ..) => ("trim", vec![lower_operand(e, bindings, lowering)]),

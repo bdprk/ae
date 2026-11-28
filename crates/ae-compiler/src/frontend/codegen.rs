@@ -1149,8 +1149,12 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let id = *next; *next += 1;
             let get_fn = if matches!(ty, Type::Enum(name, _) if *name == "FloatResult") { "ae_mapf_get" } else { "ae_map_get" };
             // A borrow-typed place already is the pointer (ADR-0245); a
-            // value place takes the address.
-            let recv = if place.by_ref() { format!("&{}", place.text()) } else { place.text() };
+            // value place takes the address. An unbound deref chain lowers
+            // its materialized borrow pointer inline.
+            let recv = match place {
+                MapPlace::Pointer(expr, _) => emit_expr(expr, out, next, false, ctx).text,
+                _ => if place.by_ref() { format!("&{}", place.text()) } else { place.text() },
+            };
             out.push_str(&format!("    {}t{id} = {get_fn}({recv}, AE_VIEW({}), {line}, {col});\n", ty.c_temp(ctx), k.text));
             if k.owned { drop_owned_temp(out, &k, ctx); }
             Emitted { text: format!("t{id}"), ty: *ty, owned: true, moves: Vec::new(), materialized: true }
@@ -1159,7 +1163,10 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let k = emit_expr(key, out, next, false, ctx);
             let id = *next; *next += 1;
             let has_fn = if place.f64_value() { "ae_mapf_has" } else { "ae_map_has" };
-            let recv = if place.by_ref() { format!("&{}", place.text()) } else { place.text() };
+            let recv = match place {
+                MapPlace::Pointer(expr, _) => emit_expr(expr, out, next, false, ctx).text,
+                _ => if place.by_ref() { format!("&{}", place.text()) } else { place.text() },
+            };
             out.push_str(&format!("    bool t{id} = {has_fn}({recv}, AE_VIEW({}), {line}, {col});\n", k.text));
             if k.owned { drop_owned_temp(out, &k, ctx); }
             Emitted { text: format!("t{id}"), ty: Type::Bool, owned: false, moves: Vec::new(), materialized: true }
@@ -1177,12 +1184,18 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // spelled const (the view's release rules), so the mutability
             // the language already gates (the `var` binding check) is
             // restored with an explicit cast.
-            let inc_recv = if place.by_ref() {
-                format!("&{}", place.text())
-            } else if place.f64_value() {
-                format!("(ae_mapf *){}", place.text())
-            } else {
-                format!("(ae_map *){}", place.text())
+            let inc_recv = match place {
+                MapPlace::Pointer(expr, f64kind) => {
+                    let e = emit_expr(expr, out, next, false, ctx);
+                    if matches!(*f64kind, MapKind::Float) { format!("(ae_mapf *){}", e.text) } else { format!("(ae_map *){}", e.text) }
+                }
+                _ => if place.by_ref() {
+                    format!("&{}", place.text())
+                } else if place.f64_value() {
+                    format!("(ae_mapf *){}", place.text())
+                } else {
+                    format!("(ae_map *){}", place.text())
+                },
             };
             out.push_str(&format!("    {c_ty} t{id} = {inc_fn}({inc_recv}, AE_VIEW({}), {}, {line}, {col});\n", k.text, d.text));
             if d.owned { drop_owned_temp(out, &d, ctx); }
@@ -1193,12 +1206,18 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let k = emit_expr(key, out, next, false, ctx);
             let id = *next; *next += 1;
             let remove_fn = if place.f64_value() { "ae_mapf_remove" } else { "ae_map_remove" };
-            let remove_recv = if place.by_ref() {
-                format!("&{}", place.text())
-            } else if place.f64_value() {
-                format!("(ae_mapf *){}", place.text())
-            } else {
-                format!("(ae_map *){}", place.text())
+            let remove_recv = match place {
+                MapPlace::Pointer(expr, f64kind) => {
+                    let e = emit_expr(expr, out, next, false, ctx);
+                    if matches!(*f64kind, MapKind::Float) { format!("(ae_mapf *){}", e.text) } else { format!("(ae_map *){}", e.text) }
+                }
+                _ => if place.by_ref() {
+                    format!("&{}", place.text())
+                } else if place.f64_value() {
+                    format!("(ae_mapf *){}", place.text())
+                } else {
+                    format!("(ae_map *){}", place.text())
+                },
             };
             out.push_str(&format!("    bool t{id} = {remove_fn}({remove_recv}, AE_VIEW({}), {line}, {col});\n", k.text));
             if k.owned { drop_owned_temp(out, &k, ctx); }
@@ -1207,7 +1226,10 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::MapKeys(place, line, col) => {
             let id = *next; *next += 1;
             let keys_fn = if place.f64_value() { "ae_mapf_keys" } else { "ae_map_keys" };
-            let keys_recv = if place.by_ref() { format!("&{}", place.text()) } else { place.text() };
+            let keys_recv = match place {
+                MapPlace::Pointer(expr, _) => emit_expr(expr, out, next, false, ctx).text,
+                _ => if place.by_ref() { format!("&{}", place.text()) } else { place.text() },
+            };
             out.push_str(&format!("    ae_strvec t{id} = {keys_fn}({keys_recv}, {line}, {col});\n"));
             Emitted { text: format!("t{id}"), ty: vector_type(ctx, Type::String), owned: true, moves: Vec::new(), materialized: true }
         }
@@ -1957,12 +1979,18 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let k = emit_expr(key, out, next, false, ctx);
                 let v = emit_expr(value, out, next, false, ctx);
                 let put_fn = if place.f64_value() { "ae_mapf_put" } else { "ae_map_put" };
-                let put_recv = if place.by_ref() {
-                    format!("&{}", place.text())
-                } else if place.f64_value() {
-                    format!("(ae_mapf *){}", place.text())
-                } else {
-                    format!("(ae_map *){}", place.text())
+                let put_recv = match place {
+                    MapPlace::Pointer(expr, f64kind) => {
+                        let e = emit_expr(expr, out, next, false, ctx);
+                        if matches!(*f64kind, MapKind::Float) { format!("(ae_mapf *){}", e.text) } else { format!("(ae_map *){}", e.text) }
+                    }
+                    _ => if place.by_ref() {
+                        format!("&{}", place.text())
+                    } else if place.f64_value() {
+                        format!("(ae_mapf *){}", place.text())
+                    } else {
+                        format!("(ae_map *){}", place.text())
+                    },
                 };
                 out.push_str(&format!("    {put_fn}({put_recv}, AE_VIEW({}), {}, {line}, {col});\n", k.text, v.text));
                 null_moves(out, &k.moves, ctx);

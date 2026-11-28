@@ -259,6 +259,10 @@ impl<'a> Parser<'a> {
                         // raw.deref();` on a heap slot) reads as the pointer
                         // the map calls consume directly.
                         (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::MapRef(_)) => MapPlace::VarBorrow(*id, kind),
+                        // An unbound deref chain (`map_get(raw.deref(), k)`,
+                        // ADR-0245 rung 5): the expression travels to the
+                        // emitters, which materialize the borrow pointer.
+                        (_, t) if matches!(t, Type::MapRef(_)) => MapPlace::Pointer(Box::new(map.clone()), kind),
                         (Expr::Field(base, fname, t), _) if matches!(*t, Type::MapOf(_)) => match **base {
                             Expr::Variable(id, ..) => MapPlace::Field(id, fname.clone(), kind),
                             _ => {

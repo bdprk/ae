@@ -1807,6 +1807,9 @@ impl<'a> PureMirBuilder<'a> {
                 let (local, _) = self.ensure_var(*id, ty);
                 Operand::Copy(Place::from_local(local))
             }
+            // An unbound deref chain (ADR-0245 rung 5): lower the deref
+            // expression to the operand the map call consumes.
+            MapPlace::Pointer(expr, _) => self.lower_operand(expr),
             MapPlace::Field(id, fname, kind) => {
                 let ty = map_kind_ty(kind, self.ctx);
                 let (local, base_ty) = self.ensure_var(*id, ty);

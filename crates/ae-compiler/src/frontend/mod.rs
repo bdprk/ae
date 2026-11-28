@@ -676,12 +676,15 @@ enum MapKind { Int, Float }
 // the local's C form is the `const ae_map *` pointer, so the map calls take
 // it bare instead of by address).
 #[derive(Debug, Clone)]
-enum MapPlace { Var(usize, MapKind), Field(usize, String, MapKind), VarBorrow(usize, MapKind) }
+enum MapPlace { Var(usize, MapKind), Field(usize, String, MapKind), VarBorrow(usize, MapKind), Pointer(Box<Expr>, MapKind) }
 impl MapPlace {
     fn text(&self) -> String {
         match self {
             MapPlace::Var(id, _) | MapPlace::VarBorrow(id, _) => format!("v{id}"),
             MapPlace::Field(id, name, _) => format!("v{id}.{name}"),
+            // The pointer form renders through the emitter (its C text is a
+            // materialized temp); the call sites branch before calling this.
+            MapPlace::Pointer(..) => String::new(),
         }
     }
     /// Whether the C call sites take the place's address: value places do,
@@ -692,10 +695,11 @@ impl MapPlace {
     fn slot(&self) -> usize {
         match self {
             MapPlace::Var(id, _) | MapPlace::Field(id, _, _) | MapPlace::VarBorrow(id, _) => *id,
+            MapPlace::Pointer(..) => usize::MAX,
         }
     }
     fn f64_value(&self) -> bool {
-        matches!(self, MapPlace::Var(_, MapKind::Float) | MapPlace::Field(_, _, MapKind::Float) | MapPlace::VarBorrow(_, MapKind::Float))
+        matches!(self, MapPlace::Var(_, MapKind::Float) | MapPlace::Field(_, _, MapKind::Float) | MapPlace::VarBorrow(_, MapKind::Float) | MapPlace::Pointer(_, MapKind::Float))
     }
 }
 fn map_kind_of(ty: Type, ctx: &CompileContext) -> MapKind {
