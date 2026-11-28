@@ -1446,7 +1446,7 @@ impl<'a> Parser<'a> {
             // typed route's expression parser rejects it (a pointer
             // cast is the only legal use of `&expr`).
             if matches!(argument.kind, ExpressionKind::BorrowArgument { .. })
-                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::Slice(_) | Type::SliceMut(_))
+                && !matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::MapRef(_))
             {
                 self.seek_scalar_offset(argument.range.start);
                 return Err(self.fail("a borrow expression must be cast to a pointer"));
@@ -1699,6 +1699,10 @@ impl<'a> Parser<'a> {
                     let borrows_place = match expected {
                         Type::StructRef(sid) => matches!(ty, Type::Struct(found) if found == sid),
                         Type::VectorRef(wanted) => matches!(ty, Type::Vector(found) if found == wanted),
+                        // A borrowed map takes the owner's header pointer
+                        // directly (ADR-0245): the argument's MapOf place
+                        // IS the pointer the map calls consume.
+                        Type::MapRef(wanted) => matches!(ty, Type::MapOf(found) if found == wanted),
                         _ => false,
                     };
                     if !borrows_place {
