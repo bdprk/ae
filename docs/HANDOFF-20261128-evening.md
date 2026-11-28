@@ -136,3 +136,11 @@ trap（extern 堆块不可解）。工作量 ≈ stage-4 向量切片；先例 h
 alloc 陷阱）——interp 对 map 堆槽形状保持现有行为即正确，rung 4 的 interp
 工作量归零。§8 的三臂清单相应缩减为：读者臂 + MapPlace 表达式形态 + 五调
 用点 + mir.rs:523。rung 4 剩余面比 §8 估计再小一档。
+
+## 10. 追加：槽位守卫已认 MapRef；探针钉在读者门
+
+lower_body 的 slots_supported 家族加 MapRef（借位不移动，与 StructRef/
+VectorRef 同列）。`heap_map_bind.ae`（绑定形态：let view = raw.deref() 后
+map_has(view, ...)）现精确停在 rung 4 核心——"map_has expects a map
+variable or a field of one"。探针文件保留于 work/repro/（gitignore，按本
+文件内容重建即可）。rung 4 落地后此探针应三路通过并夹具化。
