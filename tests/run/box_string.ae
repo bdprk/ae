@@ -20,4 +20,13 @@ fn main() {
     let b = box_new("boxed string");
     let _f = box_free(b);
     print("freed");
+
+    // The read story at the unsafe level: the raw slot hands out a pointer,
+    // the deref reads a view, and box_free still owns the release.
+    let held = box_new("slot view");
+    unsafe {
+        print(box_slot(&held).deref());
+        print(len(box_slot(&held).deref()));
+    }
+    let _g = box_free(held);
 }

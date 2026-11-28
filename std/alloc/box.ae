@@ -34,6 +34,14 @@ pub fn box_get[T](b: &Box[T]) -> T {
     }
 }
 
+// The raw slot for an `unsafe` reader: `box_slot(&b).deref()` on an owned
+// payload reads a view (ADR-0245), so a string payload is printable and
+// comparable without the borrowed-return support an owned read-back would
+// need. The pointer is a copy handle; the box keeps the release duty.
+pub fn box_slot[T](b: &Box[T]) -> *mut T {
+    return b.ptr;
+}
+
 // Move the value out and free the slot. The box is consumed.
 pub fn box_take[T](b: Box[T]) -> T {
     unsafe {
