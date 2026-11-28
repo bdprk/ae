@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
             // value (a value capture, the FnOnce shape): the exit Frees
             // releases it unless the body moved it out, and the move checks
             // reject a second read after a move.
-            let ok = scalar_type(ty) || matches!(ty, Type::ArrayOf(..) | Type::Slice(_) | Type::SliceMut(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VectorRef(_) | Type::Vector(_) | Type::MapOf(_) | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
+            let ok = scalar_type(ty) || matches!(ty, Type::ArrayOf(..) | Type::Slice(_) | Type::SliceMut(_) | Type::StructRef(_) | Type::StructMut(_) | Type::VectorRef(_) | Type::Vector(_) | Type::MapOf(_) | Type::MapRef(_) | Type::Enum(..) | Type::Fn(_) | Type::Closure(_))
                 || matches!(ty, Type::String)
                 // A captured token cursor: the closure borrows the outer
                 // cursor (the capture form is the cursor itself), and the
