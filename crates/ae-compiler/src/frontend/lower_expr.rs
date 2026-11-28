@@ -135,10 +135,12 @@ impl<'a> Parser<'a> {
                     .or_else(|| (name == "string").then_some(Type::String))
                     // The container families too: a heap slot may hold a
                     // vector. The pointee interning needs the element type —
-                    // scalar spellings first (named elements are future work).
+                    // scalar and string spellings (named elements are future
+                    // work).
                     .or_else(|| {
                         let inner = name.strip_prefix("vec[")?.strip_suffix(']')?.trim();
-                        let elem = super::types::scalar_type(inner)?;
+                        let elem = super::types::scalar_type(inner)
+                            .or_else(|| (inner == "string").then_some(Type::String))?;
                         Some(Type::Vector(self.ctx.intern_vector_elem(elem)))
                     })
                     // spec/unsafe.md 2.1 promises a retag to any T with a

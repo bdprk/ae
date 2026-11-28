@@ -1,0 +1,17 @@
+use "../../std/alloc/bridge.ae";
+
+fn main() {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[vec[string]](), 1, 1) as *mut vec[string];
+        var held = vec["alpha", "beta"];
+        let _w = ptr_write(raw, held);
+        let view = raw.deref();
+        print(view[0]);
+        print(view[1]);
+        print(len(view));
+        let dropped = ptr_drop_in_place(raw);
+        print(dropped);
+        let _f = ae_std_free(raw as *mut i64);
+    }
+    print("done");
+}

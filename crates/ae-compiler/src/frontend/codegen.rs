@@ -301,17 +301,18 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             // A view-typed deref (ADR-0245): the pointee is owned, so the
             // read must not copy the owning header. A string view copies the
             // ptr/len pair (AE_VIEW); a vector view materializes the slot's
-            // address as a borrow pointer — the same `(*v)` shape a `&vec`
-            // parameter reads through — so every downstream consumer (len,
-            // element reads, the moved-vector guard) works unchanged.
+            // address as a borrow pointer — `const family *tN` — which every
+            // downstream consumer (element reads, the moved-vector guard)
+            // takes directly; the len call dereferences per its family's
+            // signature at the call site.
             if ty == Type::StrView {
                 Emitted::value(format!("AE_VIEW(AE_PTR_READ({}))", t.text), ty)
             } else if let Type::VectorRef(elem_id) = ty {
+                let family = c_output::vector_family(ctx, elem_id);
                 let id = *next; *next += 1;
-                out.push_str(&format!("    const {} *t{id} = ((const {} *)({}));\n",
-                    c_output::vector_family(ctx, elem_id), c_output::vector_family(ctx, elem_id), t.text));
+                out.push_str(&format!("    const {family} *t{id} = ((const {family} *)({}));\n", t.text));
                 out.push_str(&format!("    if (!t{id}->data) ae_fail(\"use of moved vector\", {line}, {column});\n"));
-                Emitted { text: format!("(*t{id})"), ty: Type::Vector(elem_id), owned: false, moves: Vec::new(), materialized: true }
+                Emitted { text: format!("t{id}"), ty: Type::VectorRef(elem_id), owned: false, moves: Vec::new(), materialized: true }
             } else {
                 Emitted::value(format!("AE_PTR_READ({})", t.text), ty)
             }
@@ -582,11 +583,19 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::VecIndexOf(base, index, line, col, elem_ty) => {
             // An element read through a field receiver (`r.cells[0]`). The
             // base is an lvalue, so the pointer accessors take its address;
-            // the by-value accessors copy the vector header.
+            // the by-value accessors copy the vector header. A deref-chain
+            // base (ADR-0245) is already the borrow pointer: access through
+            // it directly.
             let b = emit_expr(base, out, next, false, ctx);
-            out.push_str(&format!("    if (!({}).data) ae_fail(\"use of moved vector\", {line}, {col});\n", b.text));
+            let view_ptr = matches!(b.ty, Type::VectorRef(_));
+            let guard = if view_ptr {
+                format!("if (!({})->data) ae_fail(\"use of moved vector\", {line}, {col});\n", b.text)
+            } else {
+                format!("    if (!({}).data) ae_fail(\"use of moved vector\", {line}, {col});\n", b.text)
+            };
+            out.push_str(&guard);
             let i = emit_expr(index, out, next, false, ctx);
-            let ptr = format!("&({})", b.text);
+            let ptr = if view_ptr { b.text.clone() } else { format!("&({})", b.text) };
             let get = if *elem_ty == Type::String {
                 format!("(*ae_strvec_get_const({ptr}, {}, {line}, {col}))", i.text)
             } else {
@@ -672,6 +681,16 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let call = match t.ty {
                 Type::String | Type::StrView => format!("ae_str_len(AE_VIEW({}), {line}, {col})", t.text),
                 Type::Vector(elem_id) => format!("{}_len({}, {line}, {col})", c_output::vector_family(ctx, elem_id), t.text),
+                // A view operand is the family pointer; the i64 family's len
+                // takes the header by value, the other families the pointer.
+                Type::VectorRef(elem_id) => {
+                    let family = c_output::vector_family(ctx, elem_id);
+                    if family == "ae_gvec" {
+                        format!("ae_gvec_len(*{}, {line}, {col})", t.text)
+                    } else {
+                        format!("{}_len({}, {line}, {col})", family, t.text)
+                    }
+                }
                 Type::Slice(_) | Type::SliceMut(_) => format!("ae_slice_len({}, {line}, {col})", t.text),
                 Type::MapOf(id) => format!("{}_len(&{}, {line}, {col})", c_output::map_family(ctx, id), t.text),
                 _ => format!("ae_gvec_len({}, {line}, {col})", t.text),
