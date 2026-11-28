@@ -18,6 +18,7 @@
 |---|---|---|
 | s1 | `9907ce26` | 695-class workspace: **693 passed / 2 failed / 3 ignored** across all 49 test binaries (`--no-fail-fast`, log `suite2.log`); gates green incl. corpus gate, diagnostic parity, route coverage |
 | s2 | `9bfc9f86` | **695 passed / 0 failed / 3 ignored**, all 49 binaries ok, exit 0 (log `/data/home/ae-relay2/suite.log`) |
+| s3 | `a35c8de9` | **695 passed / 0 failed / 3 ignored**, all 49 binaries ok, exit 0 (log `/data/home/ae-relay3/suite.log`) |
 
 ### The s1 failures were stale pins, already fixed by slice 101
 
@@ -108,9 +109,12 @@ fixtures, gcc + libasan/lsan):
 
 - s1: **41 PASS / 0 FAIL**, every fixture `leak blocks=0 bytes=0`
   (`/data/home/ae-relay/sanitize.log`).
-- s2 rerun on the tip (the case list grew to 48 with the heap-shape
-  additions): **47 PASS**, all with `leak blocks=0 bytes=0`, and **1
-  harness failure** (`/data/home/ae-relay2/sanitize.log`):
+- s2 rerun (the case list grew to 48 with the heap-shape additions):
+  **47 PASS**, all with `leak blocks=0 bytes=0`, and **1 harness
+  failure** (`/data/home/ae-relay2/sanitize.log`) — fixed on main, see
+  below:
+- s3 rerun on `a35c8de9`: running (`/data/home/ae-relay3/sanitize.log`),
+  result to be amended.
 
   ```
   AssertionError: ('tests/run/heap_map.ae', 0, b'true\n10\n0\ndone\n', b'[leak] blocks=0 bytes=0\n')
