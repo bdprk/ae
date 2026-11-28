@@ -1,0 +1,20 @@
+use "../../std/alloc/bridge.ae";
+
+fn main() {
+    unsafe {
+        let base = ae_std_alloc(c_size_of[vec[i64]]() * 2, 1, 1) as *mut vec[i64];
+        var first = vec[10, 11];
+        let _w1 = ptr_write(base, first);
+        let second = base.offset(1);
+        var more = vec[20, 21];
+        let _w2 = ptr_write(second, more);
+        print(len(base.deref()));
+        print(len(second.deref()));
+        print(second.deref()[0] + base.deref()[1]);
+        let dropped1 = ptr_drop_in_place(base);
+        let dropped2 = ptr_drop_in_place(second);
+        print(dropped1 + dropped2);
+        let _f = ae_std_free(base as *mut i64);
+    }
+    print("done");
+}
