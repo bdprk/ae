@@ -2501,7 +2501,26 @@ fn eval_expr(
             Val::Ptr(_) | Val::NullPtr => Ok(Val::Int(0)),
             _ => Err(Flow::Trap("internal: drop of a non-pointer".to_owned())),
         },
-        Expr::PtrWrite(..) => Err(Flow::Trap("ptr_write cannot run in the interpreter; run the compiled program".to_owned())),
+        // The frame-slot model: a pointer from `&v` names a slot, so the
+        // write is exactly `Statement::PtrStore`'s mechanism, and the heap
+        // shapes (an extern-bridge slot) keep their named trap because the
+        // interpreter never builds one. Ownership follows the slot: the value
+        // moves in, the source slot is forfeited like any other move.
+        Expr::PtrWrite(pointer, value, pointee, ..) => {
+            let target = match eval_expr(env, pointer, locals, caller_locals, false)? {
+                Val::Ptr(slot) => slot,
+                Val::NullPtr => return Err(Flow::Trap("ptr_write through null".to_owned())),
+                _ => return Err(Flow::Trap("internal: ptr_write through a non-pointer".to_owned())),
+            };
+            let written = eval_expr(env, value, locals, caller_locals, true)?;
+            if pointee.owned() {
+                if let Expr::Variable(source, ..) = &**value {
+                    locals.insert(*source, Val::Moved);
+                }
+            }
+            locals.insert(target, written);
+            Ok(Val::Int(0))
+        }
         Expr::PtrNull(..) => Ok(Val::NullPtr),
         Expr::PtrIsNull(pointer) => Ok(Val::Bool(matches!(eval_expr(env, pointer, locals, caller_locals, false)?, Val::NullPtr))),
         Expr::DerefPtr(pointer, ..) => match eval_expr(env, pointer, locals, caller_locals, false)? {
