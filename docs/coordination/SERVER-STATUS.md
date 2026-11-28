@@ -64,10 +64,18 @@ had not started). Logs: `/data/home/ae-relay/fuzz-pure.log` (s1),
 Throughput is ~0.3 seeds/s under the heavily contested host; the chain
 runs unattended and totals will be amended on this branch.
 
-Observed (NOT relay's, left untouched): r2 stale-tree campaign2
-(04dff421), r3 campaign3 on current main (suite green 49/49, its own
-pure+mixed 20k segments), one `--duration 1` mixed fuzzer. Their totals
-belong to their sessions' reports.
+Observed (NOT relay's): r2 stale-tree campaign2 (04dff421), r3 campaign3
+on current main, one `--duration 1` mixed fuzzer (exited on its own
+~14:5xZ when its hour elapsed). Process coordination per the main
+agent's explicit authorization (~15:0xZ): killed the duplicated orphan
+fuzzers by exact PID after verifying each PID's cwd/cmdline —
+`1688745`/`1688746`/`1697459` (ae-r3 relaunch duplicates, current-main
+surface), `1688708` (campaign2's mixed leg, cwd `/data/home/ae-r2`,
+stale 04dff421 binary — no ADR-0242 value), and `1808021` (the relay's
+own orphaned s1 mixed leg that survived the s1 chain kill, at ~66
+seeds). The s2 chain is now the only large campaign besides r2's
+leftovers; freed cores go to the s2 totals. Killed segments' partial
+seed counts are lost (diff_fuzz prints summaries only at completion).
 
 ## Sanitizer leg
 
@@ -76,8 +84,25 @@ fixtures, gcc + libasan/lsan):
 
 - s1: **41 PASS / 0 FAIL**, every fixture `leak blocks=0 bytes=0`
   (`/data/home/ae-relay/sanitize.log`).
-- s2 rerun on the tip: running (`/data/home/ae-relay2/sanitize.log`),
-  result to be amended.
+- s2 rerun on the tip (the case list grew to 48 with the heap-shape
+  additions): **47 PASS**, all with `leak blocks=0 bytes=0`, and **1
+  harness failure** (`/data/home/ae-relay2/sanitize.log`):
+
+  ```
+  AssertionError: ('tests/run/heap_map.ae', 0, b'true\n10\n0\ndone\n', b'[leak] blocks=0 bytes=0\n')
+  ```
+
+  Reading the tuple: returncode 0, program stdout `true\n10\n0\ndone\n`
+  (byte-identical to the committed `tests/run/heap_map.stdout` modulo
+  CRLF), stderr is the leakcheck line with **blocks=0 bytes=0** — the
+  program is correct and leak-free. The failure is a stale expected
+  literal in the harness: `scripts/verify_generated_c.py` line 239 pins
+  `("tests/run/heap_map.ae", b"true\n0\ndone", True)` — the fixture's
+  output changed when slice "map writes through the borrow"
+  (`664a314e`) added the second `map_inc` (7+3 → 10), and the case list
+  was not updated. One-line fix for the main agent: change the literal
+  to `b"true\n10\n0\ndone"`. The Windows leak gate runs the same list
+  and will assert the same way.
 
 New fixtures' emitted pure C compiled individually with
 `gcc -std=c11 -O0 -fsanitize=address,leak`,
