@@ -225,7 +225,7 @@ def run():
         # covers it with the established exemption).
         ("tests/run/box_alloc.ae", b"42\n42\n99", True),
         ("tests/run/box_wrapper.ae", b"42\n42", True),
-        ("tests/run/box_string.ae", b"written\n0\nfreed", True),
+        ("tests/run/box_string.ae", b"written\n0\nfreed\nslot view\n9", True),
         ("tests/run/ptr_string_view.ae", b"heap view\ncompare ok\n0\ndone", True),
         ("tests/run/tree_nodes.ae", b"15\n5\ndone", True),
         # ADR-0245 stage 3: a bound heap view releases nothing; the owned
