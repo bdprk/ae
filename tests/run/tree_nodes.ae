@@ -1,0 +1,54 @@
+// binarytrees prep: build a 3-level tree with null sentinels, recursive
+// sum, check, recursive free.
+use "../../std/alloc/bridge.ae";
+
+#[repr(C)]
+pub struct Node {
+    item: i64,
+    left: *mut Node,
+    right: *mut Node,
+}
+
+fn leaf(item: i64) -> *mut Node {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[Node](), 1, 1) as *mut Node;
+        var _w = ptr_write(raw, Node { item: item, left: ptr::null[Node](), right: ptr::null[Node]() });
+        return raw;
+    }
+}
+
+fn pair(item: i64, l: *mut Node, r: *mut Node) -> *mut Node {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[Node](), 1, 1) as *mut Node;
+        var _w = ptr_write(raw, Node { item: item, left: l, right: r });
+        return raw;
+    }
+}
+
+fn sum(t: *mut Node) -> i64 {
+    unsafe {
+        if t.is_null() {
+            return 0;
+        }
+        return t.deref().item + sum(t.deref().left) + sum(t.deref().right);
+    }
+}
+
+fn free_tree(t: *mut Node) -> i64 {
+    unsafe {
+        if t.is_null() {
+            return 0;
+        }
+        let l = free_tree(t.deref().left);
+        let r = free_tree(t.deref().right);
+        let _f = ae_std_free(t as *mut i64);
+        return l + r + 1;
+    }
+}
+
+fn main() {
+    let t = pair(1, leaf(2), pair(3, leaf(4), leaf(5)));
+    print(sum(t));
+    print(free_tree(t));
+    print("done");
+}
