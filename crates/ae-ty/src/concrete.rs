@@ -24,6 +24,11 @@ pub enum TyKind {
     VectorRef(usize),
     /// A generic map whose `(key, value)` types are interned (ADR-0235).
     MapOf(usize),
+    /// A read-only borrow of a generic map (ADR-0245): a heap slot's map read
+    /// through a raw pointer. The header must never gain a second owner
+    /// through a value copy, so the deref types as the borrow — the map
+    /// calls consume the pointer directly.
+    MapRef(usize),
     /// A fixed-size borrowed array whose `(elem_id, len)` are interned/stored (ADR-0235).
     ArrayOf(usize, usize),
     /// A read-only slice `&[T]`: a borrowed fat pointer over contiguous

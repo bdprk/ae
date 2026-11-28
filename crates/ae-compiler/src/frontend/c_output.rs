@@ -59,6 +59,9 @@ pub(super) fn c_type_field(ty: Type, ctx: &CompileContext) -> String {
         // element kind (ADR-0236). A mutable slice carries the same value.
         Type::Slice(_) | Type::SliceMut(_) => "ae_slice".to_owned(),
         Type::MapOf(id) => map_family(ctx, id).to_owned(),
+        // A borrowed map is a pointer to the owner's header (ADR-0245); the
+        // map calls consume it without the `&` a value place takes.
+        Type::MapRef(id) => format!("const {} *", map_family(ctx, id)),
         Type::Struct(k) => format!("ae_t{k}"),
         // Unreachable: there is no syntax for a borrow-typed field; the value
         // keeps the pointer shape so a future slip prints valid C.
@@ -115,6 +118,7 @@ pub(super) fn c_type(ty: Type, id: usize, declaration: bool, ctx: &CompileContex
         Type::Vector(elem) => format!("{} v{id}", vector_family(ctx, elem)),
         Type::Slice(_) | Type::SliceMut(_) => format!("ae_slice v{id}"),
         Type::MapOf(map_id) => format!("{} v{id}", map_family(ctx, map_id)),
+        Type::MapRef(map_id) => format!("const {} *v{id}", map_family(ctx, map_id)),
         Type::Struct(k) => format!("ae_t{k} v{id}"),
         Type::StructRef(k) if declaration => format!("const ae_t{k} *v{id}"),
         Type::StructRef(k) => format!("const ae_t{k} *"),

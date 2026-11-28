@@ -59,6 +59,9 @@ pub(crate) fn c_type_name(ty: TyKind) -> String {
         TyKind::Tokens => "ae_tokens".to_owned(),
         TyKind::Atomic => "ae_atomic".to_owned(),
         TyKind::MapOf(_) => "ae_map".to_owned(),
+        // A borrowed map is a pointer to the owner's header (ADR-0245): the
+        // map calls consume it directly.
+        TyKind::MapRef(_) => "ae_map *".to_owned(),
         TyKind::Exec => "ae_exec".to_owned(),
         TyKind::Thread(_) => "ae_thread_slot *".to_owned(),
         TyKind::Shared(_) => "ae_shared".to_owned(),

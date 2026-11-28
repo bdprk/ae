@@ -79,6 +79,7 @@ pub fn format_ty(ty: TyKind) -> String {
         TyKind::Vector(id) => format!("Vec#{id}"),
         TyKind::VectorRef(id) => format!("&Vec#{id}"),
         TyKind::MapOf(id) => format!("Map#{id}"),
+        TyKind::MapRef(id) => format!("&Map#{id}"),
         TyKind::ArrayOf(id, len) => format!("[Array#{id}; {len}]"),
         TyKind::Slice(id) => format!("&[Slice#{id}]"),
         TyKind::SliceMut(id) => format!("&mut [Slice#{id}]"),

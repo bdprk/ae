@@ -295,6 +295,12 @@ impl TypeDisplay for Type {
                 let (k, v) = ctx.map_types(id);
                 format!("map[{}, {}]", k.name(ctx), v.name(ctx))
             }
+            // A read-only borrow of a map (ADR-0245): same layout, the `&`
+            // keeps the header from copying or releasing.
+            Type::MapRef(id) => {
+                let (k, v) = ctx.map_types(id);
+                format!("&map[{}, {}]", k.name(ctx), v.name(ctx))
+            }
             Type::ArrayOf(elem, n) => format!("&[{}; {n}]", ctx.array_elem(elem).name(ctx)),
             Type::Struct(id) => format!("struct #{}", id),
             // A read-only borrow of a struct (ADR-0184). It names the same

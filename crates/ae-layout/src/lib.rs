@@ -350,6 +350,7 @@ pub fn layout_of(
         | TyKind::StructRef(_)
         | TyKind::StructMut(_)
         | TyKind::VectorRef(_)
+        | TyKind::MapRef(_)
         | TyKind::Thread(_)
         | TyKind::Fn(_) => Ok(Layout {
             size: target.pointer_size(),
