@@ -1,0 +1,16 @@
+// P4.1: the real Box[T] over the generic pointer field. Allocate, move in,
+// read, move out + free, free-without-read. The unit-returning explicit
+// generic statement call (box_free as a bare statement) still routes as a
+// binding, so the cleanup binds its unit.
+use "../../std/alloc/box.ae";
+
+fn main() {
+    let b = box_new(42);
+    print(box_get[i64](&b));
+    let taken = box_take[i64](b);
+    print(taken);
+
+    let owner = box_new(99);
+    print(box_get[i64](&owner));
+    let _f = box_free[i64](owner);
+}

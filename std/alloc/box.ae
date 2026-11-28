@@ -1,10 +1,51 @@
 // std/alloc/box.ae
-// Core Box[T] unique heap ownership wrapper (M1.4 / M1.10)
+// Core Box[T] unique heap ownership wrapper (M1.4 / M1.10, P4.1).
+//
+// A `Box[T]` owns one heap slot holding a `T`. Allocation goes through the
+// runtime's allocator bridge; the value moves into the slot at construction
+// (`ptr_write` takes ownership), and `box_take` moves it back out, freeing
+// the slot. Auto-drop of the slot itself lands with the Drop-through-Box
+// slice; until then callers free explicitly with `box_free`.
 
 pub struct Box[T] {
-    val: T,
+    ptr: *mut T,
 }
 
+extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
+extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;
+
+// Allocate one slot and move `val` into it.
 pub fn box_new[T](val: T) -> Box[T] {
-    return Box[T] { val: val };
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[T](), 1, 1) as *mut T;
+        var _w = ptr_write(raw, val);
+        return Box[T] { ptr: raw };
+    }
+}
+
+// Read the boxed value. A Copy `T` copies; an owned `T` reads through the
+// slot as a view (fields can never move out of the box).
+pub fn box_get[T](b: &Box[T]) -> T {
+    unsafe {
+        return b.ptr.deref();
+    }
+}
+
+// Move the value out and free the slot. The box is consumed.
+pub fn box_take[T](b: Box[T]) -> T {
+    unsafe {
+        let value = b.ptr.deref();
+        let _f = ae_std_free(b.ptr as *mut i64);
+        return value;
+    }
+}
+
+// Free the slot without reading the value: for `T`s whose bytes need no
+// drop. A `T` with owned fields needs `box_take` plus explicit field drops
+// until the Drop-through-Box slice lands.
+pub fn box_free[T](b: Box[T]) {
+    unsafe {
+        let _f = ae_std_free(b.ptr as *mut i64);
+        return;
+    }
 }

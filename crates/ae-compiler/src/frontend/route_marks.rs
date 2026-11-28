@@ -218,6 +218,9 @@ pub(super) fn payload_shape(payload: &Payload, args: &[ShapeArg], generics: &Gen
     match payload {
         Payload::Concrete(ty) => Some(ShapeArg::Value(*ty)),
         Payload::Param(index) => args.get(*index).cloned(),
+        // A pointer-to-param has no value shape; the typed route's deferred
+        // interning answers at instantiation.
+        Payload::PointerParam { .. } => None,
         Payload::Nested(index) => {
             let shape = generics.nested_shapes.get(*index)?;
             let resolved: Option<Vec<ShapeArg>> = shape.args.iter().map(|payload| payload_shape(payload, args, generics)).collect();

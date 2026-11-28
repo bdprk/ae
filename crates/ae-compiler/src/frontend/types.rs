@@ -268,7 +268,7 @@ impl Parser<'_> {
             self.enum_names.insert(name.clone(), id);
             let concrete: Vec<(String, Vec<Type>)> = variants.into_iter().map(|(vname, fields)| (vname, fields.into_iter().map(|p| match p {
                 Payload::Concrete(ty) => ty,
-                Payload::Param(_) | Payload::Nested(_) => unreachable!("a non-generic enum has no type parameters"),
+                Payload::Param(_) | Payload::Nested(_) | Payload::PointerParam { .. } => unreachable!("a non-generic enum has no type parameters"),
             }).collect())).collect();
             if is_copy {
                 for (vname, fields) in &concrete {
@@ -562,6 +562,23 @@ impl Parser<'_> {
     // instantiated (M1.10).
     pub(super) fn field_type(&mut self, params: &[String]) -> Result<Payload, ae_span::Diagnostic> {
         if *self.current() == Kind::Star {
+            // `*mut T` where T is the declaration's own type parameter: the
+            // pointer interning defers to instantiation (P4.1 — a `Box[T]`
+            // stores `*mut T`). Any other pointee re-parses as a concrete
+            // pointer from the Star.
+            let star = self.pos;
+            self.pos += 1;
+            let mutable = ae_syntax::declaration::pointer_mutability(
+                &self.file, self.source, &self.tokens[self.pos],
+            )?;
+            self.pos += 1;
+            if let Kind::Ident(name) = self.current()
+                && let Some(index) = params.iter().position(|p| p == name)
+            {
+                self.pos += 1;
+                return Ok(Payload::PointerParam { mutable, param: index });
+            }
+            self.pos = star;
             return Ok(Payload::Concrete(self.pointer_type()?));
         }
         if let Kind::Ident(name) = self.current() {
@@ -616,6 +633,10 @@ impl Parser<'_> {
         match payload {
             Payload::Concrete(ty) => Ok(*ty),
             Payload::Param(index) => Ok(args[*index]),
+            Payload::PointerParam { mutable, param } => {
+                let id = self.ctx.intern_pointee(args[*param]);
+                Ok(if *mutable { Type::PtrMut(id) } else { Type::Ptr(id) })
+            }
             Payload::Nested(index) => {
                 let shape = self.generics.nested_shapes[*index].clone();
                 let mut resolved = Vec::new();
@@ -750,7 +771,7 @@ impl Parser<'_> {
                 let owned = match &fty {
                     Payload::Concrete(Type::Struct(sid)) if self.structs[*sid].repr_c => false,
                     Payload::Concrete(ty) => ty.owned(),
-                    Payload::Nested(_) => false,
+                    Payload::Nested(_) | Payload::PointerParam { .. } => false,
                     Payload::Param(_) => false,
                 };
                 if owned {
@@ -774,7 +795,7 @@ impl Parser<'_> {
                 let ty = match payload {
                     Payload::Concrete(ty) => ty,
                     Payload::Nested(_) => self.resolve_payload(&payload, &[], name_offset)?,
-                    Payload::Param(_) => unreachable!("a non-generic struct has no type parameters"),
+                    Payload::Param(_) | Payload::PointerParam { .. } => unreachable!("a non-generic struct has no type parameters"),
                 };
                 if repr_c && ty.owned() && !matches!(ty, Type::Struct(sid) if self.structs[sid].repr_c) {
                     return Err(self.error_at(name_offset, &format!("field '{}' of '{}' owns storage, so the struct cannot claim a C layout", fname, name)));

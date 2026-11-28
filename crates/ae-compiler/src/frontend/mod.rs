@@ -458,7 +458,7 @@ fn specialize_result_variants(def: &GenericEnum, args: &[Type; 2]) -> Vec<(Strin
         let fields = fields.iter().map(|payload| match payload {
             Payload::Param(index) => args[*index],
             Payload::Concrete(ty) => *ty,
-            Payload::Nested(_) => unreachable!("the prelude Result has no nested payloads"),
+            Payload::Nested(_) | Payload::PointerParam { .. } => unreachable!("the prelude Result has no nested payloads"),
         }).collect();
         (name.clone(), fields)
     }).collect()
@@ -825,7 +825,15 @@ impl EnumDef {
 // declaration's type parameters. Substitution replaces every Param with a
 // concrete argument, so Param never reaches code generation.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Payload { Concrete(Type), Param(usize), Nested(usize) }
+enum Payload {
+    Concrete(Type),
+    Param(usize),
+    Nested(usize),
+    // `*mut T` / `*const T` inside a generic declaration: the pointee is a
+    // type parameter, so the pointer interning defers to instantiation
+    // (P4.1: a `Box[T]` stores `*mut T`).
+    PointerParam { mutable: bool, param: usize },
+}
 // The shape behind `Payload::Nested`: a generic declaration (struct or enum)
 // and the argument payloads it was spelled with, at least one of which is
 // itself a type parameter of the enclosing declaration. Recorded at

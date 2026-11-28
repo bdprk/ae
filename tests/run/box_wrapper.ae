@@ -1,11 +1,14 @@
 use "../../std/alloc/box.ae";
 
-pub struct Node {
-    val: i64,
+#[repr(C)]
+struct Wrapped {
+    n: i64,
 }
 
 fn main() {
-    let b = box_new[Node](Node { val: 42 });
-    assert(b.val.val == 42);
-    print("BOX HEAP WRAPPER WORKING\n");
+    let b = box_new[Wrapped](Wrapped { n: 42 });
+    let value = box_get[Wrapped](&b);
+    print(value.n);
+    let taken = box_take[Wrapped](b);
+    print(taken.n);
 }
