@@ -218,3 +218,15 @@ lower_expr.rs 两处：BorrowArgument 拒绝白名单加 MapRef 参数；borrows
 the body route"（scan 的借用实参形状检查未认 map 借位）。剩余单门：
 lower_scan 的借用实参准入加 map 形态（MapOf 局部被 & 借用时视作 VarBorrow
 实参）→ 三路夹具化。工作量小，先例 &vec 准入在同文件。
+
+## 18. 追加：借用实参分类已落，降级路径 catch-all 为剩余门
+
+lower_expr.rs 两处（BorrowArgument 拒绝白名单 + borrows_place 的
+MapRef↔MapOf 判定 → Argument::Value(BorrowAs(place)) 形态）已提交。
+探针再进：参数构建成功后，`&counts` 表达式在某路径被
+lower_scalar_body_expression 直接降级触 catch-all（lower_expr.rs:1189
+"this expression is not supported by the body route"）。下窗追踪：
+(1) 找出哪条路径对 BorrowArgument 再降级（print 臂预降级/values 集合/
+Argument::Value 的 emit 前降级）；(2) 该路径应让 BorrowAs(MapOf place)
+走 BorrowAs 发射臂（`&(v)` 形态已存在）。先例：&vec 参数全链同构。
+零 corpus 影响（无既有 MapRef 参数形状），门禁全绿已提交。
