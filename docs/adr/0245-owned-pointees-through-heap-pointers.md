@@ -64,3 +64,21 @@ Staged, each stage behind the existing gates:
 - The interp's `ptr_drop_in_place` stays a named trap (its slot model has
   no heap block to release); the compiled backends carry the corpus
   evidence, per the established interpreter-trap convention.
+
+## Stage status (2026-11-28)
+
+- **Stage 1 — landed.** The layout constant, the retag/null admissions and
+  the drop-through `box_free` (slice 85); `tests/run/box_string.ae` is the
+  corpus witness on both backends, leak-gate clean.
+- **Stage 2 — landed.** The deref-is-a-view rule across both lowering sites
+  and `expr_type` (slice 86); print and comparison consume the view on all
+  three compiled routes byte-identically.
+- **Stage 3 — landed.** Binding a heap view works like any other view: with
+  the stage-2 typing in place the scope's ownership filter already treats
+  `StrView` slots as non-owned, so no release is ever recorded for them —
+  the interim rejection is retired, `tests/run/ptr_string_view_bind.ae`
+  prints and measures the view and passes the Windows leak wrapper at the
+  same 2-block baseline, and the corpus gate floor sits at 184/184. The
+  interpreter keeps its named traps for the heap shapes (externs cannot run
+  there by design); the compiled backends plus the fuzzer's compiled-only
+  seed class carry the differential evidence (kind 31).
