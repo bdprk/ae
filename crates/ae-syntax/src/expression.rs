@@ -511,7 +511,7 @@ impl Parser<'_> {
         // for the caller's own diagnostic (`expected RParen, found LBracket`).
         while matches!(self.current().kind, Kind::LParen | Kind::Dot | Kind::ColonColon | Kind::As)
             || (self.current().kind == Kind::LBracket
-                && matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Field { .. }))
+                && matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Field { .. } | ExpressionKind::Qualified { .. }))
             || (!no_struct && self.current().kind == Kind::LBrace
                 && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Specialization { .. }))
         {
@@ -536,7 +536,11 @@ impl Parser<'_> {
                     self.cursor += 1;
                     ExpressionKind::Call { callee: Box::new(base), arguments }
                 }
-                Kind::LBracket if matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_))) => {
+                // `[` after a name or a qualified path: a type-argument list
+                // (`Pair[string, i64]`, `ptr::null[T]`), a call with explicit
+                // type arguments (`identity[i64](41)`), or an index of a
+                // binding; the lookahead decides.
+                Kind::LBracket if matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Qualified { .. }) => {
                     let start = self.cursor - 1;
                     let end = crate::declaration::skip_type_parameter_list(self.tokens, start);
                     if self.tokens.get(end).is_some_and(|token| matches!(token.kind, Kind::ColonColon | Kind::LBrace)) {
