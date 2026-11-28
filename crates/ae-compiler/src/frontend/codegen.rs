@@ -313,6 +313,15 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
                 out.push_str(&format!("    const {family} *t{id} = ((const {family} *)({}));\n", t.text));
                 out.push_str(&format!("    if (!t{id}->data) ae_fail(\"use of moved vector\", {line}, {column});\n"));
                 Emitted { text: format!("t{id}"), ty: Type::VectorRef(elem_id), owned: false, moves: Vec::new(), materialized: true }
+            } else if let Type::MapRef(map_id) = ty {
+                // A heap slot's map reads as the borrow pointer (ADR-0245):
+                // materialize it like the vector view, with the slots
+                // sentinel as the moved guard.
+                let family = c_output::map_family(ctx, map_id);
+                let id = *next; *next += 1;
+                out.push_str(&format!("    const {family} *t{id} = ((const {family} *)({}));\n", t.text));
+                out.push_str(&format!("    if (!t{id}->slots) ae_fail(\"use of moved map\", {line}, {column});\n"));
+                Emitted { text: format!("t{id}"), ty: Type::MapRef(map_id), owned: false, moves: Vec::new(), materialized: true }
             } else {
                 Emitted::value(format!("AE_PTR_READ({})", t.text), ty)
             }
