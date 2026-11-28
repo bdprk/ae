@@ -113,8 +113,10 @@ fixtures, gcc + libasan/lsan):
   **47 PASS**, all with `leak blocks=0 bytes=0`, and **1 harness
   failure** (`/data/home/ae-relay2/sanitize.log`) — fixed on main, see
   below:
-- s3 rerun on `a35c8de9`: running (`/data/home/ae-relay3/sanitize.log`),
-  result to be amended.
+- s3 rerun on `a35c8de9` (case list now 49): **49 PASS / 0 FAIL**,
+  exit 0, every fixture `leak blocks=0 bytes=0`
+  (`/data/home/ae-relay3/sanitize.log`) — the fixed heap_map entry
+  included.
 
   ```
   AssertionError: ('tests/run/heap_map.ae', 0, b'true\n10\n0\ndone\n', b'[leak] blocks=0 bytes=0\n')
