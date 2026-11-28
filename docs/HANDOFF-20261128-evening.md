@@ -230,3 +230,12 @@ lower_scalar_body_expression 直接降级触 catch-all（lower_expr.rs:1189
 Argument::Value 的 emit 前降级）；(2) 该路径应让 BorrowAs(MapOf place)
 走 BorrowAs 发射臂（`&(v)` 形态已存在）。先例：&vec 参数全链同构。
 零 corpus 影响（无既有 MapRef 参数形状），门禁全绿已提交。
+
+## 19. §18 线索补充：borrow-argument 分支对 map 基底提前 bail
+
+resolve_borrow_place_type 对空 fields 的 MapOf 基底已透传（无需改）。真门在
+borrow-argument 分支更早处：`&counts` 实参进入分类前，place 解析入口
+（receiver_field_type / resolve_field_chain 对 map 局部的处理）或分支的
+前置类型门对 MapOf 基底 bail → 落回标量降级 → catch-all。下窗从
+lower_value_arguments 的 BorrowArgument 臂入口单步追踪（80 行），找到
+bail 点后加 map 形态即可。树已恢复 HEAD 态（误编辑全回退，零残留）。
