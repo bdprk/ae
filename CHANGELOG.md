@@ -6,6 +6,15 @@ All notable, user-visible changes to the `ae` toolchain and the language it comp
 
 ### Added — language
 
+- **Heap containers through raw slots** (ADR-0245). A `#[repr(C)]`-layout constant for owned values (`c_size_of[string]()` = 24, `c_size_of[vec[i64]]()` / `c_size_of[map[string, i64]]()` = 40) lets an `ae_std_alloc` slot hold any of them; `ptr_write` transfers ownership into the slot, `ptr_drop_in_place` releases it, and the block frees — the raw-pointer form of `Box[T]` / `Vec[T]` / `Map[T]` allocation. Reading through a slot pointer is a **view** (`StrView` for strings, `VectorRef` for vectors): print, comparison, indexing, `len`, and `for` iteration consume the view without copying the owning header, on all three execution routes byte-identically.
+- **`Rc[T]` shared ownership** (`std/alloc/rc.ae`). `rc_new`/`rc_clone`/`rc_get`/`rc_count` over an atomic count cell; the generic destructor releases the slot exactly once when the last handle drops. An `Rc` value copies like a handle; the count tracks the live handles.
+- **`Box[T]` reads through the raw slot** (`std/alloc/box.ae`): `box_new` allocates and moves any `T` in, `box_free` drops the pointee in place then frees, and `box_slot` hands the raw pointer to an `unsafe` reader.
+- **Bare generic calls infer composite parameters** (`box_get(&b)` on a `Box[Point]` infers `box_get[Point]`; enum payloads infer the same way) — explicit type arguments remain valid, and a mismatched composite keeps the write-its-type-arguments diagnostic.
+- **An index may follow a call result** (`raw.deref()[0]`, `len(raw.deref())`) — heap views read unbound, byte-identically across the three execution routes.
+- **The interpreter answers frame-slot pointer operations**: scalar `ptr_drop_in_place` (reads nothing, returns 0) and `ptr_write` through `&v as *mut T` slots.
+
+### Added — language
+
 - **`unsafe` blocks and `unsafe fn`** (M2.12, ADR-0207). Dereferencing a raw pointer and calling an `unsafe fn` require an enclosing `unsafe` block; an `unsafe fn` declaration requires a doc comment naming its preconditions. `unsafe fn` bodies do not behave like implicit `unsafe` blocks.
 - **Raw pointers** `*const T` / `*mut T`. Cast from a borrow with `&v as *const T` / `&mut v as *mut T`; read with `p.deref()` / `p.read()` and write with `p.write(value)` inside `unsafe`. A pointer to an owned value is rejected at the declaration — its borrow is untracked.
 - **`extern "C"` declarations** — call C symbols at link time (`extern "C" fn abs(v: i64) -> i64;`). Calling a declaration requires `unsafe`. The compiler emits a real C prototype for every declaration, so a foreign symbol works regardless of definition order.
