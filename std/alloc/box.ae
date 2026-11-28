@@ -4,8 +4,12 @@
 // A `Box[T]` owns one heap slot holding a `T`. Allocation goes through the
 // runtime's allocator bridge; the value moves into the slot at construction
 // (`ptr_write` takes ownership), and `box_take` moves it back out, freeing
-// the slot. Auto-drop of the slot itself lands with the Drop-through-Box
-// slice; until then callers free explicitly with `box_free`.
+// the slot. `box_free` drops the pointee in place before freeing, so every
+// `T` releases completely (ADR-0245). Reading an owned payload back needs a
+// view-typed return (`&string` borrows cannot be returned yet — the
+// input-tied borrow return is the lifetime-inference item, P3.4); until it
+// lands, read the payload through the raw-pointer views the module's
+// callers own, or keep payloads Copy.
 
 use "./bridge.ae";
 
