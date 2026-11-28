@@ -209,3 +209,12 @@ rung 3 已认）。探针 work/repro/map_sig.ae 推进至调用实参门：
 借用实参分类（Argument::View 的 map 形态，&vec 先例）+ 被调端 place
 （MapPlace::VarBorrow 已在，参数绑定成 MapRef 局部即落）。工作量小，
 下窗可完。纯增量地基已提交（零行为变化，门禁全绿）。
+
+## 17. 追加：调用点白名单+borrows_place 已落
+
+lower_expr.rs 两处：BorrowArgument 拒绝白名单加 MapRef 参数；borrows_place
+匹配加 MapRef↔MapOf 同 id 判定（Argument::Value(BorrowAs(place)) 形态，
+&vec 同构）。探针推进至扫描准入门："this expression is not supported by
+the body route"（scan 的借用实参形状检查未认 map 借位）。剩余单门：
+lower_scan 的借用实参准入加 map 形态（MapOf 局部被 & 借用时视作 VarBorrow
+实参）→ 三路夹具化。工作量小，先例 &vec 准入在同文件。
