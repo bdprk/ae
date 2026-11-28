@@ -1,0 +1,36 @@
+// P2.4: borrowing a place inside a binding — a struct field (`&h.item`),
+// a vector field (`&r.cells`), an element of a vector field (`&t.rows[0]`)
+// and a nested field (`&o.inner`). The place is addressed in place and the
+// borrow lives only for the call.
+struct Inner { radius: i64 }
+
+struct Outer { inner: Inner, tag: i64 }
+
+struct Row { cells: vec }
+
+struct Table { rows: vec[vec] }
+
+fn mag(i: &Inner) -> i64 { return i.radius * i.radius; }
+
+fn show(o: &Outer) { print(o.inner.radius + o.tag); }
+
+fn total(row: &vec) -> i64 {
+    var sum = 0;
+    for i in 0..len(row) {
+        sum += row[i];
+    }
+    return sum;
+}
+
+fn main() {
+    let o = Outer { inner: Inner { radius: 3 }, tag: 4 };
+    print(mag(&o.inner));
+    show(&o);
+
+    let rows = Table { rows: vec[vec[1, 2], vec[3, 4, 5]] };
+    print(total(&rows.rows[0]));
+    print(total(&rows.rows[1]));
+
+    let r = Row { cells: vec[9, 1] };
+    print(total(&r.cells));
+}

@@ -1,0 +1,98 @@
+// ADR-0236 rung 4: `&mut [T]` — a mutable slice over a whole vector binding.
+// The callee reads and stores through the fat pointer; the owner's mutability
+// and exclusivity are checked at the call site. Copy elements only.
+#[derive(Copy)]
+struct Point { x: i64, y: i64 }
+
+fn double_all(items: &mut [i64]) {
+    var i = 0;
+    while i < len(items) {
+        items[i] = items[i] * 2;
+        i += 1;
+    }
+}
+
+fn total(items: &mut [i64]) -> i64 {
+    var t = 0;
+    for x in items { t += x; }
+    return t;
+}
+
+fn fill_pair(items: &mut [i64], a: i64, b: i64) {
+    items[0] = a;
+    items[1] = b;
+}
+
+fn set_floats(items: &mut [f64]) {
+    items[0] = 1.5;
+    items[1] = 2.5;
+}
+
+fn move_point(items: &mut [Point], to: i64) {
+    items[0] = Point { x: to, y: to + 1 };
+}
+
+fn set_flags(flags: &mut [bool]) {
+    flags[0] = true;
+    flags[1] = false;
+}
+
+fn set_char(chars: &mut [char]) {
+    chars[0] = 'z';
+}
+
+fn fill_middle(items: &mut [i64]) {
+    items[0] = 100;
+    items[1] = 200;
+}
+
+fn set_front(items: &mut [i64]) {
+    items[0] = 9;
+}
+
+fn main() {
+    var v = vec[1, 2, 3];
+    double_all(&mut v);
+    print(v[0]);
+    print(v[1]);
+    print(total(&mut v));
+    fill_pair(&mut v, 7, 8);
+    print(v[0]);
+    print(v[1]);
+    print(v[2]);
+    var floats = vec[0.0, 0.0];
+    set_floats(&mut floats);
+    print(floats[0]);
+    print(floats[1]);
+    var points = vec[Point { x: 1, y: 2 }];
+    move_point(&mut points, 5);
+    print(points[0].x);
+    print(points[0].y);
+    var flags = vec[false, true];
+    set_flags(&mut flags);
+    print(flags[0]);
+    print(flags[1]);
+    var chars = vec['a', 'b'];
+    set_char(&mut chars);
+    print(chars[0]);
+    print(chars[1]);
+    var windowed = vec[1, 2, 3, 4];
+    fill_middle(&mut windowed[1..3]);
+    print(windowed[0]);
+    print(windowed[1]);
+    print(windowed[2]);
+    print(windowed[3]);
+    // Computed window bounds: a scalar local and the owner's own length,
+    // then one window per loop iteration.
+    var dynamic = vec[1, 2, 3];
+    let start = 1;
+    set_front(&mut dynamic[start..len(dynamic)]);
+    print(dynamic[1]);
+    var i = 0;
+    while i < len(dynamic) - 1 {
+        set_front(&mut dynamic[i..i + 1]);
+        i += 1;
+    }
+    print(dynamic[0]);
+    print(dynamic[1]);
+}

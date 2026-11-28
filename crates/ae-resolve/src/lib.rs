@@ -31,14 +31,18 @@
 //! The dump (`dump`) is a deterministic text form of the whole table and is
 //! pinned by `tests/resolve` UI snapshots through `ae emit-resolve`.
 
+#![allow(clippy::result_large_err)]
 pub mod dump;
+pub mod dump_types;
 pub mod imports;
 pub mod module;
-pub mod typecheck;
 pub mod resolve;
 pub mod types;
 
 pub use module::{parse_module, FnUnit, Module};
+/// The shared operator rules now live in `ae-ty`; the old path stays as a
+/// re-export so resolver call sites and snapshots keep one source.
+pub use ae_ty as typecheck;
 pub use resolve::{resolve, FnOccurrences, Resolution};
 pub use dump::dump;
 pub use types::{classify, Spelled, TypeSpelling, SpellingRole, SpellingEntry};
@@ -46,10 +50,8 @@ pub use imports::{load_and_resolve, load_module_transitive};
 
 use std::ops::Range;
 
-/// One definition in the flat def table. Locals and items share the table so
-/// an occurrence needs a single id to point at its owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DefId(pub u32);
+/// Definition identity now lives in `ae-ty`; the path stays for callers.
+pub use ae_ty::DefId;
 
 /// What a definition is. `is_local` separates the per-function namespace
 /// (lookup first, shadowing nothing outside its block) from the module
@@ -183,7 +185,7 @@ mod tests {
         let receiver = resolution.defs.iter().find(|entry| entry.name == "self").expect("the receiver is a local");
         assert_eq!(receiver.kind, DefKind::Parameter);
         assert_eq!(&source[receiver.range.clone()], "self", "the def names the receiver token");
-        assert_eq!(receiver.mutable, false, "&self borrows read-only");
+        assert!(!receiver.mutable, "&self borrows read-only");
         let occurrences = &resolution.functions[0].occurrences;
         assert!(occurrences.iter().any(|occurrence| occurrence.role == Role::Read && occurrence.name == "self" && occurrence.target == Some(receiver.id)));
     }
@@ -329,9 +331,9 @@ fn main() {
             let start = source.find(fragment).unwrap();
             facts.get(&(start..start + fragment.len())).copied()
         };
-        assert_eq!(fact("x + 2"), Some(Checked(Scalar::Int)));
-        assert_eq!(fact("n * 3"), Some(Checked(Scalar::Int)));
-        assert_eq!(fact("-(n * 3)"), Some(Checked(Scalar::Int)));
+        assert_eq!(fact("x + 2"), Some(Checked(Scalar::Int(ae_ty::IntTy::I64))));
+        assert_eq!(fact("n * 3"), Some(Checked(Scalar::Int(ae_ty::IntTy::I64))));
+        assert_eq!(fact("-(n * 3)"), Some(Checked(Scalar::Int(ae_ty::IntTy::I64))));
         assert_eq!(fact("1.5 % 2.0"), Some(Rejected(OperatorError::FloatRemainder)));
         assert_eq!(fact("(1.5 % 2.0) + 3.0"), Some(Deferred));
         assert_eq!(fact("scale(9) + 1"), Some(Deferred));

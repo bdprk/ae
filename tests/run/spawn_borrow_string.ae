@@ -1,0 +1,8 @@
+// A spawned closure that reads a parent string captures it by reference: the
+// thread context carries a view of the slot after the moved captures, and the
+// join keeps the storage alive until the read completes (ADR-0241).
+fn main() {
+    let text = "borrowed";
+    let t = spawn(|| -> i64 { return len(text); });
+    print(wait(t));
+}

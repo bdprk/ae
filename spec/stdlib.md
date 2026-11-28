@@ -32,7 +32,7 @@ The compiler's reserved-name registry (`RESERVED`, `crates/ae-compiler/src/front
 
 | Domain | Today's built-ins | Destination |
 |---|---|---|
-| Containers | `vec` literals, `vec[string]`/`vec[f64]`, `strvec_new`, `f64vec_new`, `push`, `pop`, `sort`, `reverse` | `alloc::Vec[T]` — `v.push(x)`, `v.pop()`, `v.sort()`, `v.reverse()`; `vec[T]::new()` |
+| Containers | `vec` literals, `vec[string]`/`vec[f64]`, `vec[T]` for Copy/owned/nested elements (ADR-0235), `strvec_new`, `f64vec_new`, `push`, `pop`, `sort`, `reverse` | `alloc::Vec[T]` — `v.push(x)`, `v.pop()`, `v.sort()`, `v.reverse()`; `vec[T]::new()` |
 | Maps | `map_new`, `f64map_new`, `map_put`, `map_get`, `map_has`, `map_remove`, `map_inc`, `keys` | `alloc::Map[K, V]` — `m.put(k, v)`, `m.get(k) -> Option[V]`, `m.has(k)`, `m.remove(k)`, `m.entry(k).or_insert(0)`, `m.keys()` |
 | Strings | `bytes`, `contains`, `slice`, `split`, `join`, `lines`, `count_lines_with`, `trim`, `starts_with`, `ends_with`, `find`, `utf8_len`, `utf8_prefix`, `to_string`, `parse_int`, `slice_view`, `tokenize` | `core::str` / `alloc::String` — `s.contains(p)`, `s.split(sep)`, `s.find(p) -> Option[usize]`, `s.trim()`, `s.lines()`, `s.bytes()`, `s.parse[T]()`, `s.tokenize(sep)` |
 | Numbers | `to_f64`, `to_i64`, `sqrt`, `abs`, `floor`, `ceil`, `round`, `exp`, `log`, `sin`, `cos`, `pow`, `atan2`, `min`, `max` | `core` numeric methods — `n.to_f64()`, `f.sqrt()`, `f.min(o)`; `min`/`max` keep the NaN-ignoring, ±0-total-order semantics (ADR-64) |
@@ -42,7 +42,7 @@ The compiler's reserved-name registry (`RESERVED`, `crates/ae-compiler/src/front
 | JSON | `json_get`, `json_int`, `json_bool`, `json_len`, `json_has` | `std::json` — `json::get(doc, "$.a.b")` survives until derive-based serialization (M3.3) replaces it |
 | FFI layout | **[keep]** `c_size_of`, `c_align_of`, `c_offset_of` | stays with the `#[repr(C)]` family (`spec/unsafe.md` §5) — not a stdlib item |
 
-The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-compatible custom-enum contract dissolve into `Result[T, E]` + `Option[T]` (M1.11): fallible built-ins return `Result[T, std::io::Error]`-shaped values, `?` propagates the one generic type, and the one-family-per-function restriction disappears with it.
+The nine preset result enums (`ReadResult` … `FloatResult`) and the shape-compatible custom-enum contract dissolve into `Result[T, E]` + `Option[T]` (M1.11, P2.4): every preset family is the `Result[payload, string]` instantiation of the one generic declaration, the family names remain pattern aliases, and the C runtime's macro ids are generated from the registered enum ids (ADR-0233). Fallible built-ins therefore return `Result`-shaped values, `?` propagates the one generic type, and the one-family-per-function restriction disappears with it.
 
 ## 4. Migration Policy (plan §5.3)
 

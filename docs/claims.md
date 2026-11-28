@@ -4,7 +4,7 @@
 
 1. Do not claim "memory-safe language achieved": Currently, it is restricted borrowing + compile-time move sets + runtime sentinels.
 2. Do not claim Go-level compilation speed or Rust-level performance/safety guarantees, nor claim that low CPU, memory, or disk footprint targets have been met.
-3. Do not claim to surpass Gojo or Python: There is no shippable comparison report with fixed versions, equivalent features, and identical inputs.
+3. Do not claim to surpass Go or Python: There is no shippable comparison report with fixed versions, equivalent features, and identical inputs.
 4. Do not claim that the generated C is free of undefined behavior under all inputs: Sanitizers and allocation counters only cover listed test cases.
 5. Do not claim that the existing content-addressed cache is equivalent to package-level incremental builds, nor claim that cache-hit results can replace cold-build measurements.
 6. Do not claim compatibility with the Python ecosystem, support for GPU/networking/threads, or that "all tasks can be completed in a single language."

@@ -1,0 +1,1 @@
+ae: $DIR/i8_cast_literal_oob.ae:2:20: integer literal 128 is out of range for 'i8' (-128..=127)

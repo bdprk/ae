@@ -1,0 +1,1 @@
+ae: $DIR/int_method_non_int_receiver.ae:3:25: type f64 has no method 'wrapping_add'

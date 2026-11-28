@@ -1,0 +1,29 @@
+// P2.4: an element read through a struct field (`r.cells[0]`).
+// Every vector family works through the receiver — i64, f64, string and an
+// owned struct element (field reads) — including a struct field reached
+// through a `&Struct` parameter.
+struct W { words: vec[string], values: vec[f64], cells: vec }
+
+struct Item { name: string, n: i64 }
+
+struct Bag { items: vec[Item] }
+
+fn total(w: &W) -> i64 {
+    var sum = 0;
+    for i in 0..len(w.cells) {
+        sum += w.cells[i];
+    }
+    return sum;
+}
+
+fn main() {
+    let w = W { words: vec["alpha", "beta"], values: vec[1.5, 2.5], cells: vec[3, 4, 5] };
+    print(len(w.words));
+    print(w.words[0]);
+    print(w.values[1]);
+    print(total(&w));
+
+    let b = Bag { items: vec[Item { name: "a", n: 7 }] };
+    print(b.items[0].n);
+    print(b.items[0].name);
+}

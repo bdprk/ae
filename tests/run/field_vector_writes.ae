@@ -1,0 +1,53 @@
+// P2.4: vector operations on a struct's vector field.
+// `push`/`pop`/`sort`/`reverse` and `r.cells[i] = x` address the field lvalue;
+// a `&mut` root writes through its pointer; an owned element releases the
+// replaced or popped value exactly once, in order.
+struct Bag { items: vec }
+
+struct Words { words: vec[string] }
+
+struct Tagged { name: string, n: i64 }
+
+impl Drop for Tagged {
+    fn drop(&mut self) { print("drop " + self.name); }
+}
+
+struct Tray { items: vec[Tagged] }
+
+fn grow(h: &mut Bag) {
+    push(h.items, 3);
+}
+
+fn main() {
+    var bag = Bag { items: vec[5, 1, 3] };
+    push(bag.items, 9);
+    print(len(bag.items));
+    print(bag.items[3]);
+    bag.items[0] = 2;
+    print(bag.items[0]);
+    pop(bag.items);
+    print(len(bag.items));
+    sort(bag.items);
+    print(bag.items[0]);
+    print(bag.items[2]);
+    reverse(bag.items);
+    print(bag.items[0]);
+
+    grow(&mut bag);
+    print(len(bag.items));
+
+    var words = Words { words: vec["alpha"] };
+    push(words.words, "beta");
+    words.words[0] = "zeta";
+    print(words.words[0]);
+    print(len(words.words));
+
+    var tray = Tray { items: vec[Tagged { name: "a", n: 1 }] };
+    var extra = Tagged { name: "b", n: 2 };
+    push(tray.items, extra);
+    var replacement = Tagged { name: "c", n: 3 };
+    tray.items[0] = replacement;
+    print(tray.items[0].n);
+    pop(tray.items);
+    print(len(tray.items));
+}

@@ -1,0 +1,24 @@
+resolve slices.ae
+use headers: none
+items:
+#0 function sum @3..6
+#1 function main @111..115
+types:
+#0 sum:
+  15..21 parameter values -> &[i64]
+  26..29 return-> i64
+locals in #0 sum:
+#2 parameter values @7..13 owner=#0 = &[i64]
+#3 binding total @40..45 owner=#0 mutable = i64
+#4 for-binding x @59..60 owner=#0 = deferred
+occurrences in #0 sum:
+  64..70 read values -> #2
+  73..78 write total -> #3
+  82..83 read x -> #4
+  98..103 read total -> #3
+locals in #1 main:
+#5 binding v @128..129 owner=#1 mutable = vec[i64]
+occurrences in #1 main:
+  153..156 call sum -> #0
+  158..159 borrow v -> #5
+diagnostics: none

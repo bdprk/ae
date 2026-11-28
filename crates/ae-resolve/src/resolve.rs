@@ -87,9 +87,14 @@ pub fn resolve(module: &Module) -> Resolution {
 /// of imported enums are visible too (patterns reach them); imported impl
 /// methods are not (dispatch is the type checker's business).
 pub fn resolve_with_imports(module: &Module, imports: &[(String, Module)]) -> Resolution {
-    let tokens = ae_syntax::lex_diagnostic(&module.source)
-        .expect("parse_module already lexed this source cleanly");
-    resolve_with_tokens(module, imports, &tokens)
+    match ae_syntax::lex_diagnostic(&module.source) {
+        Ok(tokens) => resolve_with_tokens(module, imports, &tokens),
+        Err(diagnostic) => {
+            let mut resolution = resolve_with_tokens(module, imports, &[]);
+            resolution.diagnostics.insert(0, diagnostic);
+            resolution
+        }
+    }
 }
 
 /// Resolve against the same token stream used to assemble the entry module.
@@ -164,11 +169,10 @@ impl<'m> Pass<'m> {
             if token.end > window.end {
                 break;
             }
-            if let Kind::Ident(spelled) = &token.kind {
-                if spelled == name {
+            if let Kind::Ident(spelled) = &token.kind
+                && spelled == name {
                     return token.offset..token.end;
                 }
-            }
         }
         window
     }
@@ -191,7 +195,8 @@ impl<'m> Pass<'m> {
             }
         }
         let mut pending: Vec<Option<DefId>> = vec![None; self.module.functions.len()];
-        let mut inherent: Vec<(String, DefId, Vec<(String, DefId)>)> = Vec::new();
+        type InherentMethods = (String, DefId, Vec<(String, DefId)>);
+        let mut inherent: Vec<InherentMethods> = Vec::new();
         for declaration_index in 0..self.module.declarations.len() {
             let declaration = &self.module.declarations[declaration_index];
             match &declaration.kind {
@@ -215,7 +220,7 @@ impl<'m> Pass<'m> {
                     }
                     self.variants.insert(id, table);
                 }
-                DeclarationKind::Trait => {
+                DeclarationKind::Trait { .. } => {
                     let id = self.register(&declaration.name, DefKind::Trait, self.name_range(&declaration.name, declaration.range.clone()), None);
                     self.claim_item(&declaration.name, id);
                 }
@@ -239,8 +244,11 @@ impl<'m> Pass<'m> {
                 }
             }
         }
-        self.function_defs = pending.into_iter()
-            .map(|slot| slot.expect("every function unit got a def in the declaration walk"))
+        self.function_defs = pending.into_iter().enumerate()
+            .map(|(index, slot)| slot.unwrap_or_else(|| {
+                let decl = &self.module.functions[index].declaration;
+                self.register(&decl.name, DefKind::Function, self.name_range(&decl.name, decl.range.clone()), None)
+            }))
             .collect();
         // Pair every inherent impl's methods with its target type's item def.
         for (type_name, _, method_defs) in inherent {
@@ -273,7 +281,7 @@ impl<'m> Pass<'m> {
                         self.claim_free(&declaration.name, id);
                         continue;
                     }
-                    DeclarationKind::Trait => DefKind::Trait,
+                    DeclarationKind::Trait { .. } => DefKind::Trait,
                     DeclarationKind::Impl { .. } => continue,
                 };
                 let id = self.register_imported(&declaration.name, visible, self.import_name_range(&tokens, declaration), None, true);
@@ -304,11 +312,10 @@ impl<'m> Pass<'m> {
             if token.end > declaration.range.end {
                 break;
             }
-            if let Kind::Ident(spelled) = &token.kind {
-                if *spelled == declaration.name {
+            if let Kind::Ident(spelled) = &token.kind
+                && *spelled == declaration.name {
                     return token.offset..token.end;
                 }
-            }
         }
         declaration.range.clone()
     }
@@ -331,8 +338,8 @@ impl<'m> Pass<'m> {
     fn spelling_context(&self, unit: &crate::module::FnUnit) -> (Vec<String>, Option<String>) {
         let mut params: Vec<String> = unit.declaration.type_parameters.iter().map(|p| p.name.clone()).collect();
         let mut self_name = None;
-        if let Some(owner) = unit.impl_owner {
-            if let Some(impl_declaration) = self.module.declarations.get(owner) {
+        if let Some(owner) = unit.impl_owner
+            && let Some(impl_declaration) = self.module.declarations.get(owner) {
                 params.extend(impl_declaration.type_parameters.iter().map(|p| p.name.clone()));
                 self_name = match &impl_declaration.kind {
                     DeclarationKind::Impl { target } => match target {
@@ -342,7 +349,6 @@ impl<'m> Pass<'m> {
                     _ => None,
                 };
             }
-        }
         (params, self_name)
     }
 
@@ -499,7 +505,10 @@ impl<'m> Pass<'m> {
                     } else {
                         matches!(
                             classify(self.tokens, &|name: &str| self.items.get(name).copied(), &type_params, self_name.as_deref(), parameter.ty.clone()).spelling,
-                            crate::TypeSpelling::Borrow { mutable: true, .. } | crate::TypeSpelling::Pointer { mutable: true, .. },
+                            crate::TypeSpelling::Borrow { mutable: true, .. }
+                                | crate::TypeSpelling::Pointer { mutable: true, .. }
+                                // `&mut [T]` stores elements through the slice (ADR-0236 rung 4).
+                                | crate::TypeSpelling::Slice { mutable: true, .. },
                         )
                     };
                     let inferred = if parameter.ty.start != parameter.ty.end {
@@ -539,10 +548,16 @@ impl<'m> Pass<'m> {
             // value` sits on the closing brace (probes r1-r5: if/else both,
             // full match arms and unsafe blocks count, `while true` does
             // not).
-            if matches!(unit.declaration.kind, DeclarationKind::Function { returns: Some(_), .. }) {
-                if let Some(body) = &unit.body {
-                    if !Walker::definitely_returns(body) {
-                        if let Some(end) = body_end {
+            let non_unit_return = match &unit.declaration.kind {
+                DeclarationKind::Function { returns: Some(range), .. } => {
+                    self.module.source.get(range.clone()).map(str::trim) != Some("()")
+                }
+                _ => false,
+            };
+            if non_unit_return
+                && let Some(body) = &unit.body
+                    && !Walker::definitely_returns(body)
+                        && let Some(end) = body_end {
                             walker.diagnostics.push(
                                 ae_syntax::diagnostic_range(
                                     &self.module.file, &self.module.source, end..end,
@@ -550,9 +565,6 @@ impl<'m> Pass<'m> {
                                 ),
                             );
                         }
-                    }
-                }
-            }
             let Walker { locals, occurrences, binding_visibility, spellings, diagnostics, closure_bodies, specialization_arguments, pointer_cast_targets, closure_headers, expression_types, .. } = walker;
             self.defs.extend(locals);
             self.spellings.extend(spellings);
@@ -606,7 +618,7 @@ struct Walker<'w> {
     /// Live bindings use the compiler's flat name map. Closure parameters
     /// can replace a name temporarily; other live duplicates are E0104.
     live: HashMap<String, DefId>,
-    blocks: Vec<(Range<usize>, Vec<(String, Option<DefId>)>)>,
+    blocks: Vec<ScopeFrame>,
     binding_visibility: Vec<(DefId, Range<usize>)>,
     occurrences: Vec<Occurrence>,
     closure_bodies: Vec<ClosureBody>,
@@ -618,7 +630,10 @@ struct Walker<'w> {
     diagnostics: Vec<Diagnostic>,
 }
 
+type ScopeFrame = (Range<usize>, Vec<(String, Option<DefId>)>);
+
 impl Walker<'_> {
+    #[allow(clippy::too_many_arguments)]
     fn declare(&mut self, name: String, kind: DefKind, range: Range<usize>, mutable: bool, writable_through: bool, inferred: Option<TypeSpelling>, visible_from: usize) -> DefId {
         let id = DefId(self.base + self.locals.len() as u32);
         self.locals.push(DefEntry { id, name: name.clone(), kind, range: range.clone(), owner: Some(self.function_def), mutable, writable_through, inferred, imported: false });
@@ -667,7 +682,9 @@ impl Walker<'_> {
             ExpressionKind::Atom(Kind::Number(_)) => Some(TypeSpelling::Primitive("i64")),
             ExpressionKind::Atom(Kind::Float(_)) => Some(TypeSpelling::Primitive("f64")),
             ExpressionKind::Atom(Kind::Text(_)) => Some(TypeSpelling::Primitive("string")),
+            ExpressionKind::Atom(Kind::Char(_)) => Some(TypeSpelling::Primitive("char")),
             ExpressionKind::Atom(Kind::True) | ExpressionKind::Atom(Kind::False) => Some(TypeSpelling::Primitive("bool")),
+            ExpressionKind::Unit => Some(TypeSpelling::Primitive("()")),
             // A name read resolves through the live bindings — the walk is
             // at this statement, so the map answers exactly what the
             // compiler's single pass would see here. Module items and the
@@ -677,6 +694,24 @@ impl Walker<'_> {
                     return self.defs_local(*def).and_then(|entry| entry.inferred.clone());
                 }
                 if let Some(def) = self.items.get(name) {
+                    if let Some(declaration) = self.module.declarations.iter()
+                        .find(|d| d.name == *name && matches!(d.kind, DeclarationKind::Function { .. }))
+                        && let DeclarationKind::Function { parameters, returns, unsafe_fn, abi } = &declaration.kind
+                    {
+                            if *unsafe_fn || abi.is_some() || !declaration.type_parameters.is_empty() {
+                                return None;
+                            }
+                            let param_shapes: Vec<TypeSpelling> = parameters.iter()
+                                .map(|p| classify(self.tokens, &|n: &str| self.items.get(n).copied(), &[], None, p.ty.clone()).spelling)
+                                .collect();
+                            let ret_shape = match returns.clone() {
+                                Some(range) if range.start != range.end => {
+                                    classify(self.tokens, &|n: &str| self.items.get(n).copied(), &[], None, range).spelling
+                                }
+                                _ => TypeSpelling::Primitive("()"),
+                            };
+                            return Some(TypeSpelling::FnValue { parameters: param_shapes, returns: Box::new(ret_shape) });
+                    }
                     return Some(TypeSpelling::Named { def: *def });
                 }
                 if let Some(prelude) = crate::types::PRELUDE_TYPES.iter().find(|prelude| **prelude == name) {
@@ -696,13 +731,19 @@ impl Walker<'_> {
             // shape — the pointee spelling classifies directly.
             ExpressionKind::AddressCast { mutable, pointee, .. } => {
                 let mutable = *mutable;
-                let shape = classify(&self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), pointee.clone()).spelling;
+                let shape = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), pointee.clone()).spelling;
                 Some(TypeSpelling::Pointer { mutable, pointee: Box::new(shape) })
             }
             ExpressionKind::PointerCast { mutable, pointee, .. } => {
                 let mutable = *mutable;
-                let shape = classify(&self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), pointee.clone()).spelling;
+                let shape = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), pointee.clone()).spelling;
                 Some(TypeSpelling::Pointer { mutable, pointee: Box::new(shape) })
+            }
+            ExpressionKind::ScalarCast { target, .. } => {
+                let name = self.module.source.get(target.clone())?.trim();
+                let scalar = crate::typecheck::Scalar::from_spelling(name)?;
+                matches!(scalar, crate::typecheck::Scalar::Int(_) | crate::typecheck::Scalar::Float(_) | crate::typecheck::Scalar::Char)
+                    .then(|| TypeSpelling::Primitive(scalar.spelling()))
             }
             // Field and index reads infer through the base's shape.
             ExpressionKind::Field { base, name } => {
@@ -723,7 +764,7 @@ impl Walker<'_> {
             ExpressionKind::Specialization { base, arguments } => {
                 let shape = self.infer_expression(base)?;
                 let converted: Vec<TypeSpelling> = arguments.iter()
-                    .map(|argument| classify(&self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), argument.clone()).spelling)
+                    .map(|argument| classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), argument.clone()).spelling)
                     .collect();
                 Some(match shape {
                     TypeSpelling::Named { def } => TypeSpelling::GenericInstance { def, arguments: converted },
@@ -750,6 +791,23 @@ impl Walker<'_> {
                     }
                     return None;
                 }
+                if let ExpressionKind::Field { base, name } = &callee.kind {
+                    if matches!(
+                        name.as_str(),
+                        "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_neg"
+                            | "saturating_add" | "saturating_sub" | "saturating_mul"
+                    ) {
+                        return self.infer_expression(base);
+                    }
+                    if matches!(
+                        name.as_str(),
+                        "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem" | "checked_neg"
+                    ) {
+                        let base_shape = self.infer_expression(base)?;
+                        return Some(TypeSpelling::Prelude { name: "Option", arguments: vec![base_shape] });
+                    }
+                    return None;
+                }
                 // The root names the module function being called; its
                 // return spelling is the shape.
                 let ExpressionKind::Atom(Kind::Ident(fn_name)) = &callee.kind else {
@@ -760,9 +818,11 @@ impl Walker<'_> {
                 let DeclarationKind::Function { returns, .. } = &declaration.kind else {
                     return None;
                 };
-                let range = returns.clone()?;
+                let Some(range) = returns.clone() else {
+                    return (declaration.name != "main").then_some(TypeSpelling::Primitive("()"));
+                };
                 let params: Vec<String> = declaration.type_parameters.iter().map(|parameter| parameter.name.clone()).collect();
-                Some(classify(&self.tokens, &|name: &str| self.items.get(name).copied(), &params, None, range).spelling)
+                Some(classify(self.tokens, &|name: &str| self.items.get(name).copied(), &params, None, range).spelling)
             }
             ExpressionKind::Vector(items) => {
                 // The first typed element decides the vector (ADR-61).
@@ -787,12 +847,12 @@ impl Walker<'_> {
                     if param.ty.start == param.ty.end {
                         return None;
                     }
-                    shapes.push(classify(&self.tokens, &lookup, &self.type_params, self.self_name.as_deref(), param.ty.clone()).spelling);
+                    shapes.push(classify(self.tokens, &lookup, &self.type_params, self.self_name.as_deref(), param.ty.clone()).spelling);
                 }
                 if return_type.start == return_type.end {
                     return None;
                 }
-                let returns = classify(&self.tokens, &lookup, &self.type_params, self.self_name.as_deref(), return_type.clone()).spelling;
+                let returns = classify(self.tokens, &lookup, &self.type_params, self.self_name.as_deref(), return_type.clone()).spelling;
                 Some(TypeSpelling::FnValue { parameters: shapes, returns: Box::new(returns) })
             }
             _ => None,
@@ -816,6 +876,14 @@ impl Walker<'_> {
     /// their field up in the declaration; borrowed receivers read through
     /// (the compiler auto-borrows `&self` fields).
     fn field_shape(&mut self, base_shape: &TypeSpelling, name: &str) -> Option<TypeSpelling> {
+        // `p.deref()` is spelled as a field on a pointer (the resolved
+        // route's form of the method call); it yields the pointee's shape,
+        // so a following field read chains through it (`p.deref().val`).
+        if let TypeSpelling::Pointer { pointee, .. } = base_shape {
+            if name == "deref" {
+                return Some((**pointee).clone());
+            }
+        }
         let def = match base_shape {
             TypeSpelling::Named { def } => Some(*def),
             TypeSpelling::Borrow { inner, .. } => match &**inner {
@@ -832,7 +900,7 @@ impl Walker<'_> {
             return None;
         };
         let field = fields.iter().find(|field| field.name == name)?;
-        Some(classify(&self.tokens, &|lookup_name: &str| self.items.get(lookup_name).copied(), &declaration.type_parameters.iter().map(|parameter| parameter.name.clone()).collect::<Vec<String>>(), None, field.ty.clone()).spelling)
+        Some(classify(self.tokens, &|lookup_name: &str| self.items.get(lookup_name).copied(), &declaration.type_parameters.iter().map(|parameter| parameter.name.clone()).collect::<Vec<String>>(), None, field.ty.clone()).spelling)
     }
 
     /// The compiler's value-arity rule at name level: a call whose callee
@@ -916,7 +984,7 @@ impl Walker<'_> {
                 );
                 continue;
             }
-            if covered.iter().any(|covered| *covered == field.name) {
+            if covered.contains(&field.name) {
                 self.diagnostics.push(
                     ae_syntax::diagnostic_range(
                         &self.module.file, &self.module.source, field.name_range.clone(),
@@ -927,7 +995,7 @@ impl Walker<'_> {
             covered.push(field.name.clone());
         }
         for declared_field in declared {
-            if !covered.iter().any(|covered| *covered == declared_field.name) {
+            if !covered.contains(&declared_field.name) {
                 self.diagnostics.push(
                     ae_syntax::diagnostic_range(
                         &self.module.file, &self.module.source, declared_field.name_range.clone(),
@@ -991,11 +1059,10 @@ impl Walker<'_> {
                         return true;
                     }
                 }
-                StatementKind::Unsafe(body) => {
-                    if Walker::definitely_returns(body) {
+                StatementKind::Unsafe(body)
+                    if Walker::definitely_returns(body) => {
                         return true;
                     }
-                }
                 _ => {}
             }
         }
@@ -1048,7 +1115,9 @@ impl Walker<'_> {
     }
 
     fn close_scope(&mut self) {
-        let (_, bindings) = self.blocks.pop().expect("open scope");
+        let Some((_, bindings)) = self.blocks.pop() else {
+            return;
+        };
         for (name, previous) in bindings.into_iter().rev() {
             if let Some(previous) = previous {
                 self.live.insert(name, previous);
@@ -1060,12 +1129,16 @@ impl Walker<'_> {
 
     fn block_range(&self, header_end: usize, body: &[Statement]) -> Range<usize> {
         let next = self.tokens.partition_point(|token| token.offset < header_end);
-        let open = next + self.tokens[next..].iter().position(|token| token.kind == Kind::LBrace)
-            .expect("parsed block has an opening brace");
+        let Some(rel_open) = self.tokens[next..].iter().position(|token| token.kind == Kind::LBrace) else {
+            let end = body.last().map_or(header_end, |last| last.range.end);
+            return header_end..end.max(header_end);
+        };
+        let open = next + rel_open;
         let close = body.last().map_or(open + 1, |last| {
             self.tokens.partition_point(|token| token.offset < last.range.end)
         });
-        self.tokens[open].end..self.tokens[close].end
+        let end = self.tokens.get(close).or_else(|| self.tokens.get(open)).map_or(header_end, |token| token.end);
+        self.tokens[open].end..end.max(self.tokens[open].end)
     }
 
     fn block(&mut self, body: &[Statement], range: Range<usize>) {
@@ -1091,9 +1164,23 @@ impl Walker<'_> {
 
     fn statement(&mut self, statement: &Statement) {
         match &statement.kind {
-            StatementKind::Binding { mutable, name, name_range, initializer } => {
+            StatementKind::Binding { mutable, name, name_range, ty, initializer } => {
                 self.expr(initializer, Role::Read);
-                let inferred = self.infer_expression(initializer);
+                // A `let v: Type = …` annotation is the binding's declared
+                // shape: it wins over the initializer's inference and joins
+                // the spelling table (so hover and type dumps show it).
+                let annotated = ty.as_ref().map(|range| {
+                    let spelled = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), range.clone());
+                    let spelling = spelled.spelling.clone();
+                    self.spellings.push(SpellingEntry {
+                        owner: self.function_def,
+                        role: SpellingRole::LocalBinding,
+                        name: name.clone(),
+                        spelled,
+                    });
+                    spelling
+                });
+                let inferred = annotated.or_else(|| self.infer_expression(initializer));
                 let binding = self.declare(name.clone(), DefKind::Binding, name_range.clone(), *mutable, *mutable, inferred, statement.range.end);
                 if let Some(ExpressionType::Checked(scalar)) = self.expression_types.get(&initializer.range) {
                     self.scalar_bindings.insert(binding, *scalar);
@@ -1171,10 +1258,12 @@ impl Walker<'_> {
                 self.expr(value, Role::Read);
                 // A returned shape must agree with the declaration when
                 // both are known; a deferred shape stays silent.
-                if let Some(declared) = self.declared_return.clone() {
+                if let Some(declared) = self.declared_return.clone()
+                    && !matches!(declared, TypeSpelling::Unknown(_))
+                {
                     let returned = self.infer_expression(value);
-                    if let Some(returned) = returned {
-                        if returned != declared {
+                    if let Some(returned) = returned
+                        && returned != declared {
                             self.diagnostics.push(
                                 ae_syntax::diagnostic_range(
                                     &self.module.file, &self.module.source, statement.range.clone(),
@@ -1182,7 +1271,6 @@ impl Walker<'_> {
                                 ),
                             );
                         }
-                    }
                 }
             }
         }
@@ -1248,7 +1336,7 @@ impl Walker<'_> {
         let mut catch_all = false;
         for arm in arms {
             match &arm.pattern.kind {
-                PatternKind::Binding(_) => catch_all = true,
+                PatternKind::Wildcard | PatternKind::Binding(_) => catch_all = true,
                 PatternKind::Variant { variant, .. } => covered.push(variant.clone()),
             }
         }
@@ -1257,7 +1345,7 @@ impl Walker<'_> {
         }
         let enum_name = enum_entry.map(|entry| entry.name.clone()).unwrap_or_default();
 
-        for (variant_name, _) in variants.iter() {
+        for variant_name in variants.keys() {
             if covered.iter().any(|covered_name| covered_name == variant_name) {
                 continue;
             }
@@ -1282,14 +1370,15 @@ impl Walker<'_> {
     /// payload order.
     fn pattern(&mut self, pattern: &Pattern, subject_shape: Option<TypeSpelling>) {
         match &pattern.kind {
+            PatternKind::Wildcard => {}
             PatternKind::Binding(name) => {
                 // The pattern covers exactly the binding's name token.
                 self.declare(name.clone(), DefKind::PatternBinding, pattern.range.clone(), false, false, subject_shape, pattern.range.end);
             }
             PatternKind::Variant { enum_name, variant, variant_range, payload } => {
-                if let Some(enum_id) = self.items.get(enum_name) {
-                    if let Some(table) = self.variants.get(enum_id) {
-                        if let Some(variant_id) = table.get(variant) {
+                if let Some(enum_id) = self.items.get(enum_name)
+                    && let Some(table) = self.variants.get(enum_id)
+                        && let Some(variant_id) = table.get(variant) {
                             self.occurrences.push(Occurrence {
                                 range: variant_range.clone(),
                                 name: variant.clone(),
@@ -1297,8 +1386,6 @@ impl Walker<'_> {
                                 target: Some(*variant_id),
                             });
                         }
-                    }
-                }
                 // The payload bindings carry the variant's payload spellings,
                 // classified against the enum's own type parameters.
                 let (_enum_params, subject_arguments) = match &subject_shape {
@@ -1332,7 +1419,7 @@ impl Walker<'_> {
                             .unwrap_or_default();
                         payload_ranges.iter()
                             .map(|range| {
-                                let shape = classify(&self.tokens, &|lookup: &str| self.items.get(lookup).copied(), &enum_params, None, range.clone()).spelling;
+                                let shape = classify(self.tokens, &|lookup: &str| self.items.get(lookup).copied(), &enum_params, None, range.clone()).spelling;
                                 Some(crate::types::substitute(shape, &enum_params, &subject_arguments))
                             })
                             .collect()
@@ -1374,8 +1461,9 @@ impl Walker<'_> {
             _ => None,
         };
         let result = match &expression.kind {
-            ExpressionKind::Atom(Kind::Number(_)) => return Checked(Scalar::Int),
-            ExpressionKind::Atom(Kind::Float(_)) => return Checked(Scalar::Float),
+            ExpressionKind::Atom(Kind::Number(_)) => return Checked(Scalar::Int(ae_ty::IntTy::I64)),
+            ExpressionKind::Atom(Kind::Float(_)) => return Checked(Scalar::Float(ae_ty::FloatTy::F64)),
+            ExpressionKind::Atom(Kind::Char(_)) => return Checked(Scalar::Char),
             ExpressionKind::Atom(Kind::True | Kind::False) => return Checked(Scalar::Bool),
             ExpressionKind::Atom(Kind::Ident(_)) => {
                 let scalar = target.and_then(|id| {
@@ -1401,6 +1489,13 @@ impl Walker<'_> {
                 let (Some(left), Some(right)) = (checked_child(left), checked_child(right)) else { return Deferred };
                 typecheck::infix(operator, Some(left), Some(right))
             }
+            ExpressionKind::ScalarCast { base, target } => {
+                let Some(target_scalar) = self.module.source.get(target.clone())
+                    .and_then(|name| Scalar::from_spelling(name.trim())) else { return Deferred };
+                let Some(base_scalar) = checked_child(base) else { return Deferred };
+                if !ae_ty::valid_scalar_cast(base_scalar, target_scalar) { return Deferred; }
+                return Checked(target_scalar);
+            }
             _ => return Deferred,
         };
         result.map_or_else(Rejected, Checked)
@@ -1415,7 +1510,7 @@ impl Walker<'_> {
                 };
                 self.occurrence(name, expression.range.clone(), role, mode)
             }
-            ExpressionKind::Atom(_) => None,
+            ExpressionKind::Atom(_) | ExpressionKind::Unit => None,
             ExpressionKind::Group(inner) | ExpressionKind::Propagate(inner) => self.expr(inner, role),
             ExpressionKind::AddressCast { binding, binding_range, mutable, pointee } => {
                 self.pointer_cast_targets.insert(pointee.start, *mutable);
@@ -1431,11 +1526,31 @@ impl Walker<'_> {
                 self.pointer_cast_targets.insert(pointee.start, *mutable);
                 self.expr(base, role)
             }
-            ExpressionKind::BorrowArgument { name, name_range, mutable, .. } => {
+            // A scalar cast names a type, not a value: only the base is walked.
+            ExpressionKind::ScalarCast { base, .. } => self.expr(base, role),
+            ExpressionKind::BorrowArgument { name, name_range, mutable, index, .. } => {
                 let mutable = *mutable;
                 let target = self.occurrence(name, name_range.clone(), Role::Borrow, Lookup::LocalOnly);
                 if mutable {
                     self.mutable_borrow_gate(target, name_range.clone());
+                }
+                // `&name[index]` reads the index; `&name[start..end]` reads both
+                // bounds (ADR-0236 rung 3). The bracket contents are a byte
+                // range in the shared grammar, so parse them back into trees
+                // and resolve them like any other read.
+                if let Some(range) = index {
+                    let parts: Vec<std::ops::Range<usize>> = match ae_syntax::expression::split_range_argument(self.tokens, range) {
+                        Some((start, end)) => vec![start, end],
+                        None => vec![range.clone()],
+                    };
+                    for part in parts {
+                        let start = self.tokens.partition_point(|token| token.offset < part.start);
+                        if let Ok((expression, _)) = ae_syntax::expression::parse_expression_tokens(
+                            &self.module.file, &self.module.source, self.tokens, start, false,
+                        ) {
+                            self.expr(&expression, Role::Read);
+                        }
+                    }
                 }
                 None
             }
@@ -1460,8 +1575,8 @@ impl Walker<'_> {
                 if self.unsafe_depth == 0 {
                     // Statement-position pointer calls are unsafe on their
                     // own (the compiler's text, no code).
-                    if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind {
-                        if matches!(name.as_str(), "ptr_write" | "ptr_drop_in_place") {
+                    if let ExpressionKind::Atom(Kind::Ident(name)) = &callee.kind
+                        && matches!(name.as_str(), "ptr_write" | "ptr_drop_in_place") {
                             self.diagnostics.push(
                                 ae_syntax::diagnostic_range(
                                     &self.module.file, &self.module.source, callee.range.clone(),
@@ -1469,7 +1584,6 @@ impl Walker<'_> {
                                 ),
                             );
                         }
-                    }
                     // A module function declared `unsafe fn` or
                     // `extern "C"` needs an enclosing unsafe block (E0701).
                     if let Some(def) = callee_target {
@@ -1555,7 +1669,7 @@ impl Walker<'_> {
             let shape = if param.ty.start == param.ty.end {
                 None
             } else {
-                let spelled = classify(&self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), param.ty.clone());
+                let spelled = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), param.ty.clone());
                 self.spellings.push(SpellingEntry {
                     owner: self.function_def,
                     role: SpellingRole::ClosureParameter,
@@ -1568,45 +1682,49 @@ impl Walker<'_> {
         }
         // The closure's return spelling sits between the parameters and the
         // body; an empty range means the spelling carries no return type.
-        if return_type.start != return_type.end {
+        let closure_return = if return_type.start != return_type.end {
+            let spelled = classify(self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), return_type.clone());
+            let shape = spelled.spelling.clone();
             self.spellings.push(SpellingEntry {
                 owner: self.function_def,
                 role: SpellingRole::ClosureReturn,
                 name: String::new(),
-                spelled: classify(&self.tokens, &|name: &str| self.items.get(name).copied(), &self.type_params, self.self_name.as_deref(), return_type.clone()),
+                spelled,
             });
-        }
+            Some(shape)
+        } else {
+            None
+        };
         if let Some(open) = self.tokens.iter().position(|token| token.offset == body.start) {
             let occurrences_start = self.occurrences.len();
             let locals_start = self.locals.len();
-            match parse_statements_until_close(&self.module.file, &self.module.source, self.tokens, open + 1) {
-                Ok((statements, _)) => {
-                    for statement in &statements {
-                        self.statement(statement);
-                    }
-                    let has_binding_conflict = self.diagnostics[diagnostics_start..].iter()
-                        .any(|diagnostic| diagnostic.code.as_deref() == Some("E0104"));
-                    // Captures: reads inside the body whose target is an
-                    // outer def (declared before this closure's locals
-                    // began). The compiler owns the capture mode.
-                    let mut captures: Vec<DefId> = Vec::new();
-                    for occurrence in &self.occurrences[occurrences_start..] {
-                        if occurrence.role != Role::Read { continue; }
-                        let Some(target) = occurrence.target else { continue };
-                        let outer = (self.base as usize..self.base as usize + locals_start)
-                            .contains(&(target.0 as usize));
-                        if outer && !captures.contains(&target) {
-                            captures.push(target);
-                        }
-                    }
-                    self.closure_bodies.push(ClosureBody {
-                        start: body.start, end: body.end, statements: statements.into(),
-                        has_binding_conflict, captures,
-                    });
+            let prev_return = std::mem::replace(&mut self.declared_return, closure_return);
+            // The grammar accepted the literal's header; a body that does
+            // not parse stays opaque rather than inventing diagnostics.
+            if let Ok((statements, _)) = parse_statements_until_close(&self.module.file, &self.module.source, self.tokens, open + 1) {
+                for statement in &statements {
+                    self.statement(statement);
                 }
-                // The grammar accepted the literal's header; a body that does
-                // not parse stays opaque rather than inventing diagnostics.
-                Err(_) => {}
+                self.declared_return = prev_return;
+                let has_binding_conflict = self.diagnostics[diagnostics_start..].iter()
+                    .any(|diagnostic| diagnostic.code.as_deref() == Some("E0104"));
+                // Captures: reads inside the body whose target is an
+                // outer def (declared before this closure's locals
+                // began). The compiler owns the capture mode.
+                let mut captures: Vec<DefId> = Vec::new();
+                for occurrence in &self.occurrences[occurrences_start..] {
+                    if occurrence.role != Role::Read { continue; }
+                    let Some(target) = occurrence.target else { continue };
+                    let outer = (self.base as usize..self.base as usize + locals_start)
+                        .contains(&(target.0 as usize));
+                    if outer && !captures.contains(&target) {
+                        captures.push(target);
+                    }
+                }
+                self.closure_bodies.push(ClosureBody {
+                    start: body.start, end: body.end, statements: statements.into(),
+                    has_binding_conflict, captures,
+                });
             }
         }
         self.close_scope();
@@ -1620,11 +1738,10 @@ impl Walker<'_> {
             if token.end > end {
                 break;
             }
-            if let Kind::Ident(spelled) = &token.kind {
-                if spelled == name {
+            if let Kind::Ident(spelled) = &token.kind
+                && spelled == name {
                     return token.offset..token.end;
                 }
-            }
         }
         after..after
     }

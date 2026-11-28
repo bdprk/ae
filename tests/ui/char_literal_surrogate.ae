@@ -1,0 +1,4 @@
+fn main() {
+    let a = '\u{D800}';
+    print(a);
+}

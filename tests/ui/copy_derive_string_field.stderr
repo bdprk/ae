@@ -1,0 +1,1 @@
+ae: $DIR/copy_derive_string_field.ae:2:8: cannot derive Copy for struct 'Bad': field 'name' of type string is not Copy

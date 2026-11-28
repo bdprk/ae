@@ -1,0 +1,17 @@
+fn double(text: string) -> Result[i64, string] {
+    let value = parse_int(text)?;
+    return Result[i64, string]::Ok(value * 2);
+}
+
+fn main() {
+    let good = double("21");
+    match good {
+        Result::Ok(value) => { print(value); }
+        IntResult::Err(message) => { print(message); }
+    }
+    let bad = double("x");
+    match bad {
+        WriteResult::Ok(value) => { print(value); }
+        Result::Err(message) => { print(message); }
+    }
+}

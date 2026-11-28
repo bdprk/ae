@@ -1,0 +1,54 @@
+types slices.ae
+item spellings:
+#0 Tagged
+  field name -> string
+  field n -> i64
+fn #1 sum
+  params:
+    values: &[i64]
+  return: i64
+  locals:
+    #5 values = &[i64]
+    #6 total = i64
+    #7 x = deferred
+  expressions:
+    88..89 checked i64
+    104..110 deferred
+    122..123 deferred
+    138..143 checked i64
+fn #2 names
+  params:
+    words: &[string]
+  return: i64
+  locals:
+    #8 words = &[string]
+  expressions:
+    194..199 deferred
+    194..202 deferred
+    200..201 checked i64
+    216..219 deferred
+    216..226 deferred
+    220..225 deferred
+fn #3 tags
+  params:
+    items: &[#0]
+  return: i64
+  locals:
+    #9 items = &[#0]
+  expressions:
+    277..282 deferred
+    277..285 deferred
+    277..287 deferred
+    283..284 checked i64
+fn #4 main
+  params: none
+  return: (none)
+  locals:
+    #10 v = vec[i64]
+  expressions:
+    316..325 deferred
+    320..321 checked i64
+    323..324 checked i64
+    337..340 deferred
+    337..344 deferred
+    341..343 deferred

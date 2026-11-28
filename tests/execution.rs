@@ -275,7 +275,9 @@ fn excessive_nesting_returns_diagnostic_instead_of_crashing() {
     let nested = format!("fn main() {{ print({}1{}); }}", "(".repeat(300), ")".repeat(300));
     let output = execute(&nested);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("nesting limit"));
+    // Deep parentheses: the typed route says "nesting limit", the shared
+    // grammar "complexity limit"; the contract is that a limit fires.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("limit exceeded"));
     let long = format!("fn main() {{ print({}); }}", vec!["1"; 300].join(" + "));
     let output = execute(&long);
     assert!(!output.status.success());
@@ -283,7 +285,7 @@ fn excessive_nesting_returns_diagnostic_instead_of_crashing() {
     let blocks = format!("fn main() {{ {} print(1); {} }}", "if 1 == 1 { ".repeat(100), "}".repeat(100));
     let output = execute(&blocks);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("block nesting limit"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("limit exceeded"));
 }
 #[test]
 fn signed_arithmetic_boundaries_match_checked_integer_semantics() {
@@ -440,7 +442,7 @@ fn float_vectors_move_release_and_borrow_like_other_owned_types() {
 fn float_vector_misuse_is_rejected() {
     for (source, expected) in [
         ("fn main() { let v = vec[1, 2.0]; }", "does not convert implicitly"),
-        ("fn main() { let v = vec[\"a\"]; }", "vector elements must be i64 or f64"),
+        ("enum E { A(string) } fn main() { let v = vec[E::A(\"a\")]; }", "vector literal elements must be a value type"),
         ("fn main() { var v = vec[1.0]; push(v, 2); }", "vector elements must be f64"),
         ("fn main() { var v = vec[1.0]; sort(v); }", "not supported for vec[f64]"),
         ("fn main() { var v = vec[1.0]; reverse(v); }", "not supported for vec[f64]"),
@@ -495,6 +497,143 @@ fn release_array_bounds_checks_remain_enabled() {
     fs::remove_file(path).unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("array index out of bounds"));
+}
+
+/// `for x in a` iterates a fixed array: the length is the type's constant,
+/// elements bind by value, and the array is borrowed for the loop's duration.
+#[test]
+fn array_for_matches_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("array_for.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    // The iterated array is borrowed for the whole loop, so an element store
+    // inside the body is rejected exactly like the vector case.
+    let path = std::env::temp_dir().join(format!(
+        "ae-array-for-bad-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, "fn main() { var a = [1, 2]; for x in a { a[0] = 9; print(x); } }").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(!result.status.success(), "an element store inside the array loop must be rejected");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("cannot modify 'a' while it is borrowed"),
+        "got {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+/// A fixed array is a Copy value: copy initialization, whole-array
+/// assignment and compound element stores copy element by element, and a
+/// compound store evaluates its index once.
+#[test]
+fn array_copy_and_store_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("array_copy.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "compound store on a let array",
+            "fn main() { let a = [1, 2]; a[0] += 1; }",
+            "cannot assign to immutable variable 'a'",
+        ),
+        (
+            "whole assignment on a let array",
+            "fn main() { let a = [1, 2]; a = [3, 4]; }",
+            "cannot assign to immutable variable 'a'",
+        ),
+        (
+            "assignment inside the loop that borrows it",
+            "fn main() { var a = [1, 2]; for x in a { a = [3, 4]; print(x); } }",
+            "cannot modify 'a' while it is borrowed",
+        ),
+        (
+            "length mismatch",
+            "fn main() { var a = [1, 2, 3]; a = [1, 2]; }",
+            "array length mismatch: expected 3, found 2",
+        ),
+        (
+            "literal element mismatch",
+            "fn main() { var a = [1, 2]; a = [1.5, 2.5]; }",
+            "array element type mismatch: expected i64, found f64",
+        ),
+        (
+            "binding type mismatch",
+            "fn main() { var a = [1, 2]; let b = [1.5, 2.5]; a = b; }",
+            "array type mismatch",
+        ),
+        (
+            "compound store on bool elements",
+            "fn main() { var a = [true, false]; a[0] += true; }",
+            "compound assignment is not supported for type 'bool'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-array-copy-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 #[test]
 fn generated_integer_program_matches_independent_reference_in_both_modes() {
@@ -925,6 +1064,10 @@ fn frontend_cache_reuses_generated_c_until_an_imported_file_changes() {
     fs::write(&source, "use \"lib.ae\";\nfn main() { print(answer() + 1); }").unwrap();
     let build = |out: &std::path::Path| Command::new(env!("CARGO_BIN_EXE_ae"))
         .arg("build").arg(&source).arg("-o").arg(out)
+        // The content-addressed cache belongs to the legacy MIR backend; a
+        // pure build bypasses it by design (README, Backends), so this test
+        // pins the backend instead of inheriting the ambient AE_BACKEND.
+        .env("AE_BACKEND", "legacy")
         .env("AE_CACHE", &cache).env("AE_TIMINGS", "1").output().unwrap();
     let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
 
@@ -1086,7 +1229,7 @@ fn vector_misuse_is_rejected_at_compile_time() {
         "fn main() { let v = vec[1]; push(v, 2); }",
         "fn main() { var v = vec[1]; let w = v; push(v, 2); }",
         "fn main() { var v = vec[1]; let w = v; print(len(v)); }",
-        "fn main() { let v = vec[true]; }",
+        "fn main() { let v = vec[\"hi\", 2]; }",
         "fn main() { print(vec[1, 2]); }",
         "fn push(v: vec) -> i64 { return 1; } fn main() {}",
         "fn main() { var len = 1; }",
@@ -1334,11 +1477,11 @@ fn hosted_files_preserve_bytes_and_processes_recover_status() {
         "    }}\n",
         "{}",
         "    match first {{\n",
-        "        CommandResult::Ok(status, out) => {{ print(status); print(contains(out, \"two words\")); }}\n",
+        "        CommandResult::Ok(finished) => {{ print(finished.status); print(contains(finished.output, \"two words\")); }}\n",
         "        CommandResult::Err(reason) => {{ print(\"spawn \" + reason); }}\n",
         "    }}\n",
         "    match second {{\n",
-        "        CommandResult::Ok(status, out) => {{ print(status); }}\n",
+        "        CommandResult::Ok(finished) => {{ print(finished.status); }}\n",
         "        CommandResult::Err(reason) => {{ print(\"spawn \" + reason); }}\n",
         "    }}\n",
         "}}\n"
@@ -1819,8 +1962,9 @@ fn main() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "41\nada\nleft\nwrapped\nk\n2\n");
     for (source, expected) in [
-        // The type arguments are mandatory: there is no inference.
-        ("fn id[T](x: T) -> T { return x; } fn main() { print(id(5)); }", "is a generic function"),
+        // A parameter that occurs only in a concrete argument cannot be
+        // inferred; the call still gets the explicit-type-argument remedy.
+        ("fn id[T](x: i64) -> i64 { return x; } fn main() { print(id(5)); }", "is a generic function"),
         ("fn id[T](x: T) -> T { return x; } fn main() { print(id[i64, string](5)); }", "takes 1 type argument(s), found 2"),
         // A body is checked after substitution, against the concrete type.
         ("fn bad[T](x: T) -> i64 { return x + 1; } fn main() { print(bad[string](\"a\")); }", "'+' requires two strings"),
@@ -1831,6 +1975,48 @@ fn main() {
         ("fn id[T](x: T) -> T { return x; } fn id(x: i64) -> i64 { return x; } fn main() { print(1); }", "duplicate function 'id'"),
     ] {
         let path = std::env::temp_dir().join(format!("ae-generic-fn-{}-{}.ae", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        fs::write(&path, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(!output.status.success(), "accepted invalid program: {source}");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(err.contains(expected), "{source}: {err}");
+    }
+}
+
+#[test]
+fn generic_calls_infer_direct_value_parameter_types() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("generic_inference.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "mode {label} failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (source, expected) in [
+        // Every occurrence of one parameter must instantiate to the same type.
+        ("fn first[T](a: T, b: T) -> T { return a; } fn main() { print(first(1, \"two\")); }", "argument 2 to 'first' must be i64"),
+        // Concrete parameters are still checked after inferring the other ones.
+        ("fn keep[T](value: T, index: i64) -> T { return value; } fn main() { print(keep(\"x\", \"index\")); }", "argument 2 to 'keep' must be i64"),
+        // A return-only parameter has no value argument to infer from.
+        ("fn make[T](x: i64) -> i64 { return x; } fn main() { print(make(1)); }", "write its type arguments"),
+    ] {
+        let path = std::env::temp_dir().join(format!("ae-generic-infer-{}-{}.ae", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         fs::write(&path, source).unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
         fs::remove_file(path).unwrap();
@@ -1962,7 +2148,7 @@ fn many_generic_declarations_in_one_file_keep_their_own_bodies() {
     for i in 0..40 {
         source.push_str(&format!("print(f{i}[i64]({i}, 1)); print(g{i}[i64]({i}, 100)); "));
     }
-    source.push_str("}");
+    source.push('}');
     let output = execute(&source);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let mut expected = Vec::new();
@@ -2392,7 +2578,7 @@ fn count_lines_with_matches_reference_semantics() {
     }
     for (text, pat, expected) in cases {
         let src_text = ae_lit(&text);
-        let src_pat = ae_lit(&pat);
+        let src_pat = ae_lit(pat);
         let source = format!("fn main() {{ print(count_lines_with(\"{src_text}\", \"{src_pat}\")); }}");
         let output = execute(&source);
         assert!(output.status.success(), "{source}: {}", String::from_utf8_lossy(&output.stderr));
@@ -2930,21 +3116,21 @@ fn file_metadata_reports_size_and_missing_paths() {
     let source = format!(r#"fn main() {{
     let found = try_file_info("{data}");
     match found {{
-        FileResult::Ok(size, modified, is_dir) => {{
-            print(size);
-            print(is_dir);
-            print(modified > 0);
+        FileResult::Ok(meta) => {{
+            print(meta.size);
+            print(meta.is_dir);
+            print(meta.mtime > 0);
         }}
         FileResult::Err(reason) => {{ print("unexpected failure"); }}
     }}
     let folder = try_file_info("{dir}");
     match folder {{
-        FileResult::Ok(size, modified, is_dir) => {{ print(is_dir); }}
+        FileResult::Ok(meta) => {{ print(meta.is_dir); }}
         FileResult::Err(reason) => {{ print("unexpected failure"); }}
     }}
     let absent = try_file_info("{missing}");
     match absent {{
-        FileResult::Ok(size, modified, is_dir) => {{ print("unexpected success"); }}
+        FileResult::Ok(meta) => {{ print("unexpected success"); }}
         FileResult::Err(reason) => {{ print(len(reason) > 0); }}
     }}
 }}"#, data = literal(&data), dir = literal(&dir), missing = literal(&missing));
@@ -3153,8 +3339,6 @@ fn invalid_error_propagation_is_rejected() {
         "fn f() -> ReadResult { let x = 1?; return ReadResult::Ok(\"a\"); } fn main() { print(1); }",
         // only the prelude-shaped Ok/Err pairs can be propagated
         "enum Pair { Ok(string), Bad(string) } fn f() -> Pair { let x = try_read_file(\"a\")?; return Pair::Ok(x); } fn main() { print(1); }",
-        // a three-value Ok needs an explicit match, a binding cannot pick one
-        "fn f(p: &string) -> FileResult { let size = try_file_info(p)?; return FileResult::Ok(size, 0, false); } fn main() { print(1); }",
         // a bare call statement must state what happens to the result
         "fn f(p: &string) -> StatusResult { try_remove_file(p); return StatusResult::Ok; } fn main() { print(1); }",
     ] {
@@ -3183,11 +3367,14 @@ fn float_maps_reject_wrong_value_types_and_move_like_int_maps() {
         ("fn main() { var m = f64map_new(); print(map_inc(m, \"a\", 1)); }", "map_inc expects a f64 delta"),
         ("fn main() { var m = f64map_new(); let g = map_get(m, \"a\"); match g { IntResult::Ok(v) => { print(v); } IntResult::Err(r) => { print(r); } } }", "pattern must name the matched enum"),
         ("fn main() { var m = f64map_new(); let w = m; print(map_has(m, \"a\")); }", "moved"),
-        ("fn main() { var m = map[string, f64]; }", "unknown variable"),
     ] {
         let message = check_rejects(source);
         assert!(message.contains(expected), "{source}: {message}");
     }
+    // A `map[string, f64]` initializer spelling is rejected by both routes with
+    // different wording (name-aware "unknown variable" vs the shared grammar's
+    // bracket diagnostic); only the rejection is contractual.
+    check_rejects("fn main() { var m = map[string, f64]; }");
 }
 #[test]
 fn float_maps_live_in_structs_and_release_exactly_once() {
@@ -3405,7 +3592,10 @@ fn main() {
 }
 #[test]
 fn allocation_failure_reports_the_operation_location() {
-    let source = "fn main() {\n    let text = \"hello\";\n    print(text);\n}";
+    // A string literal is static storage on the pure backend (zero
+    // allocations), so the program allocates through a concat instead: both
+    // backends reach the budget at the same source line.
+    let source = "fn main() {\n    let text = \"hel\" + \"lo\";\n    print(text);\n}";
     let exhausted = execute_with_env(source, &[("AE_ALLOC_LIMIT", "0")]);
     assert!(!exhausted.status.success(), "an exhausted allocation budget must fail");
     let stderr = String::from_utf8_lossy(&exhausted.stderr);
@@ -4018,6 +4208,88 @@ fn cache_prunes_entries_beyond_the_configured_limit() {
     let _ = fs::remove_dir_all(&dir);
 }
 #[test]
+fn cache_prune_keeps_the_entry_that_was_just_used() {
+    // Pruning is least-recently-used, so the entry a build just served must
+    // outlive an older one. Without a `used` marker refreshed on a frontend
+    // hit, every entry looks as old as its store time and the sweep can drop
+    // the hot one, turning the cache into a rebuild loop once the limit is hit.
+    let dir = std::env::temp_dir().join(format!("ae-cache-lru-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let cache = dir.join("cache");
+    fs::create_dir(&dir).unwrap();
+
+    let hot = dir.join("hot.ae");
+    let cold = dir.join("cold.ae");
+    fs::write(&hot, "fn main() { print(\"hot\"); }").unwrap();
+    fs::write(&cold, "fn main() { print(\"cold\"); }").unwrap();
+
+    let build = |source: &std::path::Path, out: &std::path::Path, limit: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ae"));
+        cmd.arg("build").arg(source).arg("-o").arg(out)
+            .env("AE_CACHE", &cache).env_remove("AE_CACHE_LIMIT");
+        if let Some(value) = limit { cmd.env("AE_CACHE_LIMIT", value); }
+        let result = cmd.output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    };
+    let frontend_dirs = || fs::read_dir(cache.join("frontend")).map(|d| d.count()).unwrap_or(0);
+    // Which entry holds a given program, found through its generated C: the
+    // directory name is a hash of the canonical source path, which this test
+    // cannot reproduce without re-implementing sha256.
+    let entry_for = |needle: &str| {
+        fs::read_dir(cache.join("frontend")).into_iter().flatten().flatten()
+            .map(|e| e.path())
+            .find(|p| fs::read_to_string(p.join("program.c")).map(|t| t.contains(needle)).unwrap_or(false))
+    };
+
+    build(&hot, &dir.join(if cfg!(windows) { "hot.exe" } else { "hot" }), None);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    build(&cold, &dir.join(if cfg!(windows) { "cold.exe" } else { "cold" }), None);
+    assert_eq!(frontend_dirs(), 2, "both programs are cached");
+
+    // Rebuild the hot program: a hit, which must refresh its recency.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    build(&hot, &dir.join(if cfg!(windows) { "hot2.exe" } else { "hot2" }), None);
+    let hot_dir = entry_for("\"hot\"").expect("hot entry exists");
+    assert!(hot_dir.join("used").exists(), "a hit marks the entry used");
+
+    // The cap has to force a real choice: keep the hot entry and drop the cold
+    // one. The sweep walks oldest-first and stops the moment the total fits, so
+    // the cap must be tight enough to require eviction, but with enough slack
+    // that the cold pair alone satisfies it.
+    let dir_bytes = |p: &std::path::Path| -> u64 {
+        fs::read_dir(p).into_iter().flatten().flatten()
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len()).sum()
+    };
+    let cold_dir = entry_for("\"cold\"").expect("cold entry exists");
+    let hot_bytes = dir_bytes(&hot_dir);
+    let cold_bytes = dir_bytes(&cold_dir);
+    assert!(hot_bytes > 0 && cold_bytes > 0, "both entries carry content");
+
+    let all_frontend: Vec<_> = fs::read_dir(cache.join("frontend")).into_iter().flatten().flatten()
+        .map(|e| e.path()).collect();
+    let all_exec: Vec<_> = fs::read_dir(cache.join("entries")).into_iter().flatten().flatten()
+        .map(|e| e.path()).collect();
+    let exec_bytes: u64 = all_exec.iter().map(|p| dir_bytes(p)).sum();
+    let stored: u64 = all_frontend.iter().map(|p| dir_bytes(p)).sum::<u64>() + exec_bytes;
+
+    // The third program contributes one frontend entry and one executable entry
+    // before the sweep runs. Publishing it, then requiring the total to drop
+    // back under `stored + one cold entry` forces exactly the cold pair out.
+    let third_frontend = hot_bytes;
+    let third_exec = dir_bytes(&all_exec[0]);
+    let limit = stored + third_frontend + third_exec - cold_bytes;
+
+    let third = dir.join("third.ae");
+    fs::write(&third, "fn main() { print(\"third\"); }").unwrap();
+    build(&third, &dir.join(if cfg!(windows) { "third.exe" } else { "third" }), Some(&limit.to_string()));
+
+    assert!(entry_for("\"hot\"").is_some(), "the recently used entry survives the sweep");
+    assert!(entry_for("\"cold\"").is_none(), "the stale entry is the one evicted");
+    let _ = fs::remove_dir_all(&dir);
+}
+#[test]
 fn string_vectors_start_empty_and_copy_borrowed_elements() {
     // `args()` hands back owned strings, but indexing it gives a borrow. Pushing
     // a borrow must copy it: moving the element would empty the slot it was read
@@ -4053,13 +4325,13 @@ fn run_command_reports_status_and_output() {
     var argv = strvec_new();
 {pushes}    let result = run_command("{program}", argv);
     match result {{
-        CommandResult::Ok(code, out) => {{ print(code); print(contains(out, "child-ok")); }}
+        CommandResult::Ok(finished) => {{ print(finished.status); print(contains(finished.output, "child-ok")); }}
         CommandResult::Err(reason) => {{ print("failed: " + reason); }}
     }}
     var empty = strvec_new();
     let missing = run_command("ae-no-such-program-on-path", empty);
     match missing {{
-        CommandResult::Ok(code, out) => {{ print("unexpected " + to_string(code)); }}
+        CommandResult::Ok(finished) => {{ print("unexpected " + to_string(finished.status)); }}
         CommandResult::Err(reason) => {{ print(contains(reason, "cannot start")); }}
     }}
 }}"#);
@@ -4406,6 +4678,7 @@ fn standalone_declarations_cover_example_and_run_corpus() {
             }
             let source = fs::read_to_string(&path).unwrap();
             let file = path.display().to_string();
+            #[allow(clippy::result_large_err)]
             let parsed = (|| {
                 let tokens = ae_syntax::lex_diagnostic(&source)?;
                 let headers = ae_syntax::module::parse_use_headers(&file, &source, &tokens)?;
@@ -4484,8 +4757,8 @@ fn main() { let p = P { x: 1 }; print(p.x); }
     let tree = String::from_utf8_lossy(&output.stdout);
     assert!(tree.contains("struct #"), "struct declarations print: {tree}");
     assert!(tree.contains("fn main() -> i64 {"), "main prints: {tree}");
-    assert!(tree.contains("v0: owned = struct #0 {"), "literal prints: {tree}");
-    assert!(tree.contains("print v0 (struct #0) @ 2:39.x"), "field read prints: {tree}");
+    assert!(tree.contains("v0: owned = struct #2 {"), "literal prints: {tree}");
+    assert!(tree.contains("print v0 (struct #2) @ 2:39.x"), "field read prints: {tree}");
 }
 
 #[test]
@@ -4632,7 +4905,7 @@ fn mir_interpreter_agrees_on_file_builtins_with_the_compiled_backends() {
     // exact. The probe files live in the process CWD and are cleaned
     // up afterwards.
     let source = "probe_files.ae";
-    fs::write(source, "fn main() {\n    let _c = try_create_dir(\"./probe_dir\");\n    let w = try_write_file(\"./probe_dir/probe.txt\", \"hello file\");\n    match w { WriteResult::Ok(n) => { print(n); } WriteResult::Err(_) => { print(0 - 1); } }\n    let text = read_file(\"./probe_dir/probe.txt\");\n    print(text);\n    let st = try_file_info(\"./probe_dir/probe.txt\");\n    match st {\n        FileResult::Ok(size, modified, is_dir) => { print(size); }\n        FileResult::Err(_) => { print(0 - 1); }\n    }\n    let _c2 = try_create_dir(\"./probe_dir/sub\");\n    let _w2 = try_write_file(\"./probe_dir/sub/inner.txt\", \"inner\");\n    let listed = try_list_dir(\"./probe_dir/sub\");\n    match listed {\n        DirResult::Ok(names) => { print(len(names)); print(names[0]); }\n        DirResult::Err(e) => { print(e); }\n    }\n    print(path_exists(\"./probe_dir/sub\"));\n    print(path_is_dir(\"./probe_dir/sub\"));\n    print(path_join(\"dir\", \"name\"));\n    print(path_name(\"dir/sub/name.txt\"));\n    print(path_parent(\"dir/sub/name.txt\"));\n    let _r1 = try_remove_file(\"./probe_dir/probe.txt\");\n    let _r2 = try_remove_file(\"./probe_dir/sub/inner.txt\");\n    let _r3 = try_remove_dir(\"./probe_dir/sub\");\n    print(path_exists(\"./probe_dir/probe.txt\"));\n}").unwrap();
+    fs::write(source, "fn main() {\n    let _c = try_create_dir(\"./probe_dir\");\n    let w = try_write_file(\"./probe_dir/probe.txt\", \"hello file\");\n    match w { WriteResult::Ok(n) => { print(n); } WriteResult::Err(_) => { print(0 - 1); } }\n    let text = read_file(\"./probe_dir/probe.txt\");\n    print(text);\n    let st = try_file_info(\"./probe_dir/probe.txt\");\n    match st {\n        FileResult::Ok(meta) => { print(meta.size); }\n        FileResult::Err(_) => { print(0 - 1); }\n    }\n    let _c2 = try_create_dir(\"./probe_dir/sub\");\n    let _w2 = try_write_file(\"./probe_dir/sub/inner.txt\", \"inner\");\n    let listed = try_list_dir(\"./probe_dir/sub\");\n    match listed {\n        DirResult::Ok(names) => { print(len(names)); print(names[0]); }\n        DirResult::Err(e) => { print(e); }\n    }\n    print(path_exists(\"./probe_dir/sub\"));\n    print(path_is_dir(\"./probe_dir/sub\"));\n    print(path_join(\"dir\", \"name\"));\n    print(path_name(\"dir/sub/name.txt\"));\n    print(path_parent(\"dir/sub/name.txt\"));\n    let _r1 = try_remove_file(\"./probe_dir/probe.txt\");\n    let _r2 = try_remove_file(\"./probe_dir/sub/inner.txt\");\n    let _r3 = try_remove_dir(\"./probe_dir/sub\");\n    print(path_exists(\"./probe_dir/probe.txt\"));\n}").unwrap();
     let interp = Command::new(env!("CARGO_BIN_EXE_ae")).args(["run", source, "--interp"]).output().unwrap();
     assert!(interp.status.success(), "interp failed: {}", String::from_utf8_lossy(&interp.stderr));
     let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(source).output().unwrap();
@@ -4797,7 +5070,7 @@ fn field_assignment_evaluates_rhs_before_releasing_old_value() {
         let emitted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("emit-c").arg(&vector).env("AE_CODEGEN", backend).output().unwrap();
         assert!(emitted.status.success(), "{backend}: {}", String::from_utf8_lossy(&emitted.stderr));
         let c = String::from_utf8_lossy(&emitted.stdout);
-        assert!(c.contains("ae_f64vec_release(&v0.value);"), "{backend}: old vector field must be released");
+        assert!(c.contains("ae_gvec_release(&v0.value);"), "{backend}: old vector field must be released");
         let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&vector).env("AE_CODEGEN", backend).output().unwrap();
         assert!(run.status.success(), "{backend}: {}", String::from_utf8_lossy(&run.stderr));
         assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "done\n");
@@ -5071,7 +5344,7 @@ fn repr_c_layout_queries_and_extern_prototypes() {
     let emitted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("emit-c").arg(&source).output().unwrap();
     assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
     let c = String::from_utf8_lossy(&emitted.stdout).replace("\r\n", "\n");
-    assert!(c.contains("int64_t pair_sum(ae_t0 v0);"), "the by-value prototype: {c}");
+    assert!(c.contains("int64_t pair_sum(ae_t2 v0);"), "the by-value prototype: {c}");
     assert!(!c.contains("ae_index"), "no runtime layout checks: {c}");
     fs::remove_dir_all(dir).unwrap();
 }
@@ -5271,7 +5544,7 @@ fn emit_mir_lowers_closures_and_aggregates() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let mir = String::from_utf8_lossy(&output.stdout);
     assert!(mir.contains("closure#0"), "closure literal lowers to ClosureLit: {mir}");
-    assert!(mir.contains("struct #0 {"), "struct aggregate lowers: {mir}");
+    assert!(mir.contains("struct #2 {"), "struct aggregate lowers: {mir}");
     assert!(mir.contains("-> i64"), "binary rvalue includes result type: {mir}");
 }
 
@@ -5830,7 +6103,7 @@ fn fmt_formats_a_module_file_without_a_main() {
     let ignore_digits = |line: &str| -> String { line.chars().filter(|c| !c.is_ascii_digit()).collect() };
     let strip = |bytes: &[u8]| -> Vec<String> {
         String::from_utf8_lossy(bytes).replace("\r\n", "\n").split('\n')
-            .map(|l| ignore_digits(l)).collect()
+            .map(ignore_digits).collect()
     };
     assert_eq!(strip(&before.stdout), strip(&after.stdout));
     let _ = fs::remove_dir_all(&dir);
@@ -7756,7 +8029,7 @@ fn path_dependency_versions_must_satisfy_caret_requirements() {
             assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("lib {version}")), "{version}");
         } else {
             assert!(!output.status.success(), "{version}");
-            assert!(stderr.contains(&format!("requires version 0.3 but")) && stderr.contains(version), "{version}: {stderr}");
+            assert!(stderr.contains("requires version 0.3 but") && stderr.contains(version), "{version}: {stderr}");
         }
     }
     write("lib", "0.3.0", "");
@@ -7808,14 +8081,18 @@ fn test_answer() -> i64 {
         assert!(String::from_utf8_lossy(&tests.stdout).contains("test_answer"));
     }
     let cache = dir.join("cache");
+    // The cache-hit/lockfile assertions belong to the legacy backend (a pure
+    // build bypasses the cache by design, README "Backends"), so the runs that
+    // inspect AE_TIMINGS pin the backend instead of inheriting AE_BACKEND.
     let native_run = || Command::new(cli).current_dir(&app)
+        .env("AE_BACKEND", "legacy")
         .env("AE_CACHE", &cache).env("AE_TIMINGS", "1").arg("run").output().unwrap();
     assert!(native_run().status.success());
     let cached = native_run();
     assert!(cached.status.success());
     assert!(String::from_utf8_lossy(&cached.stderr).contains("frontend-cache: hit"));
     let executable = app.join("tool.exe");
-    let build = || Command::new(cli).current_dir(&app).env("AE_CACHE", &cache).args(["build", "-o"]).arg(&executable).output().unwrap();
+    let build = || Command::new(cli).current_dir(&app).env("AE_BACKEND", "legacy").env("AE_CACHE", &cache).args(["build", "-o"]).arg(&executable).output().unwrap();
     let missing = build();
     assert!(!missing.status.success() && String::from_utf8_lossy(&missing.stderr).contains("Run ae update"));
     let update = || Command::new(cli).current_dir(&app).arg("update").output().unwrap();
@@ -8141,7 +8418,7 @@ fn malformed_dependency_declarations_are_reported_at_the_manifest_location() {
         assert!(!ok, "{dependency}: {stderr}");
         // The location is the declaring manifest, not just a bare message.
         assert!(stderr.contains(manifest_path.file_name().unwrap().to_str().unwrap())
-            && stderr.contains(&manifest_path.parent().unwrap().file_name().unwrap().to_str().unwrap()),
+            && stderr.contains(manifest_path.parent().unwrap().file_name().unwrap().to_str().unwrap()),
             "{dependency}: {stderr}");
         assert!(stderr.contains(needle), "{dependency}: {stderr}");
     }
@@ -8669,4 +8946,2924 @@ fn resolver_agrees_with_the_compiler_on_accepted_programs() {
     }
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     assert!(checked > 100, "expected a large resolution corpus, checked {checked}");
+}
+
+// P1.4: a body the resolved route does not take is a diagnostic in every
+// mode (the typed parser and its escape hatch are gone). A fully routed
+// program compiles; an unrouted statement shape fails with the message.
+#[test]
+fn unrouted_bodies_are_diagnostics() {
+    let routed = "struct S { a: i64, b: i64 }\nfn make(a: i64, b: i64) -> S { return S { a: a, b: b }; }\nfn main() { let s = make(1, 2); print(s.a + s.b); }\n";
+    // A bare method call statement (`p.m();`) is still off the resolved
+    // route, so it is rejected instead of falling back.
+    let legacy = "struct P { n: i64 } impl P { fn m(self) -> i64 { return self.n; } } fn main() { let p = P { n: 1 }; p.m(); }\n";
+    for (source, expect_ok) in [(routed, true), (legacy, false)] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-deny-legacy-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::write(&path, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.success(), expect_ok, "{stderr}");
+        if !expect_ok {
+            assert!(stderr.contains("the legacy body parser"), "{stderr}");
+        }
+    }
+}
+
+// P1.1 chained-call rung: a method call on the result of another call
+// (`start.shifted(1, 2).shifted(0, -6)`) lowers on the resolved route. The
+// binding's type comes from the chain's declared returns, so the following
+// `moved.describe()` resolves too, and the comparison around it keeps its
+// operand bound (`...value() == 11`). The compiled and interpreted runs
+// agree byte for byte, and P1.4 leaves no fallback path to take.
+#[test]
+fn chained_method_calls_lower_and_run_on_the_resolved_route() {
+    let source = r#"struct Point {
+    x: i64,
+    y: i64,
+}
+impl Point {
+    fn new(x: i64, y: i64) -> Point {
+        return Point { x: x, y: y };
+    }
+    fn shifted(self, dx: i64, dy: i64) -> Point {
+        return Point { x: self.x + dx, y: self.y + dy };
+    }
+    fn distance(self) -> i64 {
+        return abs_i64(self.x) + abs_i64(self.y);
+    }
+    fn describe(self) -> string {
+        return "(" + to_string(self.x) + ", " + to_string(self.y) + ")";
+    }
+}
+fn abs_i64(value: i64) -> i64 {
+    if value < 0 {
+        return -value;
+    }
+    return value;
+}
+fn main() {
+    let start = Point::new(3, 4);
+    let moved = start.shifted(1, 2).shifted(0, -6);
+    print(moved.describe());
+    let from_origin = Point::new(1, 2);
+    assert(from_origin.distance() == 3);
+    print(1);
+}"#;
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "(4, 0)\n1\n");
+
+    // The same source runs identically under the interpreter.
+    let path = std::env::temp_dir().join(format!("ae-chained-methods-interp-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let interp = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("run")
+        .arg(&path)
+        .arg("--interp")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(interp.status.success(), "{}", String::from_utf8_lossy(&interp.stderr));
+    assert_eq!(String::from_utf8_lossy(&interp.stdout).replace("\r\n", "\n"), "(4, 0)\n1\n");
+
+    // Every body is on the resolved route; check accepts it.
+    let path = std::env::temp_dir().join(format!("ae-chained-methods-check-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let check = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+}
+
+// P1.1 pointer rung: the extern allocator bridge, pointer retag, pointer
+// arithmetic (`offset`/`byte_offset`), stores through `*p`, `deref` reads and
+// the free call all lower on the resolved route. The check run proves the
+// whole body is resolved-route; the compiled output is the fixture's.
+#[test]
+fn raw_pointer_surface_lowers_on_the_resolved_route() {
+    let source = r#"extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
+/// Preconditions: block came from ae_std_alloc; released exactly once.
+extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;
+
+fn main() {
+    unsafe {
+        let buf = ae_std_alloc(64, 12, 22);
+        *buf = 10;
+        let second = buf.offset(1);
+        *second = 20;
+        let third = buf.byte_offset(16);
+        *third = 30;
+        print(buf.deref());
+        print(second.deref());
+        print(third.deref());
+        let view = buf as *const f64;
+        print("retagged");
+        let freed = ae_std_free(buf);
+    }
+    print("done");
+}"#;
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "10\n20\n30\nretagged\ndone\n"
+    );
+
+    // Every body is on the resolved route; check accepts it.
+    let path = std::env::temp_dir().join(format!("ae-pointer-route-check-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let check = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+}
+
+// P1.1 drop rung: a construction of a struct that declares `drop` lowers on
+// the resolved route, and the user's `drop` runs on every exit path (the
+// early return and the falling exit), exactly where the typed route ran it.
+#[test]
+fn drop_carrying_constructions_lower_on_the_resolved_route() {
+    let source = r#"struct Guard {
+    id: i64,
+}
+impl Guard {
+    fn drop(&mut self) -> i64 {
+        print(self.id);
+        return 0;
+    }
+}
+fn early(flag: bool) -> i64 {
+    let g = Guard { id: 7 };
+    if flag {
+        return 1;
+    }
+    return 2;
+}
+fn main() {
+    print(early(true));
+    print(early(false));
+}"#;
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "7\n1\n7\n2\n");
+
+    // Every body is on the resolved route; check accepts it.
+    let path = std::env::temp_dir().join(format!("ae-drop-route-check-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let check = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+}
+
+// P1.4 slice 2: enum constructions lower from the shared syntax tree. The
+// payload-free path (`Shape::Empty`) and the payload path (`Shape::Circle(3)`)
+// both go through lower_shared_enum_construction, so the route report for
+// this program carries no typed-expression fallback line.
+#[test]
+fn enum_constructions_lower_on_the_resolved_route() {
+    let source = r#"enum Shape {
+    Circle(i64),
+    Empty,
+}
+
+fn area(shape: Shape) -> i64 {
+    match shape {
+        Shape::Circle(r) => { return r * r; }
+        Shape::Empty => { return 0; }
+    }
+}
+
+fn pick(flag: bool) -> Option[i64] {
+    if flag { return Option[i64]::Some(7); }
+    return Option[i64]::None();
+}
+
+fn main() {
+    let circle = Shape::Circle(3);
+    print(area(circle));
+    let empty = Shape::Empty;
+    print(area(empty));
+    let picked = pick(true);
+    match picked {
+        Option::Some(value) => { print(value); }
+        Option::None => { print(0); }
+    }
+}"#;
+    let path = std::env::temp_dir().join(format!("ae-enum-construction-route-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .env("AE_ROUTE_REPORT", "1")
+        .output()
+        .unwrap();
+    fs::remove_file(path).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("route typed-expression"), "{stderr}");
+}
+
+// P2.1 (ADR-0232): `as` converts between i64 and f64 explicitly. Int->float
+// rounds, float->int truncates and traps outside the i64 range, and the
+// compiled and interpreted runs agree byte for byte; a non-numeric target is
+// a compile-time diagnostic.
+#[test]
+fn scalar_as_casts_match_between_backends_and_trap_alike() {
+    let source = "fn main() {\n    let x = 3;\n    print(x as f64);\n    let z = 2.5 as i64;\n    print(z);\n    print(1 as f64 + 0.5);\n}";
+    let output = execute(source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"), "3.0\n2\n1.5\n");
+
+    let path = std::env::temp_dir().join(format!("ae-scalar-casts-interp-{}.ae", std::process::id()));
+    fs::write(&path, source).unwrap();
+    let interp = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(interp.status.success(), "{}", String::from_utf8_lossy(&interp.stderr));
+    assert_eq!(String::from_utf8_lossy(&interp.stdout).replace("\r\n", "\n"), "3.0\n2\n1.5\n");
+
+    let trap = "fn main() {\n    let big = 1e300;\n    print(big as i64);\n}";
+    for arguments in [vec![], vec!["--interp"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run");
+        let path = std::env::temp_dir().join(format!("ae-scalar-cast-trap-{}-{}.ae", std::process::id(), arguments.len()));
+        fs::write(&path, trap).unwrap();
+        command.arg(&path);
+        for argument in &arguments { command.arg(argument); }
+        let output = command.output().unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("float-to-integer cast out of range"));
+    }
+
+    let message = check_rejects("fn main() { let b = 3 as bool; print(b); }");
+    assert!(message.contains("conversion from i64 to bool is not allowed"), "{message}");
+}
+
+#[test]
+fn i8_u8_compiled_and_interp_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/i8_u8_primitives.ae");
+    let expected = fs::read_to_string(root.join("tests/run/i8_u8_primitives.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for extra in [vec![], vec!["--interp"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {:?} failed: {}",
+            extra,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {extra:?}"
+        );
+    }
+
+    let neg_i8 = check_rejects("fn main() { let x = (-129) as i8; print(x); }");
+    assert!(neg_i8.contains("out of range for 'i8'"), "{neg_i8}");
+    let neg_u8 = check_rejects("fn main() { let x = (-1) as u8; print(x); }");
+    assert!(neg_u8.contains("out of range for 'u8'"), "{neg_u8}");
+}
+
+#[test]
+fn i8_u8_runtime_traps_match_between_backends() {
+    let cases = [
+        ("i8_add_overflow", "fn main() { let a = 127 as i8; let b = 1 as i8; print(a + b); }", "integer overflow"),
+        ("i8_sub_underflow", "fn main() { let a = (-128) as i8; let b = 1 as i8; print(a - b); }", "integer overflow"),
+        ("i8_neg_min", "fn main() { let a = (-128) as i8; print(-a); }", "integer overflow"),
+        ("i8_div_min_neg1", "fn main() { let a = (-128) as i8; let b = (-1) as i8; print(a / b); }", "integer overflow"),
+        ("u8_add_overflow", "fn main() { let a = 255 as u8; let b = 1 as u8; print(a + b); }", "integer overflow"),
+        ("u8_sub_underflow", "fn main() { let a = 0 as u8; let b = 1 as u8; print(a - b); }", "integer overflow"),
+        ("i8_div_zero", "fn main() { let a = 1 as i8; let b = 0 as i8; print(a / b); }", "division by zero"),
+        ("i8_mod_zero", "fn main() { let a = 1 as i8; let b = 0 as i8; print(a % b); }", "division by zero"),
+        ("u8_div_zero", "fn main() { let a = 1 as u8; let b = 0 as u8; print(a / b); }", "division by zero"),
+        ("u8_mod_zero", "fn main() { let a = 1 as u8; let b = 0 as u8; print(a % b); }", "division by zero"),
+        ("i8_shl_oob", "fn main() { let a = 1 as i8; let b = 8 as i8; print(a << b); }", "shift count out of range"),
+        ("i8_shr_neg", "fn main() { let a = 1 as i8; let b = (-1) as i8; print(a >> b); }", "shift count out of range"),
+        ("u8_shl_oob", "fn main() { let a = 1 as u8; let b = 8 as u8; print(a << b); }", "shift count out of range"),
+        ("u8_shr_oob", "fn main() { let a = 1 as u8; let b = 8 as u8; print(a >> b); }", "shift count out of range"),
+        ("f64_to_i8_nan", "fn main() { let x = sqrt(-1.0); print(x as i8); }", "float-to-integer cast out of range"),
+        ("f64_to_u8_inf", "fn main() { let x = exp(1000.0); print(x as u8); }", "float-to-integer cast out of range"),
+        ("f64_to_i8_high", "fn main() { let x = 128.0; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f64_to_i8_low", "fn main() { let x = -129.0; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f64_to_u8_high", "fn main() { let x = 256.0; print(x as u8); }", "float-to-integer cast out of range"),
+        ("f64_to_u8_low", "fn main() { let x = -1.0; print(x as u8); }", "float-to-integer cast out of range"),
+    ];
+
+    let pid = std::process::id();
+    for (name, source, expected_trap) in cases {
+        for arguments in [vec![], vec!["--interp"]] {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ae-i8-u8-trap-{name}-{pid}-{seq}.ae"));
+            fs::write(&path, source).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+            command.arg("run").arg(&path);
+            for arg in &arguments {
+                command.arg(arg);
+            }
+            let output = command.output().unwrap();
+            let _ = fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{name} ({arguments:?}) unexpectedly succeeded"
+            );
+            assert!(
+                stderr.contains(expected_trap),
+                "{name} ({arguments:?}) stderr {stderr:?} missing {expected_trap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn all_int_widths_compiled_mir_and_interp_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/int_widths_primitives.ae");
+    let expected = fs::read_to_string(root.join("tests/run/int_widths_primitives.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+
+    for (src, needle) in [
+        ("fn main() { let x = (-32769) as i16; print(x); }", "out of range for 'i16'"),
+        ("fn main() { let x = (-1) as u16; print(x); }", "out of range for 'u16'"),
+        ("fn main() { let x = (-1) as u32; print(x); }", "out of range for 'u32'"),
+        ("fn main() { let x = (-1) as usize; print(x); }", "out of range for 'usize'"),
+        ("fn main() { let x = 1 as u32; print(-x); }", "unary '-' is not allowed on unsigned"),
+        ("fn main() { let x = 1 as u64; print(-x); }", "unary '-' is not allowed on unsigned"),
+        ("fn main() { let x = 1 as usize; print(-x); }", "unary '-' is not allowed on unsigned"),
+    ] {
+        let msg = check_rejects(src);
+        assert!(msg.contains(needle), "{src}: {msg}");
+    }
+}
+
+#[test]
+fn all_int_widths_runtime_traps_match_between_backends() {
+    let cases = [
+        ("i16_add_ovf", "fn main() { let a = 32767 as i16; print(a + (1 as i16)); }", "integer overflow"),
+        ("i16_neg_min", "fn main() { let a = (-32768) as i16; print(-a); }", "integer overflow"),
+        ("i16_div_zero", "fn main() { let a = 1 as i16; print(a / (0 as i16)); }", "division by zero"),
+        ("i16_shl_16", "fn main() { let a = 1 as i16; print(a << (16 as i16)); }", "shift count out of range"),
+        ("u16_add_ovf", "fn main() { let a = 65535 as u16; print(a + (1 as u16)); }", "integer overflow"),
+        ("u16_sub_udf", "fn main() { let a = 0 as u16; print(a - (1 as u16)); }", "integer overflow"),
+        ("u16_shr_16", "fn main() { let a = 1 as u16; print(a >> (16 as u16)); }", "shift count out of range"),
+        ("i32_add_ovf", "fn main() { let a = 2147483647 as i32; print(a + (1 as i32)); }", "integer overflow"),
+        ("i32_div_min", "fn main() { let a = (-2147483648) as i32; print(a / ((-1) as i32)); }", "integer overflow"),
+        ("i32_shl_neg", "fn main() { let a = 1 as i32; print(a << ((-1) as i32)); }", "shift count out of range"),
+        ("u32_add_ovf", "fn main() { let a = 4294967295 as u32; print(a + (1 as u32)); }", "integer overflow"),
+        ("u32_mod_zero", "fn main() { let a = 1 as u32; print(a % (0 as u32)); }", "division by zero"),
+        ("u32_shl_32", "fn main() { let a = 1 as u32; print(a << (32 as u32)); }", "shift count out of range"),
+        ("isize_add_ovf", "fn main() { let a = 9223372036854775807 as isize; print(a + (1 as isize)); }", "integer overflow"),
+        ("isize_div_zero", "fn main() { let a = 1 as isize; print(a / (0 as isize)); }", "division by zero"),
+        ("isize_shr_64", "fn main() { let a = 1 as isize; print(a >> (64 as isize)); }", "shift count out of range"),
+        ("u64_add_ovf", "fn main() { let h = (1 as u64) << (63 as u64); let m = h + (h - (1 as u64)); print(m + (1 as u64)); }", "integer overflow"),
+        ("u64_sub_udf", "fn main() { let a = 0 as u64; print(a - (1 as u64)); }", "integer overflow"),
+        ("u64_mod_zero", "fn main() { let a = 1 as u64; print(a % (0 as u64)); }", "division by zero"),
+        ("u64_shl_64", "fn main() { let a = 1 as u64; print(a << (64 as u64)); }", "shift count out of range"),
+        ("usize_sub_udf", "fn main() { let a = 0 as usize; print(a - (1 as usize)); }", "integer overflow"),
+        ("usize_shr_64", "fn main() { let a = 1 as usize; print(a >> (64 as usize)); }", "shift count out of range"),
+        ("f64_to_i16_high", "fn main() { let x = 32768.0; print(x as i16); }", "float-to-integer cast out of range"),
+        ("f64_to_i16_low", "fn main() { let x = -32769.0; print(x as i16); }", "float-to-integer cast out of range"),
+        ("f64_to_u16_high", "fn main() { let x = 65536.0; print(x as u16); }", "float-to-integer cast out of range"),
+        ("f64_to_u16_low", "fn main() { let x = -1.0; print(x as u16); }", "float-to-integer cast out of range"),
+        ("f64_to_i32_high", "fn main() { let x = 2147483648.0; print(x as i32); }", "float-to-integer cast out of range"),
+        ("f64_to_u32_high", "fn main() { let x = 4294967296.0; print(x as u32); }", "float-to-integer cast out of range"),
+        ("f64_to_isize_high", "fn main() { let x = 9223372036854775808.0; print(x as isize); }", "float-to-integer cast out of range"),
+        ("f64_to_u64_high", "fn main() { let x = 18446744073709551616.0; print(x as u64); }", "float-to-integer cast out of range"),
+        ("f64_to_usize_nan", "fn main() { let x = sqrt(-1.0); print(x as usize); }", "float-to-integer cast out of range"),
+        ("f64_to_usize_inf", "fn main() { let x = exp(1000.0); print(x as usize); }", "float-to-integer cast out of range"),
+    ];
+
+    let pid = std::process::id();
+    for (name, source, expected_trap) in cases {
+        for arguments in [vec![], vec!["--interp"]] {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ae-w2-trap-{name}-{pid}-{seq}.ae"));
+            fs::write(&path, source).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+            command.arg("run").arg(&path);
+            for arg in &arguments {
+                command.arg(arg);
+            }
+            let output = command.output().unwrap();
+            let _ = fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{name} ({arguments:?}) unexpectedly succeeded"
+            );
+            assert!(
+                stderr.contains(expected_trap),
+                "{name} ({arguments:?}) stderr {stderr:?} missing {expected_trap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wave3a_f32_char_unit_ptr_usize_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/f32_char_unit_ptr_usize.ae");
+    let expected = fs::read_to_string(root.join("tests/run/f32_char_unit_ptr_usize.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+
+    let mut_write_src = "fn main() { var y = 10; unsafe { let p = &mut y as *mut i64; let a = p as usize; let q = a as *mut i64; let _w = ptr_write(q, 99); } print(y); }\n";
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("ae-w3a-mut-ptr-{}-{seq}.ae", std::process::id()));
+    fs::write(&path, mut_write_src).unwrap();
+    for (label, mir) in [("compiled", false), ("mir", true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{label} mut ptr round-trip failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            "99\n"
+        );
+    }
+    let _ = fs::remove_file(&path);
+
+    let msg = check_rejects("fn main() { let x = 65 as char; print(x); }");
+    assert!(msg.contains("not allowed"), "{msg}");
+}
+
+#[test]
+fn wave3a_runtime_traps_match_between_backends() {
+    let cases = [
+        ("f32_to_i8_nan", "fn main() { let x = sqrt(-1.0) as f32; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f32_to_u8_inf", "fn main() { let x = exp(1000.0) as f32; print(x as u8); }", "float-to-integer cast out of range"),
+        ("f32_to_i8_high", "fn main() { let x = 128.0 as f32; print(x as i8); }", "float-to-integer cast out of range"),
+        ("f32_to_u8_low", "fn main() { let x = (-1.0) as f32; print(x as u8); }", "float-to-integer cast out of range"),
+        ("f32_to_i32_high", "fn main() { let x = 2147483648.0 as f32; print(x as i32); }", "float-to-integer cast out of range"),
+        ("f32_to_u32_high", "fn main() { let x = 4294967296.0 as f32; print(x as u32); }", "float-to-integer cast out of range"),
+        ("f32_to_isize_high", "fn main() { let x = 9223372036854775808.0 as f32; print(x as isize); }", "float-to-integer cast out of range"),
+        ("f32_to_usize_high", "fn main() { let x = 18446744073709551616.0 as f32; print(x as usize); }", "float-to-integer cast out of range"),
+        ("f32_div_zero", "fn main() { let a = 1.0 as f32; let b = 0.0 as f32; print(a / b); }", "f32 division by zero"),
+        ("u32_to_char_d800", "fn main() { let v = 55296 as u32; print(v as char); }", "invalid Unicode scalar value"),
+        ("u32_to_char_dfff", "fn main() { let v = 57343 as u32; print(v as char); }", "invalid Unicode scalar value"),
+        ("u32_to_char_110000", "fn main() { let v = 1114112 as u32; print(v as char); }", "invalid Unicode scalar value"),
+    ];
+
+    let pid = std::process::id();
+    for (name, source, expected_trap) in cases {
+        for arguments in [vec![], vec!["--interp"]] {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ae-w3a-trap-{name}-{pid}-{seq}.ae"));
+            fs::write(&path, source).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+            command.arg("run").arg(&path);
+            for arg in &arguments {
+                command.arg(arg);
+            }
+            let output = command.output().unwrap();
+            let _ = fs::remove_file(&path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{name} ({arguments:?}) unexpectedly succeeded"
+            );
+            assert!(
+                stderr.contains(expected_trap),
+                "{name} ({arguments:?}) stderr {stderr:?} missing {expected_trap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wave3b_int_checked_wrapping_saturating_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/int_checked_wrapping_saturating.ae");
+    let expected = fs::read_to_string(root.join("tests/run/int_checked_wrapping_saturating.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+#[test]
+fn p2_2_copy_derive_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/copy_derive.ae");
+    let expected = fs::read_to_string(root.join("tests/run/copy_derive.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+#[test]
+fn p2_2_drop_order_and_trait_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/drop_order_and_trait.ae");
+    let expected = fs::read_to_string(root.join("tests/run/drop_order_and_trait.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+
+    // Inherent unit `fn drop(&mut self)` + multi-field declaration-order drops.
+    let multi_field_src = "struct Leaf { id: i64 }\nimpl Leaf { fn drop(&mut self) { print(\"leaf \" + to_string(self.id)); } }\nstruct Pair { a: Leaf, b: Leaf }\nimpl Drop for Pair { fn drop(&mut self) { print(\"pair\"); } }\nfn main() { let l1 = Leaf { id: 1 }; let l2 = Leaf { id: 2 }; let p = Pair { a: l1, b: l2 }; }\n";
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("ae-p22-drop-fields-{}-{seq}.ae", std::process::id()));
+    fs::write(&path, multi_field_src).unwrap();
+    for (label, extra, mir) in [
+        ("compiled", vec![], false),
+        ("mir", vec![], true),
+        ("interp", vec!["--interp"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if mir {
+            command.env("AE_CODEGEN", "mir");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{label} multi-field drop failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            "pair\nleaf 1\nleaf 2\n",
+            "{label} multi-field drop order mismatch"
+        );
+    }
+    let _ = fs::remove_file(&path);
+
+    for (src, needle) in [
+        ("struct G { id: i64 }\nimpl Drop for G { fn drop(&mut self) { print(self.id); } }\nfn main() { var g = G { id: 1 }; let _r = G::drop(&mut g); }", "drop"),
+        ("struct G { id: i64 }\nimpl Drop for G { fn drop(&mut self, extra: i64) { print(self.id); } }\nfn main() {}", "drop"),
+        ("struct G { id: i64 }\nimpl Drop for G { fn drop(&self) { print(self.id); } }\nfn main() {}", "drop"),
+    ] {
+        let msg = check_rejects(src);
+        assert!(msg.contains(needle), "{src}: {msg}");
+    }
+}
+
+#[test]
+fn p2_3_storable_fn_ptrs_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/storable_fn_ptrs.ae");
+    let expected = fs::read_to_string(root.join("tests/run/storable_fn_ptrs.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+#[test]
+fn p2_3_first_class_closures_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/first_class_closures.ae");
+    let expected = fs::read_to_string(root.join("tests/run/first_class_closures.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+/// P2.4 slice 1 (ADR-0233): the prelude's generic `Result[T, E]` is usable
+/// without a declaration or import, and every payload family the
+/// generic-enum rule admits agrees across the C emitters and `--interp`.
+#[test]
+fn p2_4_prelude_result_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/prelude_result.ae");
+    let expected = fs::read_to_string(root.join("tests/run/prelude_result.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+/// P2.4 slice 2 (ADR-0233): the flat-payload preset result families are the
+/// `Result[p, string]` instantiations. Both spellings must name one type and
+/// agree across the C emitters and `--interp`.
+#[test]
+fn p2_4_preset_result_alias_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/preset_result_aliases.ae");
+    let expected = fs::read_to_string(root.join("tests/run/preset_result_aliases.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+/// P2.4 slice 3 (ADR-0233): `IntResult` and `WriteResult` share the
+/// `Result[i64, string]` instantiation, and the family names stay usable as
+/// pattern aliases on either spelling.
+#[test]
+fn p2_4_preset_result_int_alias_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/preset_result_int_alias.ae");
+    let expected = fs::read_to_string(root.join("tests/run/preset_result_int_alias.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+/// P2.4 slice 4 (ADR-0233): `StatusResult` is `Result[(), string]`; the unit
+/// payload takes no bindings, and both the constructor and the pattern form
+/// agree across the C emitters and `--interp`.
+#[test]
+fn p2_4_preset_result_unit_alias_parity() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("tests/run/preset_result_unit_alias.ae");
+    let expected = fs::read_to_string(root.join("tests/run/preset_result_unit_alias.stdout"))
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    for (label, extra, codegen) in [
+        ("compiled", vec![], None),
+        ("mir", vec![], Some("mir")),
+        ("tree", vec![], Some("tree")),
+        ("interp", vec!["--interp"], None),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        if let Some(mode) = codegen {
+            command.env("AE_CODEGEN", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+            expected,
+            "stdout mismatch for mode {label}"
+        );
+    }
+}
+
+/// ADR-0235 Slice 3a: generic fixed-size arrays `[T; N]` for Copy non-borrow,
+/// non-unit types (`f64`, `bool`, `i32`, `char`, `#[derive(Copy)]` structs)
+/// compile, run, and match `--interp`, while heterogeneous or non-Copy arrays
+/// are rejected.
+#[test]
+fn generic_copy_arrays_compile_run_and_match_interpreter() {
+    let source = r#"
+#[derive(Copy)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn sum_floats(xs: &[f64; 3]) -> f64 {
+    return xs[0] + xs[1] + xs[2];
+}
+
+fn second_point_x(pts: &[Point; 2]) -> i64 {
+    let p = pts[1];
+    return p.x + p.y;
+}
+
+fn main() {
+    var floats = [1.5, 2.5, 3.0];
+    floats[1] = 4.25;
+    print(floats[0]);
+    print(floats[1]);
+    print(len(floats));
+    print(sum_floats(&floats));
+
+    var flags = [true, false];
+    flags[1] = true;
+    print(flags[0]);
+    print(flags[1]);
+    print(len(flags));
+
+    var ints = [10 as i32, 20 as i32, 30 as i32];
+    ints[2] = 42 as i32;
+    print(ints[0]);
+    print(ints[2]);
+    print(len(ints));
+
+    var chars = ['a', 'z'];
+    chars[0] = 'q';
+    print(chars[0]);
+    print(chars[1]);
+    print(len(chars));
+
+    var pts = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    pts[1] = Point { x: 10, y: 20 };
+    let p0 = pts[0];
+    print(p0.x);
+    print(second_point_x(&pts));
+    print(len(pts));
+}
+"#;
+    let path = std::env::temp_dir().join(format!(
+        "ae-generic-arrays-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, source).unwrap();
+
+    let mut outputs = Vec::new();
+    for (label, extra) in [("compiled", vec![]), ("interp", vec!["--interp"])] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        outputs.push(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"));
+    }
+    fs::remove_file(&path).unwrap();
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(
+        outputs[0],
+        "1.5\n4.25\n3\n8.75\ntrue\ntrue\n2\n10\n42\n3\nq\nz\n2\n1\n30\n2\n"
+    );
+
+    for bad_source in [
+        "fn main() { let a = [1, 2.5]; }",
+        "fn main() { let a = [\"a\", \"b\"]; }",
+        "fn f(a: &[string; 2]) -> i64 { return len(a); } fn main() {}",
+    ] {
+        let bad_path = std::env::temp_dir().join(format!(
+            "ae-generic-arrays-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&bad_path, bad_source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&bad_path)
+            .output()
+            .unwrap();
+        fs::remove_file(&bad_path).unwrap();
+        assert!(!result.status.success(), "expected failure for: {bad_source}");
+    }
+}
+
+/// ADR-0235 Slice 3b: generic `vec[T]` (`ae_gvec`) for Copy non-borrow,
+/// non-unit types (`bool`, `i32`, `u8`, `char`, `f32`, `#[derive(Copy)]`
+/// structs) compiles, runs, and matches `--interp`, while mixed or non-Copy
+/// element vectors are rejected.
+#[test]
+fn generic_copy_vectors_compile_run_and_match_interpreter() {
+    let source = r#"
+#[derive(Copy)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn sum_points(pts: &vec[Point]) -> i64 {
+    var total = 0;
+    for pt in pts {
+        total += pt.x + pt.y;
+    }
+    return total;
+}
+
+fn take_points(pts: vec[Point]) -> i64 {
+    let p = pts[0];
+    return p.x + len(pts);
+}
+
+fn main() {
+    var flags = vec[true, false];
+    push(flags, true);
+    flags[1] = true;
+    print(flags[0]);
+    print(flags[1]);
+    print(len(flags));
+    pop(flags);
+    print(len(flags));
+    for f in flags {
+        print(f);
+    }
+
+    var i32s = vec[10 as i32, 20 as i32];
+    push(i32s, 30 as i32);
+    i32s[1] = 25 as i32;
+    print(i32s[1]);
+    print(len(i32s));
+    pop(i32s);
+    print(len(i32s));
+
+    var octets = vec[1 as u8, 2 as u8];
+    push(octets, 3 as u8);
+    octets[0] = 9 as u8;
+    print(octets[0]);
+    print(len(octets));
+
+    var chars = vec['a', 'b'];
+    push(chars, 'c');
+    chars[1] = 'z';
+    print(chars[1]);
+    print(len(chars));
+
+    var f32s = vec[1.5 as f32, 2.5 as f32];
+    push(f32s, 3.5 as f32);
+    f32s[0] = 4.5 as f32;
+    print(f32s[0]);
+    print(len(f32s));
+
+    var pts = vec[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    push(pts, Point { x: 5, y: 6 });
+    pts[1] = Point { x: 10, y: 20 };
+    let p1 = pts[1];
+    print(p1.x);
+    print(sum_points(&pts));
+    pop(pts);
+    print(take_points(pts));
+}
+"#;
+    let path = std::env::temp_dir().join(format!(
+        "ae-generic-vectors-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, source).unwrap();
+
+    let mut outputs = Vec::new();
+    for (label, extra) in [("compiled", vec![]), ("interp", vec!["--interp"])] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&path);
+        for arg in &extra {
+            command.arg(arg);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        outputs.push(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"));
+    }
+    fs::remove_file(&path).unwrap();
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(
+        outputs[0],
+        "true\ntrue\n3\n2\ntrue\ntrue\n25\n3\n2\n9\n3\nz\n3\n4.5\n3\n10\n44\n3\n"
+    );
+
+    for bad_source in [
+        "fn main() { let v = vec[true, 1]; }",
+        "enum OwnedEnum { Item(string) } fn main() { let v = vec[OwnedEnum::Item(\"a\")]; }",
+    ] {
+        let bad_path = std::env::temp_dir().join(format!(
+            "ae-generic-vectors-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&bad_path, bad_source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&bad_path)
+            .output()
+            .unwrap();
+        fs::remove_file(&bad_path).unwrap();
+        assert!(!result.status.success(), "expected failure for: {bad_source}");
+    }
+}
+
+
+/// ADR-0235 route coverage: a field read on an indexed aggregate
+/// (`v[i].x`, `v[i].inner.radius`) resolves the element type from the
+/// vector/array interner and lowers on every backend. A field *store*
+/// through an index has no lowering yet, so it stays an honest refusal.
+#[test]
+fn indexed_element_field_reads_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("vector_element_field_reads.ae");
+    let expected = fs::read_to_string(fixture.with_extension("stdout")).unwrap();
+    let expected = lines(expected.as_bytes());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    let bad_source = r#"#[derive(Copy)] struct P { x: i64 } fn main() { var v = vec[P { x: 1 }]; v[0].x = 2; print(v[0].x); }"#;
+    let bad_path = std::env::temp_dir().join(format!(
+        "ae-indexed-field-store-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&bad_path, bad_source).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&bad_path)
+        .output()
+        .unwrap();
+    fs::remove_file(&bad_path).unwrap();
+    assert!(!result.status.success(), "expected a field store through an index to stay refused");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("resolved route"),
+        "the refusal must stay the route diagnostic: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+/// ADR-0235 slice 4: `vec[vec]` is the first owned element type. The outer
+/// vector owns each inner header; `push`, `pop`, overwrite and scope exit
+/// release through the runtime's drop hook, element reads are views, and the
+/// compiled, MIR, tree and interpreter backends agree on every operation.
+#[test]
+fn nested_vector_elements_drop_and_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_vectors.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "moved inner vector",
+            "fn main() { var rows = vec[vec[1]]; var row = vec[2]; push(rows, row); print(len(row)); }",
+            "cannot use 'row' because it was moved",
+        ),
+        (
+            "borrowed element binding",
+            "fn main() { var rows = vec[vec[1]]; let row = rows[0]; print(len(row)); }",
+            "cannot store a borrowed vector in a variable",
+        ),
+        (
+            "mixed inner literals",
+            "fn main() { let rows = vec[vec[1], vec[2.5]]; }",
+            "vector elements must all be",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-vectors-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// ADR-0235 slice 5: an owned struct element (`vec[Tagged]`) stores the
+/// struct by value and releases each element exactly once on pop, overwrite
+/// and scope exit through the drop hook. Element reads are `&Struct` views:
+/// fields read inline, a `for` variable forwards to `&Struct` parameters, and
+/// the element cannot be bound or moved out. The interpreter runs the same
+/// drops in the same order as the compiled backends.
+#[test]
+fn owned_struct_vector_elements_drop_and_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("owned_struct_vector.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "element view pushed into its own vector",
+            r#"struct Tagged { name: string, n: i64 } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; push(items, items[0]); }"#,
+            "vector elements must be",
+        ),
+        (
+            "borrowed element binding",
+            r#"struct Tagged { name: string, n: i64 } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; let t = items[0]; print(t.n); }"#,
+            "cannot store a borrowed struct in a variable",
+        ),
+        (
+            "field moved into the vector",
+            r#"struct Tagged { name: string, n: i64 } struct Holder { item: Tagged } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; let h = Holder { item: Tagged { name: "b", n: 2 } }; push(items, h.item); }"#,
+            "cannot move a field out of a struct",
+        ),
+        (
+            "stored value used after the move",
+            r#"struct Tagged { name: string, n: i64 } fn main() { var items = vec[Tagged { name: "a", n: 1 }]; var extra = Tagged { name: "c", n: 3 }; items[0] = extra; print(extra.n); }"#,
+            "cannot use 'extra' because it was moved",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-owned-struct-vectors-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// ADR-0235 slice 6: string vector literals. `vec["a", "b"]` builds a
+/// `vec[string]` where text literals are owned, a string view (field read,
+/// `slice_view`, string-vector element) is copied in, and an owned string
+/// variable moves in — the vector never aliases the struct that still owns a
+/// field. `push(v, p.name)` follows the same copy rule (a pre-existing
+/// aliasing bug: the field bytes were handed to the vector and both owners
+/// freed them).
+#[test]
+fn string_vector_literals_copy_views_and_move_owned_strings() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("string_vector_literals.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "moved string element used after the literal",
+            r#"fn main() { var s = "delta"; var w = vec[s]; print(s); }"#,
+            "cannot use 's' because it was moved",
+        ),
+        (
+            "mixed string and integer elements",
+            r#"fn main() { let v = vec["a", 1]; }"#,
+            "vector elements must all be string",
+        ),
+        (
+            "field moved out instead of copied",
+            r#"struct L { name: string, n: i64 } fn main() { let p = L { name: "a", n: 1 }; let s = p.name; print(s); }"#,
+            "cannot move a field out of a struct",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-string-vector-literals-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: element reads through a struct-field receiver (`r.cells[0]`).
+/// The receiver is an lvalue, so every vector family reads through it —
+/// i64, f64, string (a view), and an owned struct element's fields — and a
+/// string/owned view keeps the struct variable borrowed while a binding can
+/// still read it.
+#[test]
+fn field_receiver_indexing_matches_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("field_receiver_indexing.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "indexing a non-vector field",
+            r#"struct P { n: i64 } fn main() { let p = P { n: 1 }; print(p.n[0]); }"#,
+            "cannot index a value of type i64",
+        ),
+        (
+            "struct reassigned while a field-element view is live",
+            r#"struct W { words: vec[string] } fn main() { var w = W { words: vec["alpha"] }; let s = w.words[0]; w = W { words: vec["beta"] }; print(s); }"#,
+            "cannot assign to 'w' while it is borrowed",
+        ),
+        (
+            "owned struct element bound to a local",
+            r#"struct I { name: string, n: i64 } struct B { items: vec[I] } fn main() { let b = B { items: vec[I { name: "a", n: 1 }] }; let t = b.items[0]; print(t.n); }"#,
+            "cannot store a borrowed struct in a variable",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-field-receiver-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: `&vec[i]` borrow arguments. The element is addressed in place and
+/// passed to a `&T`/`&vec` parameter for the duration of the call; owned
+/// struct elements, Copy struct elements and nested vector elements all
+/// work, and the vector stays usable once the call returns.
+#[test]
+fn indexed_borrow_arguments_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("indexed_borrow_arguments.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "mutable element borrow",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var items = vec[T { n: 1 }]; show(&mut items[0]); }"#,
+            "a place borrow is read-only",
+        ),
+        (
+            "element shape mismatch",
+            r#"fn total(row: &vec) -> i64 { return len(row); } fn main() { let words = vec["a"]; print(total(&words[0])); }"#,
+            "argument must be &vec[i64]",
+        ),
+        (
+            "element borrow after the vector moved",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var items = vec[T { n: 1 }]; let moved = items; show(&items[0]); }"#,
+            "cannot borrow 'items' because it was moved",
+        ),
+        (
+            "element borrow of a non-vector binding",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { let s = "x"; show(&s[0]); }"#,
+            "'&s...' needs a vector place to index",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-indexed-borrows-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: vector operations on a struct's vector field. `push`, `pop`,
+/// `sort`, `reverse` and `r.cells[i] = x` address the field lvalue for every
+/// family; a `&mut` root writes through its pointer; an owned element
+/// releases the replaced/popped value exactly once, in order.
+#[test]
+fn field_vector_writes_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("field_vector_writes.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "immutable root",
+            r#"struct B { items: vec } fn main() { let b = B { items: vec[1] }; push(b.items, 2); }"#,
+            "cannot modify immutable variable 'b'",
+        ),
+        (
+            "field write while an element view is live",
+            r#"struct W { words: vec[string] } fn main() { var w = W { words: vec["a"] }; let s = w.words[0]; push(w.words, "b"); print(s); }"#,
+            "cannot modify 'w' while it is borrowed",
+        ),
+        (
+            "moved root",
+            r#"struct B { items: vec } fn main() { var b = B { items: vec[1] }; let moved = b; push(b.items, 2); }"#,
+            "cannot use 'b' because it was moved",
+        ),
+        (
+            "field is not a vector",
+            r#"struct P { n: i64 } fn main() { var p = P { n: 1 }; push(p.n, 2); }"#,
+            "push expects a vec, found i64",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-field-vector-writes-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: place borrow arguments (`&h.item`, `&r.cells`, `&t.rows[0]`,
+/// `&o.inner`). The place is addressed in place and the borrow lives only for
+/// the call, so a struct field, a vector field and an element of a vector
+/// field all reach `&T`/`&vec` parameters without moving or copying.
+#[test]
+fn place_borrow_arguments_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("place_borrow_arguments.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "mutable place borrow",
+            r#"struct T { n: i64 } struct H { item: T } fn mutate(t: &mut T) { t.n = 2; } fn main() { var h = H { item: T { n: 1 } }; mutate(&mut h.item); }"#,
+            "a place borrow is read-only",
+        ),
+        (
+            "root moved before the borrow",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { var h = T { n: 1 }; let moved = h; show(&h); }"#,
+            "cannot borrow 'h' because it was moved",
+        ),
+        (
+            "missing field",
+            r#"struct T { n: i64 } struct H { item: T } fn show(t: &T) { print(t.n); } fn main() { let h = H { item: T { n: 1 } }; show(&h.missing); }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+        (
+            "field on a non-struct",
+            r#"struct T { n: i64 } fn show(t: &T) { print(t.n); } fn main() { let s = "abc"; show(&s.name); }"#,
+            "only a struct has fields, found string",
+        ),
+        (
+            "scalar field to a struct borrow",
+            r#"struct T { n: i64 } struct H { item: T, m: i64 } fn show(t: &T) { print(t.n); } fn main() { let h = H { item: T { n: 1 }, m: 2 }; show(&h.m); }"#,
+            "argument must be &struct #",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-place-borrows-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: vector operations through a nested struct-field receiver
+/// (`a.b.c.cells`). The field path resolves step by step from the root
+/// binding; a `&mut` root writes through its pointer at every level.
+#[test]
+fn nested_field_receiver_writes_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_field_receiver_writes.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "moved root",
+            r#"struct C { cells: vec } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { cells: vec[1] } } }; let moved = a; push(a.b.c.cells, 2); }"#,
+            "cannot use 'a' because it was moved",
+        ),
+        (
+            "non-vector final field",
+            r#"struct C { n: i64 } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { n: 1 } } }; push(a.b.c.n, 2); }"#,
+            "push expects a vec, found i64",
+        ),
+        (
+            "missing intermediate field",
+            r#"struct C { cells: vec } struct B { c: C } struct A { b: B } fn main() { var a = A { b: B { c: C { cells: vec[1] } }, }; push(a.b.missing.cells, 2); }"#,
+            "struct 'B' has no field 'missing'",
+        ),
+        (
+            "nested map field store",
+            r#"struct M { counts: map[string, i64] } struct A { m: M } fn main() { var a = A { m: M { counts: map_new() } }; a.m.counts["k"] = 2; }"#,
+            "a nested map field store is not supported yet",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-field-writes-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// P2.4: field stores through a nested receiver. `o.m.inner.n = 5`,
+/// `o.m.inner.name = "beta"`, `o.m.inner.cells = vec[7, 8]` and a `&mut`
+/// helper's compound write all resolve the chain from the root binding; a
+/// write into a moved value is rejected like any other use of it.
+#[test]
+fn nested_field_stores_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("nested_field_stores.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "immutable root",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { let h = H { i: I { n: 1 } }; h.i.n = 2; }"#,
+            "cannot assign to immutable variable 'h'",
+        ),
+        (
+            "read-only struct borrow root",
+            r#"struct I { n: i64 } struct H { i: I } fn write(h: &H) { h.i.n = 2; } fn main() {}"#,
+            "cannot assign to immutable variable 'h'",
+        ),
+        (
+            "moved root",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { var h = H { i: I { n: 1 } }; let moved = h; h.i.n = 2; }"#,
+            "cannot use 'h' because it was moved",
+        ),
+        (
+            "one-level field write after a move",
+            r#"struct P { x: i64 } fn main() { var p = P { x: 1 }; let q = p; p.x = 2; }"#,
+            "cannot use 'p' because it was moved",
+        ),
+        (
+            "missing intermediate field",
+            r#"struct I { n: i64 } struct H { i: I } fn main() { var h = H { i: I { n: 1 } }; h.missing.n = 2; }"#,
+            "struct 'H' has no field 'missing'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-nested-field-stores-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// `bytes(s)` copies a string's UTF-8 bytes into an i64 vector. The
+/// interpreter now implements it too, and with its `bytes` arm the interpreter
+/// covers every expression variant — there is no "unsupported expression"
+/// fallback left, so a new variant must add an arm (the build fails
+/// otherwise) instead of silently trapping.
+#[test]
+fn bytes_values_match_across_backends_and_the_interpreter_is_complete() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("bytes_values.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+}
+
+/// P2.5.1 (M1.2.06): local type annotations. `let v: vec[f64] = vec[];`
+/// names an empty literal's element type, `let n: i64 = 41;` declares a
+/// scalar binding, and a mismatch reports "the annotation says X, but the
+/// initializer is Y". A borrow annotation is rejected outright.
+#[test]
+fn typed_bindings_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("typed_bindings.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "scalar annotation mismatch",
+            r#"fn main() { let n: i64 = 1.5; print(n); }"#,
+            "the annotation says i64, but the initializer is f64",
+        ),
+        (
+            "vector element annotation mismatch",
+            r#"fn main() { let v: vec[f64] = vec[1, 2]; }"#,
+            "the annotation says vec[f64], but the initializer is vec[i64]",
+        ),
+        (
+            "borrow annotation",
+            r#"struct P { x: i64 } fn main() { let p = P { x: 1 }; let r: &P = p; print(r.x); }"#,
+            "a local binding cannot hold a borrow",
+        ),
+        (
+            "unknown annotated type",
+            r#"fn main() { let extra: Vec[i64] = vec[1]; }"#,
+            "unknown type 'Vec'",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-typed-bindings-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+/// ADR-0236: `&[T]` slices are read-only fat pointers built at call sites
+/// from a whole vector, a whole array, or another slice. Length, indexing and
+/// `for` iteration read through the pointer; owned elements read as views.
+#[test]
+fn slices_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slices.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source, needle) in [
+        (
+            "element mismatch",
+            r#"fn sum(values: &[i64]) -> i64 { return len(values); } fn main() { var words = vec["a"]; print(sum(&words)); }"#,
+            "argument must be &[i64], found vec[string]",
+        ),
+        (
+            "element slice",
+            r#"fn sum(values: &[i64]) -> i64 { return len(values); } fn main() { var v = vec[1, 2]; print(sum(&v[0])); }"#,
+            "a slice argument borrows a whole vector or array",
+        ),
+        (
+            "push through a slice",
+            r#"fn grow(values: &[i64]) { push(values, 1); } fn main() {}"#,
+            "push expects a vec, found &[i64]",
+        ),
+        (
+            "returning a slice",
+            r#"fn take(values: &[i64]) -> &[i64] { return values; } fn main() {}"#,
+            "a function cannot return a borrow",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slices-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+
+/// ADR-0236 rung 3: `&v[start..end]` slices a window out of a vector, an
+/// array or another slice. The bounds check is a runtime trap with the same
+/// message and position on the compiled and interpreted paths.
+#[test]
+fn slice_ranges_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slice_ranges.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    for (label, source) in [
+        ("start past end", "fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[3..1])); }"),
+        ("end past len", "fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[0..9])); }"),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slice-range-trap-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+        let interpreted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!compiled.status.success() && !interpreted.status.success(), "{label}: both modes must trap");
+        // The compiled path reaches the trap through C stdio (CRLF on
+        // Windows); the interpreter writes LF. Compare the text, not the
+        // platform's line-file terminator.
+        let compiled_stderr = String::from_utf8_lossy(&compiled.stderr).replace("\r\n", "\n");
+        let interpreted_stderr = String::from_utf8_lossy(&interpreted.stderr).replace("\r\n", "\n");
+        assert_eq!(
+            compiled_stderr,
+            interpreted_stderr,
+            "{label}: trap position/message differ"
+        );
+        assert!(
+            String::from_utf8_lossy(&compiled.stderr).contains("slice range out of bounds"),
+            "{label}: got {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+
+    for (label, source, needle) in [
+        (
+            "open end",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[1..])); }"#,
+            "a slice range needs both bounds",
+        ),
+        (
+            "non-integer bound",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v["a"..2])); }"#,
+            "slice range bounds must be integers",
+        ),
+        (
+            "field range",
+            r#"struct R { cells: vec } fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var r = R { cells: vec[1, 2] }; print(take(&r.cells[0..1])); }"#,
+            "field slices are not supported yet",
+        ),
+        (
+            "element slice",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&v[0])); }"#,
+            "element slices are not supported yet",
+        ),
+        (
+            "mutable range",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; print(take(&mut v[0..1])); }"#,
+            "this parameter borrows read-only; write the argument as '&name'",
+        ),
+        (
+            "moved source",
+            r#"fn take(s: &[i64]) -> i64 { return len(s); } fn main() { var v = vec[1, 2]; let w = v; print(len(w)); print(take(&v[0..1])); }"#,
+            "cannot borrow 'v' because it was moved",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slice-range-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+
+/// ADR-0236 composes with generics: `&[T]` parameters instantiate per
+/// element type (`size[i64]`, `size[string]`), and len / for / sub-windows
+/// work on each instantiation. Calls spell their type arguments until
+/// P2.5.2 inference lands.
+#[test]
+fn generic_slices_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("generic_slices.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+    // P2.5.2: a bare generic slice call infers `&[T]` from `&a`, while a
+    // genuinely uninferable parameter (such as an extra type parameter with no
+    // inferable argument) still requires explicit type arguments.
+    let path = std::env::temp_dir().join(format!(
+        "ae-generic-slices-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1, 2]; print(size(&a)); }",
+    )
+    .unwrap();
+    let inferred = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        inferred.status.success(),
+        "inferred generic slice call must succeed: {}",
+        String::from_utf8_lossy(&inferred.stderr)
+    );
+    fs::write(
+        &path,
+        "fn size_tagged[T, U](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1, 2]; print(size_tagged(&a)); }",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!result.status.success(), "the uninferable call must be rejected");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("write its type arguments"),
+        "expected the type-argument remedy, got {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    // A generic slice instantiates to the spelled element; a source of a
+    // different element is rejected with the concrete instantiated type.
+    for (label, source, needle) in [
+        (
+            "i64 slice, string source",
+            r#"fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let w = vec["a"]; print(size[i64](&w)); }"#,
+            "argument must be &[i64], found vec[string]",
+        ),
+        (
+            "string slice, i64 source",
+            r#"fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1]; print(size[string](&a)); }"#,
+            "argument must be &[string], found vec[i64]",
+        ),
+        (
+            "vec slice, scalar source",
+            r#"fn size[T](v: &[T]) -> i64 { return len(v); } fn main() { let a = vec[1]; print(size[vec](&a)); }"#,
+            "argument must be &[vec[i64]], found vec[i64]",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-generic-slices-mis-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+
+/// ADR-0236 rung 2: a place borrow names one element of a slice parameter
+/// (`&items[0]`, `&rows[0]`) and passes it to a `&Struct`/`&vec` parameter,
+/// addressed in place exactly like the vector element borrow.
+#[test]
+fn slice_element_borrows_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slice_element_borrows.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    // A string element is not a place-borrow target (same as the vector form).
+    let path = std::env::temp_dir().join(format!(
+        "ae-slice-elem-borrow-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn sl(s: &string) -> i64 { return len(s); } fn f(words: &[string]) -> i64 { return sl(&words[0]); } fn main() { let w = vec[\"hello\"]; print(f(&w)); }",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!result.status.success(), "a string element borrow must be rejected");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("a borrow expression must be cast to a pointer"),
+        "expected the pointer-cast remedy, got {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+
+/// ADR-0236 rung 4: `&mut [T]` stores through the fat pointer. The owner is a
+/// whole vector binding, the call site checks exclusivity, and Copy elements
+/// (i64/f64/Copy struct) are writable; the four backends agree on the values.
+#[test]
+fn slice_mut_match_across_backends() {
+    fn lines(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>().join("\n")
+    }
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("run")
+        .join("slice_mut.ae");
+    let expected = lines(&fs::read(fixture.with_extension("stdout")).unwrap());
+    for (label, codegen, interp) in [("mir", Some("mir"), false), ("tree", Some("tree"), false), ("default", None, false), ("interp", None, true)] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run").arg(&fixture);
+        if let Some(codegen) = codegen {
+            command.env("AE_CODEGEN", codegen);
+        }
+        if interp {
+            command.arg("--interp");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode {label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(lines(&output.stdout), expected, "mode {label} output differs");
+    }
+
+    // An out-of-range store traps at the same position on both paths (the
+    // container-index wording differs, as it already does for vector reads).
+    let path = std::env::temp_dir().join(format!(
+        "ae-slice-mut-oob-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn f(m: &mut [i64]) { m[5] = 1; } fn main() { var v = vec[1]; f(&mut v); }",
+    )
+    .unwrap();
+    let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!compiled.status.success() && !interpreted.status.success(), "both modes must trap");
+    let compiled_err = String::from_utf8_lossy(&compiled.stderr);
+    let interpreted_err = String::from_utf8_lossy(&interpreted.stderr);
+    assert!(compiled_err.contains("index out of bounds"), "got {compiled_err}");
+    assert!(interpreted_err.contains("index out of bounds"), "got {interpreted_err}");
+    assert_eq!(compiled_err.split(':').take(3).collect::<Vec<_>>(), interpreted_err.split(':').take(3).collect::<Vec<_>>(), "trap position differs");
+
+    // A bad mutable window traps at the call site with the same text and
+    // position on both paths.
+    let path = std::env::temp_dir().join(format!(
+        "ae-slice-mut-window-{}-{}.ae",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(
+        &path,
+        "fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[2..1]); }",
+    )
+    .unwrap();
+    let compiled = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).arg("--interp").output().unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(!compiled.status.success() && !interpreted.status.success(), "both modes must trap");
+    assert_eq!(
+        String::from_utf8_lossy(&compiled.stderr).replace("\r\n", "\n"),
+        String::from_utf8_lossy(&interpreted.stderr).replace("\r\n", "\n"),
+        "window trap position/message differ"
+    );
+    assert!(String::from_utf8_lossy(&compiled.stderr).contains("slice range out of bounds"));
+
+    for (label, source, needle) in [
+        (
+            "missing &mut",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1]; f(&v); }"#,
+            "this parameter borrows mutably; write the argument as '&mut name'",
+        ),
+        (
+            "bare name",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1]; f(v); }"#,
+            "a mutable slice argument is written '&mut name'",
+        ),
+        (
+            "immutable owner",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { let v = vec[1]; f(&mut v); }"#,
+            "cannot borrow 'v' mutably: it was declared without 'var'",
+        ),
+        (
+            "mutable arg to a read-only parameter",
+            r#"fn f(s: &[i64]) -> i64 { return s[0]; } fn main() { var v = vec[1]; print(f(&mut v)); }"#,
+            "this parameter borrows read-only; write the argument as '&name'",
+        ),
+        (
+            "store through a read-only slice",
+            r#"fn f(s: &[i64]) { s[0] = 1; } fn main() {}"#,
+            "a read-only slice cannot be written; take the parameter as '&mut [T]'",
+        ),
+        (
+            "owned element store",
+            r#"struct T { n: i64 } fn f(m: &mut [T]) { m[0] = T { n: 1 }; } fn main() {}"#,
+            "storing through a mutable slice of owned elements is not supported yet",
+        ),
+        (
+            "forwarded mutable slice",
+            r#"fn g(m: &mut [i64]) { m[0] = 1; } fn f(m: &mut [i64]) { g(&mut m); } fn main() {}"#,
+            "forwarding a mutable slice is not supported yet",
+        ),
+        (
+            "mutable element borrow",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[0]); }"#,
+            "a single element is not a mutable slice",
+        ),
+        (
+            "mutable window open bound",
+            r#"fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var v = vec[1, 2]; f(&mut v[1..]); }"#,
+            "a slice range needs both bounds",
+        ),
+        (
+            "field mutable slice",
+            r#"struct R { cells: vec } fn f(m: &mut [i64]) { m[0] = 1; } fn main() { var r = R { cells: vec[1] }; f(&mut r.cells); }"#,
+            "field slices are not supported yet",
+        ),
+        (
+            "wrong store type",
+            r#"fn f(m: &mut [i64]) { m[0] = "x"; } fn main() {}"#,
+            "slice elements must be i64",
+        ),
+        (
+            "mutable borrow inside a loop over the owner",
+            r#"fn touch(m: &mut [i64]) { m[0] = 0; } fn main() { var v = vec[1, 2]; for x in v { print(x); touch(&mut v); } }"#,
+            "cannot borrow 'v' mutably while it is borrowed in this statement",
+        ),
+        (
+            "two mutable borrows in one statement",
+            r#"fn pa(a: &mut [i64], b: &mut [i64]) -> i64 { a[0] = 1; b[0] = 2; return a[0]; } fn main() { var v = vec[1]; print(pa(&mut v, &mut v)); }"#,
+            "cannot borrow 'v' mutably while it is borrowed in this statement",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "ae-slice-mut-bad-{}-{}.ae",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ae"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!result.status.success(), "{label} must be rejected");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(needle),
+            "{label}: expected '{needle}', got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+
+#[test]
+fn emit_pure_c_outputs_runnable_c_and_fails_closed() {
+    // The pure-MIR C pipeline (ADR-0237) is reachable from the CLI and its
+    // output is a runnable translation unit, like the legacy `emit-c`.
+    let dir = unique_temp_dir("emit_pure_c");
+    let source = dir.join("program.ae");
+    fs::write(&source, "fn main() { print(6 * 7); }").unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(text.contains("ae_fn_main") && text.contains("int main"), "{text}");
+
+    let c_path = dir.join("program.c");
+    let exe_path = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    fs::write(&c_path, &emitted.stdout).unwrap();
+    let cc = std::env::var_os("AE_CC").unwrap_or_else(|| "gcc".into());
+    let build = Command::new(cc)
+        .args(["-std=c11", "-O0", &c_path.to_string_lossy(), "-o", &exe_path.to_string_lossy(), "-lm"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe_path).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "42\n");
+
+    // Shapes the pipeline does not support yet fail closed with a named
+    // diagnostic instead of emitting malformed C. The pure backend ships a
+    // small runtime bridge (ae_std_alloc/free, ae_extern_probe); any other
+    // extern symbol is still rejected.
+    let unsupported = dir.join("unsupported.ae");
+    fs::write(
+        &unsupported,
+        "extern \"C\" fn ae_unknown_symbol(v: i64) -> i64;\nfn main() { unsafe { let p = ae_unknown_symbol(1); } }\n",
+    )
+    .unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&unsupported)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let message = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        message.contains("is not supported by the pure C backend")
+            || message.contains("is not linked by the pure C backend")
+            || message.contains("cannot handle"),
+        "{message}"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn emit_pure_c_owns_and_releases_strings() {
+    // ADR-0238 stage 1: one `ae_str` value type carries a literal's static
+    // bytes and an allocated buffer's ownership; concatenation consumes the
+    // owned operands, a move takes the slot, and a drop releases it.
+    let dir = unique_temp_dir("emit_pure_c_strings");
+    let source = dir.join("program.ae");
+    fs::write(
+        &source,
+        r#"struct Label { name: string, n: i64 }
+
+fn tag(s: string) -> string {
+    return "tag:" + s;
+}
+
+fn main() {
+    var s = "a" + "b";
+    print(s);
+    let t = s;
+    print(t);
+    let u = tag(t);
+    print(u);
+    print(len(u));
+    let v = slice(u, 0, 3);
+    print(v);
+    let w = slice_view(u, 4, 6);
+    print(w);
+    print(u == "tag:ab");
+    print(u != "nope");
+    let p = Label { name: "z" + to_string(7), n: 7 };
+    print(p.name);
+    print(p.n);
+}
+"#,
+    )
+    .unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(
+        text.contains("typedef struct { const char *ptr; int64_t len; bool owned; } ae_str;"),
+        "{text}"
+    );
+    assert!(text.contains("ae_str_take(&"), "a move must leave the source slot empty: {text}");
+    assert!(text.contains("ae_str_release(&"), "an owned value must be released: {text}");
+    assert!(text.contains("ae_str_concat("), "{text}");
+
+    let c_path = dir.join("program.c");
+    let exe_path = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    fs::write(&c_path, &emitted.stdout).unwrap();
+    let cc = std::env::var_os("AE_CC").unwrap_or_else(|| "gcc".into());
+    let build = Command::new(&cc)
+        .args(["-std=c11", "-O0", &c_path.to_string_lossy(), "-o", &exe_path.to_string_lossy(), "-lm"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe_path).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "ab\nab\ntag:ab\n6\ntag\nab\ntrue\ntrue\nz7\n7\n"
+    );
+
+    // Every allocation above is released exactly once. Linux CI runs the
+    // same binary under ASan+UBSan; MinGW has no sanitizers, so the plain
+    // run is the Windows evidence.
+    #[cfg(target_os = "linux")]
+    {
+        let asan_path = dir.join("program_asan");
+        let build = Command::new(&cc)
+            .args([
+                "-std=c11",
+                "-O0",
+                "-g",
+                "-fsanitize=address,undefined",
+                &c_path.to_string_lossy(),
+                "-o",
+                &asan_path.to_string_lossy(),
+                "-lm",
+            ])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let run = Command::new(&asan_path).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{stderr}");
+        assert!(
+            !stderr.contains("LeakSanitizer") && !stderr.contains("AddressSanitizer"),
+            "{stderr}"
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+// Appended test: vectors (ADR-0238 stage 2) grow, store, iterate, nest and
+// release their element storage.
+#[test]
+fn emit_pure_c_owns_and_releases_vectors() {
+    let dir = unique_temp_dir("emit_pure_c_vectors");
+    let source = dir.join("program.ae");
+    fs::write(
+        &source,
+        r#"fn main() {
+    var v = vec[1, 2];
+    push(v, 3);
+    print(len(v));
+    print(v[0]);
+    v[0] = 9;
+    print(v[0]);
+    pop(v);
+    print(len(v));
+
+    var words = vec["a", "b"];
+    push(words, "c");
+    for w in words {
+        print(w);
+    }
+
+    var rows = vec[vec[1, 2], vec[3]];
+    let p = vec[4, 4];
+    push(rows, p);
+    print(len(rows));
+    print(len(rows[2]));
+}
+"#,
+    )
+    .unwrap();
+    let emitted = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("emit-pure-c")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(emitted.status.success(), "{}", String::from_utf8_lossy(&emitted.stderr));
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(text.contains("typedef struct {\n    void *data;\n    int64_t len;\n    int64_t cap;\n    int64_t elem_size;\n    void (*drop)(void *);\n} ae_vec;"), "{text}");
+    assert!(text.contains("ae_vec_push("), "{text}");
+    assert!(text.contains("ae_vec_at("), "{text}");
+    assert!(text.contains("ae_vec_release(&"), "{text}");
+
+    let c_path = dir.join("program.c");
+    let exe_path = dir.join(if cfg!(windows) { "program.exe" } else { "program" });
+    fs::write(&c_path, &emitted.stdout).unwrap();
+    let cc = std::env::var_os("AE_CC").unwrap_or_else(|| "gcc".into());
+    let build = Command::new(&cc)
+        .args(["-std=c11", "-O0", &c_path.to_string_lossy(), "-o", &exe_path.to_string_lossy(), "-lm"])
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe_path).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "3\n1\n9\n2\na\nb\nc\n3\n2\n"
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let asan_path = dir.join("program_asan");
+        let build = Command::new(&cc)
+            .args([
+                "-std=c11",
+                "-O0",
+                "-g",
+                "-fsanitize=address,undefined",
+                &c_path.to_string_lossy(),
+                "-o",
+                &asan_path.to_string_lossy(),
+                "-lm",
+            ])
+            .output()
+            .unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let run = Command::new(&asan_path).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{stderr}");
+        assert!(
+            !stderr.contains("LeakSanitizer") && !stderr.contains("AddressSanitizer"),
+            "{stderr}"
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn utf8_validation_reads_files_and_reports_the_first_bad_byte() {
+    // ADR-0244: `read_file` is byte-exact (binary files must round-trip), so
+    // text validation is the caller's job and lives in std/core/utf8.ae. A
+    // valid file validates; a file with one broken sequence reports the byte
+    // offset where it stops being UTF-8.
+    let dir = std::env::temp_dir().join(format!("ae-utf8-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("good.txt");
+    let bad = dir.join("bad.txt");
+    fs::write(&good, "héllo 😀").unwrap();
+    // 0x61 'a', then 0xE2 0x82 (a valid lead with a missing final byte).
+    fs::write(&bad, [b'a', 0xE2, 0x82]).unwrap();
+    let source = format!(
+        concat!(
+            "use \"{}\";\n",
+            "fn main() {{\n",
+            "    let ok = read_file(\"{}\");\n",
+            "    print(is_utf8(ok));\n",
+            "    print(utf8_error_offset(ok));\n",
+            "    let broken = read_file(\"{}\");\n",
+            "    print(is_utf8(broken));\n",
+            "    print(utf8_error_offset(broken));\n",
+            "    print(len(broken));\n",
+            "}}\n"
+        ),
+        // The lexer reads a backslash as an escape, so the use path is spelled
+        // with forward slashes on every host; Windows file APIs accept them.
+        repo_std_utf8().display().to_string().replace('\\', "/"),
+        good.display().to_string().replace('\\', "/"),
+        bad.display().to_string().replace('\\', "/"),
+    );
+    let path = dir.join("main.ae");
+    fs::write(&path, source).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "true\n-1\nfalse\n1\n3\n"
+    );
+}
+
+/// The stdlib module path used by source strings the tests write into a
+/// temporary directory: `use` paths resolve relative to the importing file.
+fn repo_std_utf8() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/core/utf8.ae")
+}
+
+#[test]
+fn read_errors_distinguish_missing_paths_from_unreadable_ones() {
+    // M3.2.07: the caller-visible outcomes are distinguishable without parsing
+    // platform text: a missing path reports "No such file" in the OS wording,
+    // a path that exists but cannot be read as a file reports a different
+    // reason (a directory: EACCES on Windows, EISDIR on Linux), and an empty
+    // file is `Ok("")`. Directory construction is portable, so the fixture
+    // runs on both hosts.
+    let dir = std::env::temp_dir().join(format!("ae-readerr-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("a-directory")).unwrap();
+    fs::write(dir.join("empty.txt"), "").unwrap();
+    let slash = |path: std::path::PathBuf| path.display().to_string().replace('\\', "/");
+    let source = format!(
+        concat!(
+            "fn main() {{\n",
+            "    let missing = try_read_file(\"{}\");\n",
+            "    match missing {{\n",
+            "        ReadResult::Ok(t) => {{ print(\"unexpected \"); print(len(t)); }}\n",
+            "        ReadResult::Err(r) => {{ print(contains(r, \"No such file\")); }}\n",
+            "    }}\n",
+            "    let unreadable = try_read_file(\"{}\");\n",
+            "    match unreadable {{\n",
+            "        ReadResult::Ok(t) => {{ print(\"unexpected \"); print(len(t)); }}\n",
+            "        ReadResult::Err(r) => {{ print(len(r) > 0); print(contains(r, \"No such file\")); }}\n",
+            "    }}\n",
+            "    let empty = try_read_file(\"{}\");\n",
+            "    match empty {{\n",
+            "        ReadResult::Ok(t) => {{ print(len(t)); }}\n",
+            "        ReadResult::Err(r) => {{ print(\"failed \"); print(r); }}\n",
+            "    }}\n",
+            "}}\n"
+        ),
+        slash(dir.join("does-not-exist.txt")),
+        slash(dir.join("a-directory")),
+        slash(dir.join("empty.txt")),
+    );
+    let path = dir.join("main.ae");
+    fs::write(&path, source).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_ae")).arg("run").arg(&path).output().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "true\ntrue\nfalse\n0\n"
+    );
+}
+
+#[test]
+fn pure_backend_flag_builds_and_runs_the_same_program() {
+    // ADR-0237: `build --pure` / `run --pure` select the pure-MIR C backend.
+    // The program's observable behaviour is the same C contract as the default
+    // backend: the same stdout for a completed program and the same positioned
+    // overflow trap for a checked operation.
+    let dir = std::env::temp_dir().join(format!("ae-pure-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("input.ae");
+    fs::write(&source, "fn main() { var x = 2; while x < 5 { x = x + 1; } print(x); }").unwrap();
+
+    let output = dir.join(if cfg!(windows) { "pure.exe" } else { "pure" });
+    let build = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("build").arg(&source).arg("-o").arg(&output).arg("--pure")
+        .output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&output).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5");
+
+    // `run --pure` reaches the same answer as the default route.
+    let pure_run = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("run").arg(&source).arg("--pure")
+        .output().unwrap();
+    assert!(pure_run.status.success(), "{}", String::from_utf8_lossy(&pure_run.stderr));
+    assert_eq!(String::from_utf8_lossy(&pure_run.stdout).trim(), "5");
+
+    // Checked arithmetic keeps its contract through the pure backend.
+    fs::write(&source, "fn main() { var x = 9223372036854775807; print(x + 1); }").unwrap();
+    let pure_trap = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("run").arg(&source).arg("--pure")
+        .output().unwrap();
+    assert!(!pure_trap.status.success());
+    assert!(
+        String::from_utf8_lossy(&pure_trap.stderr).contains("integer overflow"),
+        "{}",
+        String::from_utf8_lossy(&pure_trap.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

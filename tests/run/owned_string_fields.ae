@@ -1,0 +1,34 @@
+// A struct with a `string` field is owned like any other value: the
+// construction moves the string in (P1.1 slice 7), the generated
+// `ae_tN_release` frees it, and a `&mut` receiver stores a new string into
+// the field by releasing the old one and consuming the right-hand side.
+struct Req { buf: string, n: i64 }
+
+fn make(src: string, n: i64) -> Req {
+    return Req { buf: src, n: n };
+}
+
+fn label(src: string) -> string {
+    return "req: " + src;
+}
+
+fn step(r: &mut Req) -> i64 {
+    r.n = r.n + 1;
+    return r.n;
+}
+
+fn fill(r: &mut Req, text: string) -> i64 {
+    r.buf = r.buf + text;
+    return len(r.buf);
+}
+
+fn main() {
+    var r = make("ab", 1);
+    print(r.n);
+    print(r.buf);
+    print(step(&mut r));
+    print(r.n);
+    print(fill(&mut r, "cd"));
+    print(r.buf);
+    print(label("x"));
+}

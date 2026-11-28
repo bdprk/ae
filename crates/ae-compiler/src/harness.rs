@@ -37,10 +37,10 @@ pub(crate) fn discover(source: &str) -> Result<Vec<String>, String> {
             if name.starts_with("test_") {
                 let line = tokens[i].line;
                 let at = |index: usize, kind: &Kind| -> bool {
-                    tokens.get(index).map_or(false, |t| &t.kind == kind)
+                    tokens.get(index).is_some_and(|t| &t.kind == kind)
                 };
                 let is_i64 = |index: usize| -> bool {
-                    tokens.get(index).map_or(false, |t| matches!(&t.kind, Kind::Ident(text) if text == "i64"))
+                    tokens.get(index).is_some_and(|t| matches!(&t.kind, Kind::Ident(text) if text == "i64"))
                 };
                 let generic = at(i + 2, &Kind::LBracket);
                 let zero_params = at(i + 2, &Kind::LParen) && at(i + 3, &Kind::RParen);

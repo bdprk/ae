@@ -1,0 +1,27 @@
+// P2.4 container rung: string vector literals (`vec["a", "b"]`).
+// A text literal is an owned string; a string view (a struct field read or a
+// `slice_view`) is copied into the vector, and an owned string variable moves
+// in. The vector releases every element exactly once at scope exit.
+struct Label { name: string, n: i64 }
+
+fn main() {
+    var words = vec["alpha", "beta"];
+    push(words, "gamma");
+    print(len(words));
+    print(words[0]);
+    print(words[2]);
+    for w in words {
+        print(w);
+    }
+
+    let p = Label { name: "delta", n: 4 };
+    var copies = vec[p.name, "tail"];
+    print(len(copies));
+    print(copies[0]);
+    print(p.name);
+
+    var owned = "moved";
+    var moved = vec[owned];
+    print(len(moved));
+    print(moved[0]);
+}

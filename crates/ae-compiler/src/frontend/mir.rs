@@ -18,18 +18,22 @@ use super::*;
 use super::cfg::{build_cfg, CfgBlock, CfgTerminator};
 
 pub(super) fn mir_path(path: &Path) -> Result<String, String> {
-    let program = loader::load_program(path)?;
+    mir_path_with_imports(path, &PackageImports::new())
+}
+
+pub(super) fn mir_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    let program = loader::load_program_with_imports(path, imports)?;
     let mut out = String::new();
     for file in &program.files {
         for function in file {
-            let mut mir = lower_function(function);
+            let mut mir = lower_function(function, &program.ctx);
             optimize_function(&mut mir);
             // The printed graph is the one the C backend ships, releases
             // included (M2.4), so `emit-mir` shows exactly which drops
             // survived elaboration.
             elaborate_drops(&mut mir);
-            validate(&mir)?;
-            print_function(&mir, &mut out);
+            validate(&mir, &program.ctx)?;
+            print_function(&mir, &mut out, &program.ctx);
         }
     }
     Ok(out)
@@ -81,6 +85,7 @@ pub(super) enum MirRvalue {
     ShortCircuit(MirOperand, Kind, Expr),
     Call(usize, Vec<MirOperand>, Type),
     FnCall(usize, Vec<MirOperand>, Type),
+    FnExprCall(MirOperand, Vec<MirOperand>, Type),
     ClosureLit(usize),
     Intrinsic(&'static str, Vec<MirOperand>, Type),
     Aggregate(usize, Vec<MirRvalue>),
@@ -96,15 +101,18 @@ pub(super) enum MirOperand {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Char(char),
+    Unit,
     Str(Rc<str>, usize, usize),
 }
 
 #[derive(Debug)]
-pub(super) struct MirLowering {
+pub(super) struct MirLowering<'a> {
     next_temp: usize,
+    ctx: &'a CompileContext,
 }
 
-impl MirLowering {
+impl<'a> MirLowering<'a> {
     fn fresh(&mut self, ty: Type) -> MirPlace {
         let id = self.next_temp;
         self.next_temp += 1;
@@ -113,9 +121,9 @@ impl MirLowering {
 }
 
 // Lower the whole function: the CFG's blocks, each statement decomposed.
-pub(super) fn lower_function(function: &Function) -> MirFunction {
-    let graph = build_cfg(function);
-    let mut lowering = MirLowering { next_temp: 0 };
+pub(super) fn lower_function(function: &Function, ctx: &CompileContext) -> MirFunction {
+    let graph = build_cfg(function, ctx);
+    let mut lowering = MirLowering { next_temp: 0, ctx };
     let blocks = graph.blocks.iter().map(|block| lower_block(block, &mut lowering)).collect();
     MirFunction { id: function.id, is_main: function.is_main, params: function.params.clone(), returns: function.returns, blocks }
 }
@@ -132,28 +140,33 @@ fn lower_statement(statement: &Statement, bindings: &mut Vec<MirBinding>, loweri
     match statement {
         Statement::Declare(id, expr) => {
             let rvalue = lower_expr(expr, bindings, lowering);
-            bindings.push(MirBinding { target: MirPlace::Local(*id, expr_type(expr)), rvalue });
+            bindings.push(MirBinding { target: MirPlace::Local(*id, expr_type(expr, lowering.ctx)), rvalue });
         }
         Statement::Assign(id, expr, _) => {
             let rvalue = lower_expr(expr, bindings, lowering);
-            bindings.push(MirBinding { target: MirPlace::Local(*id, expr_type(expr)), rvalue });
+            bindings.push(MirBinding { target: MirPlace::Local(*id, expr_type(expr, lowering.ctx)), rvalue });
         }
-        Statement::FieldStore(id, fname, fty, value, base_ty) => {
+        Statement::FieldStore(id, path, fty, value, base_ty) => {
             let rvalue = lower_expr(value, bindings, lowering);
-            bindings.push(MirBinding {
-                target: MirPlace::Field(Box::new(MirPlace::Local(*id, *base_ty)), fname.clone(), *fty),
-                rvalue,
-            });
+            let mut place = MirPlace::Local(*id, *base_ty);
+            for (name, step_ty) in path {
+                place = MirPlace::Field(Box::new(place), name.clone(), *step_ty);
+            }
+            let target = match place {
+                MirPlace::Field(..) => place,
+                local => MirPlace::Field(Box::new(local), String::new(), *fty),
+            };
+            bindings.push(MirBinding { target, rvalue });
         }
         Statement::Return(expr, _) => {
             let rvalue = lower_expr(expr, bindings, lowering);
-            let temp = lowering.fresh(expr_type(expr));
+            let temp = lowering.fresh(expr_type(expr, lowering.ctx));
             bindings.push(MirBinding { target: temp, rvalue });
         }
         Statement::Print(printed) => {
             if let Printed::Expr(e) = printed {
                 let rvalue = lower_expr(e, bindings, lowering);
-                let temp = lowering.fresh(expr_type(e));
+                let temp = lowering.fresh(expr_type(e, lowering.ctx));
                 bindings.push(MirBinding { target: temp, rvalue });
             }
         }
@@ -163,8 +176,8 @@ fn lower_statement(statement: &Statement, bindings: &mut Vec<MirBinding>, loweri
             // survived drop elaboration (M2.4) — the same lists the C
             // backend emits — instead of a bare stmt() placeholder.
             let operands = list.iter().map(|(id, ty)| MirOperand::Place(MirPlace::Local(*id, *ty))).collect();
-            let temp = lowering.fresh(Type::Int);
-            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic("releases", operands, Type::Int) });
+            let temp = lowering.fresh(Type::Int(IntTy::I64));
+            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic("releases", operands, Type::Int(IntTy::I64)) });
         }
         other => {
             // Container updates, asserts, and the remaining statement shapes
@@ -174,8 +187,8 @@ fn lower_statement(statement: &Statement, bindings: &mut Vec<MirBinding>, loweri
             // them into blocks and edges) keep the bare placeholder as a
             // tripwire: one should never reach a MIR block.
             let (name, operands) = statement_intrinsic(other, bindings, lowering);
-            let temp = lowering.fresh(Type::Int);
-            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic(name, operands, Type::Int) });
+            let temp = lowering.fresh(Type::Int(IntTy::I64));
+            bindings.push(MirBinding { target: temp, rvalue: MirRvalue::Intrinsic(name, operands, Type::Int(IntTy::I64)) });
         }
     }
 }
@@ -185,6 +198,8 @@ fn lower_expr(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut MirLow
         Expr::Number(n) => MirRvalue::Use(MirOperand::Int(*n)),
         Expr::FloatLit(x) => MirRvalue::Use(MirOperand::Float(*x)),
         Expr::BoolLit(b) => MirRvalue::Use(MirOperand::Bool(*b)),
+        Expr::CharLit(c) => MirRvalue::Use(MirOperand::Char(*c)),
+        Expr::Unit => MirRvalue::Use(MirOperand::Unit),
         Expr::StrLit(text, line, col) => MirRvalue::Use(MirOperand::Str(Rc::from(text.as_str()), *line, *col)),
         Expr::Variable(id, ty, ..) => MirRvalue::Use(MirOperand::Place(MirPlace::Local(*id, *ty))),
         Expr::Field(base, fname, fty) => MirRvalue::Use(MirOperand::Place(MirPlace::Field(Box::new(base_place(base, bindings, lowering)), fname.clone(), *fty))),
@@ -197,10 +212,12 @@ fn lower_expr(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut MirLow
         Expr::Binary(a, op, b, ..) => {
             let lhs = lower_operand(a, bindings, lowering);
             let rhs = lower_operand(b, bindings, lowering);
-            MirRvalue::Binary(lhs, op.clone(), rhs, expr_type(expr))
+            MirRvalue::Binary(lhs, op.clone(), rhs, expr_type(expr, lowering.ctx))
         }
         Expr::Call(id, args, ret) => MirRvalue::Call(*id, lower_args(args, bindings, lowering), *ret),
         Expr::FnCall(id, args, ret, _) => MirRvalue::FnCall(*id, lower_args(args, bindings, lowering), *ret),
+        Expr::FnExprCall(callee, args, ret, _) => MirRvalue::FnExprCall(lower_operand(callee, bindings, lowering), lower_args(args, bindings, lowering), *ret),
+        Expr::FnRef(id, _) => MirRvalue::Use(MirOperand::FnPtr(*id)),
         Expr::ClosureLit(cid) => MirRvalue::ClosureLit(*cid),
         // The decomposed view records the spawn as a named side effect over
         // its capture slots and callable; the C emission goes through the
@@ -219,8 +236,8 @@ fn lower_expr(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut MirLow
             // with their operands; an unhandled shape keeps the bare
             // placeholder so a missing arm is visible, not silent.
             let (name, operands) = expr_intrinsic(other, bindings, lowering);
-            let ty = expr_type(other);
-            let temp = lowering.fresh(ty.clone());
+            let ty = expr_type(other, lowering.ctx);
+            let temp = lowering.fresh(ty);
             bindings.push(MirBinding { target: temp.clone(), rvalue: MirRvalue::Intrinsic(name, operands, ty) });
             MirRvalue::Use(MirOperand::Place(temp))
         }
@@ -232,11 +249,13 @@ fn lower_operand(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mir
         Expr::Number(n) => MirOperand::Int(*n),
         Expr::FloatLit(x) => MirOperand::Float(*x),
         Expr::BoolLit(b) => MirOperand::Bool(*b),
+        Expr::CharLit(c) => MirOperand::Char(*c),
+        Expr::Unit => MirOperand::Unit,
         Expr::StrLit(text, line, col) => MirOperand::Str(Rc::from(text.as_str()), *line, *col),
         Expr::Variable(id, ty, ..) => MirOperand::Place(MirPlace::Local(*id, *ty)),
         other => {
             let rvalue = lower_expr(other, bindings, lowering);
-            let temp = lowering.fresh(expr_type(other));
+            let temp = lowering.fresh(expr_type(other, lowering.ctx));
             bindings.push(MirBinding { target: temp.clone(), rvalue });
             MirOperand::Place(temp)
         }
@@ -249,7 +268,7 @@ fn base_place(base: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut MirLow
         Expr::Field(inner, fname, fty) => MirPlace::Field(Box::new(base_place(inner, bindings, lowering)), fname.clone(), *fty),
         other => {
             let rvalue = lower_expr(other, bindings, lowering);
-            let temp = lowering.fresh(expr_type(other));
+            let temp = lowering.fresh(expr_type(other, lowering.ctx));
             bindings.push(MirBinding { target: temp.clone(), rvalue });
             temp
         }
@@ -261,7 +280,7 @@ fn lower_args(args: &[Argument], bindings: &mut Vec<MirBinding>, lowering: &mut 
         Argument::Value(e) => lower_operand(e, bindings, lowering),
         Argument::View(e) => {
             let value = lower_operand(e, bindings, lowering);
-            if expr_type(e) == Type::StrView {
+            if expr_type(e, lowering.ctx) == Type::StrView {
                 return value;
             }
             let target = lowering.fresh(Type::StrView);
@@ -272,7 +291,7 @@ fn lower_args(args: &[Argument], bindings: &mut Vec<MirBinding>, lowering: &mut 
             MirOperand::Place(target)
         }
         Argument::Borrow(slot, take_address) => MirOperand::Borrow { slot: *slot, take_address: *take_address },
-        Argument::FnPtr(id) => MirOperand::FnPtr(*id),
+        Argument::FnPtr(id, _) => MirOperand::FnPtr(*id),
     }).collect()
 }
 
@@ -282,39 +301,40 @@ fn lower_args(args: &[Argument], bindings: &mut Vec<MirBinding>, lowering: &mut 
 // rvalues the program computes.
 fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lowering: &mut MirLowering) -> (&'static str, Vec<MirOperand>) {
     match statement {
-        Statement::Array(id, values) => {
-            let mut operands = vec![MirOperand::Place(MirPlace::Local(*id, Type::Array(values.len())))];
+        Statement::Array(id, values, elem_ty) => {
+            let mut operands = vec![MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(*elem_ty).unwrap_or(0), values.len())))];
             operands.extend(values.iter().map(|v| lower_operand(v, bindings, lowering)));
             ("array", operands)
         }
-        Statement::Store(id, len, index, value, ..) => ("store", vec![
-            MirOperand::Place(MirPlace::Local(*id, Type::Array(*len))),
+        Statement::Store(id, len, index, value, _, _, elem_ty) => ("store", vec![
+            MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(*elem_ty).unwrap_or(0), *len))),
             lower_operand(index, bindings, lowering),
             lower_operand(value, bindings, lowering),
         ]),
-        Statement::VecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, Type::Vec)), lower_operand(value, bindings, lowering)]),
-        Statement::StrVecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec)), lower_operand(value, bindings, lowering)]),
-        Statement::VecFPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, Type::VecF)), lower_operand(value, bindings, lowering)]),
-        Statement::VecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, Type::Vec))]),
-        Statement::StrVecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec))]),
-        Statement::VecFPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, Type::VecF))]),
-        Statement::VecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, Type::Vec)), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
-        Statement::StrVecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec)), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
-        Statement::VecFStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, Type::VecF)), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::StrVecPush(id, value, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(value, bindings, lowering)]),
+        Statement::GVecPush(id, value, elem_ty, ..) => ("push", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false))), lower_operand(value, bindings, lowering)]),
+        Statement::StrVecPop(id, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false)))]),
+        Statement::GVecPop(id, elem_ty, ..) => ("pop", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false)))]),
+        Statement::StrVecStore(id, index, value, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::GVecStore(id, index, value, elem_ty, ..) => ("store", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, *elem_ty, false))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::SliceStore(id, index, value, elem_ty, ..) => ("slice_store", vec![MirOperand::Place(MirPlace::Local(*id, Type::SliceMut(lowering.ctx.find_slice_elem(*elem_ty).unwrap_or(0)))), lower_operand(index, bindings, lowering), lower_operand(value, bindings, lowering)]),
         // The flag is the parser's sort-as-strings bit (vec[string] sorts by
         // bytes), so it names the intrinsic instead of posing as a direction.
-        Statement::Sort(id, strings, ..) => (if *strings { "sort_strings" } else { "sort" }, vec![MirOperand::Place(MirPlace::Local(*id, if *strings { Type::StrVec } else { Type::Vec }))]),
-        Statement::Reverse(id, strings, ..) => (if *strings { "reverse_strings" } else { "reverse" }, vec![MirOperand::Place(MirPlace::Local(*id, if *strings { Type::StrVec } else { Type::Vec }))]),
-        Statement::MapPut(place, key, value, ..) => ("put", vec![map_place_operand(place), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Statement::Sort(id, strings, ..) => (if *strings { "sort_strings" } else { "sort" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),
+        Statement::Reverse(id, strings, ..) => (if *strings { "reverse_strings" } else { "reverse" }, vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, if *strings { Type::String } else { Type::Int(IntTy::I64) }, false)))]),
+        Statement::MapPut(place, key, value, ..) => ("put", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Statement::Assert(condition, ..) => ("assert", vec![lower_operand(condition, bindings, lowering)]),
         Statement::Print(Printed::Text(text)) => ("print", vec![MirOperand::Str(Rc::from(text.as_str()), 0, 0)]),
         // The match subject rides the switch terminator, so the payload
         // binding's operands are the binding itself and the variant indices.
-        Statement::BindPayload(bid, _, variant, index, ty) => ("bind_payload", vec![
-            MirOperand::Place(MirPlace::Local(*bid, ty.clone())),
-            MirOperand::Int(*variant as i64),
-            MirOperand::Int(*index as i64),
-        ]),
+        Statement::BindPayload(bid, _, path, ty) => {
+            let mut ops = vec![MirOperand::Place(MirPlace::Local(*bid, *ty))];
+            for (variant, index) in path {
+                ops.push(MirOperand::Int(*variant as i64));
+                ops.push(MirOperand::Int(*index as i64));
+            }
+            ("bind_payload", ops)
+        }
         // The `?`'s error-path releases ride inside the statement (the C
         // backend emits them where the error path exits); the continuing
         // path's operand is the unwrapped expression.
@@ -336,23 +356,60 @@ fn statement_intrinsic(statement: &Statement, bindings: &mut Vec<MirBinding>, lo
         }
         Statement::Break => ("break", vec![]),
         Statement::Continue(label) => ("continue", label.iter().map(|l| MirOperand::Int(*l as i64)).collect()),
+        // P2.4: vector operations on a struct's vector field. The receiver is
+        // the field place; the value/index operands are the statement's own.
+        Statement::VecPushField(id, field, base_ty, value, elem_ty, ..) => (
+            "push_field",
+            vec![field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx), lower_operand(value, bindings, lowering)],
+        ),
+        Statement::VecPopField(id, field, base_ty, elem_ty, ..) => (
+            "pop_field",
+            vec![field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx)],
+        ),
+        Statement::VecStoreField(id, field, base_ty, index, value, elem_ty, ..) => (
+            "store_field",
+            vec![
+                field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx),
+                lower_operand(index, bindings, lowering),
+                lower_operand(value, bindings, lowering),
+            ],
+        ),
+        Statement::VecSortField(id, field, base_ty, elem_ty, reverse, ..) => (
+            if *reverse { "reverse_field" } else { "sort_field" },
+            vec![field_vector_operand(*id, field, *base_ty, *elem_ty, lowering.ctx)],
+        ),
         // Control shapes never survive into a MIR block; a bare placeholder
         // here is a tripwire, not a rendering.
         _ => ("stmt", vec![]),
     }
 }
 
-fn map_kind_type(kind: &MapKind) -> Type {
-    match kind {
-        MapKind::Int => Type::Map,
-        MapKind::Float => Type::MapF,
-    }
+fn map_kind_type(kind: &MapKind, ctx: &CompileContext) -> Type {
+    let value = match kind {
+        MapKind::Int => Type::Int(IntTy::I64),
+        MapKind::Float => Type::Float(FloatTy::F64),
+    };
+    Type::MapOf(ctx.find_map_types(Type::String, value).unwrap_or(0))
 }
 
-fn map_place_operand(place: &MapPlace) -> MirOperand {
+/// The receiver of a vector-field operation: `root.field` typed with the
+/// field's vector type. The element type was interned when the field's type
+/// spelling was parsed, so the lookup always answers.
+fn field_vector_operand(id: usize, path: &[(String, Type)], base_ty: Type, elem_ty: Type, ctx: &CompileContext) -> MirOperand {
+    let vector_ty = ctx.find_vector_elem(elem_ty).map(Type::Vector).unwrap_or(Type::Vector(0));
+    let last = path.len().saturating_sub(1);
+    let mut place = MirPlace::Local(id, base_ty);
+    for (index, (name, ty)) in path.iter().enumerate() {
+        let place_ty = if index == last { vector_ty } else { *ty };
+        place = MirPlace::Field(Box::new(place), name.clone(), place_ty);
+    }
+    MirOperand::Place(place)
+}
+
+fn map_place_operand(place: &MapPlace, ctx: &CompileContext) -> MirOperand {
     match place {
-        MapPlace::Var(id, kind) => MirOperand::Place(MirPlace::Local(*id, map_kind_type(kind))),
-        MapPlace::Field(id, name, kind) => MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(*id, map_kind_type(kind))), name.clone(), map_kind_type(kind))),
+        MapPlace::Var(id, kind) => MirOperand::Place(MirPlace::Local(*id, map_kind_type(kind, ctx))),
+        MapPlace::Field(id, name, kind) => MirOperand::Place(MirPlace::Field(Box::new(MirPlace::Local(*id, map_kind_type(kind, ctx))), name.clone(), map_kind_type(kind, ctx))),
     }
 }
 
@@ -368,6 +425,14 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             if *bytewise { "byte_offset" } else { "ptr_offset" },
             vec![lower_operand(e, bindings, lowering), lower_operand(c, bindings, lowering)],
         ),
+        Expr::ScalarCast(e, ..) => ("scalar_cast", vec![lower_operand(e, bindings, lowering)]),
+        Expr::IntMethod(kind, recv, arg, ..) => {
+            let mut operands = vec![lower_operand(recv, bindings, lowering)];
+            if let Some(arg) = arg {
+                operands.push(lower_operand(arg, bindings, lowering));
+            }
+            (kind.mir_name(), operands)
+        }
         Expr::PtrCast(e, mutable, _pointee_id, ..) => (
             if *mutable { "ptr_cast_mut" } else { "ptr_cast" },
             vec![lower_operand(e, bindings, lowering)],
@@ -375,24 +440,48 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::PtrDropInPlace(e, ..) => ("ptr_drop_in_place", vec![lower_operand(e, bindings, lowering)]),
         Expr::PtrWrite(p, v, ..) => ("ptr_write", vec![lower_operand(p, bindings, lowering), lower_operand(v, bindings, lowering)]),
         Expr::Len(e, ..) => ("len", vec![lower_operand(e, bindings, lowering)]),
-        Expr::Index(id, len, index, ..) => ("index", vec![
-            MirOperand::Place(MirPlace::Local(*id, Type::Array(*len))),
+        Expr::Index(id, len, index, _, _, elem_ty) => ("index", vec![
+            MirOperand::Place(MirPlace::Local(*id, Type::ArrayOf(lowering.ctx.find_array_elem(*elem_ty).unwrap_or(0), *len))),
             lower_operand(index, bindings, lowering),
         ]),
         Expr::VecIndex(id, index, _, _, borrowed, element) => {
-            let vector = match (*element, *borrowed) {
-                (Type::F64, false) => Type::VecF,
-                (Type::F64, true) => Type::VecFRef,
-                (_, false) => Type::Vec,
-                (_, true) => Type::VecRef,
-            };
+            let vector = vector_type(lowering.ctx, *element, *borrowed);
             ("index", vec![MirOperand::Place(MirPlace::Local(*id, vector)), lower_operand(index, bindings, lowering)])
         }
         Expr::StrVecIndex(id, index, _, _, borrowed) => {
-            let vector = if *borrowed { Type::StrVecRef } else { Type::StrVec };
+            let vector = vector_type(lowering.ctx, Type::String, *borrowed);
             ("index", vec![MirOperand::Place(MirPlace::Local(*id, vector)), lower_operand(index, bindings, lowering)])
         }
-        Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, Type::StrVec)), lower_operand(sep, bindings, lowering)]),
+        Expr::VecIndexOf(base, index, _, _, _) => (
+            "index_of",
+            vec![lower_operand(base, bindings, lowering), lower_operand(index, bindings, lowering)],
+        ),
+        Expr::SliceOf(slot, source, elem, ..) => (
+            "slice_of",
+            vec![MirOperand::Place(MirPlace::Local(*slot, match *source {
+                Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)),
+                other => other,
+            }))],
+        ),
+        Expr::SliceIndex(slot, index, _, _, elem) => (
+            "slice_index",
+            vec![
+                MirOperand::Place(MirPlace::Local(*slot, Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)))),
+                lower_operand(index, bindings, lowering),
+            ],
+        ),
+        Expr::SliceRange(slot, source, elem, start, end, ..) => (
+            "slice_range",
+            vec![
+                MirOperand::Place(MirPlace::Local(*slot, match *source {
+                    Type::Slice(_) => Type::Slice(lowering.ctx.find_slice_elem(*elem).unwrap_or(0)),
+                    other => other,
+                })),
+                lower_operand(start, bindings, lowering),
+                lower_operand(end, bindings, lowering),
+            ],
+        ),
+        Expr::Join(id, sep, ..) => ("join", vec![MirOperand::Place(MirPlace::Local(*id, vector_type(lowering.ctx, Type::String, false))), lower_operand(sep, bindings, lowering)]),
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
         Expr::ReadFile(path, ..) => ("read_file", vec![lower_operand(path, bindings, lowering)]),
@@ -406,8 +495,8 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::ToI64(e, ..) => ("to_i64", vec![lower_operand(e, bindings, lowering)]),
         Expr::FloatToString(e, ..) => ("float_to_string", vec![lower_operand(e, bindings, lowering)]),
         Expr::StrEq(a, b, ..) => ("str_eq", vec![lower_operand(a, bindings, lowering), lower_operand(b, bindings, lowering)]),
-        Expr::MapKeys(place, ..) => ("keys", vec![map_place_operand(place)]),
-        Expr::RunCommand(program, vid, ..) => ("run_command", vec![lower_operand(program, bindings, lowering), MirOperand::Place(MirPlace::Local(*vid, Type::StrVec))]),
+        Expr::MapKeys(place, ..) => ("keys", vec![map_place_operand(place, lowering.ctx)]),
+        Expr::RunCommand(program, vid, ..) => ("run_command", vec![lower_operand(program, bindings, lowering), MirOperand::Place(MirPlace::Local(*vid, vector_type(lowering.ctx, Type::String, false)))]),
         Expr::ToString(e, ..) => ("to_string", vec![lower_operand(e, bindings, lowering)]),
         Expr::Lines(e, ..) => ("lines", vec![lower_operand(e, bindings, lowering)]),
         Expr::CountLinesWith(text, pattern, ..) => ("count_lines_with", vec![lower_operand(text, bindings, lowering), lower_operand(pattern, bindings, lowering)]),
@@ -428,10 +517,10 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::TryCreateDir(path, ..) => ("create_dir", vec![lower_operand(path, bindings, lowering)]),
         Expr::SetCwd(path, ..) => ("set_cwd", vec![lower_operand(path, bindings, lowering)]),
         Expr::MapNew(..) => ("map_new", vec![]),
-        Expr::MapGet(place, key, ..) => ("map_get", vec![map_place_operand(place), lower_operand(key, bindings, lowering)]),
-        Expr::MapHas(place, key, ..) => ("map_has", vec![map_place_operand(place), lower_operand(key, bindings, lowering)]),
-        Expr::MapRemove(place, key, ..) => ("map_remove", vec![map_place_operand(place), lower_operand(key, bindings, lowering)]),
-        Expr::MapInc(place, key, value, ..) => ("map_inc", vec![map_place_operand(place), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
+        Expr::MapGet(place, key, ..) => ("map_get", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering)]),
+        Expr::MapHas(place, key, ..) => ("map_has", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering)]),
+        Expr::MapRemove(place, key, ..) => ("map_remove", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering)]),
+        Expr::MapInc(place, key, value, ..) => ("map_inc", vec![map_place_operand(place, lowering.ctx), lower_operand(key, bindings, lowering), lower_operand(value, bindings, lowering)]),
         Expr::Utf8Len(e, ..) => ("utf8_len", vec![lower_operand(e, bindings, lowering)]),
         Expr::Utf8Prefix(e, n, ..) => ("utf8_prefix", vec![lower_operand(e, bindings, lowering), lower_operand(n, bindings, lowering)]),
         Expr::Trim(e, ..) => ("trim", vec![lower_operand(e, bindings, lowering)]),
@@ -473,33 +562,46 @@ fn string_base_operand(id: usize, field: &Option<String>) -> MirOperand {
     }
 }
 
-pub(super) fn expr_type(expr: &Expr) -> Type {
+fn vector_type(ctx: &CompileContext, elem: Type, borrowed: bool) -> Type {
+    let id = ctx.find_vector_elem(elem).unwrap_or(0);
+    if borrowed { Type::VectorRef(id) } else { Type::Vector(id) }
+}
+
+pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
     match expr {
         Expr::Spawn(_, _, tid, ..) => Type::Thread(*tid),
         Expr::Wait(_, ret, ..) => *ret,
         Expr::AtomicNew(..) => Type::Atomic,
-        Expr::AtomicLoad(..) | Expr::AtomicAdd(..) => Type::Int,
+        Expr::AtomicLoad(..) | Expr::AtomicAdd(..) => Type::Int(IntTy::I64),
         Expr::AtomicCas(..) => Type::Bool,
         Expr::SharedNew(_, sid) => Type::Shared(*sid),
-        Expr::SharedGet(_, sid) => shared_types_get(*sid),
+        Expr::SharedGet(_, sid) => ctx.shared_types_get(*sid),
         Expr::MutexNew => Type::Mutex,
         Expr::MutexLock(..) => Type::Guard,
         Expr::ChanNew(..) => Type::Chan,
         Expr::ChanSend(..) | Expr::ChanTrySend(..) => Type::Bool,
-        Expr::ChanRecv(..) | Expr::ChanSelect(..) | Expr::ExecRun(..) | Expr::PoolJoin(..) => Type::Int,
+        Expr::ChanRecv(..) | Expr::ChanSelect(..) | Expr::ExecRun(..) | Expr::PoolJoin(..) => Type::Int(IntTy::I64),
         Expr::ExecNew => Type::Exec,
         Expr::ScopeNew => Type::TaskScope,
         Expr::PoolNew(..) => Type::Pool,
-        Expr::Number(..) | Expr::Index(..) | Expr::Len(..) => Type::Int,
+        Expr::Number(..) | Expr::Len(..) => Type::Int(IntTy::I64),
+        Expr::Index(.., elem_ty) => *elem_ty,
         Expr::VecIndex(_, _, _, _, _, ty) => *ty,
+        Expr::VecIndexOf(_, _, _, _, ty) => *ty,
+        Expr::SliceOf(_, _, elem, ..) => Type::Slice(ctx.find_slice_elem(*elem).unwrap_or(0)),
+        Expr::SliceRange(_, _, elem, ..) => Type::Slice(ctx.find_slice_elem(*elem).unwrap_or(0)),
+        Expr::SliceIndex(_, _, _, _, elem) => *elem,
         Expr::StrVecIndex(..) => Type::String,
         Expr::Binary(_, _, _, _, _, ty) => *ty,
-        Expr::FloatLit(..) | Expr::ToF64(..) => Type::F64,
+        Expr::FloatLit(..) | Expr::ToF64(..) => Type::Float(FloatTy::F64),
+        Expr::CharLit(..) => Type::Char,
+        Expr::Unit => Type::Unit,
         Expr::BoolLit(..) | Expr::StrEq(..) | Expr::Contains(..) => Type::Bool,
         Expr::Variable(_, ty, ..) | Expr::Field(_, _, ty) | Expr::VecLit(_, ty, ..) => *ty,
         Expr::StructLit(sid, _) => Type::Struct(*sid),
         Expr::EnumLit(name, layout, ..) => Type::Enum(name, *layout),
-        Expr::Call(_, _, ty) | Expr::FnCall(_, _, ty, _) => *ty,
+        Expr::Call(_, _, ty) | Expr::FnCall(_, _, ty, _) | Expr::FnExprCall(_, _, ty, _) => *ty,
+        Expr::FnRef(_, sig) => Type::Fn(*sig),
         // The printed place types are evidence, so the string-shaped
         // expressions name their real types instead of the integer
         // catch-all (a string literal bound to `v0 (i64)` misleads).
@@ -507,32 +609,49 @@ pub(super) fn expr_type(expr: &Expr) -> Type {
         | Expr::Slice(..) | Expr::FloatToString(..) | Expr::ToString(..)
         | Expr::PathJoin(..) | Expr::PathName(..) | Expr::PathParent(..)
         | Expr::Utf8Prefix(..) => Type::String,
-        Expr::Bytes(..) => Type::Vec,
-        Expr::Neg(value, ..) => expr_type(value),
+        Expr::Bytes(..) => vector_type(ctx, Type::Int(IntTy::I64), false),
+        Expr::Neg(value, ..) => expr_type(value, ctx),
         Expr::ClosureLit(id) => Type::Closure(*id),
-        Expr::MapInc(place, ..) if place.f64_value() => Type::F64,
+        Expr::MapInc(place, ..) if place.f64_value() => Type::Float(FloatTy::F64),
         Expr::MapHas(..) | Expr::MapRemove(..) => Type::Bool,
         Expr::SliceView(..) => Type::StrView,
         Expr::Tokens(..) => Type::Tokens,
-        Expr::Split(..) | Expr::Args(..) | Expr::Lines(..) | Expr::StrVecNew(..) | Expr::MapKeys(..) => Type::StrVec,
-        Expr::F64VecNew(..) => Type::VecF,
-        Expr::MapNew(_, _, MapKind::Float) => Type::MapF,
-        Expr::MapNew(..) => Type::Map,
+        Expr::Split(..) | Expr::Args(..) | Expr::Lines(..) | Expr::StrVecNew(..) | Expr::MapKeys(..) => vector_type(ctx, Type::String, false),
+        Expr::F64VecNew(..) => vector_type(ctx, Type::Float(FloatTy::F64), false),
+        Expr::MapNew(_, _, kind) => map_kind_type(kind, ctx),
         // Math calls return f64 by definition (ADR-60).
-        Expr::MathCall(..) => Type::F64,
+        Expr::MathCall(..) => Type::Float(FloatTy::F64),
         Expr::Not(..) | Expr::PathExists(..) | Expr::PathIsDir(..) | Expr::StartsWith(..) | Expr::EndsWith(..) | Expr::JsonHas(..) => Type::Bool,
         // M2.12 slice 2: the address takes the pointee's pointer shape; a
-        // deref yields the pointee.
-        Expr::BorrowAs(e, mutable, ..) => if *mutable { Type::PtrMut(crate::frontend::intern_pointee(expr_type(e))) } else { Type::Ptr(crate::frontend::intern_pointee(expr_type(e))) },
+        // deref yields the pointee. A borrow of an aggregate keeps its
+        // dedicated view type: `&vec`/`&struct` are `VectorRef`/`StructRef`,
+        // not raw pointers (ADR-0235 slice 4 binds a `for` variable this way).
+        Expr::BorrowAs(e, mutable, ..) => match expr_type(e, ctx) {
+            Type::Vector(id) => Type::VectorRef(id),
+            Type::Struct(sid) => {
+                if *mutable { Type::StructMut(sid) } else { Type::StructRef(sid) }
+            }
+            pointee => {
+                if let Some(pid) = ctx.find_pointee(pointee) {
+                    if *mutable { Type::PtrMut(pid) } else { Type::Ptr(pid) }
+                } else if *mutable {
+                    Type::PtrMut(0)
+                } else {
+                    Type::Ptr(0)
+                }
+            }
+        }
         // Both pointer forms deref to their pointee — PtrMut was missing
         // here, so a *mut f64 deref printed through the i64 printer (the
         // slice-3 shapes were i64-only and matched the fallback by luck).
-        Expr::DerefPtr(p, ..) => match expr_type(p) { Type::Ptr(id) | Type::PtrMut(id) => crate::frontend::ptr_pointee(id), other => other },
+        Expr::DerefPtr(p, ..) => match expr_type(p, ctx) { Type::Ptr(id) | Type::PtrMut(id) => ctx.ptr_pointee(id), other => other },
         // Offsetting keeps the base's pointer type.
-        Expr::PtrOffset(p, ..) => expr_type(p),
-        Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => Type::Int,
+        Expr::PtrOffset(p, ..) => expr_type(p, ctx),
+        Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => Type::Int(IntTy::I64),
         // A retag's type is the new pointer, taken from the variant's own
         // fields — recursing on the same expression here would not terminate.
+        Expr::ScalarCast(_, _, to, ..) => *to,
+        Expr::IntMethod(_, _, _, ty, ..) => *ty,
         Expr::PtrCast(_, mutable, pointee_id, ..) => {
             if *mutable { Type::PtrMut(*pointee_id) } else { Type::Ptr(*pointee_id) }
         }
@@ -542,12 +661,23 @@ pub(super) fn expr_type(expr: &Expr) -> Type {
         | Expr::TryFileInfo(_, ty, ..) | Expr::TryRemoveFile(_, ty, ..) | Expr::TryRemoveDir(_, ty, ..)
         | Expr::TryCreateDir(_, ty, ..) | Expr::SetCwd(_, ty, ..) | Expr::Env(_, ty, ..)
         | Expr::RunCommand(_, _, ty, ..) | Expr::MapGet(_, _, ty, ..)
-        | Expr::ReadStdin(ty, ..) | Expr::Cwd(ty, ..) => ty.clone(),
+        | Expr::ReadStdin(ty, ..) | Expr::Cwd(ty, ..) => *ty,
         Expr::TryWriteFile(_, _, ty, ..) | Expr::TryCopyFile(_, _, ty, ..) | Expr::TryRenamePath(_, _, ty, ..)
         | Expr::TryAppendFile(_, _, ty, ..) | Expr::JsonGet(_, _, ty, ..) | Expr::JsonInt(_, _, ty, ..)
-        | Expr::JsonBool(_, _, ty, ..) | Expr::JsonLen(_, _, ty, ..) | Expr::Find(_, _, ty, ..) => ty.clone(),
-        Expr::ToI64(..) | Expr::WriteFile(..) | Expr::CountLinesWith(..) | Expr::Utf8Len(..)
-        | Expr::MapInc(..) | Expr::NowMs | Expr::NowS => Type::Int,
+        | Expr::JsonBool(_, _, ty, ..) | Expr::JsonLen(_, _, ty, ..) | Expr::Find(_, _, ty, ..) => *ty,
+        // to_i64 is fallible: its type is the IntResult enum the parser
+        // attached, not a plain i64.
+        Expr::ToI64(_, ty, ..) => *ty,
+        // map_inc's result is the map's value kind: i64 or f64.
+        Expr::MapInc(place, ..) => {
+            if place.f64_value() {
+                Type::Float(FloatTy::F64)
+            } else {
+                Type::Int(IntTy::I64)
+            }
+        }
+        Expr::WriteFile(..) | Expr::CountLinesWith(..) | Expr::Utf8Len(..)
+        | Expr::NowMs | Expr::NowS => Type::Int(IntTy::I64),
     }
 }
 
@@ -647,7 +777,7 @@ fn thread_edges(blocks: &mut [MirBlock]) -> bool {
         let replacement = match &block.terminator {
             CfgTerminator::Goto(target) => {
                 let resolved = resolve_target(*target, &trampolines);
-                (resolved != *target).then(|| CfgTerminator::Goto(resolved))
+                (resolved != *target).then_some(CfgTerminator::Goto(resolved))
             }
             CfgTerminator::Branch(cond, then_target, else_target) => {
                 let then_target_now = resolve_target(*then_target, &trampolines);
@@ -660,9 +790,14 @@ fn thread_edges(blocks: &mut [MirBlock]) -> bool {
                     None
                 }
             }
-            CfgTerminator::Switch(subject, layout, targets) => {
-                let resolved: Vec<usize> = targets.iter().map(|t| resolve_target(*t, &trampolines)).collect();
-                (resolved != *targets).then(|| CfgTerminator::Switch(*subject, *layout, resolved))
+            CfgTerminator::Switch(subject, path, layout, targets, default) => {
+                let resolved: Vec<(usize, usize)> = targets
+                    .iter()
+                    .map(|(v, t)| (*v, resolve_target(*t, &trampolines)))
+                    .collect();
+                let resolved_default = default.map(|d| resolve_target(d, &trampolines));
+                (resolved != *targets || resolved_default != *default)
+                    .then_some(CfgTerminator::Switch(*subject, path.clone(), *layout, resolved, resolved_default))
             }
             _ => None,
         };
@@ -679,8 +814,8 @@ fn thread_edges(blocks: &mut [MirBlock]) -> bool {
 // real side effect (§2.2 Rule 7: optimizations must not change behavior).
 fn condition_is_pure(expr: &Expr) -> bool {
     match expr {
-        Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) => true,
-        Expr::Variable(_, Type::Int | Type::Bool | Type::F64, ..) => true,
+        Expr::Number(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::CharLit(..) | Expr::Unit => true,
+        Expr::Variable(_, Type::Int(_) | Type::Bool | Type::Float(_) | Type::Char | Type::Unit, ..) => true,
         Expr::Not(value) => condition_is_pure(value),
         Expr::Binary(left, op, right, ..) => {
             // Arithmetic can trap on overflow or division by zero.
@@ -764,7 +899,13 @@ fn terminator_targets(terminator: &CfgTerminator) -> Vec<usize> {
     match terminator {
         CfgTerminator::Goto(target) => vec![*target],
         CfgTerminator::Branch(_, a, b) => vec![*a, *b],
-        CfgTerminator::Switch(_, _, targets) => targets.clone(),
+        CfgTerminator::Switch(_, _, _, targets, default) => {
+            let mut out: Vec<usize> = targets.iter().map(|(_, t)| *t).collect();
+            if let Some(d) = default {
+                out.push(*d);
+            }
+            out
+        }
         CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => Vec::new(),
     }
 }
@@ -794,11 +935,10 @@ fn optimize_block(block: &mut MirBlock) {
                 }
             }
             MirPlace::Temp(id, _) => {
-                if let MirRvalue::Use(op) = &binding.rvalue {
-                    if is_scalar_const(op) {
+                if let MirRvalue::Use(op) = &binding.rvalue
+                    && is_scalar_const(op) {
                         temp_consts.insert(*id, op.clone());
                     }
-                }
             }
             MirPlace::Field(base, _, _) => {
                 if let Some(root) = root_local(base) {
@@ -890,6 +1030,7 @@ fn fold_rvalue(rvalue: &MirRvalue, locals: &HashMap<usize, MirOperand>, temps: &
         }
         MirRvalue::Call(id, args, ret) => MirRvalue::Call(*id, args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
         MirRvalue::FnCall(id, args, ret) => MirRvalue::FnCall(*id, args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
+        MirRvalue::FnExprCall(callee, args, ret) => MirRvalue::FnExprCall(subst_operand(callee, locals, temps), args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
         MirRvalue::ClosureLit(id) => MirRvalue::ClosureLit(*id),
         MirRvalue::Intrinsic(name, args, ret) => MirRvalue::Intrinsic(name, args.iter().map(|a| subst_operand(a, locals, temps)).collect(), *ret),
         MirRvalue::Aggregate(sid, vals) => MirRvalue::Aggregate(*sid, vals.iter().map(|v| fold_rvalue(v, locals, temps)).collect()),
@@ -940,6 +1081,10 @@ fn collect_rvalue_temps(rvalue: &MirRvalue, used: &mut HashSet<usize>) {
         MirRvalue::Call(_, args, _) | MirRvalue::FnCall(_, args, _) | MirRvalue::Intrinsic(_, args, _) => {
             for a in args { collect_operand_temps(a, used); }
         }
+        MirRvalue::FnExprCall(callee, args, _) => {
+            collect_operand_temps(callee, used);
+            for a in args { collect_operand_temps(a, used); }
+        }
         MirRvalue::Aggregate(_, vals) | MirRvalue::AdtAggregate(_, _, _, vals) | MirRvalue::VecNew(vals, _) => {
             for v in vals { collect_rvalue_temps(v, used); }
         }
@@ -963,7 +1108,7 @@ fn collect_place_temps(place: &MirPlace, used: &mut HashSet<usize>) {
 
 // Check block identity, successor references and the declared type of each
 // call result before a consumer uses the optimized graph.
-pub(super) fn validate(function: &MirFunction) -> Result<(), String> {
+pub(super) fn validate(function: &MirFunction, ctx: &CompileContext) -> Result<(), String> {
     // Unreachable-block elimination leaves the surviving ids sparse, so a
     // target is valid when it names a surviving block, not when it indexes
     // the block vector.
@@ -1005,28 +1150,39 @@ pub(super) fn validate(function: &MirFunction) -> Result<(), String> {
             if target != returns {
                 return Err(format!(
                     "internal: fn #{} block {} assigns a call result of type {} to a place of type {}",
-                    function.id, block.id, returns.name(), target.name(),
+                    function.id, block.id, returns.name(ctx), target.name(ctx),
                 ));
             }
         }
         match &block.terminator {
             CfgTerminator::Goto(target) => if !ids.contains(target) { return Err(format!("internal: fn #{} block {} branches to missing block {}", function.id, block.id, target)); },
             CfgTerminator::Branch(condition, yes, no) => {
-                if expr_type(condition) != Type::Bool {
+                if expr_type(condition, ctx) != Type::Bool {
                     return Err(format!("internal: fn #{} block {} has a non-boolean branch condition", function.id, block.id));
                 }
                 if !ids.contains(yes) || !ids.contains(no) {
                     return Err(format!("internal: fn #{} block {} branches to missing blocks", function.id, block.id));
                 }
             }
-            CfgTerminator::Switch(_, _, targets) => for t in targets { if !ids.contains(t) { return Err(format!("internal: fn #{} switch target missing", function.id)); } },
-            CfgTerminator::Return(value) if expr_type(value) != function.returns => {
+            CfgTerminator::Switch(_, _, _, targets, default) => {
+                for (_, t) in targets {
+                    if !ids.contains(t) {
+                        return Err(format!("internal: fn #{} switch target missing", function.id));
+                    }
+                }
+                if let Some(d) = default
+                    && !ids.contains(d)
+                {
+                    return Err(format!("internal: fn #{} switch default target missing", function.id));
+                }
+            }
+            CfgTerminator::Return(value) if expr_type(value, ctx) != function.returns => {
                 return Err(format!(
                     "internal: fn #{} block {} returns {}, expected {}",
-                    function.id, block.id, expr_type(value).name(), function.returns.name(),
+                    function.id, block.id, expr_type(value, ctx).name(ctx), function.returns.name(ctx),
                 ));
             }
-            CfgTerminator::Exit(code) if expr_type(code) != Type::Int => {
+            CfgTerminator::Exit(code) if expr_type(code, ctx) != Type::Int(IntTy::I64) => {
                 return Err(format!("internal: fn #{} block {} exits with a non-i64 value", function.id, block.id));
             }
             CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => {}
@@ -1035,25 +1191,30 @@ pub(super) fn validate(function: &MirFunction) -> Result<(), String> {
     Ok(())
 }
 
-fn print_function(function: &MirFunction, out: &mut String) {
+fn print_function(function: &MirFunction, out: &mut String, ctx: &CompileContext) {
     let name = if function.is_main { "main".to_owned() } else { format!("#{}", function.id) };
-    let params = function.params.iter().map(|(id, t)| format!("v{}: {}", id, t.name())).collect::<Vec<_>>().join(", ");
-    out.push_str(&format!("fn {}({}) -> {} ({} blocks)\n", name, params, function.returns.name(), function.blocks.len()));
+    let params = function.params.iter().map(|(id, t)| format!("v{}: {}", id, t.name(ctx))).collect::<Vec<_>>().join(", ");
+    out.push_str(&format!("fn {}({}) -> {} ({} blocks)\n", name, params, function.returns.name(ctx), function.blocks.len()));
     for block in &function.blocks {
         out.push_str(&format!("  block {}:\n", block.id));
         for binding in &block.bindings {
             let mut text = String::new();
-            print_place(&binding.target, &mut text);
+            print_place(&binding.target, &mut text, ctx);
             text.push_str(" = ");
-            print_rvalue(&binding.rvalue, &mut text);
+            print_rvalue(&binding.rvalue, &mut text, ctx);
             out.push_str(&format!("    {}\n", text));
         }
         let tail = match &block.terminator {
             CfgTerminator::Goto(target) => format!("goto block {}", target),
-            CfgTerminator::Branch(cond, a, b) => format!("branch {} -> then block {} else block {}", mir_text(cond), a, b),
-            CfgTerminator::Switch(subject, _, targets) => format!("switch v{} -> {}", subject, targets.iter().map(|t| format!("block {}", t)).collect::<Vec<_>>().join(", ")),
-            CfgTerminator::Return(expr) => format!("return {}", mir_text(expr)),
-            CfgTerminator::Exit(code) => format!("exit {}", mir_text(code)),
+            CfgTerminator::Branch(cond, a, b) => format!("branch {} -> then block {} else block {}", mir_text(cond, ctx), a, b),
+            CfgTerminator::Switch(subject, _, _, targets, default) => format!(
+                "switch v{} -> {}{}",
+                subject,
+                targets.iter().map(|(v, t)| format!("v{v}: block {t}")).collect::<Vec<_>>().join(", "),
+                default.map(|d| format!(", default: block {d}")).unwrap_or_default(),
+            ),
+            CfgTerminator::Return(expr) => format!("return {}", mir_text(expr, ctx)),
+            CfgTerminator::Exit(code) => format!("exit {}", mir_text(code, ctx)),
             CfgTerminator::Unreachable if function.is_main => "implicit exit (main)".to_owned(),
             CfgTerminator::Unreachable => "unreachable".to_owned(),
         };
@@ -1061,29 +1222,31 @@ fn print_function(function: &MirFunction, out: &mut String) {
     }
 }
 
-fn mir_text(expr: &Expr) -> String {
-    crate::frontend::tree::expression_text(expr)
+fn mir_text(expr: &Expr, ctx: &CompileContext) -> String {
+    crate::frontend::tree::expression_text(expr, ctx)
 }
 
-fn print_place(place: &MirPlace, out: &mut String) {
+fn print_place(place: &MirPlace, out: &mut String, ctx: &CompileContext) {
     match place {
-        MirPlace::Local(id, ty) => out.push_str(&format!("v{} ({})", id, ty.name())),
-        MirPlace::Temp(id, ty) => out.push_str(&format!("t{} ({})", id, ty.name())),
+        MirPlace::Local(id, ty) => out.push_str(&format!("v{} ({})", id, ty.name(ctx))),
+        MirPlace::Temp(id, ty) => out.push_str(&format!("t{} ({})", id, ty.name(ctx))),
         MirPlace::Field(base, fname, ty) => {
-            print_place(base, out);
-            out.push_str(&format!(".{} ({})", fname, ty.name()));
+            print_place(base, out, ctx);
+            out.push_str(&format!(".{} ({})", fname, ty.name(ctx)));
         }
     }
 }
 
-fn print_operand(operand: &MirOperand, out: &mut String) {
+fn print_operand(operand: &MirOperand, out: &mut String, ctx: &CompileContext) {
     match operand {
-        MirOperand::Place(place) => print_place(place, out),
+        MirOperand::Place(place) => print_place(place, out, ctx),
         MirOperand::Int(n) => out.push_str(&n.to_string()),
         // Debug formatting keeps the decimal point: `4.0` prints as `4.0`,
         // not `4`, which would read as an integer operand.
         MirOperand::Float(x) => out.push_str(&format!("{x:?}")),
         MirOperand::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        MirOperand::Char(c) => out.push_str(&format!("{c:?}")),
+        MirOperand::Unit => out.push_str("()"),
         MirOperand::Borrow { slot, take_address } => {
             let operation = if *take_address { "address_of" } else { "forward_borrow" };
             out.push_str(&format!("{operation}(v{slot})"));
@@ -1093,44 +1256,50 @@ fn print_operand(operand: &MirOperand, out: &mut String) {
     }
 }
 
-fn print_rvalue(rvalue: &MirRvalue, out: &mut String) {
+fn print_rvalue(rvalue: &MirRvalue, out: &mut String, ctx: &CompileContext) {
     match rvalue {
-        MirRvalue::Use(operand) => print_operand(operand, out),
+        MirRvalue::Use(operand) => print_operand(operand, out, ctx),
         MirRvalue::ShortCircuit(lhs, op, rhs) => {
-            print_operand(lhs, out);
-            out.push_str(&format!(" {} lazy {{ {} }} -> bool", tree::operator_text(op), mir_text(rhs)));
+            print_operand(lhs, out, ctx);
+            out.push_str(&format!(" {} lazy {{ {} }} -> bool", tree::operator_text(op), mir_text(rhs, ctx)));
         }
         MirRvalue::Binary(a, op, b, ty) => {
-            print_operand(a, out);
+            print_operand(a, out, ctx);
             out.push(' ');
             out.push_str(crate::frontend::tree::operator_text(op));
             out.push(' ');
-            print_operand(b, out);
-            out.push_str(&format!(" -> {}", ty.name()));
+            print_operand(b, out, ctx);
+            out.push_str(&format!(" -> {}", ty.name(ctx)));
         }
         MirRvalue::Call(id, args, ret) => {
             out.push_str(&format!("fn#{}(", id));
-            print_operands(args, out);
-            out.push_str(&format!(") -> {}", ret.name()));
+            print_operands(args, out, ctx);
+            out.push_str(&format!(") -> {}", ret.name(ctx)));
         }
         MirRvalue::FnCall(id, args, ret) => {
             out.push_str(&format!("v{}(", id));
-            print_operands(args, out);
-            out.push_str(&format!(") -> {}", ret.name()));
+            print_operands(args, out, ctx);
+            out.push_str(&format!(") -> {}", ret.name(ctx)));
+        }
+        MirRvalue::FnExprCall(callee, args, ret) => {
+            print_operand(callee, out, ctx);
+            out.push('(');
+            print_operands(args, out, ctx);
+            out.push_str(&format!(") -> {}", ret.name(ctx)));
         }
         MirRvalue::ClosureLit(id) => {
             out.push_str(&format!("closure#{}", id));
         }
         MirRvalue::Intrinsic(name, args, ret) => {
             out.push_str(&format!("{}(", name));
-            print_operands(args, out);
-            out.push_str(&format!(") -> {}", ret.name()));
+            print_operands(args, out, ctx);
+            out.push_str(&format!(") -> {}", ret.name(ctx)));
         }
         MirRvalue::Aggregate(sid, values) => {
             out.push_str(&format!("struct #{} {{ ", sid));
             for (index, value) in values.iter().enumerate() {
                 if index > 0 { out.push_str(", "); }
-                print_rvalue(value, out);
+                print_rvalue(value, out, ctx);
             }
             out.push_str(" }");
         }
@@ -1138,7 +1307,7 @@ fn print_rvalue(rvalue: &MirRvalue, out: &mut String) {
             out.push_str(&format!("{}#{}::variant#{}(", name, eid, vidx));
             for (index, value) in values.iter().enumerate() {
                 if index > 0 { out.push_str(", "); }
-                print_rvalue(value, out);
+                print_rvalue(value, out, ctx);
             }
             out.push(')');
         }
@@ -1146,17 +1315,17 @@ fn print_rvalue(rvalue: &MirRvalue, out: &mut String) {
             out.push('[');
             for (index, value) in values.iter().enumerate() {
                 if index > 0 { out.push_str(", "); }
-                print_rvalue(value, out);
+                print_rvalue(value, out, ctx);
             }
-            out.push_str(&format!("] ({})", ty.name()));
+            out.push_str(&format!("] ({})", ty.name(ctx)));
         }
     }
 }
 
-fn print_operands(args: &[MirOperand], out: &mut String) {
+fn print_operands(args: &[MirOperand], out: &mut String, ctx: &CompileContext) {
     for (index, arg) in args.iter().enumerate() {
         if index > 0 { out.push_str(", "); }
-        print_operand(arg, out);
+        print_operand(arg, out, ctx);
     }
 }
 
@@ -1170,21 +1339,21 @@ mod validation_tests {
             id: 0,
             is_main: false,
             params: vec![],
-            returns: Type::Int,
+            returns: Type::Int(IntTy::I64),
             blocks: vec![MirBlock {
                 id: 0,
                 statements: vec![],
                 bindings: vec![MirBinding {
-                    target: MirPlace::Temp(0, Type::Int),
+                    target: MirPlace::Temp(0, Type::Int(IntTy::I64)),
                     rvalue: MirRvalue::Call(1, vec![], Type::Bool),
                 }],
                 terminator: CfgTerminator::Return(Expr::Number(0)),
             }],
         };
-        let error = validate(&function).unwrap_err();
+        let error = validate(&function, &CompileContext::new()).unwrap_err();
         assert!(error.contains("call result of type bool to a place of type i64"), "{error}");
         function.blocks[0].bindings[0].target = MirPlace::Temp(0, Type::Bool);
-        assert!(validate(&function).is_ok());
+        assert!(validate(&function, &CompileContext::new()).is_ok());
     }
 
     #[test]
@@ -1193,27 +1362,27 @@ mod validation_tests {
             id: 0,
             is_main: false,
             params: vec![],
-            returns: Type::Int,
+            returns: Type::Int(IntTy::I64),
             blocks: vec![MirBlock {
                 id: 0,
                 statements: vec![],
                 bindings: vec![
                     MirBinding {
-                        target: MirPlace::Temp(1, Type::Int),
-                        rvalue: MirRvalue::Use(MirOperand::Place(MirPlace::Temp(0, Type::Int))),
+                        target: MirPlace::Temp(1, Type::Int(IntTy::I64)),
+                        rvalue: MirRvalue::Use(MirOperand::Place(MirPlace::Temp(0, Type::Int(IntTy::I64)))),
                     },
                     MirBinding {
-                        target: MirPlace::Temp(0, Type::Int),
+                        target: MirPlace::Temp(0, Type::Int(IntTy::I64)),
                         rvalue: MirRvalue::Use(MirOperand::Int(42)),
                     },
                 ],
                 terminator: CfgTerminator::Return(Expr::Number(0)),
             }],
         };
-        let error = validate(&function).unwrap_err();
+        let error = validate(&function, &CompileContext::new()).unwrap_err();
         assert!(error.contains("uses undefined temporary t0"), "{error}");
         function.blocks[0].bindings.swap(0, 1);
-        assert!(validate(&function).is_ok());
+        assert!(validate(&function, &CompileContext::new()).is_ok());
     }
 
     #[test]
@@ -1222,7 +1391,7 @@ mod validation_tests {
             id: 0,
             is_main: false,
             params: vec![],
-            returns: Type::Int,
+            returns: Type::Int(IntTy::I64),
             blocks: vec![MirBlock {
                 id: 0,
                 statements: vec![],
@@ -1230,10 +1399,10 @@ mod validation_tests {
                 terminator: CfgTerminator::Return(Expr::BoolLit(false)),
             }],
         };
-        assert!(validate(&function).unwrap_err().contains("returns bool, expected i64"));
+        assert!(validate(&function, &CompileContext::new()).unwrap_err().contains("returns bool, expected i64"));
         function.blocks[0].terminator = CfgTerminator::Exit(Expr::BoolLit(false));
-        assert!(validate(&function).unwrap_err().contains("exits with a non-i64 value"));
+        assert!(validate(&function, &CompileContext::new()).unwrap_err().contains("exits with a non-i64 value"));
         function.blocks[0].terminator = CfgTerminator::Exit(Expr::Number(0));
-        assert!(validate(&function).is_ok());
+        assert!(validate(&function, &CompileContext::new()).is_ok());
     }
 }

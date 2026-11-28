@@ -31,11 +31,15 @@ pub struct ClosureParam {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExpressionKind {
     Atom(Kind),
+    Unit,
     Group(Box<Expression>),
     Propagate(Box<Expression>),
     AddressCast { binding: String, binding_range: Range<usize>, mutable: bool, pointee: Range<usize> },
     PointerCast { base: Box<Expression>, mutable: bool, pointee: Range<usize> },
-    BorrowArgument { mutable: bool, name: String, name_range: Range<usize> },
+    /// `base as TypeName` for a scalar spelling (`i64`, `f64`, ...). The
+    /// compiler owns the cast semantics; the grammar keeps the target range.
+    ScalarCast { base: Box<Expression>, target: Range<usize> },
+    BorrowArgument { mutable: bool, name: String, name_range: Range<usize>, fields: Vec<(String, Range<usize>)>, index: Option<Range<usize>> },
     Array(Vec<Expression>),
     Vector(Vec<Expression>),
     Struct { target: Box<Expression>, fields: Vec<FieldInitializer> },
@@ -143,12 +147,84 @@ pub fn parse_borrow_argument(
     let Kind::Ident(name) = &token.kind else {
         return Err(error(token, "expected identifier").with_code("E0010"));
     };
+    // `&name.field.field` and `&name[expr]` (and `&name.field[expr]`): a
+    // borrow of one place inside a binding. Field names are kept with their
+    // spans; the bracket's contents are a byte range the compiler parses and
+    // type-checks.
+    let mut end = index + 1;
+    let mut fields: Vec<(String, Range<usize>)> = Vec::new();
+    while tokens.get(end).is_some_and(|token| token.kind == Kind::Dot) {
+        let dot = &tokens[end];
+        let Some(field_token) = tokens.get(end + 1) else {
+            return Err(error(dot, "expected a field name after '.'").with_code("E0010"));
+        };
+        let Kind::Ident(field) = &field_token.kind else {
+            return Err(error(field_token, "expected a field name").with_code("E0010"));
+        };
+        fields.push((field.clone(), field_token.offset..field_token.end));
+        end += 2;
+    }
+    let mut element_index = None;
+    if tokens.get(end).is_some_and(|token| token.kind == Kind::LBracket) {
+        let open = end;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, token) in tokens[open..].iter().enumerate() {
+            match token.kind {
+                Kind::LBracket => depth += 1,
+                Kind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            return Err(error(&tokens[open], "unterminated index in a borrow argument").with_code("E0010"));
+        };
+        let contents = &tokens[open + 1..close];
+        let Some(first) = contents.first() else {
+            return Err(error(&tokens[open], "expected an index expression").with_code("E0010"));
+        };
+        element_index = Some(first.offset..contents[contents.len() - 1].end);
+        end = close + 1;
+    }
     let kind = ExpressionKind::BorrowArgument {
         mutable,
         name: name.clone(),
         name_range: token.offset..token.end,
+        fields,
+        index: element_index,
     };
-    Ok((Expression { kind, range: amp.offset..token.end }, index + 1))
+    Ok((Expression { kind, range: amp.offset..tokens[end - 1].end }, end))
+}
+
+/// Split a borrow argument's bracket contents at a top-level `..` (ADR-0236's
+/// sub-slicing form, `&v[start..end]`). The returned byte ranges are the two
+/// bounds; an open side comes back empty so the compiler can name the missing
+/// bound. A `..` inside nested brackets or parentheses belongs to an inner
+/// expression and is ignored; `None` means the contents are one index.
+pub fn split_range_argument(tokens: &[Token], range: &Range<usize>) -> Option<(Range<usize>, Range<usize>)> {
+    let start = tokens.partition_point(|token| token.offset < range.start);
+    let end = tokens.partition_point(|token| token.end <= range.end);
+    let contents = tokens.get(start..end)?;
+    let first = contents.first()?;
+    let last = contents.last()?;
+    let mut depth = 0i32;
+    for token in contents {
+        match token.kind {
+            Kind::LParen | Kind::LBracket | Kind::LBrace => depth += 1,
+            Kind::RParen | Kind::RBracket | Kind::RBrace => depth -= 1,
+            Kind::DotDot if depth == 0 => {
+                return Some((first.offset..token.offset, token.end..last.end));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 struct Parser<'a> {
@@ -210,9 +286,12 @@ impl Parser<'_> {
                         self.file, self.source, self.tokens, self.cursor, None,
                     )?;
                     self.cursor = end;
-                    let ExpressionKind::BorrowArgument { name, name_range, mutable } = argument.kind else {
+                    let ExpressionKind::BorrowArgument { name, name_range, mutable, fields, index } = argument.kind else {
                         unreachable!("expected a borrowed binding");
                     };
+                    if index.is_some() || !fields.is_empty() {
+                        return Err(self.error("an address cast must borrow a whole binding; '&name.field'/'&name[index]' are call arguments only"));
+                    }
                     if self.current().kind != Kind::As {
                         return Err(self.error("a borrow expression must be cast to a pointer"));
                     }
@@ -226,11 +305,17 @@ impl Parser<'_> {
                 }
                 Kind::LParen => {
                     self.cursor += 1;
-                    let inner = self.expression(0)?;
-                    crate::expect_token(self.file, self.source, self.current(), Kind::RParen)?;
-                    range.end = self.current().end;
-                    self.cursor += 1;
-                    ExpressionKind::Group(Box::new(inner))
+                    if self.current().kind == Kind::RParen {
+                        range.end = self.current().end;
+                        self.cursor += 1;
+                        ExpressionKind::Unit
+                    } else {
+                        let inner = self.expression(0)?;
+                        crate::expect_token(self.file, self.source, self.current(), Kind::RParen)?;
+                        range.end = self.current().end;
+                        self.cursor += 1;
+                        ExpressionKind::Group(Box::new(inner))
+                    }
                 }
                 Kind::LBracket => {
                     let elements = self.collection(false)?;
@@ -265,7 +350,9 @@ impl Parser<'_> {
                     self.cursor += 1;
                     ExpressionKind::Atom(token.kind.clone())
                 }
-                _ => return Err(self.error("expected an expression")),
+                // The typed route's wording and code: these fixtures pin it
+                // through `check --json`, and the two parsers must agree.
+                _ => return Err(self.error("expected expression").with_code("E0011")),
             }
         };
         let left = self.postfix(Expression { kind, range }, no_struct)?;
@@ -419,7 +506,12 @@ impl Parser<'_> {
     }
 
     fn postfix(&mut self, mut base: Expression, no_struct: bool) -> Result<Expression, Diagnostic> {
-        while matches!(self.current().kind, Kind::LParen | Kind::LBracket | Kind::Dot | Kind::ColonColon | Kind::As)
+        // `[` continues the postfix chain only after a name or a field of one
+        // (the typed parser's index rule); any other base leaves the bracket
+        // for the caller's own diagnostic (`expected RParen, found LBracket`).
+        while matches!(self.current().kind, Kind::LParen | Kind::Dot | Kind::ColonColon | Kind::As)
+            || (self.current().kind == Kind::LBracket
+                && matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Field { .. } | ExpressionKind::Qualified { .. }))
             || (!no_struct && self.current().kind == Kind::LBrace
                 && matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Specialization { .. }))
         {
@@ -444,7 +536,11 @@ impl Parser<'_> {
                     self.cursor += 1;
                     ExpressionKind::Call { callee: Box::new(base), arguments }
                 }
-                Kind::LBracket if matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_))) => {
+                // `[` after a name or a qualified path: a type-argument list
+                // (`Pair[string, i64]`, `ptr::null[T]`), a call with explicit
+                // type arguments (`identity[i64](41)`), or an index of a
+                // binding; the lookahead decides.
+                Kind::LBracket if matches!(&base.kind, ExpressionKind::Atom(Kind::Ident(_)) | ExpressionKind::Qualified { .. }) => {
                     let start = self.cursor - 1;
                     let end = crate::declaration::skip_type_parameter_list(self.tokens, start);
                     if self.tokens.get(end).is_some_and(|token| matches!(token.kind, Kind::ColonColon | Kind::LBrace)) {
@@ -486,8 +582,17 @@ impl Parser<'_> {
                     ExpressionKind::Struct { target: Box::new(base), fields }
                 }
                 Kind::As => {
-                    let (mutable, pointee) = self.pointer_cast_target()?;
-                    ExpressionKind::PointerCast { base: Box::new(base), mutable, pointee }
+                    if matches!(self.current().kind, Kind::Ident(_)) {
+                        let token = self.current().clone();
+                        self.cursor += 1;
+                        ExpressionKind::ScalarCast {
+                            base: Box::new(base),
+                            target: token.offset..token.end,
+                        }
+                    } else {
+                        let (mutable, pointee) = self.pointer_cast_target()?;
+                        ExpressionKind::PointerCast { base: Box::new(base), mutable, pointee }
+                    }
                 }
                 Kind::Dot => {
                     let name = crate::parse_identifier(self.file, self.source, self.current())?.to_owned();
@@ -680,6 +785,31 @@ mod tests {
     }
 
     #[test]
+    fn sub_slice_ranges_split_at_the_top_level() {
+        let source = "call(&v[1..3], &a[start..end], &w[i])";
+        let tokens = crate::lex_diagnostic(source).unwrap();
+        let parsed = parse_operator_expression("case.ae", source).unwrap();
+        let ExpressionKind::Call { arguments, .. } = parsed.kind else {
+            panic!("expected a call");
+        };
+        let bounds = |argument: &Expression| {
+            let ExpressionKind::BorrowArgument { index, .. } = &argument.kind else {
+                panic!("expected a borrow argument");
+            };
+            split_range_argument(&tokens, index.as_ref().unwrap())
+        };
+        // Closed bounds on a vector and on an array.
+        let (start, end) = bounds(&arguments[0]).unwrap();
+        assert_eq!(&source[start], "1");
+        assert_eq!(&source[end], "3");
+        let (start, end) = bounds(&arguments[1]).unwrap();
+        assert_eq!(&source[start], "start");
+        assert_eq!(&source[end], "end");
+        // A single element index has no top-level `..`.
+        assert!(bounds(&arguments[2]).is_none());
+    }
+
+    #[test]
     fn pointer_cast_groups_before_method_call() {
         let source = "ptr as *mut Boxed[i64].deref()";
         let parsed = parse_operator_expression("case.ae", source).unwrap();
@@ -710,7 +840,7 @@ mod tests {
             (&arguments[0], "items", false),
             (&arguments[1], "point", true),
         ] {
-            let ExpressionKind::BorrowArgument { mutable, name, name_range } = &argument.kind else {
+            let ExpressionKind::BorrowArgument { mutable, name, name_range, .. } = &argument.kind else {
                 panic!("expected a borrowed argument");
             };
             assert_eq!(name, expected);

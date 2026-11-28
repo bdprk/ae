@@ -25,8 +25,8 @@ pub(super) fn enabled() -> bool {
 
 // Emit one function body as labelled blocks. The caller owns the signature and
 // the trailing backstops; this writes everything between them.
-pub(super) fn emit_function_body(function: &Function, out: &mut String) -> Result<(), String> {
-    let mut mir = mir::lower_function(function);
+pub(super) fn emit_function_body(function: &Function, out: &mut String, ctx: &codegen::CodegenCtx<'_>) -> Result<(), String> {
+    let mut mir = mir::lower_function(function, ctx);
     // The same optimization pipeline the printer uses: constant folding and
     // CFG simplification decide which blocks are live. A pruned block is
     // unreachable, so not emitting it changes nothing.
@@ -35,12 +35,12 @@ pub(super) fn emit_function_body(function: &Function, out: &mut String) -> Resul
     // unnecessary and keeps every release it cannot prove redundant, where
     // the idempotent release itself decides at runtime.
     mir::elaborate_drops(&mut mir);
-    mir::validate(&mir)?;
+    mir::validate(&mir, ctx)?;
     let mut next = 0usize;
     let mut needs_tail = false;
     for block in &mir.blocks {
         out.push_str(&format!("  block_{}: ;\n", block.id));
-        emit_block(&mir, block, out, &mut next, &mut needs_tail);
+        emit_block(&mir, block, out, &mut next, &mut needs_tail, ctx);
     }
     // `main`'s pending tail is not necessarily the last block created — a
     // loop's exit block is created while the loop lowers, but any arm or join
@@ -54,7 +54,7 @@ pub(super) fn emit_function_body(function: &Function, out: &mut String) -> Resul
     Ok(())
 }
 
-fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: &mut usize, needs_tail: &mut bool) {
+fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: &mut usize, needs_tail: &mut bool, ctx: &codegen::CodegenCtx<'_>) {
     let mut statements: &[Statement] = &block.statements;
     // A `return`/`exit` carries the scope's releases as a trailing `Frees`
     // statement (the CFG lowering puts them in the block, before the
@@ -62,27 +62,30 @@ fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: 
     // the return may move a value out of one of those slots — so the terminator
     // emits them exactly where the tree backend does.
     let mut frees: &[(usize, Type)] = &[];
-    if matches!(block.terminator, CfgTerminator::Return(_) | CfgTerminator::Exit(_)) {
-        if let Some(Statement::Frees(ids)) = statements.last() {
+    if matches!(block.terminator, CfgTerminator::Return(_) | CfgTerminator::Exit(_))
+        && let Some(Statement::Frees(ids)) = statements.last() {
             frees = ids;
             statements = &statements[..statements.len() - 1];
         }
-    }
-    emit_statements(statements, out, next);
+    emit_statements(statements, out, next, ctx);
     match &block.terminator {
         CfgTerminator::Goto(target) => out.push_str(&format!("    goto block_{target};\n")),
         CfgTerminator::Branch(condition, yes, no) => {
             // The condition keeps its source form: emitting it once, here,
             // preserves short-circuit evaluation and any call it contains.
-            let cond = emit_expr(condition, out, next, false);
+            let cond = emit_expr(condition, out, next, false, ctx);
             out.push_str(&format!("    if ({}) goto block_{yes}; else goto block_{no};\n", cond.text));
         }
         CfgTerminator::Return(expr) => {
-            let result = codegen::emit_value_before_cleanup(expr, frees, out, next, true);
-            out.push_str(&format!("    return {result};\n"));
+            let result = codegen::emit_value_before_cleanup(expr, frees, out, next, true, ctx);
+            if result.is_empty() {
+                out.push_str("    return;\n");
+            } else {
+                out.push_str(&format!("    return {result};\n"));
+            }
         }
         CfgTerminator::Exit(code) => {
-            let result = codegen::emit_value_before_cleanup(code, frees, out, next, false);
+            let result = codegen::emit_value_before_cleanup(code, frees, out, next, false, ctx);
             out.push_str(&format!("    ae_exit({result});\n"));
         }
         // Enum dispatch: one arm block per variant, in variant order, so each
@@ -90,10 +93,17 @@ fn emit_block(function: &MirFunction, block: &MirBlock, out: &mut String, next: 
         // exhaustive, so every variant has a target and no default is
         // needed; the arm bodies are other blocks, so the switch contains
         // only gotos and nothing inside it can `break` an enclosing loop.
-        CfgTerminator::Switch(subject, eid, targets) => {
-            out.push_str(&format!("    switch (v{subject}.tag) {{\n"));
-            for (variant, target) in targets.iter().enumerate() {
+        CfgTerminator::Switch(subject, path, eid, targets, default) => {
+            let mut place = format!("v{subject}");
+            for (v, f) in path {
+                place.push_str(&format!(".u.v{v}.p{f}"));
+            }
+            out.push_str(&format!("    switch ({place}.tag) {{\n"));
+            for (variant, target) in targets {
                 out.push_str(&format!("    case AE_E{eid}_{variant}: goto block_{target};\n"));
+            }
+            if let Some(default_block) = default {
+                out.push_str(&format!("    default: goto block_{default_block};\n"));
             }
             out.push_str("    }\n");
         }

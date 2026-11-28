@@ -16,13 +16,32 @@ const LF_CHAR: char = '\n';
 #[derive(Debug, Clone)]
 enum Val {
     Int(i64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    Isize(isize),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    Usize(usize),
+    F32(f32),
     Float(f64),
     Bool(bool),
+    Char(char),
+    Unit,
     Str(String),
-    Array(Vec<i64>),
+    Array(Vec<Val>),
+    // ADR-0236: a slice parameter's value. Read-only borrows are snapshots in
+    // the interpreter (the same model `&vec` uses), so the visible elements
+    // are copied and reads never reach across a frame. A mutable slice names
+    // the owner slot in the calling frame instead, so stores write back.
+    Slice(Vec<Val>),
+    SliceMutRef { owner: usize, start: i64, len: i64 },
     VecI(Vec<i64>),
     VecS(Vec<String>),
     VecF(Vec<f64>),
+    VecG(Vec<Val>),
     Map(HashMap<String, i64>),
     MapF(HashMap<String, f64>),
     Tokens { base: Rc<str>, sep: Rc<str> },
@@ -104,7 +123,11 @@ struct Env<'a> {
 const MAX_STEPS: usize = 5_000_000;
 
 pub fn interpret_path(path: &Path) -> Result<(String, u8), (String, String)> {
-    let program = loader::load_program(path).map_err(|e| (String::new(), e))?;
+    interpret_path_with_imports(path, &PackageImports::new())
+}
+
+pub fn interpret_path_with_imports(path: &Path, imports: &PackageImports) -> Result<(String, u8), (String, String)> {
+    let program = loader::load_program_with_imports(path, imports).map_err(|e| (String::new(), e))?;
     let mut fns = HashMap::new();
     let mut main_fn = None;
     for file in &program.files {
@@ -124,6 +147,12 @@ pub fn interpret_path(path: &Path) -> Result<(String, u8), (String, String)> {
         Flow::Trap(msg) => Err((env.out, msg)),
         Flow::Break | Flow::Continue(_) => Err((env.out, "internal: unwound loop control in main".to_owned())),
     }
+}
+
+// A prelude payload struct (ADR-0234), resolved by name like a preset result
+// enum: the struct id is fixed after loading.
+fn payload_struct_of(env: &Env, name: &str) -> Option<usize> {
+    env.program.structs.iter().position(|def| def.name == name)
 }
 
 // A prelude result enum (IntResult, FloatResult, ...), resolved by name:
@@ -215,14 +244,14 @@ fn path_is_absolute(path: &str) -> bool {
 // `path_name`: everything after the final separator; `path_parent`: every-
 // thing before it (the separator itself dropped, matching the runtime).
 fn path_name(path: &str) -> String {
-    match path.rfind(|c| is_separator(c)) {
+    match path.rfind(is_separator) {
         Some(idx) => path[idx + 1..].to_owned(),
         None => path.to_owned(),
     }
 }
 
 fn path_parent(path: &str) -> String {
-    match path.rfind(|c| is_separator(c)) {
+    match path.rfind(is_separator) {
         Some(idx) => path[..idx].to_owned(),
         None => String::new(),
     }
@@ -486,32 +515,34 @@ fn eval_stmts(
                     Err(f) => return f,
                 }
             }
-            Statement::Assign(id, expr, _) => {
-                match eval_expr(env, expr, locals, caller_locals, true) {
-                    Ok(v) => { locals.insert(*id, v); }
+            Statement::Assign(id, expr, release_old) => {
+                let v = match eval_expr(env, expr, locals, caller_locals, true) {
+                    Ok(v) => v,
                     Err(f) => return f,
-                }
+                };
+                let old = locals.insert(*id, v);
+                if *release_old
+                    && let Some(old) = old
+                        && let Err(f) = release_val_inferred(env, old) { return f; }
             }
-            Statement::Array(id, exprs) => {
+            Statement::Array(id, exprs, _) => {
                 let mut items = Vec::with_capacity(exprs.len());
                 for e in exprs {
                     match eval_expr(env, e, locals, caller_locals, false) {
-                        Ok(Val::Int(n)) => items.push(n),
-                        Ok(_) => return Flow::Trap("internal: array element not i64".to_owned()),
+                        Ok(val) => items.push(val),
                         Err(f) => return f,
                     }
                 }
                 locals.insert(*id, Val::Array(items));
             }
-            Statement::Store(id, len, idx_expr, val_expr, line, col) => {
+            Statement::Store(id, len, idx_expr, val_expr, line, col, _) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
                     Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
                     Err(f) => return f,
                 };
                 let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: array store value not i64".to_owned()),
+                    Ok(v) => v,
                     Err(f) => return f,
                 };
                 if idx < 0 || (idx as usize) >= *len {
@@ -521,7 +552,7 @@ fn eval_stmts(
                     arr[idx as usize] = val;
                 }
             }
-            Statement::FieldStore(id, fname, _, val_expr, _through_ptr) => {
+            Statement::FieldStore(id, path, _, val_expr, _through_ptr) => {
                 let val = match eval_expr(env, val_expr, locals, caller_locals, true) {
                     Ok(v) => v,
                     Err(f) => return f,
@@ -538,31 +569,15 @@ fn eval_stmts(
                     _ => None,
                 };
                 let mut wrote = false;
-                if let Some(target_id) = ref_target {
-                    if let Some(caller) = caller_locals.as_mut() {
-                        if let Some(Val::Struct(_, fields)) = caller.get_mut(&target_id) {
-                            fields.insert(fname.clone(), val.clone());
-                            wrote = true;
+                if let Some(target_id) = ref_target
+                    && let Some(caller) = caller_locals.as_mut()
+                        && let Some(Val::Struct(_, fields)) = caller.get_mut(&target_id) {
+                            wrote = insert_field_path(fields, path, val.clone());
                         }
+                if !wrote
+                    && let Some(Val::Struct(_, fields)) = locals.get_mut(id) {
+                        insert_field_path(fields, path, val);
                     }
-                }
-                if !wrote {
-                    if let Some(Val::Struct(_, fields)) = locals.get_mut(id) {
-                        fields.insert(fname.clone(), val);
-                    }
-                }
-            }
-            Statement::VecPush(id, val_expr, line, col) => {
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: vec push type".to_owned()),
-                    Err(f) => return f,
-                };
-                match locals.get_mut(id) {
-                    Some(Val::VecI(v)) => v.push(val),
-                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: vec push on non-vec".to_owned()),
-                }
             }
             Statement::StrVecPush(id, val_expr, line, col, _) => {
                 let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
@@ -576,31 +591,173 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: strvec push on non-vec".to_owned()),
                 }
             }
-            Statement::VecFPush(id, val_expr, line, col) => {
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Float(x)) => x,
-                    Ok(_) => return Flow::Trap("internal: f64vec push type".to_owned()),
+            Statement::GVecPush(id, val_expr, elem_ty, line, col) => {
+                // An owned element moves into the vector, so the source slot
+                // is consumed (the compiled side forfeits it).
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let val = match eval_expr(env, val_expr, locals, caller_locals, moving) {
+                    Ok(v) => v,
                     Err(f) => return f,
                 };
                 match locals.get_mut(id) {
-                    Some(Val::VecF(v)) => v.push(val),
+                    Some(Val::VecI(v)) => match val {
+                        Val::Int(n) => v.push(n),
+                        _ => return Flow::Trap("internal: vec push type".to_owned()),
+                    },
+                    Some(Val::VecF(v)) => match val {
+                        Val::Float(x) => v.push(x),
+                        _ => return Flow::Trap("internal: f64vec push type".to_owned()),
+                    },
+                    Some(Val::VecS(v)) => match val {
+                        Val::Str(s) => v.push(s),
+                        _ => return Flow::Trap("internal: strvec push type".to_owned()),
+                    },
+                    Some(Val::VecG(v)) => v.push(val),
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: f64vec push on non-vec".to_owned()),
+                    _ => return Flow::Trap("internal: gvec push on non-vec".to_owned()),
                 }
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) => {
+            Statement::StrVecPop(id, line, col) => {
                 match locals.get_mut(id) {
-                    Some(Val::VecI(v)) => {
-                        if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
-                    }
                     Some(Val::VecS(v)) => {
-                        if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
-                    }
-                    Some(Val::VecF(v)) => {
                         if v.pop().is_none() { return trap("pop on empty vector", *line, *col); }
                     }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
                     _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
+                }
+            }
+            Statement::GVecPop(id, elem_ty, line, col) => {
+                let popped = match locals.get_mut(id) {
+                    Some(Val::VecI(v)) => v.pop().map(Val::Int),
+                    Some(Val::VecF(v)) => v.pop().map(Val::Float),
+                    Some(Val::VecS(v)) => v.pop().map(Val::Str),
+                    Some(Val::VecG(v)) => v.pop(),
+                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
+                };
+                let Some(popped) = popped else { return trap("pop on empty vector", *line, *col) };
+                // The popped element releases exactly once, like the runtime's
+                // `ae_gvec_pop` drop hook.
+                if let Err(flow) = release_val(env, popped, *elem_ty) {
+                    return flow;
+                }
+            }
+            // P2.4: vector operations on a struct's vector field. The field
+            // value is read out, mutated, and written back; a `&mut` root
+            // resolves through the lender's frame.
+            Statement::VecPushField(id, field, _, value_expr, elem_ty, _, line, col) => {
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let value = match eval_expr(env, value_expr, locals, caller_locals, moving) {
+                    Ok(value) => value,
+                    Err(flow) => return flow,
+                };
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                match &mut container {
+                    Val::VecI(v) => match value { Val::Int(n) => v.push(n), _ => return Flow::Trap("internal: vec push type".to_owned()) },
+                    Val::VecF(v) => match value { Val::Float(x) => v.push(x), _ => return Flow::Trap("internal: f64vec push type".to_owned()) },
+                    Val::VecS(v) => match value { Val::Str(s) => v.push(s), _ => return Flow::Trap("internal: strvec push type".to_owned()) },
+                    Val::VecG(v) => v.push(value),
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: push on non-vec".to_owned()),
+                }
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+            }
+            Statement::VecPopField(id, field, _, elem_ty, line, col) => {
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                let popped = match &mut container {
+                    Val::VecI(v) => v.pop().map(Val::Int),
+                    Val::VecF(v) => v.pop().map(Val::Float),
+                    Val::VecS(v) => v.pop().map(Val::Str),
+                    Val::VecG(v) => v.pop(),
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: pop on non-vec".to_owned()),
+                };
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+                let Some(popped) = popped else { return trap("pop on empty vector", *line, *col) };
+                if let Err(flow) = release_val(env, popped, *elem_ty) {
+                    return flow;
+                }
+            }
+            Statement::VecStoreField(id, field, _, index_expr, value_expr, elem_ty, _, line, col) => {
+                let index = match eval_expr(env, index_expr, locals, caller_locals, false) {
+                    Ok(Val::Int(n)) => n,
+                    Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
+                    Err(f) => return f,
+                };
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                // The index traps before the right side runs.
+                let len = match &container {
+                    Val::VecI(v) => v.len(),
+                    Val::VecF(v) => v.len(),
+                    Val::VecS(v) => v.len(),
+                    Val::VecG(v) => v.len(),
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: store on non-vec".to_owned()),
+                };
+                if index < 0 || (index as usize) >= len { return trap("vector index out of bounds", *line, *col); }
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let value = match eval_expr(env, value_expr, locals, caller_locals, moving) {
+                    Ok(value) => value,
+                    Err(flow) => return flow,
+                };
+                let replaced = match &mut container {
+                    Val::VecI(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match value {
+                            Val::Int(n) => Val::Int(std::mem::replace(&mut v[index as usize], n)),
+                            _ => return Flow::Trap("internal: vec store type".to_owned()),
+                        }
+                    }
+                    Val::VecF(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match value {
+                            Val::Float(x) => Val::Float(std::mem::replace(&mut v[index as usize], x)),
+                            _ => return Flow::Trap("internal: f64vec store type".to_owned()),
+                        }
+                    }
+                    Val::VecS(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match value {
+                            Val::Str(s) => Val::Str(std::mem::replace(&mut v[index as usize], s)),
+                            _ => return Flow::Trap("internal: strvec store type".to_owned()),
+                        }
+                    }
+                    Val::VecG(v) => {
+                        if index < 0 || (index as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        std::mem::replace(&mut v[index as usize], value)
+                    }
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: store on non-vec".to_owned()),
+                };
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
+                }
+                if let Err(flow) = release_val(env, replaced, *elem_ty) {
+                    return flow;
+                }
+            }
+            Statement::VecSortField(id, field, _, elem_ty, reverse, line, col) => {
+                let Some(mut container) = field_place_get(locals, caller_locals, *id, field) else {
+                    return Flow::Trap("internal: vector field write on a non-struct".to_owned());
+                };
+                match &mut container {
+                    Val::VecI(v) => if *reverse { v.reverse() } else { v.sort() },
+                    Val::VecS(v) if *elem_ty == Type::String => if *reverse { v.reverse() } else { v.sort() },
+                    Val::Moved => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: sort on non-vec".to_owned()),
+                }
+                if !field_place_put(locals, caller_locals, *id, field, container) {
+                    return Flow::Trap("internal: vector field write lost its container".to_owned());
                 }
             }
             // `m[key] = value;` (and the field form): the map owns the
@@ -674,26 +831,6 @@ fn eval_stmts(
                     },
                 }
             }
-            Statement::VecStore(id, idx_expr, val_expr, line, col) => {
-                let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
-                    Err(f) => return f,
-                };
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Int(n)) => n,
-                    Ok(_) => return Flow::Trap("internal: vec store type".to_owned()),
-                    Err(f) => return f,
-                };
-                match locals.get_mut(id) {
-                    Some(Val::VecI(v)) => {
-                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
-                        v[idx as usize] = val;
-                    }
-                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: vec store on non-vec".to_owned()),
-                }
-            }
             Statement::StrVecStore(id, idx_expr, val_expr, line, col, _) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
@@ -714,24 +851,101 @@ fn eval_stmts(
                     _ => return Flow::Trap("internal: strvec store on non-vec".to_owned()),
                 }
             }
-            Statement::VecFStore(id, idx_expr, val_expr, line, col) => {
+            Statement::SliceStore(id, idx_expr, val_expr, _elem_ty, line, col) => {
+                // ADR-0236 rung 4: the write goes to the owner's slot in the
+                // calling frame, through the mutable slice's window.
+                let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
+                    Ok(Val::Int(n)) => n,
+                    Ok(_) => return Flow::Trap("internal: slice store index type".to_owned()),
+                    Err(f) => return f,
+                };
+                let (owner, start, len) = match read_var(locals, caller_locals, *id, *line, *col) {
+                    Ok(Val::SliceMutRef { owner, start, len }) => (owner, start, len),
+                    Ok(_) => return Flow::Trap("internal: slice store on a read-only slice".to_owned()),
+                    Err(f) => return f,
+                };
+                if idx < 0 || idx >= len { return trap("vector index out of bounds", *line, *col); }
+                let abs = (start + idx) as usize;
+                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
+                    Ok(v) => v,
+                    Err(f) => return f,
+                };
+                let Some(caller) = caller_locals.as_mut() else {
+                    return Flow::Trap("internal: dangling mutable slice".to_owned());
+                };
+                match caller.get_mut(&owner) {
+                    Some(Val::VecI(values)) => match val {
+                        Val::Int(n) => values[abs] = n,
+                        _ => return Flow::Trap("internal: slice store type".to_owned()),
+                    },
+                    Some(Val::VecF(values)) => match val {
+                        Val::Float(x) => values[abs] = x,
+                        _ => return Flow::Trap("internal: slice store type".to_owned()),
+                    },
+                    Some(Val::VecG(values)) => values[abs] = val,
+                    Some(Val::Array(values)) => values[abs] = val,
+                    Some(Val::Moved) => return trap("use of moved value", *line, *col),
+                    _ => return Flow::Trap("internal: slice store on non-vector owner".to_owned()),
+                }
+            }
+            Statement::GVecStore(id, idx_expr, val_expr, elem_ty, line, col) => {
                 let idx = match eval_expr(env, idx_expr, locals, caller_locals, false) {
                     Ok(Val::Int(n)) => n,
                     Ok(_) => return Flow::Trap("internal: index not i64".to_owned()),
                     Err(f) => return f,
                 };
-                let val = match eval_expr(env, val_expr, locals, caller_locals, false) {
-                    Ok(Val::Float(x)) => x,
-                    Ok(_) => return Flow::Trap("internal: f64vec store type".to_owned()),
+                // The index traps before the right side runs, like the
+                // compiled store.
+                let len = match locals.get(id) {
+                    Some(Val::VecI(v)) => v.len(),
+                    Some(Val::VecF(v)) => v.len(),
+                    Some(Val::VecS(v)) => v.len(),
+                    Some(Val::VecG(v)) => v.len(),
+                    Some(Val::Moved) => return trap("use of moved vector", *line, *col),
+                    _ => return Flow::Trap("internal: store on non-vec".to_owned()),
+                };
+                if idx < 0 || (idx as usize) >= len { return trap("vector index out of bounds", *line, *col); }
+                let moving = is_owned_type(*elem_ty, &env.program.structs, &env.program.enums);
+                let val = match eval_expr(env, val_expr, locals, caller_locals, moving) {
+                    Ok(v) => v,
                     Err(f) => return f,
                 };
-                match locals.get_mut(id) {
+                let replaced = match locals.get_mut(id) {
+                    Some(Val::VecI(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match val {
+                            Val::Int(n) => Some(Val::Int(std::mem::replace(&mut v[idx as usize], n))),
+                            _ => return Flow::Trap("internal: vec store type".to_owned()),
+                        }
+                    }
                     Some(Val::VecF(v)) => {
                         if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
-                        v[idx as usize] = val;
+                        match val {
+                            Val::Float(x) => Some(Val::Float(std::mem::replace(&mut v[idx as usize], x))),
+                            _ => return Flow::Trap("internal: f64vec store type".to_owned()),
+                        }
+                    }
+                    Some(Val::VecS(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        match val {
+                            Val::Str(s) => Some(Val::Str(std::mem::replace(&mut v[idx as usize], s))),
+                            _ => return Flow::Trap("internal: strvec store type".to_owned()),
+                        }
+                    }
+                    Some(Val::VecG(v)) => {
+                        if idx < 0 || (idx as usize) >= v.len() { return trap("vector index out of bounds", *line, *col); }
+                        let old = std::mem::replace(&mut v[idx as usize], val);
+                        Some(old)
                     }
                     Some(Val::Moved) => return trap("use of moved vector", *line, *col),
-                    _ => return Flow::Trap("internal: f64vec store on non-vec".to_owned()),
+                    _ => return Flow::Trap("internal: gvec store on non-vec".to_owned()),
+                };
+                // The overwritten element releases exactly once, like the
+                // runtime's `ae_gvec_set` drop hook.
+                if let Some(old) = replaced
+                    && let Err(flow) = release_val(env, old, *elem_ty)
+                {
+                    return flow;
                 }
             }
             Statement::Sort(id, is_str, line, col) => {
@@ -838,15 +1052,15 @@ fn eval_stmts(
                 }
             }
             Statement::Match(subject, _, arms) => {
-                let (vidx, payloads) = match read_var(locals, caller_locals, *subject, 0, 0) {
-                    Ok(Val::Enum(_, vidx, payloads)) => (vidx, payloads),
+                let subject_val = match read_var(locals, caller_locals, *subject, 0, 0) {
+                    Ok(v @ Val::Enum(..)) => v,
                     Ok(_) => return Flow::Trap("internal: match subject not enum".to_owned()),
                     Err(f) => return f,
                 };
                 for arm in arms {
-                    if arm.variant == vidx {
-                        for (bind_id, _, field_idx) in &arm.bindings {
-                            if let Some(p) = payloads.get(*field_idx) {
+                    if interp_pattern_matches(&arm.pattern, &subject_val) {
+                        for (bind_id, _, path) in &arm.bindings {
+                            if let Some(p) = interp_extract_path(&subject_val, path) {
                                 locals.insert(*bind_id, p.clone());
                             }
                         }
@@ -863,31 +1077,28 @@ fn eval_stmts(
                     Ok(v) => v,
                     Err(f) => return f,
                 };
-                for (id, ty) in frees {
-                    if *ty == Type::TaskScope {
-                        if let Some(Val::TaskScope(eid)) = locals.get(id).cloned() {
-                            if let Err(f) = drain_exec_queue(env, eid) { return f; }
-                        }
-                    }
-                }
+                if let Err(f) = release_frees(env, locals, frees) { return f; }
                 return Flow::Return(res);
             }
-            Statement::Exit(expr, _) => {
-                return match eval_expr(env, expr, locals, caller_locals, false) {
-                    Ok(Val::Int(code)) => Flow::Exit((code & 0xFF) as u8),
-                    Ok(_) => Flow::Exit(1),
-                    Err(f) => f,
+            Statement::Exit(expr, frees) => {
+                let code = match eval_expr(env, expr, locals, caller_locals, false) {
+                    Ok(Val::Int(code)) => (code & 0xFF) as u8,
+                    Ok(_) => 1,
+                    Err(f) => return f,
                 };
+                if let Err(f) = release_frees(env, locals, frees) { return f; }
+                return Flow::Exit(code);
             }
             // `?`: the success variant binds its payload and continues; the
             // failure variant propagates out of the function unchanged.
-            Statement::Propagate(expr, _, _, binding, _) => {
+            Statement::Propagate(expr, _, _, binding, frees) => {
                 let value = match eval_expr(env, expr, locals, caller_locals, false) {
                 Ok(v) => v,
                 Err(f) => return f,
             };
                 match value {
                     Val::Enum(eid, vidx, payloads) if vidx != 0 => {
+                        if let Err(f) = release_frees(env, locals, frees) { return f; }
                         return Flow::Return(Val::Enum(eid, vidx, payloads));
                     }
                     Val::Enum(_, _, payloads) => {
@@ -905,13 +1116,7 @@ fn eval_stmts(
             // (for, while, for-tokens) catches as its own step.
             Statement::Continue(_) => return Flow::Continue(0),
             Statement::Frees(frees) => {
-                for (id, ty) in frees {
-                    if *ty == Type::TaskScope {
-                        if let Some(Val::TaskScope(eid)) = locals.get(id).cloned() {
-                            if let Err(f) = drain_exec_queue(env, eid) { return f; }
-                        }
-                    }
-                }
+                if let Err(f) = release_frees(env, locals, frees) { return f; }
             }
             // An `unsafe` block is a scoping container (M2.12 slice 1): the
             // inner statements evaluate inline and any control flow — a
@@ -970,7 +1175,7 @@ fn eval_stmts(
                         Err(flow) => return flow,
                     }
                 }
-                let fn_id = crate::frontend::closures::closure_fn_id(*cid);
+                let fn_id = env.program.ctx.closure_fn_id(*cid);
                 let Some(func) = env.fns.get(&fn_id).copied() else {
                     return Flow::Trap(format!("internal: missing task closure fn #{fn_id}"));
                 };
@@ -986,7 +1191,7 @@ fn eval_stmts(
             }
             Statement::TaskYield => {}
             Statement::PtrStore(id, value, ..) => {
-                let pointer = match eval_expr(env, &Expr::Variable(*id, Type::Int, 0, 0), locals, caller_locals, false) {
+                let pointer = match eval_expr(env, &Expr::Variable(*id, Type::Int(IntTy::I64), 0, 0), locals, caller_locals, false) {
                     Ok(val) => val,
                     Err(flow) => return flow,
                 };
@@ -1016,11 +1221,10 @@ fn read_var(
     match locals.get(&id) {
         Some(Val::Moved) => Err(trap("use of moved value", line, col)),
         Some(Val::Ref(target_id)) => {
-            if let Some(caller) = caller_locals.as_ref() {
-                if let Some(v) = caller.get(target_id) {
+            if let Some(caller) = caller_locals.as_ref()
+                && let Some(v) = caller.get(target_id) {
                     return Ok(v.clone());
                 }
-            }
             Err(Flow::Trap("internal: dangling reference in interpreter".to_owned()))
         }
         Some(v) => Ok(v.clone()),
@@ -1039,10 +1243,15 @@ fn eval_expr(
         Expr::Number(n) => Ok(Val::Int(*n)),
         Expr::FloatLit(x) => Ok(Val::Float(*x)),
         Expr::BoolLit(b) => Ok(Val::Bool(*b)),
+        Expr::CharLit(c) => Ok(Val::Char(*c)),
+        Expr::Unit => Ok(Val::Unit),
         Expr::StrLit(s, _, _) => Ok(Val::Str(unescape_str(s))),
         Expr::Variable(id, ty, line, col) => {
             let val = read_var(locals, caller_locals, *id, *line, *col)?;
-            if moving && ty.owned() && !matches!(locals.get(id), Some(Val::Ref(_))) {
+            if moving
+                && is_owned_type(*ty, &env.program.structs, &env.program.enums)
+                && !matches!(locals.get(id), Some(Val::Ref(_)))
+            {
                 locals.insert(*id, Val::Moved);
             }
             Ok(val)
@@ -1085,26 +1294,51 @@ fn eval_expr(
         }
         Expr::VecLit(values, ty, _, _) => {
             match ty {
-                Type::Vec => {
-                    let mut out = Vec::with_capacity(values.len());
-                    for v in values {
-                        if let Val::Int(n) = eval_expr(env, v, locals, caller_locals, false)? { out.push(n); }
+                Type::Vector(id) => match env.program.ctx.vector_elem(*id) {
+                    // `elem` is bound below in each arm that needs it.
+                    Type::Int(IntTy::I64) => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for v in values {
+                            if let Val::Int(n) = eval_expr(env, v, locals, caller_locals, false)? { out.push(n); }
+                        }
+                        Ok(Val::VecI(out))
                     }
-                    Ok(Val::VecI(out))
-                }
-                Type::VecF => {
-                    let mut out = Vec::with_capacity(values.len());
-                    for v in values {
-                        if let Val::Float(x) = eval_expr(env, v, locals, caller_locals, false)? { out.push(x); }
+                    Type::Float(FloatTy::F64) => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for v in values {
+                            if let Val::Float(x) = eval_expr(env, v, locals, caller_locals, false)? { out.push(x); }
+                        }
+                        Ok(Val::VecF(out))
                     }
-                    Ok(Val::VecF(out))
-                }
+                    Type::String => {
+                        let mut out = Vec::with_capacity(values.len());
+                        for v in values {
+                            // An owned string moves into the literal; a view
+                            // is copied (the interpreter's Str values are
+                            // independent, so the copy is the same bytes).
+                            let moving = matches!(v, Expr::Variable(..));
+                            match eval_expr(env, v, locals, caller_locals, moving)? {
+                                Val::Str(s) => out.push(s),
+                                _ => return Err(Flow::Trap("internal: string vec literal element".to_owned())),
+                            }
+                        }
+                        Ok(Val::VecS(out))
+                    }
+                    elem => {
+                        let mut out = Vec::with_capacity(values.len());
+                        let moving = is_owned_type(elem, &env.program.structs, &env.program.enums);
+                        for v in values {
+                            out.push(eval_expr(env, v, locals, caller_locals, moving)?);
+                        }
+                        Ok(Val::VecG(out))
+                    }
+                },
                 _ => Err(Flow::Trap("internal: unsupported vec literal type".to_owned())),
             }
         }
         Expr::StrVecNew(_, _) => Ok(Val::VecS(Vec::new())),
         Expr::F64VecNew(_, _) => Ok(Val::VecF(Vec::new())),
-        Expr::Index(id, len, idx_expr, line, col) => {
+        Expr::Index(id, len, idx_expr, line, col, _) => {
             let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
                 Val::Int(n) => n,
                 _ => return Err(Flow::Trap("internal: index type".to_owned())),
@@ -1113,7 +1347,7 @@ fn eval_expr(
                 return Err(trap("array index out of bounds", *line, *col));
             }
             match read_var(locals, caller_locals, *id, *line, *col)? {
-                Val::Array(arr) => Ok(Val::Int(arr[idx as usize])),
+                Val::Array(arr) => Ok(arr[idx as usize].clone()),
                 _ => Err(Flow::Trap("internal: array index on non-array".to_owned())),
             }
         }
@@ -1131,8 +1365,114 @@ fn eval_expr(
                     if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
                     Ok(Val::Float(v[idx as usize]))
                 }
+                Val::VecG(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(v[idx as usize].clone())
+                }
                 _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
             }
+        }
+        Expr::VecIndexOf(base, idx_expr, line, col, _elem_ty) => {
+            let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: vec index type".to_owned())),
+            };
+            match eval_expr(env, base, locals, caller_locals, false)? {
+                Val::VecI(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(Val::Int(v[idx as usize]))
+                }
+                Val::VecF(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(Val::Float(v[idx as usize]))
+                }
+                Val::VecS(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(Val::Str(v[idx as usize].clone()))
+                }
+                Val::VecG(v) => {
+                    if idx < 0 || (idx as usize) >= v.len() { return Err(trap("vector index out of bounds", *line, *col)); }
+                    Ok(v[idx as usize].clone())
+                }
+                _ => Err(Flow::Trap("internal: vec index on non-vec".to_owned())),
+            }
+        }
+        Expr::SliceOf(slot, source, ..) => {
+            // A read-only borrow is a snapshot here: the visible elements are
+            // copied, exactly like a `&vec` parameter's value.
+            let value = read_var(locals, caller_locals, *slot, 0, 0)?;
+            let elements = match (*source, value) {
+                (Type::Slice(_), Val::Slice(values)) => values,
+                (Type::ArrayOf(..), Val::Array(values)) => values,
+                (_, Val::VecI(values)) => values.into_iter().map(Val::Int).collect(),
+                (_, Val::VecF(values)) => values.into_iter().map(Val::Float).collect(),
+                (_, Val::VecS(values)) => values.into_iter().map(Val::Str).collect(),
+                (_, Val::VecG(values)) => values,
+                _ => return Err(Flow::Trap("internal: slice source kind".to_owned())),
+            };
+            Ok(Val::Slice(elements))
+        }
+        Expr::SliceIndex(slot, idx_expr, line, col, _) => {
+            let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: slice index type".to_owned())),
+            };
+            match read_var(locals, caller_locals, *slot, *line, *col)? {
+                Val::Slice(values) => {
+                    if idx < 0 || (idx as usize) >= values.len() {
+                        return Err(trap("vector index out of bounds", *line, *col));
+                    }
+                    Ok(values[idx as usize].clone())
+                }
+                // A mutable slice reads through to the owner's storage in the
+                // calling frame (ADR-0236 rung 4).
+                Val::SliceMutRef { owner, start, len } => {
+                    if idx < 0 || idx >= len {
+                        return Err(trap("vector index out of bounds", *line, *col));
+                    }
+                    let abs = (start + idx) as usize;
+                    let Some(caller) = caller_locals.as_ref() else {
+                        return Err(Flow::Trap("internal: dangling mutable slice".to_owned()));
+                    };
+                    let value = match caller.get(&owner) {
+                        Some(Val::VecI(values)) => values.get(abs).copied().map(Val::Int),
+                        Some(Val::VecF(values)) => values.get(abs).copied().map(Val::Float),
+                        Some(Val::VecS(values)) => values.get(abs).cloned().map(Val::Str),
+                        Some(Val::VecG(values)) => values.get(abs).cloned(),
+                        Some(Val::Array(values)) => values.get(abs).cloned(),
+                        Some(Val::Moved) => return Err(trap("use of moved value", *line, *col)),
+                        _ => None,
+                    };
+                    value.ok_or_else(|| trap("vector index out of bounds", *line, *col))
+                }
+                _ => Err(Flow::Trap("internal: slice index on non-slice".to_owned())),
+            }
+        }
+        Expr::SliceRange(slot, source, _, start, end, line, col) => {
+            // ADR-0236 rung 3: the bounds evaluate first; the visible window
+            // is clipped from the same snapshot a whole slice would copy.
+            let start = match eval_expr(env, start, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+            };
+            let end = match eval_expr(env, end, locals, caller_locals, false)? {
+                Val::Int(n) => n,
+                _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+            };
+            let value = read_var(locals, caller_locals, *slot, *line, *col)?;
+            let elements = match (*source, value) {
+                (Type::Slice(_), Val::Slice(values)) => values,
+                (Type::ArrayOf(..), Val::Array(values)) => values,
+                (_, Val::VecI(values)) => values.into_iter().map(Val::Int).collect(),
+                (_, Val::VecF(values)) => values.into_iter().map(Val::Float).collect(),
+                (_, Val::VecS(values)) => values.into_iter().map(Val::Str).collect(),
+                (_, Val::VecG(values)) => values,
+                _ => return Err(Flow::Trap("internal: slice source kind".to_owned())),
+            };
+            if start < 0 || end < start || end as usize > elements.len() {
+                return Err(trap("slice range out of bounds", *line, *col));
+            }
+            Ok(Val::Slice(elements[start as usize..end as usize].to_vec()))
         }
         Expr::StrVecIndex(id, idx_expr, line, col, _) => {
             let idx = match eval_expr(env, idx_expr, locals, caller_locals, false)? {
@@ -1160,6 +1500,15 @@ fn eval_expr(
                 Val::VecS(v) => Ok(Val::Str(v.join(&sep))),
                 _ => Err(Flow::Trap("internal: join on non-strvec".to_owned())),
             }
+        }
+        // `bytes(s)` copies the string's bytes into an i64 vector: the same
+        // values the runtime's ae_bytes fills.
+        Expr::Bytes(inner, ..) => {
+            let text = match eval_expr(env, inner, locals, caller_locals, false)? {
+                Val::Str(s) => s,
+                _ => return Err(Flow::Trap("internal: bytes operand".to_owned())),
+            };
+            Ok(Val::VecI(text.as_bytes().iter().map(|byte| *byte as i64).collect()))
         }
         Expr::Contains(haystack, needle, ..) => {
             let hay = match eval_expr(env, haystack, locals, caller_locals, false)? { Val::Str(s) => s, _ => return Err(Flow::Trap("internal: contains haystack".to_owned())) };
@@ -1246,6 +1595,9 @@ fn eval_expr(
                 Val::VecI(v) => Ok(Val::Int(v.len() as i64)),
                 Val::VecS(v) => Ok(Val::Int(v.len() as i64)),
                 Val::VecF(v) => Ok(Val::Int(v.len() as i64)),
+                Val::VecG(v) => Ok(Val::Int(v.len() as i64)),
+                Val::Slice(v) => Ok(Val::Int(v.len() as i64)),
+                Val::SliceMutRef { len, .. } => Ok(Val::Int(len)),
                 Val::Array(v) => Ok(Val::Int(v.len() as i64)),
                 Val::Map(m) => Ok(Val::Int(m.len() as i64)),
                 Val::MapF(m) => Ok(Val::Int(m.len() as i64)),
@@ -1411,7 +1763,7 @@ fn eval_expr(
             let p = path_operand(eval_expr(env, path, locals, caller_locals, false))?;
             let t = path_operand(eval_expr(env, text, locals, caller_locals, false))?;
             match std::fs::write(&p, &t) {
-                Err(error) => return result_value(env, ty, false, vec![Val::Str(format!("cannot write file: {error}"))]),
+                Err(error) => result_value(env, ty, false, vec![Val::Str(format!("cannot write file: {error}"))]),
                 Ok(()) => result_value(env, ty, true, vec![Val::Int(t.len() as i64)]),
             }
         }
@@ -1457,7 +1809,13 @@ fn eval_expr(
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     let is_dir = meta.is_dir();
-                    result_value(env, ty, true, vec![Val::Int(size), Val::Int(modified), Val::Bool(is_dir)])
+                    let sid = payload_struct_of(env, "FileInfo").ok_or_else(|| Flow::Trap("internal: FileInfo payload struct missing".to_owned()))?;
+                    let info = Val::Struct(sid, HashMap::from([
+                        ("size".to_owned(), Val::Int(size)),
+                        ("mtime".to_owned(), Val::Int(modified)),
+                        ("is_dir".to_owned(), Val::Bool(is_dir)),
+                    ]));
+                    result_value(env, ty, true, vec![info])
                 }
                 Err(error) => result_value(env, ty, false, vec![Val::Str(format!("cannot read file metadata: {error}"))]),
             }
@@ -1555,7 +1913,12 @@ fn eval_expr(
             match output {
                 Ok(out) => {
                     if out.status.success() {
-                        Ok(Val::Enum(eid, ok, vec![Val::Int(out.status.code().unwrap_or(0) as i64), Val::Str(String::from_utf8_lossy(&out.stdout).to_string())]))
+                        let sid = payload_struct_of(env, "CommandOutput").ok_or_else(|| Flow::Trap("internal: CommandOutput payload struct missing".to_owned()))?;
+                        let result = Val::Struct(sid, HashMap::from([
+                            ("status".to_owned(), Val::Int(out.status.code().unwrap_or(0) as i64)),
+                            ("output".to_owned(), Val::Str(String::from_utf8_lossy(&out.stdout).to_string())),
+                        ]));
+                        Ok(Val::Enum(eid, ok, vec![result]))
                     } else {
                         Ok(Val::Enum(eid, err, vec![Val::Str(String::from_utf8_lossy(&out.stdout).to_string())]))
                     }
@@ -1899,10 +2262,10 @@ fn eval_expr(
                 "atan2" => x.atan2(y),
                 "min" => {
                     // NaN-aware: the non-NaN side wins; both NaN -> NaN.
-                    if x.is_nan() { y } else if y.is_nan() { x } else if x < y { x } else { y }
+                    if x.is_nan() { y } else if y.is_nan() || x < y { x } else { y }
                 }
                 "max" => {
-                    if x.is_nan() { y } else if y.is_nan() { x } else if x > y { x } else { y }
+                    if x.is_nan() { y } else if y.is_nan() || x > y { x } else { y }
                 }
                 _ => return Err(Flow::Trap("internal: math function".to_owned())),
             };
@@ -1911,6 +2274,11 @@ fn eval_expr(
         Expr::Neg(inner, line, col) => {
             match eval_expr(env, inner, locals, caller_locals, false)? {
                 Val::Int(n) => n.checked_neg().map(Val::Int).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::I8(n) => n.checked_neg().map(Val::I8).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::I16(n) => n.checked_neg().map(Val::I16).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::I32(n) => n.checked_neg().map(Val::I32).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::Isize(n) => n.checked_neg().map(Val::Isize).ok_or_else(|| trap("integer overflow", *line, *col)),
+                Val::F32(x) => Ok(Val::F32(-x)),
                 Val::Float(x) => Ok(Val::Float(-x)),
                 _ => Err(Flow::Trap("internal: neg operand".to_owned())),
             }
@@ -1929,6 +2297,18 @@ fn eval_expr(
         Expr::ToString(inner, _, _) | Expr::FloatToString(inner, _, _) => {
             let v = eval_expr(env, inner, locals, caller_locals, false)?;
             Ok(Val::Str(format_val(&v)))
+        }
+        Expr::ScalarCast(inner, from, to, line, col) => {
+            let value = eval_expr(env, inner, locals, caller_locals, false)?;
+            eval_scalar_cast(from, to, value, *line, *col)
+        }
+        Expr::IntMethod(kind, receiver, arg, result_ty, _, _) => {
+            let recv = eval_expr(env, receiver, locals, caller_locals, false)?;
+            let rhs = match arg {
+                Some(a) => Some(eval_expr(env, a, locals, caller_locals, false)?),
+                None => None,
+            };
+            dispatch_int_method(*kind, recv, rhs, result_ty)
         }
         Expr::ToF64(inner, line, col) => {
             let Val::Int(n) = eval_expr(env, inner, locals, caller_locals, false)? else { return Err(Flow::Trap("internal: to_f64".to_owned())); };
@@ -1976,6 +2356,31 @@ fn eval_expr(
                     Kind::GreaterEq => Ok(Val::Bool(x >= y)),
                     _ => Err(Flow::Trap("internal: int op".to_owned())),
                 },
+                (Val::I8(x), Val::I8(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::I16(x), Val::I16(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::I32(x), Val::I32(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::Isize(x), Val::Isize(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U8(x), Val::U8(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U16(x), Val::U16(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U32(x), Val::U32(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::U64(x), Val::U64(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::Usize(x), Val::Usize(y)) => eval_width_binop(x, y, op, *line, *col),
+                (Val::F32(x), Val::F32(y)) => match op {
+                    Kind::Plus => Ok(Val::F32(x + y)),
+                    Kind::Minus => Ok(Val::F32(x - y)),
+                    Kind::Star => Ok(Val::F32(x * y)),
+                    Kind::Slash => {
+                        if y == 0.0 { return Err(trap("f32 division by zero", *line, *col)); }
+                        Ok(Val::F32(x / y))
+                    }
+                    Kind::EqEq => Ok(Val::Bool(x == y)),
+                    Kind::NotEq => Ok(Val::Bool(x != y)),
+                    Kind::Less => Ok(Val::Bool(x < y)),
+                    Kind::LessEq => Ok(Val::Bool(x <= y)),
+                    Kind::Greater => Ok(Val::Bool(x > y)),
+                    Kind::GreaterEq => Ok(Val::Bool(x >= y)),
+                    _ => Err(Flow::Trap("internal: float op".to_owned())),
+                },
                 (Val::Float(x), Val::Float(y)) => match op {
                     Kind::Plus => Ok(Val::Float(x + y)),
                     Kind::Minus => Ok(Val::Float(x - y)),
@@ -1997,6 +2402,15 @@ fn eval_expr(
                     Kind::NotEq => Ok(Val::Bool(x != y)),
                     _ => Err(Flow::Trap("internal: bool op".to_owned())),
                 },
+                (Val::Char(x), Val::Char(y)) => match op {
+                    Kind::EqEq => Ok(Val::Bool(x == y)),
+                    Kind::NotEq => Ok(Val::Bool(x != y)),
+                    Kind::Less => Ok(Val::Bool(x < y)),
+                    Kind::LessEq => Ok(Val::Bool(x <= y)),
+                    Kind::Greater => Ok(Val::Bool(x > y)),
+                    Kind::GreaterEq => Ok(Val::Bool(x >= y)),
+                    _ => Err(Flow::Trap("internal: char op".to_owned())),
+                },
                 (Val::Str(x), Val::Str(y)) if *op == Kind::Plus => Ok(Val::Str(x + &y)),
                 _ => Err(Flow::Trap("internal: binary operand mismatch".to_owned())),
             }
@@ -2005,8 +2419,9 @@ fn eval_expr(
         // `&v as *const T` (M2.12 slice 2): the operand is a bare variable,
         // so the pointer carries its slot; a deref reads the slot's current
         // value, exactly what the compiled backends read through the address.
-        Expr::BorrowAs(operand, ..) => match &**operand {
+        Expr::BorrowAs(operand, mutable, ..) => match &**operand {
             Expr::Variable(id, ..) => Ok(Val::Ptr(*id)),
+            _ if !*mutable => eval_expr(env, operand, locals, caller_locals, false),
             _ => Err(Flow::Trap("internal: pointer operand is not a variable".to_owned())),
         },
         // ADR-0209 step A: a retag keeps the address and only changes the
@@ -2016,7 +2431,10 @@ fn eval_expr(
         // reinterpret the bits, the slot hands back the stored value —
         // corpus shapes avoid the punning, and the limitation is stated in
         // the ADR rather than papered over.
-        Expr::PtrCast(operand, ..) => eval_expr(env, operand, locals, caller_locals, moving),
+        Expr::PtrCast(operand, ..) => match eval_expr(env, operand, locals, caller_locals, moving)? {
+            Val::Usize(addr) => Ok(Val::Ptr(addr.wrapping_sub(0x1000))),
+            other => Ok(other),
+        },
         // ADR-0209 step A: the interpreter's pointers are slots into the
         // frame, not addresses, so byte/element arithmetic has no model here
         // — the same story as extern calls (which trap by name). The
@@ -2034,13 +2452,14 @@ fn eval_expr(
             _ => Err(Flow::Trap("internal: deref of a non-pointer".to_owned())),
         },
         Expr::Call(fn_id, args, _) => invoke_call(env, *fn_id, args, locals, caller_locals),
+        Expr::FnRef(fid, _) => Ok(Val::FnPtr(*fid)),
         Expr::FnCall(var_id, args, ..) => {
-            let target_fn = match read_var(locals, caller_locals, *var_id, 0, 0)? {
-                Val::FnPtr(fid) => fid,
-                Val::Closure(cid) => closures::closure_fn_id(cid),
-                _ => return Err(Flow::Trap("internal: FnCall on non-function".to_owned())),
-            };
-            invoke_call(env, target_fn, args, locals, caller_locals)
+            let val = read_var(locals, caller_locals, *var_id, 0, 0)?;
+            invoke_fn_val(env, val, args, locals, caller_locals)
+        }
+        Expr::FnExprCall(callee, args, ..) => {
+            let val = eval_expr(env, callee, locals, caller_locals, false)?;
+            invoke_fn_val(env, val, args, locals, caller_locals)
         }
         // ADR-0214: the spawned callable runs to completion here (its capture
         // slots evaluate as by-value arguments, so the interpreter's move
@@ -2051,22 +2470,22 @@ fn eval_expr(
                 Expr::ClosureLit(cid) => {
                     // The borrow captures read the caller's frame through the
                     // same read-only forms the compiled context packages.
-                    for (outer_id, hidden) in closures::closure_borrow_captures(*cid) {
+                    for (outer_id, hidden) in env.program.ctx.closure_borrow_captures(*cid) {
                         match hidden {
                             Type::StrView => args.push(Argument::View(Expr::Variable(outer_id, Type::String, 0, 0))),
-                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VecRef | Type::StrVecRef | Type::VecFRef))),
+                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VectorRef(_)))),
                         }
                     }
-                    invoke_call(env, closures::closure_fn_id(*cid), &args, locals, caller_locals)
+                    invoke_call(env, env.program.ctx.closure_fn_id(*cid), &args, locals, caller_locals)
                 }
                 Expr::Variable(_, Type::Closure(cid), ..) => {
-                    for (outer_id, hidden) in closures::closure_borrow_captures(*cid) {
+                    for (outer_id, hidden) in env.program.ctx.closure_borrow_captures(*cid) {
                         match hidden {
                             Type::StrView => args.push(Argument::View(Expr::Variable(outer_id, Type::String, 0, 0))),
-                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VecRef | Type::StrVecRef | Type::VecFRef))),
+                            _ => args.push(Argument::Borrow(outer_id, matches!(hidden, Type::VectorRef(_)))),
                         }
                     }
-                    invoke_call(env, closures::closure_fn_id(*cid), &args, locals, caller_locals)
+                    invoke_call(env, env.program.ctx.closure_fn_id(*cid), &args, locals, caller_locals)
                 }
                 Expr::Variable(id, Type::Fn(_), ..) => {
                     let target = match read_var(locals, caller_locals, *id, 0, 0)? {
@@ -2254,8 +2673,25 @@ fn eval_expr(
             let ready2 = !env.chans[id2].0.is_empty();
             if closed1 { Ok(Val::Int(0)) } else if closed2 { Ok(Val::Int(1)) } else if ready1 { Ok(Val::Int(0)) } else if ready2 { Ok(Val::Int(1)) } else { Ok(Val::Int(0)) }
         }
-        other => Err(Flow::Trap(format!("unsupported expression in MIR interpreter: {}", format!("{other:?}").chars().take(60).collect::<String>()))),
+        // Every expression variant is handled above: the interpreter is the
+        // differential oracle, so a new variant must add its arm here (the
+        // build fails otherwise) instead of silently trapping.
     }
+}
+
+fn invoke_fn_val(
+    env: &mut Env<'_>,
+    val: Val,
+    args: &[Argument],
+    locals: &mut HashMap<usize, Val>,
+    caller_locals: &mut Option<&mut HashMap<usize, Val>>,
+) -> Result<Val, Flow> {
+    let target_fn = match val {
+        Val::FnPtr(fid) => fid,
+        Val::Closure(cid) => env.program.ctx.closure_fn_id(cid),
+        _ => return Err(Flow::Trap("internal: indirect call on non-function".to_owned())),
+    };
+    invoke_call(env, target_fn, args, locals, caller_locals)
 }
 
 fn invoke_call(
@@ -2266,7 +2702,7 @@ fn invoke_call(
     caller_locals: &mut Option<&mut HashMap<usize, Val>>,
 ) -> Result<Val, Flow> {
     let callee = *env.fns.get(&fn_id).ok_or_else(|| {
-        match crate::frontend::extern_name(fn_id) {
+        match env.program.ctx.extern_name(fn_id) {
             // A declared extern has no ae body to interpret (M2.12
             // slice 4): the compiled backends link the C symbol; the
             // interpreter cannot.
@@ -2283,6 +2719,45 @@ fn invoke_call(
     let mut copy_backs: Vec<(usize, usize)> = Vec::new();
     for ((param_id, param_ty), arg) in callee.params.iter().zip(args.iter()) {
         let val = match arg {
+            // A `&mut [T]` parameter receives the owner's slot plus the
+            // window, not a snapshot: the callee's reads and (rung 4b)
+            // stores go through the calling frame (ADR-0236 rung 4).
+            Argument::Value(e) if matches!(param_ty, Type::SliceMut(_)) => {
+                let owner_len = |locals: &HashMap<usize, Val>, slot: &usize| -> Result<i64, Flow> {
+                    match locals.get(slot) {
+                        Some(Val::VecI(values)) => Ok(values.len() as i64),
+                        Some(Val::VecF(values)) => Ok(values.len() as i64),
+                        Some(Val::VecS(values)) => Ok(values.len() as i64),
+                        Some(Val::VecG(values)) => Ok(values.len() as i64),
+                        Some(Val::Array(values)) => Ok(values.len() as i64),
+                        Some(Val::Moved) => Err(trap("use of moved vector", 0, 0)),
+                        _ => Err(Flow::Trap("internal: mutable slice source kind".to_owned())),
+                    }
+                };
+                match e {
+                    Expr::SliceOf(slot, Type::Vector(_), ..) => {
+                        Val::SliceMutRef { owner: *slot, start: 0, len: owner_len(locals, slot)? }
+                    }
+                    // `&mut v[start..end]` (ADR-0236 rung 4): the bounds run in
+                    // the caller's frame; the window keeps the owner's slot.
+                    Expr::SliceRange(slot, Type::Vector(_), _, start_expr, end_expr, line, col) => {
+                        let start = match eval_expr(env, start_expr, locals, caller_locals, false)? {
+                            Val::Int(n) => n,
+                            _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+                        };
+                        let end = match eval_expr(env, end_expr, locals, caller_locals, false)? {
+                            Val::Int(n) => n,
+                            _ => return Err(Flow::Trap("internal: slice range bound type".to_owned())),
+                        };
+                        let len = owner_len(locals, slot)?;
+                        if start < 0 || end < start || end > len {
+                            return Err(trap("slice range out of bounds", *line, *col));
+                        }
+                        Val::SliceMutRef { owner: *slot, start, len: end - start }
+                    }
+                    _ => eval_expr(env, e, locals, caller_locals, true)?,
+                }
+            }
             Argument::Value(e) => eval_expr(env, e, locals, caller_locals, true)?,
             Argument::View(e) => eval_expr(env, e, locals, caller_locals, false)?,
             Argument::Borrow(slot, _) => {
@@ -2306,7 +2781,7 @@ fn invoke_call(
                     read_var(locals, caller_locals, *slot, 0, 0)?
                 }
             }
-            Argument::FnPtr(id) => Val::FnPtr(*id),
+            Argument::FnPtr(id, _) => Val::FnPtr(*id),
         };
         callee_locals.insert(*param_id, val);
     }
@@ -2314,11 +2789,10 @@ fn invoke_call(
     let outcome = eval_stmts(env, &callee.body, &mut callee_locals, &mut parent);
     // The copy-ins write back to the frames their references named.
     for (param_id, target) in &copy_backs {
-        if let Some(value) = callee_locals.get(param_id) {
-            if let Some(caller) = caller_locals.as_mut() {
+        if let Some(value) = callee_locals.get(param_id)
+            && let Some(caller) = caller_locals.as_mut() {
                 caller.insert(*target, value.clone());
             }
-        }
     }
     match outcome {
         Flow::Return(v) => Ok(v),
@@ -2349,19 +2823,339 @@ fn unescape_str(raw: &str) -> String {
     out
 }
 
+fn format_float(x: f64) -> String {
+    if x.is_nan() { return "nan".to_owned(); }
+    if x.is_infinite() { return if x < 0.0 { "-inf".to_owned() } else { "inf".to_owned() }; }
+    if x == 0.0 && x.is_sign_negative() { return "-0.0".to_owned(); }
+    let s = format!("{x:?}");
+    if s.contains(['.', 'e', 'E']) { s } else { format!("{s}.0") }
+}
+
 fn format_val(val: &Val) -> String {
     match val {
         Val::Int(n) => n.to_string(),
+        Val::I8(n) => n.to_string(),
+        Val::I16(n) => n.to_string(),
+        Val::I32(n) => n.to_string(),
+        Val::Isize(n) => n.to_string(),
+        Val::U8(n) => n.to_string(),
+        Val::U16(n) => n.to_string(),
+        Val::U32(n) => n.to_string(),
+        Val::U64(n) => n.to_string(),
+        Val::Usize(n) => n.to_string(),
         Val::Bool(b) => if *b { "true".to_owned() } else { "false".to_owned() },
+        Val::Char(c) => c.to_string(),
+        Val::Unit => "()".to_owned(),
         Val::Str(s) => s.clone(),
-        Val::Float(x) => {
-            if x.is_nan() { return "nan".to_owned(); }
-            if x.is_infinite() { return if *x < 0.0 { "-inf".to_owned() } else { "inf".to_owned() }; }
-            if *x == 0.0 && x.is_sign_negative() { return "-0.0".to_owned(); }
-            let s = format!("{x:?}");
-            if s.contains(['.', 'e', 'E']) { s } else { format!("{s}.0") }
-        }
+        Val::F32(x) => format_float(*x as f64),
+        Val::Float(x) => format_float(*x),
         _ => "<val>".to_owned(),
+    }
+}
+
+fn eval_scalar_cast(from: &Type, to: &Type, value: Val, line: usize, col: usize) -> Result<Val, Flow> {
+    match (from, to, &value) {
+        (Type::Char, Type::Int(IntTy::U32), Val::Char(c)) => return Ok(Val::U32(*c as u32)),
+        (Type::Int(IntTy::U32), Type::Char, Val::U32(v)) => {
+            return char::from_u32(*v)
+                .map(Val::Char)
+                .ok_or_else(|| trap("invalid Unicode scalar value", line, col));
+        }
+        (Type::Ptr(_) | Type::PtrMut(_), Type::Int(IntTy::Usize), Val::Ptr(slot)) => {
+            return Ok(Val::Usize(slot.wrapping_add(0x1000)));
+        }
+        (Type::Float(FloatTy::F32), Type::Float(FloatTy::F64), Val::F32(x)) => return Ok(Val::Float(*x as f64)),
+        (Type::Float(FloatTy::F64), Type::Float(FloatTy::F32), Val::Float(x)) => return Ok(Val::F32(*x as f32)),
+        (Type::Float(FloatTy::F32), Type::Float(FloatTy::F32), Val::F32(x)) => return Ok(Val::F32(*x)),
+        (Type::Float(FloatTy::F64), Type::Float(FloatTy::F64), Val::Float(x)) => return Ok(Val::Float(*x)),
+        _ => {}
+    }
+    if let Type::Float(ft) = to {
+        let as_f64 = match (from, &value) {
+            (Type::Int(IntTy::I64), Val::Int(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::I8), Val::I8(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::I16), Val::I16(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::I32), Val::I32(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::Isize), Val::Isize(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U8), Val::U8(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U16), Val::U16(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U32), Val::U32(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::U64), Val::U64(n)) => Some((*n as f64, *n as f32)),
+            (Type::Int(IntTy::Usize), Val::Usize(n)) => Some((*n as f64, *n as f32)),
+            _ => None,
+        };
+        if let Some((v64, v32)) = as_f64 {
+            return Ok(match ft {
+                FloatTy::F64 => Val::Float(v64),
+                FloatTy::F32 => Val::F32(v32),
+            });
+        }
+    }
+    let bits: Option<u64> = match (from, &value) {
+        (Type::Int(IntTy::I64), Val::Int(n)) => Some(*n as u64),
+        (Type::Int(IntTy::I8), Val::I8(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::I16), Val::I16(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::I32), Val::I32(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::Isize), Val::Isize(n)) => Some(*n as i64 as u64),
+        (Type::Int(IntTy::U8), Val::U8(n)) => Some(*n as u64),
+        (Type::Int(IntTy::U16), Val::U16(n)) => Some(*n as u64),
+        (Type::Int(IntTy::U32), Val::U32(n)) => Some(*n as u64),
+        (Type::Int(IntTy::U64), Val::U64(n)) => Some(*n),
+        (Type::Int(IntTy::Usize), Val::Usize(n)) => Some(*n as u64),
+        _ => None,
+    };
+    if let Some(b) = bits {
+        return match to {
+            Type::Int(IntTy::I64) => Ok(Val::Int(b as i64)),
+            Type::Int(IntTy::I8) => Ok(Val::I8(b as i8)),
+            Type::Int(IntTy::I16) => Ok(Val::I16(b as i16)),
+            Type::Int(IntTy::I32) => Ok(Val::I32(b as i32)),
+            Type::Int(IntTy::Isize) => Ok(Val::Isize(b as i64 as isize)),
+            Type::Int(IntTy::U8) => Ok(Val::U8(b as u8)),
+            Type::Int(IntTy::U16) => Ok(Val::U16(b as u16)),
+            Type::Int(IntTy::U32) => Ok(Val::U32(b as u32)),
+            Type::Int(IntTy::U64) => Ok(Val::U64(b)),
+            Type::Int(IntTy::Usize) => Ok(Val::Usize(b as usize)),
+            _ => Err(Flow::Trap(format!("internal: scalar cast on {value:?}"))),
+        };
+    }
+    if let (Type::Float(FloatTy::F64), Type::Int(ity), Val::Float(x)) = (from, to, &value) {
+        let out_of_range = !x.is_finite()
+            || match ity {
+                IntTy::I8 => *x <= -129.0 || *x >= 128.0,
+                IntTy::U8 => *x <= -1.0 || *x >= 256.0,
+                IntTy::I16 => *x <= -32769.0 || *x >= 32768.0,
+                IntTy::U16 => *x <= -1.0 || *x >= 65536.0,
+                IntTy::I32 => *x <= -2147483649.0 || *x >= 2147483648.0,
+                IntTy::U32 => *x <= -1.0 || *x >= 4294967296.0,
+                IntTy::I64 | IntTy::Isize => *x < -9223372036854775808.0 || *x >= 9223372036854775808.0,
+                IntTy::U64 | IntTy::Usize => *x <= -1.0 || *x >= 18446744073709551616.0,
+            };
+        if out_of_range {
+            return Err(trap("float-to-integer cast out of range", line, col));
+        }
+        return Ok(match ity {
+            IntTy::I8 => Val::I8(*x as i8),
+            IntTy::U8 => Val::U8(*x as u8),
+            IntTy::I16 => Val::I16(*x as i16),
+            IntTy::U16 => Val::U16(*x as u16),
+            IntTy::I32 => Val::I32(*x as i32),
+            IntTy::U32 => Val::U32(*x as u32),
+            IntTy::I64 => Val::Int(*x as i64),
+            IntTy::Isize => Val::Isize(*x as isize),
+            IntTy::U64 => Val::U64(*x as u64),
+            IntTy::Usize => Val::Usize(*x as usize),
+        });
+    }
+    if let (Type::Float(FloatTy::F32), Type::Int(ity), Val::F32(x)) = (from, to, &value) {
+        let out_of_range = !x.is_finite()
+            || match ity {
+                IntTy::I8 => *x <= -129.0f32 || *x >= 128.0f32,
+                IntTy::U8 => *x <= -1.0f32 || *x >= 256.0f32,
+                IntTy::I16 => *x <= -32769.0f32 || *x >= 32768.0f32,
+                IntTy::U16 => *x <= -1.0f32 || *x >= 65536.0f32,
+                IntTy::I32 => *x < -2147483648.0f32 || *x >= 2147483648.0f32,
+                IntTy::U32 => *x <= -1.0f32 || *x >= 4294967296.0f32,
+                IntTy::I64 | IntTy::Isize => *x < -9223372036854775808.0f32 || *x >= 9223372036854775808.0f32,
+                IntTy::U64 | IntTy::Usize => *x <= -1.0f32 || *x >= 18446744073709551616.0f32,
+            };
+        if out_of_range {
+            return Err(trap("float-to-integer cast out of range", line, col));
+        }
+        return Ok(match ity {
+            IntTy::I8 => Val::I8(*x as i8),
+            IntTy::U8 => Val::U8(*x as u8),
+            IntTy::I16 => Val::I16(*x as i16),
+            IntTy::U16 => Val::U16(*x as u16),
+            IntTy::I32 => Val::I32(*x as i32),
+            IntTy::U32 => Val::U32(*x as u32),
+            IntTy::I64 => Val::Int(*x as i64),
+            IntTy::Isize => Val::Isize(*x as isize),
+            IntTy::U64 => Val::U64(*x as u64),
+            IntTy::Usize => Val::Usize(*x as usize),
+        });
+    }
+    Err(Flow::Trap(format!("internal: scalar cast on {value:?}")))
+}
+
+trait WidthInt: Copy + Ord + Eq {
+    const ZERO: Self;
+    fn checked_add(self, rhs: Self) -> Option<Self>;
+    fn checked_sub(self, rhs: Self) -> Option<Self>;
+    fn checked_mul(self, rhs: Self) -> Option<Self>;
+    fn checked_div(self, rhs: Self) -> Option<Self>;
+    fn checked_rem(self, rhs: Self) -> Option<Self>;
+    fn checked_neg(self) -> Option<Self>;
+    fn wrapping_add(self, rhs: Self) -> Self;
+    fn wrapping_sub(self, rhs: Self) -> Self;
+    fn wrapping_mul(self, rhs: Self) -> Self;
+    fn wrapping_neg(self) -> Self;
+    fn saturating_add(self, rhs: Self) -> Self;
+    fn saturating_sub(self, rhs: Self) -> Self;
+    fn saturating_mul(self, rhs: Self) -> Self;
+    fn bit_or(self, rhs: Self) -> Self;
+    fn bit_xor(self, rhs: Self) -> Self;
+    fn bit_and(self, rhs: Self) -> Self;
+    fn wrapping_shl(self, rhs: u32) -> Self;
+    fn wrapping_shr(self, rhs: u32) -> Self;
+    fn valid_shift(self) -> Option<u32>;
+    fn from_val(val: &Val) -> Option<Self>;
+    fn into_val(self) -> Val;
+}
+
+macro_rules! impl_width_int {
+    ($ty:ty, $variant:ident, signed) => {
+        impl WidthInt for $ty {
+            const ZERO: Self = 0;
+            fn checked_add(self, rhs: Self) -> Option<Self> { <$ty>::checked_add(self, rhs) }
+            fn checked_sub(self, rhs: Self) -> Option<Self> { <$ty>::checked_sub(self, rhs) }
+            fn checked_mul(self, rhs: Self) -> Option<Self> { <$ty>::checked_mul(self, rhs) }
+            fn checked_div(self, rhs: Self) -> Option<Self> { <$ty>::checked_div(self, rhs) }
+            fn checked_rem(self, rhs: Self) -> Option<Self> { <$ty>::checked_rem(self, rhs) }
+            fn checked_neg(self) -> Option<Self> { <$ty>::checked_neg(self) }
+            fn wrapping_add(self, rhs: Self) -> Self { <$ty>::wrapping_add(self, rhs) }
+            fn wrapping_sub(self, rhs: Self) -> Self { <$ty>::wrapping_sub(self, rhs) }
+            fn wrapping_mul(self, rhs: Self) -> Self { <$ty>::wrapping_mul(self, rhs) }
+            fn wrapping_neg(self) -> Self { <$ty>::wrapping_neg(self) }
+            fn saturating_add(self, rhs: Self) -> Self { <$ty>::saturating_add(self, rhs) }
+            fn saturating_sub(self, rhs: Self) -> Self { <$ty>::saturating_sub(self, rhs) }
+            fn saturating_mul(self, rhs: Self) -> Self { <$ty>::saturating_mul(self, rhs) }
+            fn bit_or(self, rhs: Self) -> Self { self | rhs }
+            fn bit_xor(self, rhs: Self) -> Self { self ^ rhs }
+            fn bit_and(self, rhs: Self) -> Self { self & rhs }
+            fn wrapping_shl(self, rhs: u32) -> Self { <$ty>::wrapping_shl(self, rhs) }
+            fn wrapping_shr(self, rhs: u32) -> Self { <$ty>::wrapping_shr(self, rhs) }
+            fn valid_shift(self) -> Option<u32> {
+                (self >= 0 && (self as u64) < (<$ty>::BITS as u64)).then_some(self as u32)
+            }
+            fn from_val(val: &Val) -> Option<Self> {
+                if let Val::$variant(v) = val { Some(*v) } else { None }
+            }
+            fn into_val(self) -> Val { Val::$variant(self) }
+        }
+    };
+    ($ty:ty, $variant:ident, unsigned) => {
+        impl WidthInt for $ty {
+            const ZERO: Self = 0;
+            fn checked_add(self, rhs: Self) -> Option<Self> { <$ty>::checked_add(self, rhs) }
+            fn checked_sub(self, rhs: Self) -> Option<Self> { <$ty>::checked_sub(self, rhs) }
+            fn checked_mul(self, rhs: Self) -> Option<Self> { <$ty>::checked_mul(self, rhs) }
+            fn checked_div(self, rhs: Self) -> Option<Self> { <$ty>::checked_div(self, rhs) }
+            fn checked_rem(self, rhs: Self) -> Option<Self> { <$ty>::checked_rem(self, rhs) }
+            fn checked_neg(self) -> Option<Self> { None }
+            fn wrapping_add(self, rhs: Self) -> Self { <$ty>::wrapping_add(self, rhs) }
+            fn wrapping_sub(self, rhs: Self) -> Self { <$ty>::wrapping_sub(self, rhs) }
+            fn wrapping_mul(self, rhs: Self) -> Self { <$ty>::wrapping_mul(self, rhs) }
+            fn wrapping_neg(self) -> Self { <$ty>::wrapping_neg(self) }
+            fn saturating_add(self, rhs: Self) -> Self { <$ty>::saturating_add(self, rhs) }
+            fn saturating_sub(self, rhs: Self) -> Self { <$ty>::saturating_sub(self, rhs) }
+            fn saturating_mul(self, rhs: Self) -> Self { <$ty>::saturating_mul(self, rhs) }
+            fn bit_or(self, rhs: Self) -> Self { self | rhs }
+            fn bit_xor(self, rhs: Self) -> Self { self ^ rhs }
+            fn bit_and(self, rhs: Self) -> Self { self & rhs }
+            fn wrapping_shl(self, rhs: u32) -> Self { <$ty>::wrapping_shl(self, rhs) }
+            fn wrapping_shr(self, rhs: u32) -> Self { <$ty>::wrapping_shr(self, rhs) }
+            fn valid_shift(self) -> Option<u32> {
+                ((self as u64) < (<$ty>::BITS as u64)).then_some(self as u32)
+            }
+            fn from_val(val: &Val) -> Option<Self> {
+                if let Val::$variant(v) = val { Some(*v) } else { None }
+            }
+            fn into_val(self) -> Val { Val::$variant(self) }
+        }
+    };
+}
+
+impl_width_int!(i8, I8, signed);
+impl_width_int!(i16, I16, signed);
+impl_width_int!(i32, I32, signed);
+impl_width_int!(i64, Int, signed);
+impl_width_int!(isize, Isize, signed);
+impl_width_int!(u8, U8, unsigned);
+impl_width_int!(u16, U16, unsigned);
+impl_width_int!(u32, U32, unsigned);
+impl_width_int!(u64, U64, unsigned);
+impl_width_int!(usize, Usize, unsigned);
+
+fn dispatch_int_method(kind: IntMethodKind, recv: Val, rhs: Option<Val>, result_ty: &Type) -> Result<Val, Flow> {
+    match recv {
+        Val::Int(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::I8(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::I16(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::I32(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::Isize(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U8(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U16(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U32(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::U64(x) => eval_int_method(kind, x, rhs, result_ty),
+        Val::Usize(x) => eval_int_method(kind, x, rhs, result_ty),
+        _ => Err(Flow::Trap("internal: integer method on non-integer".to_owned())),
+    }
+}
+
+fn eval_int_method<T: WidthInt>(kind: IntMethodKind, x: T, rhs: Option<Val>, result_ty: &Type) -> Result<Val, Flow> {
+    let option_val = |opt: Option<T>| -> Result<Val, Flow> {
+        let Type::Enum(_, eid) = result_ty else {
+            return Err(Flow::Trap("internal: checked_* result not enum".to_owned()));
+        };
+        Ok(match opt {
+            Some(v) => Val::Enum(*eid, 0, vec![v.into_val()]),
+            None => Val::Enum(*eid, 1, Vec::new()),
+        })
+    };
+    let get_rhs = || -> Result<T, Flow> {
+        rhs.as_ref()
+            .and_then(T::from_val)
+            .ok_or_else(|| Flow::Trap("internal: integer method rhs mismatch".to_owned()))
+    };
+    match kind {
+        IntMethodKind::WrappingAdd => Ok(x.wrapping_add(get_rhs()?).into_val()),
+        IntMethodKind::WrappingSub => Ok(x.wrapping_sub(get_rhs()?).into_val()),
+        IntMethodKind::WrappingMul => Ok(x.wrapping_mul(get_rhs()?).into_val()),
+        IntMethodKind::WrappingNeg => Ok(x.wrapping_neg().into_val()),
+        IntMethodKind::SaturatingAdd => Ok(x.saturating_add(get_rhs()?).into_val()),
+        IntMethodKind::SaturatingSub => Ok(x.saturating_sub(get_rhs()?).into_val()),
+        IntMethodKind::SaturatingMul => Ok(x.saturating_mul(get_rhs()?).into_val()),
+        IntMethodKind::CheckedAdd => option_val(x.checked_add(get_rhs()?)),
+        IntMethodKind::CheckedSub => option_val(x.checked_sub(get_rhs()?)),
+        IntMethodKind::CheckedMul => option_val(x.checked_mul(get_rhs()?)),
+        IntMethodKind::CheckedDiv => option_val(x.checked_div(get_rhs()?)),
+        IntMethodKind::CheckedRem => option_val(x.checked_rem(get_rhs()?)),
+        IntMethodKind::CheckedNeg => option_val(x.checked_neg()),
+    }
+}
+
+fn eval_width_binop<T: WidthInt>(x: T, y: T, op: &Kind, line: usize, col: usize) -> Result<Val, Flow> {
+    match op {
+        Kind::Plus => x.checked_add(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col)),
+        Kind::Minus => x.checked_sub(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col)),
+        Kind::Star => x.checked_mul(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col)),
+        Kind::Slash => {
+            if y == T::ZERO { return Err(trap("division by zero", line, col)); }
+            x.checked_div(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col))
+        }
+        Kind::Percent => {
+            if y == T::ZERO { return Err(trap("division by zero", line, col)); }
+            x.checked_rem(y).map(T::into_val).ok_or_else(|| trap("integer overflow", line, col))
+        }
+        Kind::Pipe => Ok(x.bit_or(y).into_val()),
+        Kind::Caret => Ok(x.bit_xor(y).into_val()),
+        Kind::Amp => Ok(x.bit_and(y).into_val()),
+        Kind::Shl => {
+            let s = y.valid_shift().ok_or_else(|| trap("shift count out of range", line, col))?;
+            Ok(x.wrapping_shl(s).into_val())
+        }
+        Kind::Shr => {
+            let s = y.valid_shift().ok_or_else(|| trap("shift count out of range", line, col))?;
+            Ok(x.wrapping_shr(s).into_val())
+        }
+        Kind::EqEq => Ok(Val::Bool(x == y)),
+        Kind::NotEq => Ok(Val::Bool(x != y)),
+        Kind::Less => Ok(Val::Bool(x < y)),
+        Kind::LessEq => Ok(Val::Bool(x <= y)),
+        Kind::Greater => Ok(Val::Bool(x > y)),
+        Kind::GreaterEq => Ok(Val::Bool(x >= y)),
+        _ => Err(Flow::Trap("internal: int op".to_owned())),
     }
 }
 
@@ -2438,4 +3232,182 @@ fn drain_exec_queue(env: &mut Env, eid: usize) -> Result<i64, Flow> {
         }
     }
     Ok(completed)
+}
+
+fn release_frees(
+    env: &mut Env<'_>,
+    locals: &mut HashMap<usize, Val>,
+    frees: &[(usize, Type)],
+) -> Result<(), Flow> {
+    for (id, ty) in frees {
+        if let Some(val) = locals.get(id).cloned() {
+            locals.insert(*id, Val::Moved);
+            release_val(env, val, *ty)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read a struct field's value out of the frame. A slot holding a `&mut`
+/// struct reference resolves through the caller's frame.
+fn field_place_get(
+    locals: &HashMap<usize, Val>,
+    caller_locals: &Option<&mut HashMap<usize, Val>>,
+    slot: usize,
+    path: &[(String, Type)],
+) -> Option<Val> {
+    let container = match locals.get(&slot)? {
+        Val::Ref(target) => caller_locals.as_ref()?.get(target)?,
+        other => other,
+    };
+    field_path_ref(container, path).cloned()
+}
+
+/// Walk a struct field path; every step must be a struct field.
+fn field_path_ref<'a>(container: &'a Val, path: &[(String, Type)]) -> Option<&'a Val> {
+    let mut current = container;
+    for (name, _) in path {
+        let Val::Struct(_, fields) = current else { return None };
+        current = fields.get(name)?;
+    }
+    Some(current)
+}
+
+/// Write a struct field back; returns whether a struct storage was found.
+fn field_place_put(
+    locals: &mut HashMap<usize, Val>,
+    caller_locals: &mut Option<&mut HashMap<usize, Val>>,
+    slot: usize,
+    path: &[(String, Type)],
+    value: Val,
+) -> bool {
+    let target = match locals.get(&slot) {
+        Some(Val::Ref(target)) => Some(*target),
+        _ => None,
+    };
+    match target {
+        Some(target) => match caller_locals.as_mut() {
+            Some(map) => put_field(map, target, path, value),
+            None => false,
+        },
+        None => put_field(locals, slot, path, value),
+    }
+}
+
+fn put_field(map: &mut HashMap<usize, Val>, slot: usize, path: &[(String, Type)], value: Val) -> bool {
+    match map.get_mut(&slot) {
+        Some(Val::Struct(_, fields)) => insert_field_path(fields, path, value),
+        _ => false,
+    }
+}
+
+fn insert_field_path(fields: &mut HashMap<String, Val>, path: &[(String, Type)], value: Val) -> bool {
+    let Some(((name, _), rest)) = path.split_first() else { return false };
+    if rest.is_empty() {
+        fields.insert(name.clone(), value);
+        return true;
+    }
+    match fields.get_mut(name) {
+        Some(Val::Struct(_, inner)) => insert_field_path(inner, rest, value),
+        _ => false,
+    }
+}
+
+fn release_val_inferred(env: &mut Env<'_>, val: Val) -> Result<(), Flow> {
+    match val {
+        Val::Struct(sid, _) => release_val(env, val, Type::Struct(sid)),
+        Val::Enum(eid, _, _) => release_val(env, val, Type::Enum("", eid)),
+        Val::VecG(values) => {
+            for value in values {
+                release_val_inferred(env, value)?;
+            }
+            Ok(())
+        }
+        Val::TaskScope(_) => release_val(env, val, Type::TaskScope),
+        _ => Ok(()),
+    }
+}
+
+fn release_val(env: &mut Env<'_>, val: Val, ty: Type) -> Result<(), Flow> {
+    if matches!(val, Val::Moved) || is_copy_type(ty, &env.program.structs, &env.program.enums) {
+        return Ok(());
+    }
+    match (ty, val) {
+        (Type::TaskScope, Val::TaskScope(eid)) => drain_exec_queue(env, eid).map(|_| ()),
+        // An owned element releases through its own type, in element order,
+        // exactly like the runtime's `ae_gvec_release` drop loop.
+        (Type::Vector(id), Val::VecG(values)) => {
+            let element = env.program.ctx.vector_elem(id);
+            for value in values {
+                release_val(env, value, element)?;
+            }
+            Ok(())
+        }
+        (Type::Struct(sid), Val::Struct(_, mut fields)) => {
+            let def = env.program.structs[sid].clone();
+            if let Some(drop_id) = def.drop_fn
+                && let Some(drop_fn) = env.fns.get(&drop_id).copied()
+            {
+                let mut holder: HashMap<usize, Val> = HashMap::from([(0, Val::Struct(sid, fields))]);
+                let mut callee_locals: HashMap<usize, Val> = drop_fn
+                    .params
+                    .first()
+                    .map(|(pid, _)| (*pid, Val::Ref(0)))
+                    .into_iter()
+                    .collect();
+                let mut parent = Some(&mut holder);
+                match eval_stmts(env, &drop_fn.body, &mut callee_locals, &mut parent) {
+                    Flow::Next | Flow::Return(_) => {}
+                    other => return Err(other),
+                }
+                fields = match holder.remove(&0) {
+                    Some(Val::Struct(_, updated)) => updated,
+                    _ => HashMap::new(),
+                };
+            }
+            for (fname, fty) in &def.fields {
+                if let Some(fval) = fields.remove(fname) {
+                    release_val(env, fval, *fty)?;
+                }
+            }
+            Ok(())
+        }
+        (Type::Enum(_, eid), Val::Enum(_, vidx, payloads)) => {
+            let def = env.program.enums[eid].clone();
+            if let Some((_, field_tys)) = def.variants.get(vidx) {
+                for (pval, fty) in payloads.into_iter().zip(field_tys.iter()) {
+                    release_val(env, pval, *fty)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn interp_pattern_matches(pattern: &CompiledPattern, val: &Val) -> bool {
+    match pattern {
+        CompiledPattern::Wildcard | CompiledPattern::Binding => true,
+        CompiledPattern::Variant { variant, fields, .. } => {
+            let Val::Enum(_, vidx, payloads) = val else {
+                return false;
+            };
+            if *vidx != *variant {
+                return false;
+            }
+            fields
+                .iter()
+                .all(|(idx, _, subpat)| payloads.get(*idx).is_some_and(|p| interp_pattern_matches(subpat, p)))
+        }
+    }
+}
+
+fn interp_extract_path<'a>(mut val: &'a Val, path: &[(usize, usize)]) -> Option<&'a Val> {
+    for &(_, field_idx) in path {
+        let Val::Enum(_, _, payloads) = val else {
+            return None;
+        };
+        val = payloads.get(field_idx)?;
+    }
+    Some(val)
 }

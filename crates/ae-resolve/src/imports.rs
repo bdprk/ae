@@ -21,7 +21,9 @@ pub fn load_module_transitive(path: &Path) -> Result<(Module, Vec<(String, Modul
     Ok((module, imports))
 }
 
-fn load_tokenized_module(path: &Path) -> Result<(Module, Vec<(String, Module)>, Vec<Token>), String> {
+type TokenizedModule = (Module, Vec<(String, Module)>, Vec<Token>);
+
+fn load_tokenized_module(path: &Path) -> Result<TokenizedModule, String> {
     let source = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let file = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
     let tokens = ae_syntax::lex_diagnostic(&source).map_err(|diagnostic| diagnostic.to_string())?;

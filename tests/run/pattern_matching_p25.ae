@@ -1,0 +1,24 @@
+// P2.5.3: wildcard `_` match arms and nested enum pattern destructuring.
+enum Inner { Val(i64), Text(string), Empty }
+enum Outer { Wrap(Inner), Pair(Inner, Inner), None }
+
+fn describe(o: Outer) -> i64 {
+    match o {
+        Outer::Wrap(Inner::Val(n)) => { return n + 1; }
+        Outer::Wrap(Inner::Text(s)) => {
+            print(s);
+            return len(s);
+        }
+        Outer::Pair(Inner::Val(a), Inner::Val(b)) => { return a * b; }
+        _ => { return 0; }
+    }
+}
+
+fn main() {
+    print(describe(Outer::Wrap(Inner::Val(41))));
+    print(describe(Outer::Wrap(Inner::Text("ae"))));
+    print(describe(Outer::Wrap(Inner::Empty)));
+    print(describe(Outer::Pair(Inner::Val(6), Inner::Val(7))));
+    print(describe(Outer::Pair(Inner::Val(6), Inner::Empty)));
+    print(describe(Outer::None));
+}

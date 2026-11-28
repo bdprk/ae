@@ -1,0 +1,1 @@
+ae: $DIR/char_unary_neg_rejected.ae:3:13: unary '-' requires an i64 or f64 operand

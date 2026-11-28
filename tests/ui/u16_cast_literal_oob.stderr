@@ -1,0 +1,1 @@
+ae: $DIR/u16_cast_literal_oob.ae:2:22: integer literal 65536 is out of range for 'u16' (0..=65535)

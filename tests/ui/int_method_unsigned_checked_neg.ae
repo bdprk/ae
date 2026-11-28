@@ -1,0 +1,4 @@
+fn main() {
+    let a = 1 as u8;
+    let _r = a.checked_neg();
+}

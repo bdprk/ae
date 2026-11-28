@@ -11,33 +11,6 @@
 use super::*;
 use super::parser::moved_value_hint;
 
-// A function type's signature, by registry id. The registry lives on the
-// shared `Generics` state, but `Type::name` runs without a parser handy, so
-// the id maps through a thread-local mirror kept in sync by the parser.
-pub(super) fn fn_sig(id: usize) -> (Vec<Type>, Type) {
-    FN_SIGS.with(|sigs| sigs.borrow()[id].clone())
-}
-thread_local! {
-    static FN_SIGS: std::cell::RefCell<Vec<(Vec<Type>, Type)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-// Intern a signature; identical signatures share one id, which is what lets
-// two closures with the same shape pass through the same parameter.
-// The generated function behind a closure id. Codegen needs it to emit the
-// function pointer of a literal passed as a function value.
-pub(super) fn closure_fn_id(cid: usize) -> usize {
-    FN_IDS.with(|ids| ids.borrow()[cid])
-}
-thread_local! {
-    static FN_IDS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
-    // The spawn surfaces this program uses, recorded by the checker so the C
-    // assembly emits exactly the context layouts and trampolines that are
-    // referenced (ADR-0214). One compile per process, like FN_IDS.
-    static SPAWNED: std::cell::RefCell<Vec<SpawnedThread>> = const { std::cell::RefCell::new(Vec::new()) };
-    // The borrow captures of each closure, indexed by closure id: the spawn
-    // site packages their read-only forms into the thread's context.
-    static BORROW_CAPTURES: std::cell::RefCell<Vec<Vec<(usize, Type)>>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 // One spawn surface: a closure's generated function with its capture types in
 // order, or a zero-parameter function value keyed by its interned signature.
 #[derive(Clone, PartialEq, Debug)]
@@ -46,35 +19,6 @@ pub(super) enum SpawnedThread {
     // the borrow captures (read-only views/refs the join keeps alive).
     Closure { fn_id: usize, captures: Vec<Type>, borrows: Vec<(usize, Type)>, ret: Type },
     FnValue { sig: usize, ret: Type },
-}
-
-pub(super) fn record_spawned(entry: SpawnedThread) {
-    SPAWNED.with(|spawned| {
-        let mut spawned = spawned.borrow_mut();
-        if !spawned.contains(&entry) {
-            spawned.push(entry);
-        }
-    });
-}
-
-pub(super) fn take_spawned() -> Vec<SpawnedThread> {
-    let taken = SPAWNED.with(|spawned| std::mem::take(&mut *spawned.borrow_mut()));
-    taken
-}
-
-pub(super) fn closure_borrow_captures(cid: usize) -> Vec<(usize, Type)> {
-    BORROW_CAPTURES.with(|all| all.borrow()[cid].clone())
-}
-
-pub(super) fn intern_fn_sig(params: Vec<Type>, ret: Type) -> usize {
-    FN_SIGS.with(|sigs| {
-        let mut sigs = sigs.borrow_mut();
-        if let Some(index) = sigs.iter().position(|(p, r)| *p == params && *r == ret) {
-            return index;
-        }
-        sigs.push((params, ret));
-        sigs.len() - 1
-    })
 }
 
 impl Parser<'_> {
@@ -134,12 +78,20 @@ impl Parser<'_> {
             .collect();
         let mut value_captures: Vec<(usize, Type)> = Vec::new();
         let mut borrow_captures: Vec<(usize, Type)> = Vec::new();
+        let mut mut_captures: Vec<(usize, Type)> = Vec::new();
         let mut bindings: Vec<(String, Type)> = Vec::new();
-        for (name, outer_id, _, ty) in &outer {
+        for (name, outer_id, mutable, ty) in &outer {
             if !capture_names.contains(&name) { continue; }
             if mutated_names.contains(&name) {
-                return Err(self.error_at(lit_offset, &format!(
-                    "a closure cannot mutate captured variable '{name}' in this version: captures are by value or read-only, so write the loop or the update in the enclosing scope")));
+                if !*mutable || !is_copy_type(*ty, self.structs, self.enums) {
+                    return Err(self.error_at(lit_offset, &format!(
+                        "a closure cannot mutate captured variable '{name}' in this version: captures are by value or read-only, so write the loop or the update in the enclosing scope")));
+                }
+                if self.moved.contains(outer_id) {
+                    return Err(moved_value_hint(self.binding_label(self.error_at(lit_offset, &format!("cannot capture '{name}' because it was moved")).with_code("E0102"), *outer_id)));
+                }
+                mut_captures.push((*outer_id, *ty));
+                continue;
             }
             if self.moved.contains(outer_id) {
                 return Err(moved_value_hint(self.binding_label(self.error_at(lit_offset, &format!("cannot capture '{name}' because it was moved")).with_code("E0102"), *outer_id)));
@@ -161,6 +113,9 @@ impl Parser<'_> {
         for (outer_id, ty) in &borrow_captures {
             bindings.push((names_by_id[outer_id].clone(), *ty));
         }
+        for (outer_id, ty) in &mut_captures {
+            bindings.push((names_by_id[outer_id].clone(), *ty));
+        }
         // Pass 2 parses the same tokens with the classified capture types, so
         // the emitted body reads borrows as borrows and values as owned slots.
         let id2 = self.generics.next_fn_id;
@@ -170,7 +125,7 @@ impl Parser<'_> {
         self.pos = end_pos;
         // Only the visible parameters are call-checkable; the leading capture
         // slots are the call site's business, not the caller's argument list.
-        let capture_count = value_captures.len() + borrow_captures.len();
+        let capture_count = value_captures.len() + mut_captures.len() + borrow_captures.len();
         let visible: Vec<Type> = function.params[capture_count..].iter().map(|&(_, ty)| ty).collect();
         let ret = function.returns;
         self.pending.push(function);
@@ -182,10 +137,26 @@ impl Parser<'_> {
                 self.borrows.push((*outer_id, self.scopes.len(), BorrowKind::Container));
             }
         }
+        let kind = if !mut_captures.is_empty() {
+            CallableKind::FnMut
+        } else if value_captures.iter().any(|(_, ty)| !is_copy_type(*ty, self.structs, self.enums)) {
+            CallableKind::FnOnce
+        } else {
+            CallableKind::Fn
+        };
         let cid = self.generics.closures.len();
-        BORROW_CAPTURES.with(|all| all.borrow_mut().push(borrow_captures.clone()));
-        self.generics.closures.push(ClosureDef { fn_id: id2, params: visible, ret, value_captures, borrow_captures });
-        FN_IDS.with(|ids| ids.borrow_mut().push(id2));
+        self.ctx.push_closure(id2, borrow_captures.clone());
+        self.generics.closures.push(ClosureDef {
+            fn_id: id2,
+            params: visible,
+            ret,
+            value_captures,
+            borrow_captures,
+            mut_captures,
+            kind,
+            env: None,
+            file: self.file.clone(),
+        });
         Ok((Expr::ClosureLit(cid), Type::Closure(cid)))
     }
 
@@ -193,21 +164,27 @@ impl Parser<'_> {
     // Use the outer declaration offsets to recover their resolved identities.
     fn parse_closure_body(&mut self, id: usize, body_start: usize, captures: &[(String, Type)]) -> Result<(Function, std::collections::HashSet<usize>, usize), ae_span::Diagnostic> {
         let capture_starts: Vec<_> = captures.iter().map(|(name, _)| {
-            self.names.get(name).and_then(|&(slot, _, _)| self.binding_ranges.get(&slot)).map(|range| range.start)
+            self.names.get(name).and_then(|&(slot, _, _)| {
+                self.binding_ranges.get(&slot).map(|range| range.start)
+                    // A nested closure capturing a capture: the middle
+                    // closure's hidden parameter has no name range, so its
+                    // origin is the binding it was captured from.
+                    .or_else(|| self.capture_origins.get(&slot).copied())
+            })
         }).collect();
         let mut sub = Parser {
             file: self.file.clone(), source: self.source, tokens: Rc::clone(&self.tokens), shared_source: Rc::clone(&self.shared_source), pos: body_start,
-            names: HashMap::new(), binding_ranges: HashMap::new(), resolved_expressions: Rc::clone(&self.resolved_expressions), next_var: 1, expression_depth: 0, expression_nodes: 0, block_depth: 0,
+            names: HashMap::new(), binding_ranges: HashMap::new(), capture_origins: HashMap::new(), resolved_expressions: Rc::clone(&self.resolved_expressions), next_var: 1, expression_depth: 0, expression_nodes: 0, block_depth: 0,
             loop_depth: 0, loop_scopes: Vec::new(), loop_labels: Vec::new(), next_label: 0, unsafe_depth: 0,
             functions: &mut *self.functions, structs: &mut *self.structs, struct_names: &mut *self.struct_names,
-            enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics,
-            id_order: Vec::new(), in_main: false, return_type: Type::Int, moved: std::collections::HashSet::new(),
-            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), plus_operand_depth: 0, scopes: Vec::new(),
-            subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None,
+            enums: &mut *self.enums, enum_names: &mut *self.enum_names, generics: &mut *self.generics, ctx: &mut *self.ctx,
+            id_order: Vec::new(), in_main: false, return_type: Type::Int(IntTy::I64), moved: std::collections::HashSet::new(),
+            borrows: Vec::new(), deferred_write_conflicts: Vec::new(), deferred_borrow_spawns: Vec::new(), call_borrows: Vec::new(), mut_borrows: Vec::new(), scopes: Vec::new(), owned_params: Vec::new(),
+            subst: HashMap::new(), trait_bounds: HashMap::new(), receiver: None, impl_self: None, inherent_impl: false,
             // Shadowing stays allowed in both passes: a body-local may reuse
             // an outer name, and the AST walk (not the name map) decides what
             // was captured.
-            shadow_ok: true, pending: Vec::new(),
+            shadow_ok: true, impl_fn_id: None, fn_once_type_params: std::collections::HashSet::new(), fn_once_slots: std::collections::HashSet::new(), pending: Vec::new(),
         };
         let parsed = sub.closure_body(id, captures, &capture_starts);
         let end_pos = sub.pos;
@@ -241,6 +218,10 @@ impl Parser<'_> {
             self.names.insert(name.clone(), (var_id, true, *ty));
             params.push((var_id, *ty));
             if let Some(start) = start {
+                // Remember where this hidden parameter was captured from, so
+                // a closure nested inside this body can resolve the same
+                // binding (its own capture_starts lookup walks this map).
+                self.capture_origins.insert(var_id, start);
                 resolved_captures.push((var_id, start));
             }
         }
@@ -310,11 +291,22 @@ impl Parser<'_> {
         self.scopes.push(params.iter().map(|&(var_id, ty)| (var_id, ty)).collect());
         let body = match self.lower_resolved_body_with_captures(&resolved_captures) {
             Some(body) => body,
-            None => self.block(),
+            None => {
+                // The resolved route is the body parser (P1.4): a closure body
+                // it does not take is a diagnostic, never a typed fallback —
+                // the capture classification can only answer for a body that
+                // lowers.
+                if std::env::var_os("AE_ROUTE_REPORT").is_some() {
+                    let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                    eprintln!("route legacy closure id={id} at {offset}");
+                }
+                let offset = self.tokens.get(self.pos).map(|token| token.offset).unwrap_or(0);
+                return Err(self.error_at(offset, "this closure's body is not on the resolved route yet; the legacy body parser has been removed"));
+            }
         };
         let scope = self.scopes.pop().unwrap();
         let mut body = body?;
-        let owned: Vec<(usize, Type)> = scope.iter().filter(|(_, ty)| ty.owned()).copied().collect();
+        let owned: Vec<(usize, Type)> = scope.iter().rev().filter(|(_, ty)| self.is_owned(*ty)).copied().collect();
         if !owned.is_empty() { body.push(Statement::Frees(owned)); }
         if !returns(&body) { return Err(self.fail("a closure body must return a value on every path")); }
         // The closure's deferred conflicts belong to the closure's own graph;
@@ -327,15 +319,21 @@ impl Parser<'_> {
         Ok(function)
     }
 
-    // `name(args)` on a variable of closure type: the captures are read at
-    // the call site — value captures move their outer variables (so a second
-    // call is a use-after-move, which is what makes the FnOnce shape safe),
-    // borrow captures forward the enclosing scope's own borrow.
-    pub(super) fn closure_call(&mut self, name: &str, call_offset: usize) -> Result<(Expr, Type), ae_span::Diagnostic> {
-        let Some(&(var_id, _, Type::Closure(cid))) = self.names.get(name) else {
+
+    /// A closure call whose visible arguments come from the shared call node:
+    /// the captured slots are prepended exactly as the typed path does, then
+    /// the same value/borrow/move rules a direct call uses lower the visible
+    /// list. A shape the rules cannot cover is a diagnostic.
+    pub(super) fn closure_call_with(
+        &mut self,
+        name: &str,
+        call_offset: usize,
+        arguments: &[ae_syntax::expression::Expression],
+        slots: &HashMap<ae_resolve::DefId, (usize, Type)>,
+    ) -> Result<(Expr, Type), ae_span::Diagnostic> {
+        let Some(&(_, _, Type::Closure(cid))) = self.names.get(name) else {
             return Err(self.fail(&format!("internal: '{name}' is not a closure")));
         };
-        let _ = var_id;
         let def = self.generics.closures[cid].clone();
         let mut args: Vec<Argument> = Vec::new();
         for (outer_id, ty) in &def.value_captures {
@@ -345,21 +343,18 @@ impl Parser<'_> {
             if self.is_borrowed(*outer_id) {
                 return Err(self.fail(&format!("cannot call '{name}' while one of its captured variables is borrowed")));
             }
-            if ty.owned() {
+            if self.is_owned(*ty) {
                 self.moved.insert(*outer_id);
             }
             args.push(Argument::Value(Expr::Variable(*outer_id, *ty, 0, 0)));
         }
         for (outer_id, hidden) in &def.borrow_captures {
             match hidden {
-                Type::StrView => {
-                    // The outer variable is the string the view reads.
-                    args.push(Argument::View(Expr::Variable(*outer_id, Type::String, 0, 0)));
-                }
+                Type::StrView => args.push(Argument::View(Expr::Variable(*outer_id, Type::String, 0, 0))),
                 _ => args.push(Argument::Borrow(*outer_id, true)),
             }
         }
-        let visible = self.call_arguments(&format!("closure {name}"), &def.params)?;
+        let visible = self.lower_value_arguments(&format!("closure {name}"), arguments, &def.params, slots)?;
         args.extend(visible);
         Ok((Expr::Call(def.fn_id, args, def.ret), def.ret))
     }
@@ -371,9 +366,7 @@ impl Parser<'_> {
 fn borrow_capture_form(ty: &Type) -> Option<Type> {
     match ty {
         Type::String => Some(Type::StrView),
-        Type::Vec => Some(Type::VecRef),
-        Type::StrVec => Some(Type::StrVecRef),
-        Type::VecF => Some(Type::VecFRef),
+        Type::Vector(id) => Some(Type::VectorRef(*id)),
         Type::Struct(sid) => Some(Type::StructRef(*sid)),
         _ => None,
     }
@@ -410,12 +403,15 @@ fn walk_statements(statements: &[Statement], used: &mut std::collections::HashSe
             }
             Statement::TaskYield => {}
             Statement::Return(expr, _) | Statement::Declare(_, expr) => walk_expr(expr, used, mutated),
-            Statement::Array(_, values) => for v in values { walk_expr(v, used, mutated); },
+            Statement::Array(_, values, _) => for v in values { walk_expr(v, used, mutated); },
             Statement::Assign(id, expr, _) => { mutated.insert(*id); walk_expr(expr, used, mutated); }
-            Statement::Store(id, _, index, value, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
-            Statement::VecPush(id, value, _, _) | Statement::StrVecPush(id, value, _, _, _) | Statement::VecFPush(id, value, _, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
-            Statement::Sort(id, ..) | Statement::Reverse(id, ..) | Statement::VecPop(id, ..) | Statement::StrVecPop(id, ..) | Statement::VecFPop(id, ..) => { mutated.insert(*id); }
-            Statement::VecStore(id, index, value, _, _) | Statement::StrVecStore(id, index, value, _, _, _) | Statement::VecFStore(id, index, value, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
+            Statement::Store(id, _, index, value, _, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
+            Statement::StrVecPush(id, value, _, _, _) | Statement::GVecPush(id, value, _, _, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
+            Statement::VecPushField(id, _, _, value, ..) => { mutated.insert(*id); walk_expr(value, used, mutated); }
+            Statement::VecStoreField(id, _, _, index, value, ..) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
+            Statement::VecPopField(id, ..) | Statement::VecSortField(id, ..) => { mutated.insert(*id); }
+            Statement::Sort(id, ..) | Statement::Reverse(id, ..) | Statement::StrVecPop(id, ..) | Statement::GVecPop(id, ..) => { mutated.insert(*id); }
+            Statement::StrVecStore(id, index, value, _, _, _) | Statement::GVecStore(id, index, value, _, _, _) | Statement::SliceStore(id, index, value, _, _, _) => { mutated.insert(*id); walk_expr(index, used, mutated); walk_expr(value, used, mutated); }
             Statement::FieldStore(id, _, _, value, _) => { mutated.insert(*id); walk_expr(value, used, mutated); }
             Statement::Print(printed) => if let Printed::Expr(expr) = printed { walk_expr(expr, used, mutated); },
             Statement::Assert(expr, _, _) => walk_expr(expr, used, mutated),
@@ -443,13 +439,34 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         Expr::Variable(id, ..) => { used.insert(*id); }
         // A pointer takes the address of (or reads through) the slot (M2.12).
         Expr::BorrowAs(e, ..) | Expr::DerefPtr(e, ..) => walk_expr(e, used, mutated),
+        // A field receiver and its index reference captured values.
+        Expr::VecIndexOf(base, index, ..) => {
+            walk_expr(base, used, mutated);
+            walk_expr(index, used, mutated);
+        }
+        // A slice reads its owner; its index reads are ordinary reads.
+        Expr::SliceOf(slot, ..) => { used.insert(*slot); }
+        Expr::SliceIndex(slot, index, ..) => {
+            used.insert(*slot);
+            walk_expr(index, used, mutated);
+        }
+        // A sub-slice reads its owner and both bounds.
+        Expr::SliceRange(slot, _, _, start, end, ..) => {
+            used.insert(*slot);
+            walk_expr(start, used, mutated);
+            walk_expr(end, used, mutated);
+        }
         // Both the pointer and its offset can reference captured values.
         Expr::PtrOffset(base, count, ..) | Expr::PtrWrite(base, count, ..) => {
             walk_expr(base, used, mutated);
             walk_expr(count, used, mutated);
         }
         // A retag uses the base without consuming it.
-        Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) => walk_expr(e, used, mutated),
+        Expr::PtrCast(e, ..) | Expr::PtrDropInPlace(e, ..) | Expr::ScalarCast(e, ..) => walk_expr(e, used, mutated),
+        Expr::IntMethod(_, recv, arg, ..) => {
+            walk_expr(recv, used, mutated);
+            if let Some(arg) = arg { walk_expr(arg, used, mutated); }
+        }
         Expr::Index(id, _, index, ..) | Expr::VecIndex(id, index, ..) | Expr::StrVecIndex(id, index, ..) => {
             used.insert(*id);
             walk_expr(index, used, mutated);
@@ -466,7 +483,17 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
                 match arg {
                     Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
                     Argument::Borrow(id, _) => { used.insert(*id); }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
+                }
+            }
+        }
+        Expr::FnExprCall(callee, args, ..) => {
+            walk_expr(callee, used, mutated);
+            for arg in args {
+                match arg {
+                    Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
+                    Argument::Borrow(id, _) => { used.insert(*id); }
+                    Argument::FnPtr(..) => {}
                 }
             }
         }
@@ -475,7 +502,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
                 match arg {
                     Argument::Value(e) | Argument::View(e) => walk_expr(e, used, mutated),
                     Argument::Borrow(id, _) => { used.insert(*id); }
-                    Argument::FnPtr(_) => {}
+                    Argument::FnPtr(..) => {}
                 }
             }
         }
@@ -514,7 +541,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         Expr::ExecRun(ex) | Expr::PoolNew(ex) | Expr::PoolJoin(ex) => walk_expr(ex, used, mutated),
         Expr::AtomicAdd(handle, value) => { walk_expr(handle, used, mutated); walk_expr(value, used, mutated); }
         Expr::AtomicCas(handle, expect, new) => { walk_expr(handle, used, mutated); walk_expr(expect, used, mutated); walk_expr(new, used, mutated); }
-        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StrLit(..) | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::NowMs | Expr::NowS | Expr::ClosureLit(_) | Expr::MapNew(..) => {}
+        Expr::Number(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::CharLit(_) | Expr::Unit | Expr::StrLit(..) | Expr::Args(..) | Expr::ReadStdin(..) | Expr::Cwd(..) | Expr::StrVecNew(..) | Expr::F64VecNew(..) | Expr::NowMs | Expr::NowS | Expr::ClosureLit(_) | Expr::FnRef(..) | Expr::MapNew(..) => {}
     }
 }
 
@@ -522,4 +549,311 @@ fn record_place(place: &MapPlace, used: &mut std::collections::HashSet<usize>, m
     let id = place.slot();
     used.insert(id);
     mutated.insert(id);
+}
+
+impl Parser<'_> {
+    pub(super) fn materialize_closure_env(
+        &mut self,
+        cid: usize,
+        at_offset: usize,
+    ) -> Result<ClosureEnvInfo, ae_span::Diagnostic> {
+        if let Some(info) = self.generics.closures[cid].env.clone() {
+            return Ok(info);
+        }
+        let env_sid = self.structs.len();
+        let wrapper_fn_id = self.generics.next_fn_id;
+        self.generics.next_fn_id += 1;
+        self.structs.push(StructDef {
+            name: format!("__ae_closure_env_{cid}"),
+            fields: Vec::new(),
+            file: self.generics.closures[cid].file.clone(),
+            public: false,
+            repr_c: false,
+            is_copy: false,
+            drop_fn: None,
+            drop_returns_unit: false,
+        });
+        let info = self.populate_closure_env(cid, env_sid, wrapper_fn_id, false, at_offset)?;
+        self.generics.closures[cid].env = Some(info.clone());
+        self.generics.closure_envs.insert(env_sid, info.clone());
+        Ok(info)
+    }
+
+    pub(super) fn materialize_closure_struct_lit(
+        &mut self,
+        cid: usize,
+        for_return: Option<(usize, usize)>,
+        at_offset: usize,
+    ) -> Result<(Expr, ClosureEnvInfo), ae_span::Diagnostic> {
+        let info = if let Some((env_sid, wrapper_fn_id)) = for_return {
+            self.populate_closure_env(cid, env_sid, wrapper_fn_id, true, at_offset)?
+        } else {
+            self.materialize_closure_env(cid, at_offset)?
+        };
+        let def = self.generics.closures[cid].clone();
+        self.seek_scalar_offset(at_offset);
+        let (line, column) = self.position();
+        let mut field_exprs = Vec::new();
+        for &(outer_id, ty) in &def.value_captures {
+            self.check_variable_move(outer_id)?;
+            if self.is_owned(ty) {
+                self.moved.insert(outer_id);
+            }
+            field_exprs.push(Expr::Variable(outer_id, ty, line, column));
+        }
+        for &(outer_id, ty) in &def.mut_captures {
+            self.check_variable_move(outer_id)?;
+            if self.is_owned(ty) {
+                self.moved.insert(outer_id);
+            }
+            field_exprs.push(Expr::Variable(outer_id, ty, line, column));
+        }
+        for &(outer_id, hidden_ty) in &def.borrow_captures {
+            if for_return.is_some() {
+                let outer_ty = self.names.values().find(|&&(id, _, _)| id == outer_id).map(|&(_, _, t)| t).unwrap_or(hidden_ty);
+                self.check_variable_move(outer_id)?;
+                if self.is_owned(outer_ty) {
+                    self.moved.insert(outer_id);
+                }
+                field_exprs.push(Expr::Variable(outer_id, outer_ty, line, column));
+            } else {
+                let expr = match hidden_ty {
+                    Type::StrView => Expr::SliceView(
+                        outer_id,
+                        None,
+                        Box::new(Expr::Number(0)),
+                        Box::new(Expr::Len(Box::new(Expr::Variable(outer_id, Type::String, line, column)), line, column)),
+                        line,
+                        column,
+                    ),
+                    _ => Expr::BorrowAs(Box::new(Expr::Variable(outer_id, hidden_ty, line, column)), false, line, column),
+                };
+                field_exprs.push(expr);
+            }
+        }
+        Ok((Expr::StructLit(info.env_sid, field_exprs), info))
+    }
+
+    fn populate_closure_env(
+        &mut self,
+        cid: usize,
+        env_sid: usize,
+        wrapper_fn_id: usize,
+        for_return: bool,
+        at_offset: usize,
+    ) -> Result<ClosureEnvInfo, ae_span::Diagnostic> {
+        let def = self.generics.closures[cid].clone();
+        let mut fields: Vec<(String, Type)> = Vec::new();
+        let mut outer_tys: Vec<Type> = Vec::new();
+        for (i, &(_, ty)) in def.value_captures.iter().enumerate() {
+            if for_return && matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
+                return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
+            }
+            fields.push((format!("c{i}"), ty));
+            outer_tys.push(ty);
+        }
+        for (i, &(_, ty)) in def.mut_captures.iter().enumerate() {
+            if for_return && matches!(ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
+                return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
+            }
+            fields.push((format!("m{i}"), ty));
+            outer_tys.push(ty);
+        }
+        for (i, &(outer_id, hidden_ty)) in def.borrow_captures.iter().enumerate() {
+            let stored_ty = if for_return {
+                let outer_ty = self.names.values()
+                    .find(|&&(id, _, _)| id == outer_id)
+                    .map(|&(_, _, t)| t)
+                    .unwrap_or(hidden_ty);
+                if matches!(outer_ty, Type::StrView | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_) | Type::ArrayOf(..)) {
+                    return Err(self.error_at(at_offset, "cannot return closure that borrows from the enclosing scope"));
+                }
+                outer_ty
+            } else {
+                hidden_ty
+            };
+            fields.push((format!("b{i}"), stored_ty));
+            outer_tys.push(stored_ty);
+        }
+        let is_copy = (for_return || def.borrow_captures.is_empty())
+            && def.mut_captures.is_empty()
+            && fields.iter().all(|(_, ty)| is_copy_type(*ty, self.structs, self.enums));
+        self.structs[env_sid].fields = fields.clone();
+        self.structs[env_sid].is_copy = is_copy;
+
+        let env_param_ty = match def.kind {
+            CallableKind::Fn => Type::StructRef(env_sid),
+            CallableKind::FnMut => Type::StructMut(env_sid),
+            CallableKind::FnOnce => Type::Struct(env_sid),
+        };
+        let mut params = Vec::with_capacity(1 + def.params.len());
+        params.push((0, env_param_ty));
+        for (i, &pty) in def.params.iter().enumerate() {
+            params.push((1 + i, pty));
+        }
+
+        let body = if def.mut_captures.is_empty() {
+            let mut call_args = Vec::with_capacity(fields.len() + def.params.len());
+            let env_var = Expr::Variable(0, env_param_ty, 0, 0);
+            for (idx, (fname, fty)) in fields.iter().enumerate() {
+                let field_expr = Expr::Field(Box::new(env_var.clone()), fname.clone(), *fty);
+                if idx >= def.value_captures.len() + def.mut_captures.len() {
+                    let hidden_ty = def.borrow_captures[idx - def.value_captures.len() - def.mut_captures.len()].1;
+                    if hidden_ty == Type::StrView && *fty == Type::String {
+                        call_args.push(Argument::View(field_expr));
+                    } else if matches!(hidden_ty, Type::VectorRef(_) | Type::StructRef(_)) && !matches!(fty, Type::VectorRef(_) | Type::StructRef(_)) {
+                        call_args.push(Argument::Value(Expr::BorrowAs(Box::new(field_expr), false, 0, 0)));
+                    } else {
+                        call_args.push(Argument::Value(field_expr));
+                    }
+                } else {
+                    call_args.push(Argument::Value(field_expr));
+                }
+            }
+            for (i, &pty) in def.params.iter().enumerate() {
+                call_args.push(Argument::Value(Expr::Variable(1 + i, pty, 0, 0)));
+            }
+            let call_expr = Expr::Call(def.fn_id, call_args, def.ret);
+            vec![Statement::Return(call_expr, Vec::new())]
+        } else {
+            let orig = self.pending.iter().find(|f| f.id == def.fn_id)
+                .cloned()
+                .ok_or_else(|| self.error_at(at_offset, "internal: missing closure body"))?;
+            let cap_count = fields.len();
+            let mut slot_to_field: HashMap<usize, (String, Type)> = HashMap::new();
+            for (i, (fname, fty)) in fields.iter().enumerate() {
+                slot_to_field.insert(orig.params[i].0, (fname.clone(), *fty));
+            }
+            let mut param_remap: HashMap<usize, usize> = HashMap::new();
+            for (i, &(slot, _)) in orig.params.iter().enumerate().skip(cap_count) {
+                param_remap.insert(slot, 1 + (i - cap_count));
+            }
+            let mut stmts = orig.body;
+            rewrite_mut_closure_stmts(&mut stmts, env_param_ty, &slot_to_field, &param_remap);
+            for p in params.iter_mut().skip(1 + def.params.len()) {
+                p.0 += 1;
+            }
+            stmts
+        };
+
+        self.pending.push(Function {
+            id: wrapper_fn_id,
+            params,
+            returns: def.ret,
+            body,
+            is_main: false,
+        });
+        let sig = self.ctx.intern_fn_sig(def.params, def.ret);
+        Ok(ClosureEnvInfo { env_sid, wrapper_fn_id, kind: def.kind, sig })
+    }
+}
+
+fn rewrite_mut_closure_stmts(
+    stmts: &mut [Statement],
+    env_ty: Type,
+    slot_to_field: &HashMap<usize, (String, Type)>,
+    param_remap: &HashMap<usize, usize>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Declare(slot, expr) => {
+                *slot += 1;
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+            }
+            Statement::Assign(slot, expr, _) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+                if let Some((fname, fty)) = slot_to_field.get(slot) {
+                    *stmt = Statement::FieldStore(0, vec![(fname.clone(), *fty)], *fty, expr.clone(), env_ty);
+                } else if let Some(&new_slot) = param_remap.get(slot) {
+                    *slot = new_slot;
+                } else {
+                    *slot += 1;
+                }
+            }
+            Statement::FieldStore(slot, _, _, expr, _) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+                if let Some(&new_slot) = param_remap.get(slot) {
+                    *slot = new_slot;
+                } else if !slot_to_field.contains_key(slot) {
+                    *slot += 1;
+                }
+            }
+            Statement::Print(Printed::Expr(expr)) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+            }
+            Statement::Assert(expr, ..) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+            }
+            Statement::Return(expr, frees) => {
+                rewrite_mut_closure_expr(expr, env_ty, slot_to_field, param_remap);
+                frees.retain(|(s, _)| !slot_to_field.contains_key(s));
+                for (s, _) in frees.iter_mut() {
+                    if let Some(&new_slot) = param_remap.get(s) { *s = new_slot; } else { *s += 1; }
+                }
+            }
+            Statement::Frees(frees) => {
+                frees.retain(|(s, _)| !slot_to_field.contains_key(s));
+                for (s, _) in frees.iter_mut() {
+                    if let Some(&new_slot) = param_remap.get(s) { *s = new_slot; } else { *s += 1; }
+                }
+            }
+            Statement::If(cond, yes, no) => {
+                rewrite_mut_closure_expr(cond, env_ty, slot_to_field, param_remap);
+                rewrite_mut_closure_stmts(yes, env_ty, slot_to_field, param_remap);
+                rewrite_mut_closure_stmts(no, env_ty, slot_to_field, param_remap);
+            }
+            Statement::While(cond, body) => {
+                rewrite_mut_closure_expr(cond, env_ty, slot_to_field, param_remap);
+                rewrite_mut_closure_stmts(body, env_ty, slot_to_field, param_remap);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_mut_closure_expr(
+    expr: &mut Expr,
+    env_ty: Type,
+    slot_to_field: &HashMap<usize, (String, Type)>,
+    param_remap: &HashMap<usize, usize>,
+) {
+    match expr {
+        Expr::Variable(slot, _ty, line, col) => {
+            if let Some((fname, fty)) = slot_to_field.get(slot) {
+                *expr = Expr::Field(Box::new(Expr::Variable(0, env_ty, *line, *col)), fname.clone(), *fty);
+            } else if let Some(&new_slot) = param_remap.get(slot) {
+                *slot = new_slot;
+            } else {
+                *slot += 1;
+            }
+        }
+        Expr::Binary(a, _, b, ..) => {
+            rewrite_mut_closure_expr(a, env_ty, slot_to_field, param_remap);
+            rewrite_mut_closure_expr(b, env_ty, slot_to_field, param_remap);
+        }
+        Expr::Neg(a, ..) | Expr::Not(a) | Expr::Field(a, ..) | Expr::ScalarCast(a, ..) => {
+            rewrite_mut_closure_expr(a, env_ty, slot_to_field, param_remap);
+        }
+        Expr::Call(_, args, _) | Expr::FnCall(_, args, _, _) => {
+            for arg in args {
+                if let Argument::Value(e) | Argument::View(e) = arg {
+                    rewrite_mut_closure_expr(e, env_ty, slot_to_field, param_remap);
+                }
+            }
+        }
+        Expr::FnExprCall(callee, args, ..) => {
+            rewrite_mut_closure_expr(callee, env_ty, slot_to_field, param_remap);
+            for arg in args {
+                if let Argument::Value(e) | Argument::View(e) = arg {
+                    rewrite_mut_closure_expr(e, env_ty, slot_to_field, param_remap);
+                }
+            }
+        }
+        Expr::StructLit(_, vals) | Expr::EnumLit(_, _, _, vals) | Expr::VecLit(vals, ..) => {
+            for v in vals {
+                rewrite_mut_closure_expr(v, env_ty, slot_to_field, param_remap);
+            }
+        }
+        _ => {}
+    }
 }

@@ -1,0 +1,41 @@
+// P2.4: `&vec[i]` borrows one element in place for a call.
+// Owned struct elements, Copy struct elements and nested vector elements all
+// pass to `&T`/`&vec` parameters; the borrow lasts only for the call, so the
+// vector stays usable afterwards (a later `push` is allowed).
+struct Tagged { name: string, n: i64 }
+
+struct Point { x: i64, y: i64 }
+
+fn show(t: &Tagged) { print(t.name + "=" + to_string(t.n)); }
+
+fn mag(p: &Point) -> i64 { return p.x * p.x + p.y * p.y; }
+
+fn total(row: &vec) -> i64 {
+    var sum = 0;
+    for i in 0..len(row) {
+        sum += row[i];
+    }
+    return sum;
+}
+
+fn each(items: &vec[Tagged]) {
+    for i in 0..len(items) {
+        show(&items[i]);
+    }
+}
+
+fn main() {
+    var items = vec[Tagged { name: "a", n: 1 }, Tagged { name: "b", n: 2 }];
+    show(&items[len(items) - 1]);
+    each(&items);
+    var extra = Tagged { name: "c", n: 3 };
+    push(items, extra);
+    show(&items[2]);
+
+    let ps = vec[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    print(mag(&ps[1]));
+
+    let rows = vec[vec[1, 2], vec[3, 4, 5]];
+    print(total(&rows[0]));
+    print(total(&rows[1]));
+}

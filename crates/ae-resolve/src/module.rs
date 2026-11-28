@@ -38,37 +38,63 @@ pub fn parse_module(file: &str, source: &str) -> Result<Module, Diagnostic> {
     parse_module_tokens(file, source, &tokens)
 }
 
-/// Assemble a module from the lexer-produced tokens for `source`.
+/// Assemble a module from the lexer-produced tokens for `source`. A
+/// statement-level error inside a body is fatal here; the compiler's index
+/// uses the recovering form below.
 pub fn parse_module_tokens(file: &str, source: &str, tokens: &[Token]) -> Result<Module, Diagnostic> {
+    let (module, errors) = parse_module_tokens_recovering(file, source, tokens)?;
+    match errors.into_iter().next() {
+        Some((_, diagnostic)) => Err(diagnostic),
+        None => Ok(module),
+    }
+}
+
+/// Assemble a module, recovering from a statement-level error inside one
+/// function body: the diagnostic is recorded against the body's opening brace
+/// (the key the compiler uses for a collected body) and the parse continues
+/// with the next declaration. Header and declaration-level errors stay fatal.
+pub fn parse_module_tokens_recovering(
+    file: &str,
+    source: &str,
+    tokens: &[Token],
+) -> Result<(Module, Vec<(usize, Diagnostic)>), Diagnostic> {
     let headers = ae_syntax::module::parse_use_headers(file, source, tokens)?;
     let declarations = parse_declaration_tokens(file, source, tokens, headers.body_start)?;
     let mut functions = Vec::new();
-    for index in 0..declarations.len() {
-        let declaration = &declarations[index];
+    let mut errors: Vec<(usize, Diagnostic)> = Vec::new();
+    for (index, declaration) in declarations.iter().enumerate() {
         match &declaration.kind {
-            DeclarationKind::Function { .. } => {
-                let body = body_statements(file, source, tokens, declaration)?;
-                functions.push(FnUnit { declaration: declaration.clone(), impl_owner: None, body });
-            }
+            DeclarationKind::Function { .. } => match body_statements(file, source, tokens, declaration) {
+                Ok(body) => functions.push(FnUnit { declaration: declaration.clone(), impl_owner: None, body }),
+                Err(diagnostic) => {
+                    errors.push((declaration.body.as_ref().map(|range| range.start).unwrap_or(declaration.range.start), diagnostic));
+                    functions.push(FnUnit { declaration: declaration.clone(), impl_owner: None, body: None });
+                }
+            },
             DeclarationKind::Impl { .. } => {
                 for method in impl_methods(file, source, tokens, declaration)? {
-                    let body = body_statements(file, source, tokens, &method)?;
-                    functions.push(FnUnit { declaration: method, impl_owner: Some(index), body });
+                    match body_statements(file, source, tokens, &method) {
+                        Ok(body) => functions.push(FnUnit { declaration: method, impl_owner: Some(index), body }),
+                        Err(diagnostic) => {
+                            errors.push((method.body.as_ref().map(|range| range.start).unwrap_or(method.range.start), diagnostic));
+                            functions.push(FnUnit { declaration: method, impl_owner: Some(index), body: None });
+                        }
+                    }
                 }
             }
             // Struct bodies are fields, enum bodies are variants: both are
             // on the declaration already. Trait bodies stay opaque; their
             // signatures are generic-dispatch surface for the type checker.
-            DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait => {}
+            DeclarationKind::Struct { .. } | DeclarationKind::Enum { .. } | DeclarationKind::Trait { .. } => {}
         }
     }
-    Ok(Module {
+    Ok((Module {
         file: file.to_owned(),
         source: source.to_owned(),
         use_paths: headers.paths,
         declarations,
         functions,
-    })
+    }, errors))
 }
 
 /// Parse a function body whose declaration carries `body` covering
@@ -77,10 +103,11 @@ fn body_statements(file: &str, source: &str, tokens: &[Token], declaration: &Dec
     let Some(body) = declaration.body.clone() else {
         return Ok(None);
     };
-    let open = tokens.iter().position(|token| token.offset == body.start)
-        .expect("the body range starts at the opening brace token");
+    let Some(open) = tokens.iter().position(|token| token.offset == body.start) else {
+        return Err(ae_syntax::diagnostic_range(file, source, body, "expected opening brace for function body"));
+    };
     let (statements, close) = parse_statements_until_close(file, source, tokens, open + 1)?;
-    debug_assert!(tokens[close].offset < body.end, "the body parser stops inside its range");
+    debug_assert!(tokens.get(close).is_some_and(|token| token.offset < body.end), "the body parser stops inside its range");
     Ok(Some(statements))
 }
 

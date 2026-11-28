@@ -1,0 +1,9 @@
+fn call_fn[F: Fn(i64) -> string](f: F, x: i64) -> string {
+    return f(x);
+}
+
+fn main() {
+    let s = "owned";
+    let f = |n: i64| -> string { return s; };
+    print(call_fn(f, 1));
+}

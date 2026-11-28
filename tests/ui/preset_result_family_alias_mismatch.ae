@@ -1,0 +1,14 @@
+fn make(flag: bool) -> FloatResult {
+    if flag {
+        return FloatResult::Ok(1.5);
+    }
+    return FloatResult::Err("no float");
+}
+
+fn main() {
+    let r = make(true);
+    match r {
+        IntResult::Ok(value) => { print(value); }
+        IntResult::Err(e) => { print(e); }
+    }
+}

@@ -1,0 +1,60 @@
+//! P3.3 calibration gate: the pure-MIR borrow checker must accept every
+//! standalone program the existing compiler accepts. Skips are retired
+//! (ADR-0243 stage 1): a shape the pure pipeline cannot lower or check is a
+//! failure here, not an allowlist entry. Divergences are either a lowering
+//! bug or a checker bug and must be fixed, not silently allowlisted.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn repo_path(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
+}
+
+#[test]
+fn pure_mir_borrowck_agrees_on_the_accepted_run_corpus() {
+    let run_dir = repo_path("tests/run");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&run_dir)
+        .expect("read tests/run")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ae"))
+        .collect();
+    paths.sort();
+    assert!(paths.len() > 50, "expected run corpus, found {}", paths.len());
+
+    let mut checked = 0usize;
+    let mut skipped = Vec::new();
+    let mut failures = Vec::new();
+    for path in &paths {
+        if ae_compiler::frontend::check_path(path).is_err() {
+            continue;
+        }
+        match ae_compiler::compile_path_pure_mir_bodies(path) {
+            Ok(_) => checked += 1,
+            Err(err) if err.contains("pure MIR lowering cannot handle") => {
+                skipped.push(format!("{}: {err}", path.display()));
+            }
+            Err(err) => failures.push(format!("{}: {err}", path.display())),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "pure-MIR borrowck rejected {} accepted fixtures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(
+        checked >= 164,
+        "expected >=164 calibrated fixtures, got {checked} (skipped {})",
+        skipped.len()
+    );
+    // ADR-0243 stage 1: every accepted fixture lowers, validates and
+    // borrow-checks. The skip allowance from ADR-0237 is retired; a new
+    // unsupported shape must be implemented or removed from the corpus with
+    // an ADR, not skipped.
+    assert!(
+        skipped.is_empty(),
+        "the pure pipeline must lower and check every accepted fixture; skips:\n{}",
+        skipped.join("\n")
+    );
+}

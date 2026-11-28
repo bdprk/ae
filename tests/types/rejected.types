@@ -1,0 +1,38 @@
+types rejected.ae
+item spellings:
+#0 Point
+  field x -> i64
+  field y -> i64
+fn #1 ordered
+  params:
+    flag: bool
+  return: bool
+  locals:
+    #4 flag = bool
+  expressions:
+    86..90 checked bool
+    86..98 rejected comparison requires two i64, two f64, or two strings/views with == or !=
+    93..98 checked bool
+fn #2 mixed
+  params: none
+  return: f64
+  locals: none
+  expressions:
+    134..135 checked i64
+    134..141 rejected mixed i64/f64 arithmetic is not allowed; convert one side explicitly with to_f64 or to_i64
+    138..141 checked f64
+fn #3 main
+  params: none
+  return: (none)
+  locals:
+    #5 p = #0
+  expressions:
+    170..175 deferred
+    170..190 deferred
+    181..182 checked i64
+    187..188 checked i64
+    202..203 deferred
+    202..205 deferred
+    218..225 deferred
+    218..231 deferred
+    226..230 checked bool

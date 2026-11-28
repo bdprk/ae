@@ -1,0 +1,5 @@
+fn main() {
+    let a = 0 as usize;
+    let p = a as *const i64;
+    print(1);
+}

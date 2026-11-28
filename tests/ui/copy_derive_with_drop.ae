@@ -1,0 +1,12 @@
+#[derive(Copy)]
+struct Bad {
+    x: i64,
+}
+
+impl Bad {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    print(1);
+}

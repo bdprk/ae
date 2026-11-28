@@ -125,3 +125,92 @@ pub fn pipe_is_drained(p: &mut BytePipe) -> bool {
 pub fn pipe_buffered(p: &mut BytePipe) -> i64 {
     return len(p.buf);
 }
+
+// --- Late completion and buffer retention (M4.4.01) -------------------------
+// A completion source is an independent event stream (IOCP-style): the I/O
+// system posts (request id, transferred bytes) pairs and the program polls
+// them later. A request whose completion is posted but not yet polled is a
+// late completion: its state is terminal, yet its buffer is still retained
+// until the poll hands it back.
+
+pub struct CompletionSource {
+    in_flight: i64,
+    posted: i64,
+    last_id: i64,
+    last_bytes: i64,
+}
+
+pub fn source_new() -> CompletionSource {
+    return CompletionSource { in_flight: 0, posted: 0, last_id: 0, last_bytes: 0 };
+}
+
+// The request enters the source: one more buffer is in flight.
+pub fn source_track(s: &mut CompletionSource, req_id: i64) -> i64 {
+    let _ = req_id;
+    s.in_flight = s.in_flight + 1;
+    return s.in_flight;
+}
+
+// Post a completion for a tracked request. Posting after a cancel is exactly
+// the late case: the request is terminal either way, and the buffer stays
+// retained until the poll.
+pub fn source_post(s: &mut CompletionSource, req_id: i64, transferred: i64) -> bool {
+    if s.in_flight <= 0 {
+        return false;
+    }
+    // The probe posts one completion at a time, so the source keeps the
+    // last pair rather than a queue: ae has no growable field container
+    // for the receiver position `push` requires.
+    s.posted = s.posted + 1;
+    s.last_id = req_id;
+    s.last_bytes = transferred;
+    return true;
+}
+
+// Poll the next completion: the request id, or -1 when none is queued.
+pub fn source_poll(s: &mut CompletionSource) -> i64 {
+    if s.posted <= 0 {
+        return -1;
+    }
+    s.posted = s.posted - 1;
+    s.in_flight = s.in_flight - 1;
+    return s.last_id;
+}
+
+pub fn source_transferred(s: &CompletionSource) -> i64 {
+    return s.last_bytes;
+}
+
+pub fn source_in_flight(s: &CompletionSource) -> i64 {
+    return s.in_flight;
+}
+
+// The retention oracle: a buffer may be released only when no completion is
+// outstanding. A release attempted while one is still posted counts as a
+// violation, which is what a leak-after-cancel would look like.
+pub struct RetentionOracle {
+    outstanding: i64,
+    violations: i64,
+}
+
+pub fn oracle_new() -> RetentionOracle {
+    return RetentionOracle { outstanding: 0, violations: 0 };
+}
+
+pub fn oracle_hold(o: &mut RetentionOracle) -> i64 {
+    o.outstanding = o.outstanding + 1;
+    return o.outstanding;
+}
+
+pub fn oracle_release(o: &mut RetentionOracle) -> bool {
+    if o.outstanding <= 0 {
+        o.violations = o.violations + 1;
+        return false;
+    }
+    o.outstanding = o.outstanding - 1;
+    return true;
+}
+
+pub fn oracle_violations(o: &RetentionOracle) -> i64 {
+    return o.violations;
+}

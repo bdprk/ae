@@ -1,0 +1,19 @@
+fn done(flag: bool) -> Result[(), string] {
+    if flag {
+        return Result[(), string]::Ok(());
+    }
+    return Result[(), string]::Err("not done");
+}
+
+fn main() {
+    let a = done(true);
+    match a {
+        Result::Ok => { print("ok"); }
+        StatusResult::Err(message) => { print(message); }
+    }
+    let b = done(false);
+    match b {
+        Result::Ok => { print("ok"); }
+        Result::Err(message) => { print(message); }
+    }
+}

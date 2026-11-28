@@ -1,0 +1,11 @@
+struct Marker {
+    note: (),
+    value: i64,
+}
+
+fn main() {
+    var m = Marker { note: (), value: 3 };
+    m.note = ();
+    let x = ();
+    print(m.value);
+}

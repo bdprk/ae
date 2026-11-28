@@ -112,7 +112,6 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
         let (start, start_line) = (i, line);
         let newline_before = newline_pending;
         newline_pending = false;
-        let class;
         if bytes[i..].starts_with(b"//") {
             i += 2;
             while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
@@ -132,7 +131,7 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
             last_end = i;
             continue;
         }
-        if c == '"' {
+        let class = if c == '"' {
             i += 1;
             while i < bytes.len() {
                 match bytes[i] {
@@ -147,11 +146,11 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
             }
             if i >= bytes.len() { return Err(lex_error(start_line, "unterminated string literal")); }
             i += 1;
-            class = Class::Text;
+            Class::Text
         } else if c.is_ascii_alphabetic() || c == '_' {
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
-            class = match &source[start..i] {
+            match &source[start..i] {
                 "fn" => Class::Fn, "let" => Class::Let, "var" => Class::Var, "mut" => Class::Mut, "print" => Class::Print,
                 "if" => Class::If, "else" => Class::Else, "while" => Class::While, "return" => Class::Return,
                 "for" => Class::For, "in" => Class::In, "break" => Class::Break, "continue" => Class::Continue,
@@ -159,7 +158,7 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
                 "struct" => Class::Struct, "enum" => Class::Enum, "match" => Class::Match,
                 "trait" => Class::Trait, "impl" => Class::Impl,
                 _ => Class::Ident,
-            };
+            }
         } else if c.is_ascii_digit() {
             // Same fraction and exponent boundaries as the compiler lexer:
             // `1..2` stays a range, `1.field` stays a field access.
@@ -180,17 +179,17 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
                     while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
                 }
             }
-            class = if floating { Class::Float } else { Class::Number };
+            if floating { Class::Float } else { Class::Number }
         } else if ["==", "!=", "<=", ">=", "->", "&&", "||", "..", "=>", "::"].iter().any(|op| source[i..].starts_with(op)) {
             i += 2;
-            class = match &source[start..i] {
+            match &source[start..i] {
                 "==" => Class::EqEq, "!=" => Class::NotEq, "<=" => Class::LessEq, ">=" => Class::GreaterEq,
                 "->" => Class::Arrow, "&&" => Class::And, "||" => Class::Or, ".." => Class::DotDot,
                 "=>" => Class::FatArrow, "::" => Class::ColonColon, _ => unreachable!(),
-            };
+            }
         } else {
             i += c.len_utf8();
-            class = match c {
+            match c {
                 '(' => Class::LParen, ')' => Class::RParen, '{' => Class::LBrace, '}' => Class::RBrace,
                 '[' => Class::LBracket, ']' => Class::RBracket, ',' => Class::Comma, ':' => Class::Colon,
                 '&' => Class::Amp, ';' => Class::Semi, '=' => Class::Equal, '+' => Class::Plus,
@@ -199,15 +198,15 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
                 '?' => Class::Question,
                 '|' => Class::Pipe,
                 _ => return Err(lex_error(start_line, &format!("unexpected character {c:?}"))),
-            };
-        }
+            }
+        };
         // A Minus/Plus is a prefix operator when the previous token ends an
         // expression position; Bang is always prefix (there is no binary `!`).
         // Getting this wrong only adds or removes a space; the equivalence
         // and emit-c tests keep it honest.
         let prefix_op = match class {
             Class::Bang => true,
-            Class::Minus | Class::Plus => result.last().map_or(true, |prev: &FmtToken| matches!(prev.class,
+            Class::Minus | Class::Plus => result.last().is_none_or(|prev: &FmtToken| matches!(prev.class,
                 Class::LParen | Class::LBracket | Class::Comma | Class::Colon | Class::Equal
                 | Class::Plus | Class::Minus | Class::Star | Class::Slash | Class::Percent
                 | Class::Less | Class::LessEq | Class::Greater | Class::GreaterEq

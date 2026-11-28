@@ -1,0 +1,7 @@
+// A spawned closure that reads a parent vector captures a reference to it;
+// indexing goes through that reference and the join keeps the vector alive.
+fn main() {
+    let nums = vec[1, 2, 3];
+    let t = spawn(|| -> i64 { return len(nums) + nums[1]; });
+    print(wait(t));
+}

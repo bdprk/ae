@@ -1,7 +1,9 @@
 """R5.1 unit tests: the checklist generator parses the ledger and stays in
 sync with the generated file, and the commit-ID rule's patterns behave."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import gen_checklist
 
@@ -16,30 +18,81 @@ SAMPLE = """# ae implementation ledger
 ## R3 pipeline
 
 - [ ] R3b. Resolver pass over the shared grammar.
+
+## Audit remediation
+
+- [x] P2.9. Prototype-done item with an open 1.0 gap [1.0-gap: P2.2].
 """
 
 
 class ParseTests(unittest.TestCase):
     def test_items_carry_section_state_and_wrapping(self):
         items = list(gen_checklist.parse_items(SAMPLE))
-        self.assertEqual(len(items), 3)
-        section, done, item_id, title, wrapped = items[0]
+        self.assertEqual(len(items), 4)
+        section, done, item_id, title, wrapped, gap = items[0]
         self.assertEqual(section, "M2.4 Unsafe boundary")
         self.assertTrue(done)
         self.assertEqual(item_id, "M2.4a")
         self.assertEqual(title, "Something finished in this pass with evidence.")
         self.assertFalse(wrapped)
-        _, _, _, _, wrapped = items[1]
+        _, _, _, _, wrapped, _ = items[1]
         self.assertTrue(wrapped, "an item whose first line runs on gets the ellipsis")
         self.assertEqual(items[2][0], "R3 pipeline")
 
     def test_render_is_deterministic_and_counts(self):
         first = gen_checklist.render(SAMPLE)
         self.assertEqual(first, gen_checklist.render(SAMPLE))
-        self.assertIn("1 of 3 items done.", first)
+        self.assertIn("Prototype progress: 2 of 4 items done.", first)
+        self.assertIn("Charter-1.0 progress: 1 of 4 items done (1 prototype-done item still names an open gap", first)
         self.assertIn("- [x] M2.4a: Something finished", first)
         self.assertIn("- [ ] M2.4b: Something still open with a wrapped body that continues …", first)
         self.assertIn("## R3 pipeline", first)
+
+    def test_gap_marker_ignores_prose_placeholder_and_open_items(self):
+        ledger = """# ae implementation ledger
+
+## Audit
+
+- [x] P0.3. Describes the `[1.0-gap: P<phase>]` convention.
+- [x] M1.2.06. Narrowed item [1.0-gap: P2.5].
+- [x] M4.1.03. Single-platform item [1.0-gap: P5.1].
+- [ ] M3.3.07. Open item with note [1.0-gap: P4.5].
+"""
+        items = list(gen_checklist.parse_items(ledger))
+        self.assertIsNone(items[0][5])
+        self.assertEqual(items[1][5], "P2.5")
+        self.assertEqual(items[2][5], "P5.1")
+        self.assertEqual(items[3][5], "P4.5")
+        rendered = gen_checklist.render(ledger)
+        self.assertIn("Prototype progress: 3 of 4 items done.", rendered)
+        self.assertIn(
+            "Charter-1.0 progress: 1 of 4 items done (2 prototype-done items still name an open gap",
+            rendered,
+        )
+
+    def test_check_flag_detects_in_sync_and_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ledger_path = tmp_path / "ledger.md"
+            out_path = tmp_path / "checklist.md"
+            ledger_path.write_text(SAMPLE, encoding="utf-8", newline="\n")
+            self.assertEqual(
+                gen_checklist.main(["--ledger", str(ledger_path), "--out", str(out_path), "--check"]),
+                1,
+            )
+            self.assertEqual(
+                gen_checklist.main(["--ledger", str(ledger_path), "--out", str(out_path)]),
+                0,
+            )
+            self.assertEqual(
+                gen_checklist.main(["--ledger", str(ledger_path), "--out", str(out_path), "--check"]),
+                0,
+            )
+            out_path.write_text("stale\n", encoding="utf-8", newline="\n")
+            self.assertEqual(
+                gen_checklist.main(["--ledger", str(ledger_path), "--out", str(out_path), "--check"]),
+                1,
+            )
 
     def test_a_new_section_starts_a_blank_line(self):
         rendered = gen_checklist.render(SAMPLE)

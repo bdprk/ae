@@ -1,0 +1,199 @@
+// std/std/fmt.ae
+// Hosted formatting helpers (P4.4): integer bases, padding and digit grouping,
+// built from the byte/slice primitives. `to_string` covers decimal; these fill
+// the other spellings a caller reaches for when writing a report or a file.
+
+fn fmt_digit(uppercase: bool, value: i64) -> string {
+    let lower = "0123456789abcdef";
+    let upper = "0123456789ABCDEF";
+    if uppercase {
+        return slice(upper, value, value + 1);
+    }
+    return slice(lower, value, value + 1);
+}
+
+fn fmt_repeat(text: &string, count: i64) -> string {
+    var out = "";
+    var at = 0;
+    while at < count {
+        let grown = out + slice(text, 0, len(text));
+        out = grown;
+        at = at + 1;
+    }
+    return out;
+}
+
+// Hexadecimal. A negative value renders its full 64-bit two's complement (16
+// digits); `width` is a minimum, and a wider minimum pads with zeros.
+pub fn hex_i64(value: i64, width: i64) -> string {
+    var digits = 1;
+    if value < 0 {
+        digits = 16;
+    } else {
+        var probe = value;
+        while probe >= 16 && digits < 16 {
+            probe = probe / 16;
+            digits = digits + 1;
+        }
+    }
+    if width > digits {
+        digits = width;
+    }
+    if digits > 16 {
+        digits = 16;
+    }
+    var out = "";
+    var at = digits - 1;
+    while at >= 0 {
+        let nibble = (value >> (at * 4)) & 15;
+        let grown = out + fmt_digit(false, nibble);
+        out = grown;
+        at = at - 1;
+    }
+    return out;
+}
+
+// Upper-case hexadecimal, for the spellings a hash or dump uses.
+pub fn hex_i64_upper(value: i64, width: i64) -> string {
+    let lower = hex_i64(value, width);
+    return upper_ascii(lower);
+}
+
+fn upper_ascii(text: &string) -> string {
+    // ASCII only: the hex/octal/binary output this module feeds it is ASCII.
+    let lower = "abcdefghijklmnopqrstuvwxyz";
+    let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    var out = "";
+    var at = 0;
+    while at < len(text) {
+        let piece = slice(text, at, at + 1);
+        var found = -1;
+        var probe = 0;
+        while probe < 26 {
+            if slice(lower, probe, probe + 1) == piece {
+                found = probe;
+                probe = 26;
+            } else {
+                probe = probe + 1;
+            }
+        }
+        if found >= 0 {
+            let grown = out + slice(upper, found, found + 1);
+            out = grown;
+        } else {
+            let grown = out + piece;
+            out = grown;
+        }
+        at = at + 1;
+    }
+    return out;
+}
+
+// Binary, 1 or 64 bits. Negative values render the full two's complement.
+pub fn bin_i64(value: i64, width: i64) -> string {
+    var digits = 1;
+    if value < 0 {
+        digits = 64;
+    } else {
+        var probe = value;
+        while probe >= 2 && digits < 64 {
+            probe = probe / 2;
+            digits = digits + 1;
+        }
+    }
+    if width > digits {
+        digits = width;
+    }
+    if digits > 64 {
+        digits = 64;
+    }
+    var out = "";
+    var at = digits - 1;
+    while at >= 0 {
+        let bit = (value >> at) & 1;
+        if bit == 1 {
+            let grown = out + "1";
+            out = grown;
+        } else {
+            let grown = out + "0";
+            out = grown;
+        }
+        at = at - 1;
+    }
+    return out;
+}
+
+// Octal, 1 to 22 digits (22 octal digits cover 64 bits).
+pub fn oct_i64(value: i64, width: i64) -> string {
+    var digits = 1;
+    if value < 0 {
+        digits = 22;
+    } else {
+        var probe = value;
+        while probe >= 8 && digits < 22 {
+            probe = probe / 8;
+            digits = digits + 1;
+        }
+    }
+    if width > digits {
+        digits = width;
+    }
+    if digits > 22 {
+        digits = 22;
+    }
+    var out = "";
+    var at = digits - 1;
+    while at >= 0 {
+        let group = (value >> (at * 3)) & 7;
+        let grown = out + fmt_digit(false, group);
+        out = grown;
+        at = at - 1;
+    }
+    return out;
+}
+
+// Pad on the left with `fill` until the text reaches `width`. A text already
+// at least that wide is returned unchanged.
+pub fn pad_left(text: &string, width: i64, fill: &string) -> string {
+    if len(fill) == 0 || len(text) >= width {
+        // A borrowed parameter is a view, not an owned string: copy it so the
+        // caller gets the owned result the signature promises.
+        return slice(text, 0, len(text));
+    }
+    return fmt_repeat(fill, width - len(text)) + text;
+}
+
+pub fn pad_right(text: &string, width: i64, fill: &string) -> string {
+    if len(fill) == 0 || len(text) >= width {
+        return slice(text, 0, len(text));
+    }
+    return text + fmt_repeat(fill, width - len(text));
+}
+
+// Decimal with `_` grouping every three digits ("1_234_567"). The sign stays
+// attached to the first group.
+pub fn grouped_i64(value: i64) -> string {
+    let digits = to_string(value);
+    var sign = "";
+    var body = "";
+    if slice(digits, 0, 1) == "-" {
+        sign = "-";
+        body = slice(digits, 1, len(digits));
+    } else {
+        // The digits move into the body only after the sign check read them.
+        body = digits;
+    }
+    var out = "";
+    let total = len(body);
+    var at = 0;
+    while at < total {
+        if at > 0 && (total - at) % 3 == 0 {
+            let grown = out + "_";
+            out = grown;
+        }
+        let grown = out + slice(body, at, at + 1);
+        out = grown;
+        at = at + 1;
+    }
+    return sign + out;
+}

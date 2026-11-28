@@ -1,0 +1,19 @@
+struct Guard {
+    id: i64,
+}
+
+impl Guard {
+    fn drop(&mut self) {
+        print(self.id);
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        print(self.id);
+    }
+}
+
+fn main() {
+    print(1);
+}

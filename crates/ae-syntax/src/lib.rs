@@ -1,4 +1,5 @@
 //! Lexer: source text to tokens, plus location helpers.
+#![allow(clippy::result_large_err)]
 pub mod declaration;
 pub mod expression;
 pub mod fmt;
@@ -10,7 +11,7 @@ pub mod statement;
 use ae_span::{Diagnostic, SourceFile};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
-    Ident(String), Number(i64), Float(f64), Text(String), Fn, Let, Var, Mut, Print, If, Else, While, For, In, Return, Break, Continue, Assert, True, False, Use,
+    Ident(String), Number(i64), Float(f64), Text(String), Char(char), Fn, Let, Var, Mut, Print, If, Else, While, For, In, Return, Break, Continue, Assert, True, False, Use,
     EqEq, NotEq, Less, LessEq, Greater, GreaterEq, And, Or, Bang, Pipe,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Colon, Arrow, Amp, Semi, Equal, Plus, Minus, Star, Slash, Percent, Caret, Shl, Shr, PlusEqual, MinusEqual, StarEqual, SlashEqual, PercentEqual, Dot, DotDot, Struct,
     Enum, Match, ColonColon, FatArrow, Question, Trait, Impl, Unsafe, Const, As, Extern, Hash, Eof,
@@ -26,7 +27,7 @@ pub fn lex_kind_names(source: &str) -> Result<Vec<&'static str>, String> {
 
 fn kind_name(kind: &Kind) -> &'static str {
     match kind {
-        Kind::Ident(_) => "Ident", Kind::Number(_) => "Number", Kind::Float(_) => "Float", Kind::Text(_) => "Text",
+        Kind::Ident(_) => "Ident", Kind::Number(_) => "Number", Kind::Float(_) => "Float", Kind::Text(_) => "Text", Kind::Char(_) => "Char",
         Kind::Fn => "Fn", Kind::Let => "Let", Kind::Var => "Var", Kind::Mut => "Mut", Kind::Print => "Print",
         Kind::If => "If", Kind::Else => "Else", Kind::While => "While", Kind::For => "For",
         Kind::In => "In", Kind::Return => "Return", Kind::Break => "Break", Kind::Continue => "Continue",
@@ -46,12 +47,28 @@ fn kind_name(kind: &Kind) -> &'static str {
     }
 }
 
+fn clamp_char_boundary(source: &str, offset: usize) -> usize {
+    let mut idx = offset.min(source.len());
+    while idx > 0 && !source.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 // Lexer diagnostics carry no file name; load_file adds the file prefix.
 fn lex_error(source: &str, offset: usize, code: &str, message: &str) -> Diagnostic {
-    let end = offset + source[offset..].chars().next().map_or(0, char::len_utf8);
-    let span = SourceFile { name: None, text: source }.span(offset..end)
-        .expect("lexer offset must be a UTF-8 boundary in the source");
-    let mut diagnostic = Diagnostic::at(span, message);
+    let clamped = clamp_char_boundary(source, offset);
+    let end = clamped + source[clamped..].chars().next().map_or(0, char::len_utf8);
+    let mut diagnostic = match (SourceFile { name: None, text: source }).span(clamped..end) {
+        Some(span) => Diagnostic::at(span, message),
+        None => Diagnostic {
+            code: None,
+            message: message.to_owned(),
+            primary: None,
+            secondary: Vec::new(),
+            suggestions: Vec::new(),
+        },
+    };
     diagnostic.code = Some(code.to_owned());
     diagnostic
 }
@@ -62,9 +79,18 @@ pub fn diagnostic(file: &str, source: &str, offset: usize, message: &str) -> Dia
     diagnostic_range(file, source, offset..offset, message)
 }
 pub fn diagnostic_range(file: &str, source: &str, range: std::ops::Range<usize>, message: &str) -> Diagnostic {
-    let span = SourceFile { name: Some(file), text: source }.span(range)
-        .expect("parser offset must be a UTF-8 boundary in the source");
-    Diagnostic::at(span, message)
+    let start = clamp_char_boundary(source, range.start);
+    let end = clamp_char_boundary(source, range.end).max(start);
+    match (SourceFile { name: Some(file), text: source }).span(start..end) {
+        Some(span) => Diagnostic::at(span, message),
+        None => Diagnostic {
+            code: None,
+            message: message.to_owned(),
+            primary: None,
+            secondary: Vec::new(),
+            suggestions: Vec::new(),
+        },
+    }
 }
 /// Whether a doc comment (`///` line) sits in the comment block immediately
 /// above `offset`. The parser uses this for the E0704 precondition rule
@@ -75,13 +101,12 @@ pub fn diagnostic_range(file: &str, source: &str, range: std::ops::Range<usize>,
 /// `//` line inside the block does not break it (a doc block commonly mixes
 /// prose lines), but the block must contain at least one `///` line.
 pub fn has_doc_comment_above(source: &str, offset: usize) -> bool {
-    let mut end = offset;
+    let mut end = clamp_char_boundary(source, offset);
     // Walk back over the whitespace between the declaration and its comment
     // block; a token ends the walk only if it is not whitespace (the caller
     // passes the declaration keyword's offset, so line-leading whitespace
     // separates the two).
-    while end > 0 {
-        let c = source[..end].chars().next_back().unwrap();
+    while let Some(c) = source[..end].chars().next_back() {
         if c.is_whitespace() { end -= c.len_utf8(); } else { break; }
     }
     // `end` is now just past the last character of the preceding line (or 0).
@@ -156,14 +181,13 @@ pub fn lex_diagnostic(source: &str) -> Result<Vec<Token>, Diagnostic> {
 // Determine whether the rest of a malformed string has an unambiguous end.
 // A backslash consumes the next Unicode scalar even when that escape is invalid.
 fn has_closing_quote(source: &str, mut offset: usize) -> bool {
-    while offset < source.len() {
-        let ch = source[offset..].chars().next().unwrap();
+    while let Some(ch) = source.get(offset..).and_then(|s| s.chars().next()) {
         match ch {
             '"' => return true,
             '\n' | '\0' => return false,
             '\\' => {
                 offset += 1;
-                let Some(next) = source[offset..].chars().next() else { return false };
+                let Some(next) = source.get(offset..).and_then(|s| s.chars().next()) else { return false };
                 if next == '\n' || next == '\0' { return false; }
                 offset += next.len_utf8();
             }
@@ -191,9 +215,8 @@ fn lex_inner(source: &str, mut recovered: Option<&mut Vec<Diagnostic>>) -> Resul
             }
         }};
     }
-    while i < bytes.len() {
+    while let Some(c) = source[i..].chars().next() {
         let start = i;
-        let c = source[i..].chars().next().unwrap();
         if c.is_whitespace() { i += c.len_utf8(); continue; }
         if bytes[i..].starts_with(b"//") {
             i += 2;
@@ -211,14 +234,15 @@ fn lex_inner(source: &str, mut recovered: Option<&mut Vec<Diagnostic>>) -> Resul
                         if !matches!(escaped, Some(b'n' | b't' | b'r' | b'\\' | b'"')) {
                             let diagnostic = lex_error(source, i, "E0002", "unsupported string escape; allowed: \\n \\t \\r \\\\ \\\""
                             ).with_suggestion("Use a supported escape, or escape a literal backslash as \\\\.");
-                            if recovered.is_none() || !has_closing_quote(source, i) {
+                            let Some(diagnostics) = recovered.as_deref_mut().filter(|_| has_closing_quote(source, i)) else {
                                 return Err(diagnostic.into());
-                            }
-                            let diagnostics = recovered.as_deref_mut().unwrap();
+                            };
                             diagnostics.push(diagnostic);
                             if diagnostics.len() >= MAX_LEX_DIAGNOSTICS { return Ok(result); }
                             i += 1;
-                            i += source[i..].chars().next().unwrap().len_utf8();
+                            if let Some(next) = source.get(i..).and_then(|s| s.chars().next()) {
+                                i += next.len_utf8();
+                            }
                             continue;
                         }
                         i += 2;
@@ -229,6 +253,62 @@ fn lex_inner(source: &str, mut recovered: Option<&mut Vec<Diagnostic>>) -> Resul
             if i >= bytes.len() { return Err(lex_error(source, start, "E0003", "unterminated string literal").into()); }
             i += 1;
             Kind::Text(source[start + 1..i - 1].to_owned())
+        } else if c == '\'' {
+            i += 1;
+            if i >= bytes.len() {
+                return Err(lex_error(source, start, "E0001", "unterminated character literal").into());
+            }
+            if bytes[i] == b'\'' {
+                return Err(lex_error(source, start, "E0001", "empty character literal").into());
+            }
+            if bytes[i] == b'\n' || bytes[i] == b'\0' {
+                return Err(lex_error(source, i, "E0001", "character literals must not contain raw newlines or NUL; use escapes").into());
+            }
+            let ch = if bytes[i] == b'\\' {
+                i += 1;
+                match bytes.get(i).copied() {
+                    Some(b'n') => { i += 1; '\n' }
+                    Some(b'r') => { i += 1; '\r' }
+                    Some(b't') => { i += 1; '\t' }
+                    Some(b'\\') => { i += 1; '\\' }
+                    Some(b'\'') => { i += 1; '\'' }
+                    Some(b'"') => { i += 1; '"' }
+                    Some(b'0') => { i += 1; '\0' }
+                    Some(b'u') => {
+                        i += 1;
+                        if bytes.get(i) != Some(&b'{') {
+                            return Err(lex_error(source, start, "E0001", "invalid unicode escape in character literal; expected \\u{HEX}").into());
+                        }
+                        i += 1;
+                        let hex_start = i;
+                        while i < bytes.len() && bytes[i].is_ascii_hexdigit() { i += 1; }
+                        let hex = &source[hex_start..i];
+                        if hex.is_empty() || hex.len() > 6 || bytes.get(i) != Some(&b'}') {
+                            return Err(lex_error(source, start, "E0001", "invalid unicode escape in character literal; expected 1-6 hex digits in \\u{...}").into());
+                        }
+                        i += 1;
+                        let Some(ch) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) else {
+                            return Err(lex_error(source, start, "E0001", "invalid Unicode scalar value in character literal").into());
+                        };
+                        ch
+                    }
+                    _ => return Err(lex_error(source, start, "E0001", "unsupported escape in character literal").into()),
+                }
+            } else {
+                let Some(ch) = source[i..].chars().next() else {
+                    return Err(lex_error(source, start, "E0001", "unterminated character literal").into());
+                };
+                i += ch.len_utf8();
+                ch
+            };
+            if i >= bytes.len() {
+                return Err(lex_error(source, start, "E0001", "unterminated character literal").into());
+            }
+            if bytes[i] != b'\'' {
+                return Err(lex_error(source, start, "E0001", "character literal may only contain a single character").into());
+            }
+            i += 1;
+            Kind::Char(ch)
         } else if c.is_ascii_alphabetic() || c == '_' {
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }

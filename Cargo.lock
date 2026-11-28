@@ -7,16 +7,72 @@ name = "ae"
 version = "0.1.1"
 dependencies = [
  "ae-compiler",
+ "ae-hir",
  "ae-resolve",
  "ae-syntax",
  "toml",
 ]
 
 [[package]]
+name = "ae-codegen-c"
+version = "0.1.1"
+dependencies = [
+ "ae-layout",
+ "ae-mir",
+ "ae-span",
+ "ae-ty",
+]
+
+[[package]]
 name = "ae-compiler"
 version = "0.1.1"
 dependencies = [
+ "ae-codegen-c",
+ "ae-layout",
+ "ae-mir",
  "ae-resolve",
+ "ae-span",
+ "ae-syntax",
+ "ae-ty",
+]
+
+[[package]]
+name = "ae-hir"
+version = "0.1.1"
+dependencies = [
+ "ae-resolve",
+ "ae-syntax",
+]
+
+[[package]]
+name = "ae-layout"
+version = "0.1.1"
+dependencies = [
+ "ae-ty",
+]
+
+[[package]]
+name = "ae-lsp"
+version = "0.1.1"
+dependencies = [
+ "ae-query",
+ "ae-resolve",
+ "ae-span",
+ "ae-syntax",
+]
+
+[[package]]
+name = "ae-mir"
+version = "0.1.1"
+dependencies = [
+ "ae-span",
+ "ae-ty",
+]
+
+[[package]]
+name = "ae-query"
+version = "0.1.1"
+dependencies = [
  "ae-span",
  "ae-syntax",
 ]
@@ -27,6 +83,7 @@ version = "0.1.1"
 dependencies = [
  "ae-span",
  "ae-syntax",
+ "ae-ty",
 ]
 
 [[package]]
@@ -38,6 +95,13 @@ name = "ae-syntax"
 version = "0.1.1"
 dependencies = [
  "ae-span",
+]
+
+[[package]]
+name = "ae-ty"
+version = "0.1.1"
+dependencies = [
+ "ae-syntax",
 ]
 
 [[package]]

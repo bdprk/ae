@@ -1,0 +1,72 @@
+fn dbl(x: i64) -> i64 {
+    return x * 2;
+}
+
+fn apply[F: Fn(i64) -> i64](f: F, x: i64) -> i64 {
+    return f(x) + f(x + 1);
+}
+
+fn apply_mut[F: FnMut(i64) -> i64](f: &mut F, x: i64) -> i64 {
+    return f(x) + f(x + 1);
+}
+
+fn consume[F: FnOnce(i64) -> string](f: F, x: i64) -> string {
+    return f(x);
+}
+
+struct Runner[F] {
+    cb: F,
+}
+
+fn make_adder(base: i64) -> impl Fn(i64) -> i64 {
+    return |x: i64| -> i64 { return base + x; };
+}
+
+fn make_counter(start: i64) -> impl FnMut(i64) -> i64 {
+    var count = start;
+    return |step: i64| -> i64 {
+        count = count + step;
+        return count;
+    };
+}
+
+fn make_greeter(prefix: string) -> impl FnOnce(i64) -> string {
+    let owned = prefix + ":99";
+    return |n: i64| -> string { return owned; };
+}
+
+fn main() {
+    let offset = 10;
+    let add_off = |x: i64| -> i64 { return x + offset; };
+    print(apply(add_off, 5));
+    print(apply(|x: i64| -> i64 { return x + 1; }, 4));
+    print(apply(dbl, 3));
+
+    var acc = 0;
+    var bump = |d: i64| -> i64 {
+        acc = acc + d;
+        return acc;
+    };
+    print(apply_mut(&mut bump, 2));
+    print(acc);
+
+    let tag = "item";
+    let mk = |n: i64| -> string { return tag + "#" + to_string(n); };
+    print(consume(mk, 7));
+
+    let runner = Runner[fn(i64) -> i64] { cb: dbl };
+    print(runner.cb(8));
+    let r2 = Runner { cb: add_off };
+    print(r2.cb(4));
+
+    let adder = make_adder(100);
+    print(adder(5));
+    print(apply(adder, 10));
+
+    var ctr = make_counter(10);
+    print(ctr(3));
+    print(ctr(4));
+
+    let greeter = make_greeter("hi");
+    print(consume(greeter, 99));
+}

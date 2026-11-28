@@ -1,0 +1,1 @@
+ae: $DIR/drop_trait_redeclare_rejected.ae:1:12: 'Drop' is a built-in trait and cannot be redeclared

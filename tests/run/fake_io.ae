@@ -61,4 +61,28 @@ fn main() {
     // disconnect during read
     var r4 = io_submit_read("ClosedConn", 0);
     print(io_step(&mut r4));
+
+    // M4.4.01: late completion. A cancelled request's completion is posted
+    // afterwards; the buffer stays retained until the poll hands it back.
+    var src = source_new();
+    print(source_track(&mut src, 7));
+    var late = io_submit_read("LateCompletionBuffer", 5);
+    print(io_cancel(&mut late));
+    print(source_post(&mut src, 7, 19));
+    print(source_in_flight(&src));
+    var oracle = oracle_new();
+    print(oracle_hold(&mut oracle));
+    print(source_poll(&mut src));
+    print(source_transferred(&src));
+    print(source_in_flight(&src));
+    print(oracle_release(&mut oracle));
+    print(oracle_violations(&oracle));
+
+    // a release before any completion is a violation
+    var bad = oracle_new();
+    print(oracle_release(&mut bad));
+    print(oracle_violations(&bad));
+
+    // polling an empty source
+    print(source_poll(&mut src));
 }

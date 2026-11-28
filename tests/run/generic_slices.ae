@@ -1,0 +1,31 @@
+// ADR-0236 composes with generics: a `&[T]` parameter instantiates per
+// element type, and len / for / a sub-window all work on the generic
+// slice. The call spells its type arguments (inference is P2.5.2).
+fn size[T](v: &[T]) -> i64 { return len(v); }
+
+fn count[T](v: &[T]) -> i64 {
+    var n = 0;
+    for x in v { n += 1; }
+    return n;
+}
+
+fn head_size[T](v: &[T]) -> i64 { return size[T](&v[0..2]); }
+
+fn tail_size[T](v: &[T]) -> i64 { return size[T](&v[1..len(v)]); }
+
+fn main() {
+    let ints = vec[10, 20, 30];
+    print(size[i64](&ints));
+    print(count[i64](&ints));
+    print(head_size[i64](&ints));
+    print(tail_size[i64](&ints));
+    let words = vec["alpha", "beta"];
+    print(size[string](&words));
+    print(count[string](&words));
+    print(head_size[string](&words));
+    let rows = vec[vec[1, 2], vec[3]];
+    print(size[vec](&rows));
+    print(head_size[vec](&rows));
+    let fixed = [7, 8, 9];
+    print(size[i64](&fixed));
+}

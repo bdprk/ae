@@ -1,5 +1,5 @@
 // std/core/utf8.ae
-// UTF-8 byte boundary and character length primitives.
+// UTF-8 byte boundary, character length and validation primitives.
 
 pub fn is_utf8_continuation_byte(b: i64) -> bool {
     // UTF-8 continuation bytes have bits 10xxxxxx (0x80 to 0xBF)
@@ -20,4 +20,80 @@ pub fn utf8_sequence_length(first_byte: i64) -> i64 {
         return 4;
     }
     return 0;
+}
+
+// ADR-0244: a `string` is a byte container, so text read from a file or stdin
+// may not be UTF-8. This is the explicit check a caller runs when it needs to
+// know. Every sequence needs a valid lead byte, the right number of
+// continuation bytes and a buffer that ends on a boundary; overlong forms,
+// surrogates and code points above U+10FFFF are rejected, which is the same
+// contract the runtime's `utf8_len` assumes.
+pub fn is_utf8(text: &string) -> bool {
+    let raw = bytes(text);
+    var at = 0;
+    let size = len(raw);
+    while at < size {
+        let width = utf8_valid_width(&raw, at, size);
+        if width == 0 {
+            return false;
+        }
+        at = at + width;
+    }
+    return true;
+}
+
+// The first byte offset where the buffer stops being UTF-8, or -1 when it is
+// valid. A caller that wants to report the damage (an editor loading a file,
+// say) gets a position instead of a bare false.
+pub fn utf8_error_offset(text: &string) -> i64 {
+    let raw = bytes(text);
+    var at = 0;
+    let size = len(raw);
+    while at < size {
+        let width = utf8_valid_width(&raw, at, size);
+        if width == 0 {
+            return at;
+        }
+        at = at + width;
+    }
+    return -1;
+}
+
+// The width of the sequence starting at `at`, or 0 when it is not a valid
+// UTF-8 sequence inside `[at, size)`. Shared by `is_utf8` and
+// `utf8_error_offset` so the two cannot disagree.
+fn utf8_valid_width(raw: &vec, at: i64, size: i64) -> i64 {
+    let lead = raw[at];
+    let width = utf8_sequence_length(lead);
+    if width == 0 || at + width > size {
+        return 0;
+    }
+    var step = 1;
+    while step < width {
+        if !is_utf8_continuation_byte(raw[at + step]) {
+            return 0;
+        }
+        step = step + 1;
+    }
+    // Overlong encodings and the two invalid ranges inside a multi-byte
+    // sequence; the continuation bytes above already proved the shape.
+    if width == 2 && lead < 194 {
+        return 0;
+    }
+    if width == 3 && lead == 224 && raw[at + 1] < 160 {
+        return 0;
+    }
+    if width == 3 && lead == 237 && raw[at + 1] > 159 {
+        return 0;
+    }
+    if width == 4 && lead == 240 && raw[at + 1] < 144 {
+        return 0;
+    }
+    if width == 4 && lead > 244 {
+        return 0;
+    }
+    if width == 4 && lead == 244 && raw[at + 1] > 143 {
+        return 0;
+    }
+    return width;
 }

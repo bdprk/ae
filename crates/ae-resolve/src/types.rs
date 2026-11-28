@@ -19,84 +19,10 @@ use crate::{DefId, DefKind};
 pub const PRELUDE_TYPES: &[&str] = &[
     "ReadResult", "WriteResult", "IntResult", "DirResult", "FileResult",
     "StatusResult", "BoolResult", "CommandResult", "FloatResult", "Option",
+    "Result",
 ];
 
-/// How a spelled type was classified.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TypeSpelling {
-    /// `i64`, `f64`, `bool`, `string`.
-    Primitive(&'static str),
-    /// The copy-semantics handles: `atomic`, `mutex`, `guard`, `chan`,
-    /// `exec`, `task_scope`, `pool`.
-    Handle(&'static str),
-    /// `shared[T]`, `vec`, `vec[string]`, `vec[f64]`, `map[string,i64]`,
-    /// `map[string,f64]`. Element restrictions are checker material.
-    Composite { family: &'static str, arguments: Vec<TypeSpelling> },
-    /// `*const T` / `*mut T`.
-    Pointer { mutable: bool, pointee: Box<TypeSpelling> },
-    /// `&T` / `&mut T` in parameter and fn-value positions.
-    Borrow { mutable: bool, inner: Box<TypeSpelling> },
-    /// `fn(T, …) -> R`.
-    FnValue { parameters: Vec<TypeSpelling>, returns: Box<TypeSpelling> },
-    /// A struct or enum of this module.
-    Named { def: DefId },
-    /// A generic declaration's parameter (`T` in `fn report[T: Area]`).
-    TypeParameter(String),
-    /// `Name[T1, …]` on a generic item.
-    GenericInstance { def: DefId, arguments: Vec<TypeSpelling> },
-    /// A compiler prelude type (`PRELUDE_TYPES`): `Option[T]` and the
-    /// result shapes.
-    Prelude { name: &'static str, arguments: Vec<TypeSpelling> },
-    /// A name the module does not own (import surface in an accepted
-    /// program; a mistake otherwise).
-    Unknown(String),
-}
-
-impl TypeSpelling {
-    /// The name a dump line shows for this classification.
-    pub fn describe(&self) -> String {
-        match self {
-            TypeSpelling::Primitive(name) | TypeSpelling::Handle(name) => (*name).to_owned(),
-            TypeSpelling::Composite { family, arguments } => {
-                if arguments.is_empty() {
-                    (*family).to_owned()
-                } else {
-                    let inner: Vec<String> = arguments.iter().map(|argument| argument.describe()).collect();
-                    format!("{family}[{}]", inner.join(", "))
-                }
-            }
-            TypeSpelling::Pointer { mutable, pointee } => {
-                format!("*{} {}", if *mutable { "mut" } else { "const" }, pointee.describe())
-            }
-            TypeSpelling::Borrow { mutable, inner } => {
-                format!("&{} {}", if *mutable { "mut " } else { "" }, inner.describe())
-            }
-            TypeSpelling::FnValue { parameters, returns } => {
-                let inner: Vec<String> = parameters.iter().map(|parameter| parameter.describe()).collect();
-                format!("fn({}) -> {}", inner.join(", "), returns.describe())
-            }
-            TypeSpelling::Named { def: DefId(id) } => format!("#{id}"),
-            TypeSpelling::TypeParameter(name) => name.clone(),
-            TypeSpelling::GenericInstance { def: DefId(id), arguments } => {
-                let inner: Vec<String> = arguments.iter().map(|argument| argument.describe()).collect();
-                format!("#{id}[{}]", inner.join(", "))
-            }
-            TypeSpelling::Prelude { name, arguments } => {
-                if arguments.is_empty() {
-                    (*name).to_owned()
-                } else {
-                    let inner: Vec<String> = arguments.iter().map(|argument| argument.describe()).collect();
-                    format!("{name}[{}]", inner.join(", "))
-                }
-            }
-            TypeSpelling::Unknown(name) => format!("unknown {name}"),
-        }
-    }
-
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, TypeSpelling::Unknown(_))
-    }
-}
+pub use ae_ty::TypeSpelling;
 
 /// One classified spelling: the shape plus the byte range it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +41,8 @@ pub enum SpellingRole {
     ClosureParameter,
     /// The return spelling of a closure literal.
     ClosureReturn,
+    /// A `let`/`var` binding's annotation (`let v: vec[f64] = vec[];`).
+    LocalBinding,
 }
 
 /// One entry of the module's spelling table: the owner (a function, struct
@@ -137,6 +65,7 @@ impl SpellingRole {
             SpellingRole::VariantPayload => "variant-payload",
             SpellingRole::ClosureParameter => "closure-parameter",
             SpellingRole::ClosureReturn => "closure-return",
+            SpellingRole::LocalBinding => "binding",
         }
     }
 }
@@ -207,8 +136,55 @@ impl SpellingParser<'_> {
             Kind::Amp => {
                 self.cursor += 1;
                 let mutable = self.take(Kind::Mut);
+                // `&[T]` / `&[T; N]`: the element spelling, then an optional
+                // length after `;` (ADR-0236).
+                if self.take(Kind::LBracket) {
+                    let element = Box::new(self.spelling());
+                    let length = if self.take(Kind::Semi) {
+                        match self.current().map(|token| token.kind.clone()) {
+                            Some(Kind::Number(n)) => {
+                                self.cursor += 1;
+                                Some(n as usize)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    self.take(Kind::RBracket);
+                    return TypeSpelling::Slice { mutable, element, length };
+                }
                 let inner = Box::new(self.spelling());
                 TypeSpelling::Borrow { mutable, inner }
+            }
+            Kind::Impl => {
+                self.cursor += 1;
+                if let Some(Kind::Ident(trait_name)) = self.current().map(|t| &t.kind)
+                    && matches!(trait_name.as_str(), "Fn" | "FnMut" | "FnOnce")
+                {
+                    self.cursor += 1;
+                    let mut parameters = Vec::new();
+                    if self.take(Kind::LParen) {
+                        while !self.take(Kind::RParen) {
+                            if self.current().is_none() {
+                                break;
+                            }
+                            parameters.push(self.spelling());
+                            if !self.take(Kind::Comma) {
+                                self.take(Kind::RParen);
+                                break;
+                            }
+                        }
+                    }
+                    let returns = if self.take(Kind::Arrow) {
+                        Box::new(self.spelling())
+                    } else {
+                        Box::new(TypeSpelling::Primitive("()"))
+                    };
+                    TypeSpelling::FnValue { parameters, returns }
+                } else {
+                    TypeSpelling::Unknown("impl".to_owned())
+                }
             }
             Kind::Fn => {
                 self.cursor += 1;
@@ -228,13 +204,21 @@ impl SpellingParser<'_> {
                 let returns = if self.take(Kind::Arrow) {
                     Box::new(self.spelling())
                 } else {
-                    Box::new(TypeSpelling::Unknown(String::new()))
+                    Box::new(TypeSpelling::Primitive("()"))
                 };
                 TypeSpelling::FnValue { parameters, returns }
             }
             Kind::Ident(name) => {
                 self.cursor += 1;
                 self.named(name)
+            }
+            Kind::LParen => {
+                self.cursor += 1;
+                if self.take(Kind::RParen) {
+                    TypeSpelling::Primitive("()")
+                } else {
+                    TypeSpelling::Unknown(String::new())
+                }
             }
             _ => {
                 self.cursor += 1;
@@ -244,15 +228,13 @@ impl SpellingParser<'_> {
     }
 
     fn named(&mut self, name: String) -> TypeSpelling {
+        if let Some(scalar) = ae_ty::Scalar::from_spelling(name.as_str()) {
+            return TypeSpelling::Primitive(scalar.spelling());
+        }
+        if name == "string" {
+            return TypeSpelling::Primitive("string");
+        }
         match name.as_str() {
-            "i64" | "f64" | "bool" | "string" => {
-                return TypeSpelling::Primitive(match name.as_str() {
-                    "i64" => "i64",
-                    "f64" => "f64",
-                    "bool" => "bool",
-                    _ => "string",
-                });
-            }
             "atomic" | "mutex" | "guard" | "chan" | "exec" | "task_scope" | "pool" => {
                 return TypeSpelling::Handle(match name.as_str() {
                     "atomic" => "atomic",
@@ -310,7 +292,7 @@ impl SpellingParser<'_> {
                 None => TypeSpelling::Unknown("Self".to_owned()),
             };
         }
-        if self.type_parameters.iter().any(|parameter| *parameter == name) {
+        if self.type_parameters.contains(&name) {
             return TypeSpelling::TypeParameter(name);
         }
         match (self.items)(&name) {

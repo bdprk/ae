@@ -1,0 +1,1 @@
+ae: $DIR/closure_fn_bound_mismatch.ae:7:17: closure does not satisfy 'Fn(apply)' constraint

@@ -1,0 +1,1 @@
+ae: $DIR/preset_result_family_alias_mismatch.ae:11:9: pattern must name the matched enum ('FloatResult::Variant')

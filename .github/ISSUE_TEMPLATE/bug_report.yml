@@ -1,0 +1,70 @@
+name: Bug report
+description: A source the compiler mishandles, or a diagnostic that is wrong.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please reduce the report to the smallest source that still shows the
+        problem. A complete file we can paste and run beats a description.
+
+        Do not report security problems here; see SECURITY.md.
+  - type: textarea
+    id: source
+    attributes:
+      label: Source
+      description: The `.ae` file, trimmed to the smallest form that reproduces it.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command line, including `--` arguments.
+      placeholder: cargo run -- check examples/hello.ae
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What the compiler should have done.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: The diagnostic, panic message, or wrong result. Paste it verbatim.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Build mode
+      description: Which mode showed the problem, if it runs at all.
+      options:
+        - check only
+        - run (default -O0)
+        - run --release
+        - build
+      multiple: true
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: ae version
+      description: Output of `cargo run -- version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and C toolchain
+      description: OS, architecture, and `gcc --version` (or the `AE_CC` you set).
+    validations:
+      required: true

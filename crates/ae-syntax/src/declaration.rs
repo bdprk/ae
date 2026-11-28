@@ -110,6 +110,41 @@ pub fn validate_type_parameter<'a>(
     Ok(())
 }
 
+fn skip_single_bound(tokens: &[Token], start: usize) -> usize {
+    let Some(token) = tokens.get(start) else { return start };
+    if matches!(&token.kind, Kind::Ident(name) if matches!(name.as_str(), "Fn" | "FnMut" | "FnOnce"))
+        && tokens.get(start + 1).is_some_and(|next| next.kind == Kind::LParen)
+    {
+        let mut pos = delimited_body_end(tokens, start + 2, Kind::LParen, Kind::RParen)
+            .unwrap_or_else(|end| end);
+        if tokens.get(pos).is_some_and(|next| next.kind == Kind::Arrow) {
+            pos += 1;
+            let mut paren = 0usize;
+            let mut bracket = 0usize;
+            while let Some(tok) = tokens.get(pos) {
+                match tok.kind {
+                    Kind::LParen => paren += 1,
+                    Kind::RParen => {
+                        if paren == 0 { break; }
+                        paren -= 1;
+                    }
+                    Kind::LBracket => bracket += 1,
+                    Kind::RBracket => {
+                        if bracket == 0 && paren == 0 { break; }
+                        bracket = bracket.saturating_sub(1);
+                    }
+                    Kind::Plus | Kind::Comma if paren == 0 && bracket == 0 => break,
+                    Kind::Eof => break,
+                    _ => {}
+                }
+                pos += 1;
+            }
+        }
+        return pos;
+    }
+    start + 1
+}
+
 /// Read the bounds following a colon in source order. Each item includes the
 /// token index of the bound; an invalid name ends the sequence.
 pub fn type_bound_tokens(tokens: &[Token], mut index: usize) -> impl Iterator<Item = (usize, &Token)> {
@@ -120,10 +155,11 @@ pub fn type_bound_tokens(tokens: &[Token], mut index: usize) -> impl Iterator<It
         }
         let token = tokens.get(index)?;
         let bound = (index, token);
+        let next = skip_single_bound(tokens, index);
         if matches!(token.kind, Kind::Ident(_))
-            && tokens.get(index + 1).is_some_and(|next| next.kind == Kind::Plus)
+            && tokens.get(next).is_some_and(|next| next.kind == Kind::Plus)
         {
-            index += 2;
+            index = next + 1;
         } else {
             finished = true;
         }
@@ -144,6 +180,17 @@ pub struct EnumVariant {
     pub range: Range<usize>,
 }
 
+/// One `fn name(param: Type, ...) -> Type;` signature inside a trait body.
+/// The types stay byte ranges: the compiler owns their semantics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub name_range: Range<usize>,
+    pub parameters: Vec<TypedName>,
+    pub returns: Range<usize>,
+    pub range: Range<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeclarationKind {
     Function {
@@ -154,7 +201,7 @@ pub enum DeclarationKind {
     },
     Struct { fields: Vec<TypedName> },
     Enum { variants: Vec<EnumVariant> },
-    Trait,
+    Trait { methods: Vec<TraitMethod> },
     Impl { target: Option<Range<usize>> },
 }
 
@@ -162,6 +209,7 @@ pub enum DeclarationKind {
 pub enum DeclarationAttribute {
     ReprC,
     NoMangle,
+    DeriveCopy,
 }
 
 /// Parse an optional declaration attribute and return the next token index.
@@ -187,10 +235,39 @@ pub fn parse_declaration_attribute(
             DeclarationAttribute::ReprC
         }
         "no_mangle" => DeclarationAttribute::NoMangle,
-        other => return Err(parser.error(&format!("unknown attribute '{other}'; the language has '#[repr(C)]' and '#[no_mangle]' only"))),
+        "derive" => {
+            parser.take(Kind::LParen)?;
+            let inner = parser.identifier()?;
+            if inner != "Copy" {
+                return Err(parser.error(&format!("only '#[derive(Copy)]' is supported, found '#[derive({inner})]'")));
+            }
+            parser.take(Kind::RParen)?;
+            DeclarationAttribute::DeriveCopy
+        }
+        other => return Err(parser.error(&format!("unknown attribute '{other}'; supported attributes are '#[repr(C)]', '#[no_mangle]', and '#[derive(Copy)]'"))),
     };
     parser.take(Kind::RBracket)?;
     Ok((Some(attribute), parser.pos))
+}
+
+/// Parse zero or more stacked declaration attributes and return the next token index.
+pub fn parse_declaration_attributes(
+    file: &str,
+    source: &str,
+    tokens: &[Token],
+    mut start: usize,
+) -> Result<(Vec<DeclarationAttribute>, usize), Diagnostic> {
+    let mut attributes = Vec::new();
+    loop {
+        let (attribute, next) = parse_declaration_attribute(file, source, tokens, start)?;
+        match attribute {
+            Some(attr) => {
+                attributes.push(attr);
+                start = next;
+            }
+            None => return Ok((attributes, start)),
+        }
+    }
 }
 
 /// Parse an extern function prefix and return its ABI and following token index.
@@ -219,6 +296,7 @@ pub fn parse_extern_function_prefix<'a>(
 #[derive(Clone, Debug, PartialEq)]
 pub struct Declaration {
     pub attribute: Option<DeclarationAttribute>,
+    pub attributes: Vec<DeclarationAttribute>,
     pub name: String,
     pub type_parameters: Vec<TypeParameter>,
     pub kind: DeclarationKind,
@@ -425,6 +503,7 @@ impl<'a> DeclarationParser<'a> {
                     closing.pop();
                 }
                 Kind::Fn if matches!(self.tokens.get(self.pos + 1).map(|token| &token.kind), Some(Kind::LParen)) => {}
+                Kind::Impl if self.pos == start => {}
                 Kind::Semi if closing.last() == Some(&Kind::RBracket) => {}
                 Kind::Star => {
                     self.pos += 1;
@@ -476,17 +555,18 @@ impl<'a> DeclarationParser<'a> {
             }));
         }
         let token = self.current();
-        if let Kind::Ident(name) = &token.kind {
-            if name == "self" && !matches!(self.tokens.get(self.pos + 1).map(|next| &next.kind), Some(Kind::Colon)) {
-                let (name_range, end) = (token.offset..token.end, token.end);
-                self.pos += 1;
-                return Ok(Some(TypedName {
-                    name: "self".to_owned(),
-                    name_range,
-                    mutable: false,
-                    ty: end..end,
-                }));
-            }
+        if let Kind::Ident(name) = &token.kind
+            && name == "self"
+            && !matches!(self.tokens.get(self.pos + 1).map(|next| &next.kind), Some(Kind::Colon))
+        {
+            let (name_range, end) = (token.offset..token.end, token.end);
+            self.pos += 1;
+            return Ok(Some(TypedName {
+                name: "self".to_owned(),
+                name_range,
+                mutable: false,
+                ty: end..end,
+            }));
         }
         Ok(None)
     }
@@ -497,14 +577,14 @@ impl<'a> DeclarationParser<'a> {
             if !fields && names.len() >= MAX_FUNCTION_PARAMETERS {
                 return Err(self.error(&format!("function parameter limit exceeded ({MAX_FUNCTION_PARAMETERS})")));
             }
-            if !fields && names.is_empty() {
-                if let Some(receiver) = self.receiver()? {
-                    names.push(receiver);
-                    if self.consume(Kind::Comma) {
-                        continue;
-                    }
-                    break;
+            if !fields && names.is_empty()
+                && let Some(receiver) = self.receiver()?
+            {
+                names.push(receiver);
+                if self.consume(Kind::Comma) {
+                    continue;
                 }
+                break;
             }
             let mutable = !fields && self.consume(Kind::Var);
             let token = self.current();
@@ -588,10 +668,10 @@ impl<'a> DeclarationParser<'a> {
         Ok(variants)
     }
 
-    fn attribute(&mut self) -> Result<Option<DeclarationAttribute>, Diagnostic> {
-        let (attribute, end) = parse_declaration_attribute(self.file, self.source, self.tokens, self.pos)?;
+    fn attributes(&mut self) -> Result<Vec<DeclarationAttribute>, Diagnostic> {
+        let (attributes, end) = parse_declaration_attributes(self.file, self.source, self.tokens, self.pos)?;
         self.pos = end;
-        Ok(attribute)
+        Ok(attributes)
     }
 
     fn opaque_body(&mut self) -> Result<usize, Diagnostic> {
@@ -609,6 +689,42 @@ impl<'a> DeclarationParser<'a> {
         }
     }
 
+    fn trait_body(&mut self) -> Result<Vec<TraitMethod>, Diagnostic> {
+        self.take(Kind::LBrace)?;
+        let mut methods = Vec::new();
+        while self.current().kind != Kind::RBrace {
+            if self.current().kind == Kind::Eof { return Err(self.error("expected '}' before end of file")); }
+            let method_start = self.current().offset;
+            self.take(Kind::Fn)?;
+            let name_pos = self.pos;
+            let name = self.identifier()?.to_owned();
+            let name_range = self.tokens[name_pos].offset..self.tokens[name_pos].end;
+            self.take(Kind::LParen)?;
+            let mut parameters = Vec::new();
+            if self.current().kind != Kind::RParen {
+                loop {
+                    if parameters.len() >= 8 { return Err(self.error("trait method parameter limit exceeded (8)")); }
+                    let parameter_pos = self.pos;
+                    let parameter = self.identifier()?.to_owned();
+                    let parameter_range = self.tokens[parameter_pos].offset..self.tokens[parameter_pos].end;
+                    self.take(Kind::Colon)?;
+                    let ty = self.ty(&[Kind::Comma, Kind::RParen], false)?;
+                    parameters.push(TypedName { name: parameter, name_range: parameter_range, mutable: false, ty });
+                    if self.current().kind != Kind::Comma { break; }
+                    self.pos += 1;
+                }
+            }
+            self.take(Kind::RParen)?;
+            self.take(Kind::Arrow)?;
+            let returns = self.ty(&[Kind::Semi], false)?;
+            self.take(Kind::Semi)?;
+            let end = self.tokens[self.pos - 1].end;
+            methods.push(TraitMethod { name, name_range, parameters, returns, range: method_start..end });
+        }
+        self.take(Kind::RBrace)?;
+        Ok(methods)
+    }
+
     fn declaration(&mut self) -> Result<Declaration, Diagnostic> {
         let start = self.current().offset;
         let public = if matches!(&self.current().kind, Kind::Ident(name) if name == "pub") {
@@ -617,15 +733,21 @@ impl<'a> DeclarationParser<'a> {
         } else {
             false
         };
-        let attribute = self.attribute()?;
-        match attribute {
-            Some(DeclarationAttribute::ReprC) if self.current().kind != Kind::Struct => {
-                return Err(self.error("'#[repr(C)]' applies to a struct declaration"));
+        let attributes = self.attributes()?;
+        let attribute = attributes.first().cloned();
+        for attr in &attributes {
+            match attr {
+                DeclarationAttribute::ReprC if self.current().kind != Kind::Struct => {
+                    return Err(self.error("'#[repr(C)]' applies to a struct declaration"));
+                }
+                DeclarationAttribute::NoMangle if self.current().kind != Kind::Extern => {
+                    return Err(self.error("'#[no_mangle]' applies to an extern function definition"));
+                }
+                DeclarationAttribute::DeriveCopy if !matches!(self.current().kind, Kind::Struct | Kind::Enum) => {
+                    return Err(self.error("'#[derive(Copy)]' applies to a struct or enum declaration"));
+                }
+                _ => {}
             }
-            Some(DeclarationAttribute::NoMangle) if self.current().kind != Kind::Extern => {
-                return Err(self.error("'#[no_mangle]' applies to an extern function definition"));
-            }
-            _ => {}
         }
         let unsafe_fn = self.consume(Kind::Unsafe);
         let abi = if !unsafe_fn && self.current().kind == Kind::Extern {
@@ -669,8 +791,14 @@ impl<'a> DeclarationParser<'a> {
                         let Kind::Ident(bound) = &token.kind else {
                             return Err(self.error("expected identifier").with_code("E0010"));
                         };
-                        bounds.push(bound.clone());
-                        self.pos += 1;
+                        let next = skip_single_bound(self.tokens, index);
+                        if next > index + 1 {
+                            let end_offset = self.tokens[next - 1].end;
+                            bounds.push(self.source[token.offset..end_offset].to_owned());
+                        } else {
+                            bounds.push(bound.clone());
+                        }
+                        self.pos = next;
                     }
                 }
                 type_parameters.push(TypeParameter { name, bounds });
@@ -700,10 +828,12 @@ impl<'a> DeclarationParser<'a> {
                     return Err(self.error("main cannot have parameters"));
                 }
                 None
-            } else {
+            } else if foreign || self.current().kind == Kind::Arrow {
                 self.take(Kind::Arrow)?;
                 let stops = if foreign { &[Kind::LBrace, Kind::Semi][..] } else { &[Kind::LBrace][..] };
                 Some(self.ty(stops, false)?)
+            } else {
+                None
             };
             if foreign && !exposes_body {
                 crate::expect_token(self.file, self.source, self.current(), Kind::Semi)?;
@@ -715,12 +845,14 @@ impl<'a> DeclarationParser<'a> {
                 }
                 self.pos += 1;
                 let end = self.tokens[self.pos - 1].end;
-                return Ok(Declaration { attribute, public, name, type_parameters, kind: function, range: start..end, body: None });
+                return Ok(Declaration { attribute, attributes: attributes.clone(), public, name, type_parameters, kind: function, range: start..end, body: None });
             }
             let body_start = self.opaque_body()?;
             (function, body_start)
         } else if keyword == Kind::Trait {
-            (DeclarationKind::Trait, self.opaque_body()?)
+            let body_start = self.current().offset;
+            let methods = self.trait_body()?;
+            (DeclarationKind::Trait { methods }, body_start)
         } else if keyword == Kind::Impl {
             // Without a 'for' clause the declaration name is the inherent
             // implementation target. With one, it names the trait.
@@ -745,7 +877,7 @@ impl<'a> DeclarationParser<'a> {
             (DeclarationKind::Struct { fields }, body_start)
         };
         let end = self.tokens[self.pos - 1].end;
-        Ok(Declaration { attribute, public, name, type_parameters, kind, range: start..end, body: Some(body_start..end) })
+        Ok(Declaration { attribute, attributes, public, name, type_parameters, kind, range: start..end, body: Some(body_start..end) })
     }
 }
 
@@ -758,7 +890,7 @@ mod tests {
     fn trait_and_impl_ranges_follow_the_repository_examples() {
         let source = include_str!("../../../examples/traits.ae");
         let declarations = parse_declarations("traits.ae", source).unwrap();
-        assert!(matches!(declarations[0].kind, DeclarationKind::Trait));
+        assert!(matches!(declarations[0].kind, DeclarationKind::Trait { .. }));
         assert_eq!(declarations[0].name, "Area");
         let DeclarationKind::Impl { target: Some(target) } = &declarations[1].kind else {
             panic!("expected trait implementation");
@@ -823,11 +955,11 @@ mod tests {
     #[test]
     fn function_return_annotations_follow_the_entry_point_rule() {
         let source = "fn helper() {} fn main() {}";
-        let recovered = recover_declarations("case.ae", source);
-        assert_eq!(recovered.declarations.len(), 1);
-        assert_eq!(recovered.declarations[0].name, "main");
-        assert_eq!(recovered.diagnostics.len(), 1);
-        assert_eq!(recovered.diagnostics[0].message, "expected Arrow, found LBrace");
+        let declarations = parse_declarations("case.ae", source).unwrap();
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].name, "helper");
+        assert!(matches!(declarations[0].kind, DeclarationKind::Function { returns: None, .. }));
+        assert_eq!(declarations[1].name, "main");
 
         for invalid in ["fn main() -> i64 {}", "fn main[T]() {}", "fn main(x: i64) {}"] {
             assert!(parse_declarations("case.ae", invalid).is_err(), "{invalid}");

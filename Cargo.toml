@@ -7,9 +7,29 @@ edition = "2024"
 ae-compiler = { path = "crates/ae-compiler" }
 ae-syntax = { path = "crates/ae-syntax" }
 ae-resolve = { path = "crates/ae-resolve" }
+ae-hir = { path = "crates/ae-hir" }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [workspace]
-members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span"]
-default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span"]
+members = ["crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout", "crates/ae-query", "crates/ae-codegen-c", "crates/ae-lsp"]
+default-members = [".", "crates/ae-compiler", "crates/ae-syntax", "crates/ae-resolve", "crates/ae-span", "crates/ae-ty", "crates/ae-hir", "crates/ae-mir", "crates/ae-layout", "crates/ae-query", "crates/ae-codegen-c", "crates/ae-lsp"]
 resolver = "3"
+
+# Keep build artifacts small. The full debuginfo + incremental cache in the dev
+# profile was dominating disk usage (~6 GB for this small workspace).
+#
+# `debug = 0`: on Windows/MSVC every test binary also gets a `.pdb`, and line
+# tables for this suite came to 1.85 GB of `deps/*.pdb` alone. Panic and
+# assertion locations are compile-time constants (`panicked at file:line`), so
+# they survive without debuginfo; only backtrace symbol/line resolution is lost.
+# Re-enable locally with `CARGO_PROFILE_DEV_DEBUG=1` (or `=line-tables-only`)
+# when you actually need to step through a crash.
+#
+# `incremental = false`: avoids the multi-GB `debug/incremental` cache;
+# re-enable locally with `CARGO_INCREMENTAL=1` for a faster edit loop.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.dev.package."*"]
+debug = false

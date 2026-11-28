@@ -9,18 +9,22 @@
 use super::*;
 
 pub(super) fn tree_path(path: &Path) -> Result<String, String> {
-    let program = loader::load_program(path)?;
+    tree_path_with_imports(path, &PackageImports::new())
+}
+
+pub(super) fn tree_path_with_imports(path: &Path, imports: &PackageImports) -> Result<String, String> {
+    let program = loader::load_program_with_imports(path, imports)?;
     let mut out = String::new();
-    let mut printer = TreePrinter { out: &mut out, indent: 0 };
+    let mut printer = TreePrinter { out: &mut out, indent: 0, ctx: &program.ctx };
     printer.program(&program);
     Ok(out)
 }
 
 // One statement's text, for consumers that print trees inside other
 // structures (the CFG printer quotes block contents this way).
-pub(super) fn statement_text(statement: &Statement) -> String {
+pub(super) fn statement_text(statement: &Statement, ctx: &CompileContext) -> String {
     let mut out = String::new();
-    let mut printer = TreePrinter { out: &mut out, indent: 0 };
+    let mut printer = TreePrinter { out: &mut out, indent: 0, ctx };
     printer.statement(statement);
     let mut text = out;
     while text.ends_with(char::is_whitespace) { text.pop(); }
@@ -29,10 +33,10 @@ pub(super) fn statement_text(statement: &Statement) -> String {
 
 // One expression's text, same contract. The printer composes into its own
 // parameter string; the holder keeps the borrow checker satisfied.
-pub(super) fn expression_text(expr: &Expr) -> String {
+pub(super) fn expression_text(expr: &Expr, ctx: &CompileContext) -> String {
     let mut buf = String::new();
     let mut holder = String::new();
-    let mut printer = TreePrinter { out: &mut holder, indent: 0 };
+    let mut printer = TreePrinter { out: &mut holder, indent: 0, ctx };
     printer.expression(expr, &mut buf);
     buf
 }
@@ -40,6 +44,7 @@ pub(super) fn expression_text(expr: &Expr) -> String {
 struct TreePrinter<'a> {
     out: &'a mut String,
     indent: usize,
+    ctx: &'a CompileContext,
 }
 
 impl<'a> TreePrinter<'a> {
@@ -57,13 +62,13 @@ impl<'a> TreePrinter<'a> {
 
     fn program(&mut self, program: &Program) {
         for (sid, def) in program.structs.iter().enumerate() {
-            let fields = def.fields.iter().map(|(n, t)| format!("{}: {}", n, t.name())).collect::<Vec<_>>().join(", ");
+            let fields = def.fields.iter().map(|(n, t)| format!("{}: {}", n, t.name(self.ctx))).collect::<Vec<_>>().join(", ");
             let visibility = if def.public { "pub " } else { "" };
             self.line(&format!("{}struct #{} {} {{ {} }}", visibility, sid, def.name, fields));
         }
         for (eid, def) in program.enums.iter().enumerate() {
             let variants = def.variants.iter().map(|(n, fields)| {
-                let payloads = fields.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+                let payloads = fields.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", ");
                 if payloads.is_empty() { n.clone() } else { format!("{}({})", n, payloads) }
             }).collect::<Vec<_>>().join(", ");
             self.line(&format!("enum #{} {} {{ {} }}", eid, def.name, variants));
@@ -76,9 +81,9 @@ impl<'a> TreePrinter<'a> {
     }
 
     fn function(&mut self, function: &Function) {
-        let params = function.params.iter().map(|(id, t)| format!("v{}: {}", id, t.name())).collect::<Vec<_>>().join(", ");
+        let params = function.params.iter().map(|(id, t)| format!("v{}: {}", id, t.name(self.ctx))).collect::<Vec<_>>().join(", ");
         let name = if function.is_main { "main" } else { &format!("#{}", function.id) };
-        self.line(&format!("fn {}({}) -> {} {{", name, params, function.returns.name()));
+        self.line(&format!("fn {}({}) -> {} {{", name, params, function.returns.name(self.ctx)));
         self.nested(|this| this.statements(&function.body));
         self.line("}");
     }
@@ -140,9 +145,9 @@ impl<'a> TreePrinter<'a> {
                 let value = self.expression_text(expr);
                 self.line(&format!("v{}: {} = {}", id, ty, value));
             }
-            Statement::Array(id, values) => {
+            Statement::Array(id, values, elem_ty) => {
                 let items = self.expressions_text(values);
-                self.line(&format!("v{}: &[i64; {}] = [{}]", id, values.len(), items));
+                self.line(&format!("v{}: &[{}; {}] = [{}]", id, elem_ty.name(self.ctx), values.len(), items));
             }
             Statement::Assign(id, expr, releases) => {
                 let value = self.expression_text(expr);
@@ -154,30 +159,46 @@ impl<'a> TreePrinter<'a> {
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} (len {})", id, index_text, value_text, len));
             }
-            Statement::VecPush(id, value, line, col) => {
-                let value_text = self.expression_text(value);
-                self.line(&format!("push v{} <- {} @ {}:{}", id, value_text, line, col));
-            }
             Statement::StrVecPush(id, value, line, col, is_view) => {
                 let value_text = self.expression_text(value);
                 self.line(&format!("push v{} <- {}{} @ {}:{}", id, if *is_view { "view " } else { "" }, value_text, line, col));
             }
-            Statement::VecFPush(id, value, line, col) => {
+            Statement::GVecPush(id, value, _, line, col) => {
                 let value_text = self.expression_text(value);
                 self.line(&format!("push v{} <- {} @ {}:{}", id, value_text, line, col));
             }
-            Statement::VecPop(id, line, col) | Statement::StrVecPop(id, line, col) | Statement::VecFPop(id, line, col) => {
+            Statement::StrVecPop(id, line, col) | Statement::GVecPop(id, _, line, col) => {
                 self.line(&format!("pop v{} @ {}:{}", id, line, col));
             }
-            Statement::VecStore(id, index, value, line, col) | Statement::StrVecStore(id, index, value, line, col, _) | Statement::VecFStore(id, index, value, line, col) => {
+            Statement::VecPushField(id, field, _, value, elem, _, line, col) => {
+                let path = field_path_text(field);
+                let value_text = self.expression_text(value);
+                self.line(&format!("push v{}.{} <- {} ({}) @ {}:{}", id, path, value_text, elem.name(self.ctx), line, col));
+            }
+            Statement::VecPopField(id, field, _, elem, line, col) => {
+                let path = field_path_text(field);
+                self.line(&format!("pop v{}.{} ({}) @ {}:{}", id, path, elem.name(self.ctx), line, col));
+            }
+            Statement::VecStoreField(id, field, _, index, value, elem, _, line, col) => {
+                let path = field_path_text(field);
+                let index_text = self.expression_text(index);
+                let value_text = self.expression_text(value);
+                self.line(&format!("v{}.{}[{}] = {} ({}) @ {}:{}", id, path, index_text, value_text, elem.name(self.ctx), line, col));
+            }
+            Statement::VecSortField(id, field, _, elem, reverse, line, col) => {
+                let path = field_path_text(field);
+                self.line(&format!("{}(v{}.{}) ({}) @ {}:{}", if *reverse { "reverse" } else { "sort" }, id, path, elem.name(self.ctx), line, col));
+            }
+            Statement::StrVecStore(id, index, value, line, col, _) | Statement::GVecStore(id, index, value, _, line, col) | Statement::SliceStore(id, index, value, _, line, col) => {
                 let index_text = self.expression_text(index);
                 let value_text = self.expression_text(value);
                 self.line(&format!("v{}[{}] = {} @ {}:{}", id, index_text, value_text, line, col));
             }
-            Statement::FieldStore(id, fname, fty, value, base_ty) => {
+            Statement::FieldStore(id, path, fty, value, base_ty) => {
                 let value_text = self.expression_text(value);
                 let access = if matches!(base_ty, Type::StructMut(_)) { "->" } else { "." };
-                self.line(&format!("v{}{}{} = {} (field {})", id, access, fname, value_text, fty.name()));
+                let path_text = field_path_text(path);
+                self.line(&format!("v{}{}{} = {} (field {})", id, access, path_text, value_text, fty.name(self.ctx)));
             }
             Statement::Sort(id, ascending, line, col) => {
                 self.line(&format!("sort v{} {} @ {}:{}", id, if *ascending { "asc" } else { "desc" }, line, col));
@@ -221,11 +242,19 @@ impl<'a> TreePrinter<'a> {
                 self.line("}");
             }
             Statement::Match(subject, ty, arms) => {
-                self.line(&format!("match v{} ({}) {{", subject, ty.name()));
+                self.line(&format!("match v{} ({}) {{", subject, ty.name(self.ctx)));
                 self.nested(|this| {
                     for arm in arms {
-                        let bindings = arm.bindings.iter().map(|(id, t, idx)| format!("v{}: {}#{}", id, t.name(), idx)).collect::<Vec<_>>().join(", ");
-                        this.line(&format!("variant #{} ({}) => {{", arm.variant, bindings));
+                        let bindings = arm.bindings.iter().map(|(id, t, path)| {
+                            let p = path.iter().map(|(v, f)| format!("{v}.{f}")).collect::<Vec<_>>().join(".");
+                            format!("v{}: {}#{}", id, t.name(this.ctx), p)
+                        }).collect::<Vec<_>>().join(", ");
+                        let head = match &arm.pattern {
+                            CompiledPattern::Wildcard => "_".to_owned(),
+                            CompiledPattern::Binding => "_".to_owned(),
+                            CompiledPattern::Variant { variant, .. } => format!("variant #{variant}"),
+                        };
+                        this.line(&format!("{head} ({bindings}) => {{"));
                         this.nested(|inner| inner.statements(&arm.body));
                         this.line("}");
                     }
@@ -246,23 +275,24 @@ impl<'a> TreePrinter<'a> {
             }
             Statement::TakePropagationPayload(subject, ty, _, binding) => {
                 let destination = match binding {
-                    Some((id, ty)) => format!(" into v{id}: {}", ty.name()),
+                    Some((id, ty)) => format!(" into v{id}: {}", ty.name(self.ctx)),
                     None => " and discard it".to_owned(),
                 };
-                self.line(&format!("take success payload of v{subject}: {}{destination}", ty.name()));
+                self.line(&format!("take success payload of v{subject}: {}{destination}", ty.name(self.ctx)));
             }
-            Statement::BindPayload(bid, subject, variant, index, ty) => {
-                self.line(&format!("bind v{bid} = payload #{index} of v{subject}::#{variant} ({})", ty.name()));
+            Statement::BindPayload(bid, subject, path, ty) => {
+                let p = path.iter().map(|(v, f)| format!("#{v}.#{f}")).collect::<Vec<_>>().join(".");
+                self.line(&format!("bind v{bid} = payload {p} of v{subject} ({})", ty.name(self.ctx)));
             }
             Statement::Propagate(expr, ty, ok_types, binding, frees) => {
                 let expr_text = self.expression_text(expr);
                 let bound = match binding {
-                    Some((id, t)) => format!(" bind v{}: {}", id, t.name()),
+                    Some((id, t)) => format!(" bind v{}: {}", id, t.name(self.ctx)),
                     None => String::new(),
                 };
-                let oks = ok_types.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+                let oks = ok_types.iter().map(|t| t.name(self.ctx)).collect::<Vec<_>>().join(", ");
                 let drops = self.frees_text(frees);
-                self.line(&format!("propagate {} ({}) -> {}{}{}", expr_text, oks, ty.name(), bound, drops));
+                self.line(&format!("propagate {} ({}) -> {}{}{}", expr_text, oks, ty.name(self.ctx), bound, drops));
             }
             Statement::Break => self.line("break"),
             Statement::Continue(depth) => self.line(&format!("continue (depth {})", depth.unwrap_or(0))),
@@ -276,7 +306,7 @@ impl<'a> TreePrinter<'a> {
                 // nothing owned; printing it would be noise. The list is the
                 // content itself — `frees_text` is for annotations.
                 if owned.is_empty() { return; }
-                let list = owned.iter().map(|(id, t)| format!("v{}: {}", id, t.name())).collect::<Vec<_>>().join(", ");
+                let list = owned.iter().map(|(id, t)| format!("v{}: {}", id, t.name(self.ctx))).collect::<Vec<_>>().join(", ");
                 self.line(&format!("release {}", list));
             }
             Statement::Unsafe(inner) => {
@@ -300,7 +330,7 @@ impl<'a> TreePrinter<'a> {
 
     fn frees_text(&self, frees: &[(usize, Type)]) -> String {
         if frees.is_empty() { return String::new(); }
-        let list = frees.iter().map(|(id, t)| format!("v{}: {}", id, t.name())).collect::<Vec<_>>().join(", ");
+        let list = frees.iter().map(|(id, t)| format!("v{}: {}", id, t.name(self.ctx))).collect::<Vec<_>>().join(", ");
         format!(" (release {})", list)
     }
 
@@ -322,21 +352,28 @@ impl<'a> TreePrinter<'a> {
             Expr::Number(n) => out.push_str(&n.to_string()),
             Expr::FloatLit(x) => out.push_str(&x.to_string()),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),
+            Expr::CharLit(c) => out.push_str(&format!("{c:?}")),
+            Expr::Unit => out.push_str("()"),
             Expr::StrLit(text, line, col) => out.push_str(&format!("{:?} @ {}:{}", text, line, col)),
-            Expr::Variable(id, ty, line, col) => out.push_str(&format!("v{} ({}) @ {}:{}", id, ty.name(), line, col)),
+            Expr::Variable(id, ty, line, col) => out.push_str(&format!("v{} ({}) @ {}:{}", id, ty.name(self.ctx), line, col)),
             Expr::Field(base, fname, fty) => {
                 self.expression(base, out);
-                out.push_str(&format!(".{} ({})", fname, fty.name()));
+                out.push_str(&format!(".{} ({})", fname, fty.name(self.ctx)));
             }
             Expr::Call(id, args, ret) => {
                 out.push_str(&format!("fn#{}(", id));
                 self.arguments(args, out);
-                out.push_str(&format!(") -> {}", ret.name()));
+                out.push_str(&format!(") -> {}", ret.name(self.ctx)));
             }
             Expr::FnCall(id, args, ret, _) => {
                 out.push_str(&format!("v{}(", id));
                 self.arguments(args, out);
-                out.push_str(&format!(") -> {}", ret.name()));
+                out.push_str(&format!(") -> {}", ret.name(self.ctx)));
+            }
+            Expr::FnExprCall(callee, args, ret, _) => {
+                out.push_str(&format!("({})(", self.expression_text(callee)));
+                self.arguments(args, out);
+                out.push_str(&format!(") -> {}", ret.name(self.ctx)));
             }
             // M2.12 slice 2: the raw-pointer shapes.
             Expr::BorrowAs(operand, ..) => {
@@ -350,7 +387,7 @@ impl<'a> TreePrinter<'a> {
             Expr::PtrCast(operand, mutable, pointee_id, _, _) => {
                 out.push('(');
                 out.push_str(if *mutable { "*mut " } else { "*const " });
-                out.push_str(&crate::frontend::ptr_pointee(*pointee_id).name());
+                out.push_str(&self.ctx.ptr_pointee(*pointee_id).name(self.ctx));
                 out.push_str(")(");
                 out.push_str(&self.expression_text(operand));
                 out.push(')');
@@ -377,6 +414,7 @@ impl<'a> TreePrinter<'a> {
                 out.push(')');
             }
             Expr::ClosureLit(cid) => out.push_str(&format!("closure#{}", cid)),
+            Expr::FnRef(fn_id, _) => out.push_str(&format!("fn#{}", fn_id)),
             Expr::AtomicNew(value) => out.push_str(&format!("cell_new({})", self.expression_text(value))),
             Expr::AtomicLoad(handle) => out.push_str(&format!("cell_load({})", self.expression_text(handle))),
             Expr::SharedNew(value, _) => out.push_str(&format!("shared_new({})", self.expression_text(value))),
@@ -415,7 +453,7 @@ impl<'a> TreePrinter<'a> {
                 self.expression(a, out);
                 out.push_str(&format!(" {} ", operator_text(op)));
                 self.expression(b, out);
-                out.push_str(&format!(" ({} @ {}:{})", ty.name(), line, col));
+                out.push_str(&format!(" ({} @ {}:{})", ty.name(self.ctx), line, col));
             }
             Expr::Neg(a, line, col) => {
                 out.push('-');
@@ -458,9 +496,9 @@ impl<'a> TreePrinter<'a> {
                     if index > 0 { out.push_str(", "); }
                     self.expression(value, out);
                 }
-                out.push_str(&format!("] ({}) @ {}:{}", ty.name(), line, col));
+                out.push_str(&format!("] ({}) @ {}:{}", ty.name(self.ctx), line, col));
             }
-            Expr::Index(id, len, index, line, col) => {
+            Expr::Index(id, len, index, line, col, _) => {
                 out.push_str(&format!("v{}[", id));
                 self.expression(index, out);
                 out.push_str(&format!("] (len {} @ {}:{})", len, line, col));
@@ -468,7 +506,13 @@ impl<'a> TreePrinter<'a> {
             Expr::VecIndex(id, index, line, col, borrowed, elem) => {
                 out.push_str(&format!("v{}{}[", id, if *borrowed { "&" } else { "" }));
                 self.expression(index, out);
-                out.push_str(&format!("] ({}) @ {}:{}", elem.name(), line, col));
+                out.push_str(&format!("] ({}) @ {}:{}", elem.name(self.ctx), line, col));
+            }
+            Expr::VecIndexOf(base, index, line, col, elem) => {
+                self.expression(base, out);
+                out.push('[');
+                self.expression(index, out);
+                out.push_str(&format!("] ({}) @ {}:{}", elem.name(self.ctx), line, col));
             }
             Expr::StrVecIndex(id, index, line, col, borrowed) => {
                 out.push_str(&format!("v{}{}[", id, if *borrowed { "&" } else { "" }));
@@ -495,7 +539,7 @@ impl<'a> TreePrinter<'a> {
             Expr::MapGet(place, key, ret, line, col) => {
                 out.push_str(&format!("map_get({}, ", self.map_place_text(place)));
                 self.expression(key, out);
-                out.push_str(&format!(") -> {} @ {}:{}", ret.name(), line, col));
+                out.push_str(&format!(") -> {} @ {}:{}", ret.name(self.ctx), line, col));
             }
             Expr::MapHas(place, key, line, col) | Expr::MapRemove(place, key, line, col) => {
                 out.push_str(if matches!(expr, Expr::MapHas(..)) { "map_has(" } else { "map_remove(" });
@@ -521,6 +565,15 @@ impl<'a> TreePrinter<'a> {
                 }
                 out.push_str(&format!(") @ {}:{}", line, col));
             }
+            Expr::IntMethod(kind, recv, arg, ty, line, col) => {
+                out.push_str(&format!("{}(", kind.mir_name()));
+                self.expression(recv, out);
+                if let Some(arg) = arg {
+                    out.push_str(", ");
+                    self.expression(arg, out);
+                }
+                out.push_str(&format!(") -> {} @ {}:{}", ty.name(self.ctx), line, col));
+            }
             other => out.push_str(&format!("<expr {:?}>", std::mem::discriminant(other))),
         }
     }
@@ -535,7 +588,7 @@ impl<'a> TreePrinter<'a> {
                     self.expression(e, out);
                 }
                 Argument::Borrow(id, takes_address) => out.push_str(&format!("{}v{}", if *takes_address { "&" } else { "" }, id)),
-                Argument::FnPtr(id) => out.push_str(&format!("fnptr#{id}")),
+                Argument::FnPtr(id, _) => out.push_str(&format!("fnptr#{id}")),
             }
         }
     }
@@ -554,7 +607,14 @@ fn expr_type_name(expr: &Expr) -> &'static str {
     match expr {
         Expr::Number(..) | Expr::Binary(..) => "i64",
         Expr::FloatLit(..) | Expr::ToF64(..) => "f64",
+        Expr::CharLit(..) => "char",
+        Expr::Unit => "()",
         Expr::BoolLit(..) | Expr::StrEq(..) | Expr::Contains(..) | Expr::StartsWith(..) | Expr::EndsWith(..) => "bool",
         _ => "owned",
     }
+}
+
+/// A field path's display spelling (`a.b.cells`).
+fn field_path_text(field: &[(String, Type)]) -> String {
+    field.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(".")
 }

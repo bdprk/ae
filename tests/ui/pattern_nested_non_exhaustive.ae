@@ -1,0 +1,9 @@
+enum Inner { A(i64), B }
+enum Outer { Wrap(Inner), None }
+fn main() {
+    let o = Outer::Wrap(Inner::A(1));
+    match o {
+        Outer::Wrap(Inner::A(x)) => { print(x); }
+        Outer::None => { print(0); }
+    }
+}

@@ -1,0 +1,1 @@
+ae: $DIR/u64_mixed_width_usize.ae:4:16: mixed integer widths are not allowed; convert one side explicitly with 'as'

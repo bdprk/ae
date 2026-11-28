@@ -1,0 +1,9 @@
+// A spawned closure that reads a parent struct captures a reference to it;
+// field reads through that reference see the parent's values.
+struct Tag { name: string, n: i64 }
+
+fn main() {
+    let tag = Tag { name: "xy", n: 41 };
+    let t = spawn(|| -> i64 { return tag.n + len(tag.name); });
+    print(wait(t));
+}

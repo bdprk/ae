@@ -1,0 +1,1 @@
+ae: $DIR/drop_direct_call_rejected.ae:13:14: destructor 'drop' cannot be called directly

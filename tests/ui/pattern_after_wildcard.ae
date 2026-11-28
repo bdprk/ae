@@ -1,0 +1,9 @@
+enum Flag { On, Off }
+fn main() {
+    let f = Flag::On;
+    match f {
+        Flag::On => { print(1); }
+        _ => { print(0); }
+        Flag::Off => { print(2); }
+    }
+}

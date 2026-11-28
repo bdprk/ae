@@ -1,0 +1,1 @@
+ae: $DIR/i16_cast_literal_oob.ae:2:22: integer literal 32768 is out of range for 'i16' (-32768..=32767)

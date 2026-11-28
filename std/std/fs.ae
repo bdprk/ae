@@ -1,0 +1,84 @@
+// std/std/fs.ae
+// Hosted filesystem surface (P4.3). The compiler builtins stay the runtime
+// implementation; this module is the named API a program imports, with the
+// builtins' result enums passed through unchanged.
+//
+// Naming: the builtins own the reserved names (`read_file`, `write_file`,
+// `try_list_dir`, ...), so the module uses the short verb names a caller
+// reads at the use site.
+
+use "./io_error_kind.ae";
+
+pub fn read_text(path: &string) -> ReadResult {
+    return try_read_file(path);
+}
+
+pub fn write_text(path: &string, text: &string) -> WriteResult {
+    return try_write_file(path, text);
+}
+
+pub fn append_text(path: &string, text: &string) -> WriteResult {
+    return try_append_file(path, text);
+}
+
+pub fn copy(from: &string, to: &string) -> StatusResult {
+    return try_copy_file(from, to);
+}
+
+pub fn rename(from: &string, to: &string) -> StatusResult {
+    return try_rename_path(from, to);
+}
+
+pub fn remove(path: &string) -> StatusResult {
+    return try_remove_file(path);
+}
+
+pub fn mkdir(path: &string) -> StatusResult {
+    return try_create_dir(path);
+}
+
+pub fn rmdir(path: &string) -> StatusResult {
+    return try_remove_dir(path);
+}
+
+pub fn list(path: &string) -> DirResult {
+    return try_list_dir(path);
+}
+
+pub fn info(path: &string) -> FileResult {
+    return try_file_info(path);
+}
+
+pub fn exists(path: &string) -> bool {
+    return path_exists(path);
+}
+
+pub fn is_dir(path: &string) -> bool {
+    return path_is_dir(path);
+}
+
+// Path joining under a name of its own: the builtin spells it `path_join`,
+// and `join` is the string-vector separator.
+pub fn child(dir: &string, name: &string) -> string {
+    return path_join(dir, name);
+}
+
+pub fn name(path: &string) -> string {
+    return path_name(path);
+}
+
+pub fn parent(path: &string) -> string {
+    return path_parent(path);
+}
+
+// Create the directory (an existing one is not an error here), then write.
+// The write's own outcome is the result: if the directory could not be made,
+// the write reports the reason.
+pub fn write_text_in(dir: &string, name: &string, text: &string) -> WriteResult {
+    let made = try_create_dir(dir);
+    match made {
+        StatusResult::Ok => {}
+        StatusResult::Err(_reason) => {}
+    }
+    return try_write_file(path_join(dir, name), text);
+}

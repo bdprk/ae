@@ -1,0 +1,40 @@
+// A body may build a drop-free struct (no `Drop`, scalar fields only) and
+// return it: the construction, a by-value call result, and `return binding;`
+// all move the value out (P1.1). The resolved body route emits the same
+// Declare/Return shapes the typed route does, so the caller cannot tell the
+// difference — and the returned slot's Frees entry is trimmed by the drops
+// pass, so nothing is released twice.
+struct S { a: i64, b: i64 }
+
+fn make(a: i64, b: i64) -> S {
+    return S { a: a, b: b };
+}
+
+fn make_sum(limit: i64) -> S {
+    var sum = 0;
+    var i = 1;
+    while i <= limit {
+        sum = sum + i;
+        i = i + 1;
+    }
+    let s = S { a: sum, b: limit };
+    return s;
+}
+
+// A call result binds first, then its fields feed another call (a field
+// read on a temporary stays typed for now).
+fn combine(limit: i64) -> S {
+    let inner = make_sum(limit);
+    return make(inner.a, limit);
+}
+
+fn main() {
+    var s = make(1, 2);
+    print(s.a + s.b);
+    var t = make_sum(4);
+    print(t.a);
+    print(t.b);
+    var u = combine(3);
+    print(u.a);
+    print(u.b);
+}

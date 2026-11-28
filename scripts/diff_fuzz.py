@@ -5,7 +5,16 @@ Generates random *well-typed* programs from a grammar of arithmetic,
 comparisons, control flow, strings (including one a branch moves into a
 by-value call, the mixed drop shape M2.4 keeps unproven), vectors with
 their mutation surface (push, indexed store, sort) and string vectors
-(push, element store releasing the old element, join), structs, enums,
+(push, element store releasing the old element, join), owned struct
+vectors with Drop glue (push/overwrite/pop/scope release, drop prints in
+the compared output), string vector literals, vector fields and nested
+field chains (`box.cells`, `outer.box.cells`), indexed place borrows
+(`&v[i]`), typed local bindings (P2.4/P2.5), and `&[T]` slices built at
+call sites from vectors, arrays and forwarded parameters, and sub-slice
+windows (`&v[0..0]`, `&v[3..3]`, `&arr[2..3]`, string/owned/nested element
+windows), place borrows of one slice element (`&v[0]` to a `&Struct`/
+`&vec` parameter), and mutable-slice stores (`&mut [T]`, rung 4)
+(ADR-0236 rungs 1-4), structs, enums,
 matches with payload bindings, counted loops with `continue`, and the
 borrow surface (M2.5): a Doc struct with a `&mut self` method and a free
 `&mut` function, field views born and read inside one statement group,
@@ -14,7 +23,12 @@ read-then-release shape left-to-right evaluation keeps legal; compiles each sour
 with every backend and optimization level — the MIR block-graph backend (the
 -O0 default, M2.3) and the structured tree emitter (`AE_CODEGEN=tree`),
 both at -O0, plus the optimized build; runs every binary; and asserts that
-all runs produce identical output. A runtime trap is agreement too (the
+all runs produce identical output. `--pure-subset` draws only the pure-MIR C
+backend's supported surface (arithmetic, branches, loops, structs, enums),
+and `ae emit-pure-c` joins as a fifth mode; a seed whose program uses a
+shape the pure backend has not implemented yet skips that comparison (the
+summary reports how many were compared and skipped). A runtime trap is
+agreement too (the
 generator can produce overflowing arithmetic; seed 1762): every mode must
 exit with the same code, print the same stdout up to the trap, and trap at
 the same position with the same message. The parser's own move/borrow/type
@@ -23,7 +37,7 @@ generator bug and fails the run), so each seed doubles as a regression test
 of compile-or-die determinism.
 
 Usage: python scripts/diff_fuzz.py [--seeds N] [--start SEED] [--jobs N]
-                                   [--save-corpus DIR]
+                                   [--save-corpus DIR] [--pure-subset]
 
 Seeds run through a worker pool (--jobs, default min(cpu, 8)); each worker
 owns its files and its own content cache, so parallel seeds never share
@@ -55,6 +69,12 @@ def find_executable() -> Path:
     the script honest on both layouts.
     """
     name = "ae.exe" if os.name == "nt" else "ae"
+    # A long campaign must survive a rebuild: cargo replaces the target
+    # binary, and a worker spawning it in that window sees a transient
+    # failure. AE_FUZZ_BIN points the campaign at a private copy instead.
+    override = os.environ.get("AE_FUZZ_BIN")
+    if override:
+        return Path(override)
     legacy = ROOT / "target" / "debug" / name
     if legacy.exists():
         return legacy
@@ -82,6 +102,11 @@ class Gen:
         # one per-program counter instead of a random suffix, so two
         # statements can never declare the same variable twice.
         self.name_seq = 0
+        # `--pure-subset` keeps the generated program inside the pure-MIR C
+        # backend's supported surface (arithmetic/control/structs/enums),
+        # so the fifth differential mode compares instead of skipping on an
+        # unsupported intrinsic.
+        self.pure_subset = False
 
     def rnd(self) -> int:
         self.state ^= (self.state << 13) & 0xFFFFFFFF
@@ -139,7 +164,14 @@ class Gen:
         """
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
-        kind = self.rnd() % 24
+        kind = self.rnd() % 31
+        if self.pure_subset:
+            # Every kind the generator draws from. The pure subset used to be a
+            # narrowed list; the backend now covers the whole surface (owned
+            # containers, slices incl. `&mut`, the Doc borrow face, pointers,
+            # spawn, atomic cells), so the fifth mode compares the same shapes
+            # the other four do and `unsupported subset` skips are a regression.
+            kind = self.pick(list(range(0, 31)))
         # With pointers in scope, a third of the draws land on the pointer
         # kinds (19/20): the fresh surface needs the pressure, and the shapes
         # are cheap to generate.
@@ -446,6 +478,161 @@ class Gen:
                 f"unsafe {{ print({name}.deref()); }}",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
+        if kind == 24:
+            # Owned struct vector with Drop glue (P2.4 slices 4-5): element
+            # construction, push, indexed overwrite, pop and scope release all
+            # run the destructor exactly once, in the same order on every
+            # backend (the drop prints are part of the differential output).
+            name = self.fresh("tg")
+
+            def tag(prefix: str) -> str:
+                return f'FuzzTag {{ name: "{prefix}{self.rnd() % 1000}", n: {self.int_expr(vars)} }}'
+
+            return [
+                f"var {name} = vec[{tag('a')}, {tag('b')}];",
+                f"push({name}, {tag('c')});",
+                f"print(len({name}));",
+                f"print({name}[0].n);",
+                f"{name}[0] = {tag('d')};",
+                f"print({name}[0].n);",
+                f"print(fuzz_tag_n(&{name}[1]));",
+                f"pop({name});",
+                f"print(len({name}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 25:
+            # String vector literals and the full mutation surface (P2.4
+            # slice 6): text elements are owned, the store releases the old
+            # element, and join reads the container.
+            name = self.fresh("sw")
+
+            def lit(prefix: str) -> str:
+                return f'"{prefix}{self.rnd() % 1000}"'
+
+            return [
+                f"var {name} = vec[{lit('la')}, {lit('lb')}];",
+                f"push({name}, {lit('lc')});",
+                f"{name}[0] = {lit('ld')};",
+                f"print(len({name}));",
+                f'print(join({name}, "-"));',
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 26:
+            # Vector fields and their nested receivers (P2.4 slices 9-11):
+            # a struct's i64 vector field and an owned-struct vector field
+            # mutate through `box.cells`, an assignment through the field
+            # releases the old element, and a nested `outer.box.cells` chain
+            # writes and reads in place.
+            box = self.fresh("fb")
+            outer = self.fresh("fo")
+
+            def tag(prefix: str) -> str:
+                return f'FuzzTag {{ name: "{prefix}{self.rnd() % 1000}", n: {self.int_expr(vars)} }}'
+
+            value = lambda: self.int_expr(vars)
+            return [
+                f"var {box} = FuzzBox {{ cells: vec[{value()}, {value()}], tags: vec[{tag('f')}] }};",
+                f"push({box}.cells, {value()});",
+                f"{box}.cells[0] = {value()};",
+                f"print(len({box}.cells));",
+                f"print({box}.cells[0]);",
+                f"push({box}.tags, {tag('g')});",
+                f"print({box}.tags[0].n);",
+                f"print(len({box}.tags));",
+                f"var {outer} = FuzzOuter {{ box: FuzzBox {{ cells: vec[{value()}], tags: vec[{tag('h')}] }} }};",
+                f"push({outer}.box.cells, {value()});",
+                f"{outer}.box.cells[0] = {value()};",
+                f"print(len({outer}.box.cells));",
+                f"print(fuzz_tag_n(&{outer}.box.tags[0]));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 27:
+            # Local type annotations (P2.5.1): an empty `vec` takes its
+            # element type from the annotation, a scalar binding declares its
+            # shape, and a string literal binds with an annotation.
+            name = self.fresh("tv")
+            sname = self.fresh("ts")
+            return [
+                f"var {name}: vec = vec[];",
+                f"push({name}, {self.int_expr(vars)});",
+                f"print(len({name}));",
+                f"print({name}[0]);",
+                f'let {sname}: string = "t{self.rnd() % 1000}";',
+                f"print(len({sname}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 28:
+            # ADR-0236: a `&[i64]` built from a vector and from an array, plus
+            # a forwarded slice parameter. The callee's loop and index reads
+            # see the caller's elements and length through the fat pointer.
+            name = self.fresh("sl")
+            arr = self.fresh("sa")
+            values = [self.int_expr(vars) for _ in range(3)]
+            return [
+                f"var {name} = vec[{values[0]}, {values[1]}, {values[2]}];",
+                f"print(fuzz_slice_sum(&{name}));",
+                f"print(fuzz_slice_forward(&{name}));",
+                f"print(fuzz_slice_first(&{name}));",
+                f"print(fuzz_slice_sum(&{name}[1..3]));",
+                f"print(fuzz_slice_sum(&{name}[0..0]));",
+                f"print(fuzz_slice_sum(&{name}[3..3]));",
+                f"let {arr} = [{values[0]}, {values[1]}, {values[2]}];",
+                f"print(fuzz_slice_sum(&{arr}));",
+                f"print(fuzz_slice_first(&{arr}[0..2]));",
+                f"print(fuzz_slice_sum(&{arr}[2..3]));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 29:
+            # ADR-0236 element kinds: `&[string]` reads views, `&[FuzzTag]`
+            # projects an owned element's field, and `&[vec]` iterates nested
+            # containers — none of it moves the owner.
+            words = self.fresh("ss")
+            tags = self.fresh("st")
+            rows = self.fresh("sr")
+
+            def tag(prefix: str) -> str:
+                return f'FuzzTag {{ name: "{prefix}{self.rnd() % 1000}", n: {self.int_expr(vars)} }}'
+
+            value = lambda: self.int_expr(vars)
+            return [
+                f'var {words} = vec["w{self.rnd() % 1000}", "w{self.rnd() % 1000}"];',
+                f"print(fuzz_slice_words(&{words}));",
+                f"print(fuzz_slice_word_len(&{words}));",
+                f"print(fuzz_slice_words(&{words}[0..1]));",
+                f"print(fuzz_slice_word_len(&{words}[1..2]));",
+                f"var {tags} = vec[{tag('s')}, {tag('t')}];",
+                f"print(fuzz_slice_tags(&{tags}));",
+                f"print(fuzz_slice_tag0(&{tags}));",
+                f"print(fuzz_slice_tags(&{tags}[0..1]));",
+                f"print(fuzz_slice_tag0(&{tags}[1..2]));",
+                f"print(fuzz_slice_borrow_tag(&{tags}));",
+                f"print({tags}[0].n);",
+                f"var {rows} = vec[vec[{value()}, {value()}], vec[{value()}]];",
+                f"print(fuzz_slice_rows(&{rows}));",
+                f"print(fuzz_slice_rows(&{rows}[1..2]));",
+                f"print(fuzz_slice_borrow_row(&{rows}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 30:
+            # ADR-0236 rung 4: `&mut [i64]` stores through the call, including a
+            # `&mut name[1..3]` window; the owner sees the writes afterwards
+            # and every mode agrees.
+            name = self.fresh("mu")
+            values = [self.int_expr(vars) for _ in range(3)]
+            fill = self.int_expr(vars)
+            return [
+                f"var {name} = vec[{values[0]}, {values[1]}, {values[2]}];",
+                f"print(fuzz_slice_sum(&{name}));",
+                f"fuzz_slice_mut_double(&mut {name});",
+                f"print({name}[0]);",
+                f"print({name}[2]);",
+                f"fuzz_slice_mut_fill(&mut {name}, {fill});",
+                f"print({name}[0]);",
+                f"fuzz_slice_mut_fill(&mut {name}[1..3], {fill});",
+                f"print({name}[1]);",
+                f"print(len({name}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
         name = self.fresh("s")
         return [
             f"var {name} = {self.int_expr(vars)};",
@@ -457,10 +644,80 @@ class Gen:
         # `main` cannot `return` in this language; its exit is implicit. The
         # struct Pt and its two scalar fields are fixed: field reads borrow.
         # The Op enum exercises match dispatch and payload bindings.
+        if self.pure_subset:
+            # The declarations the drawn kinds reference: the struct and enum
+            # every seed has, plus the owned-struct vector's Drop glue and the
+            # nested-receiver shapes (kinds 24/26).
+            lines = [
+                "struct Pt { a: i64, b: i64 }",
+                "struct Doc { name: string, note: string }",
+                "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
+                "struct FuzzTag { name: string, n: i64 }",
+                "impl Doc {",
+                "    fn rename(&mut self, to: string) -> i64 {",
+                "        self.name = to;",
+                "        return len(self.name);",
+                "    }",
+                "}",
+                "fn doc_bump(d: &mut Doc, to: string) -> i64 {",
+                "    d.name = to;",
+                "    return len(d.name);",
+                "}",
+                "fn doc_combine(a: i64, b: i64) -> i64 {",
+                "    return a + b;",
+                "}",
+                "impl Drop for FuzzTag {",
+                '    fn drop(&mut self) { print("d" + self.name); }',
+                "}",
+                "struct FuzzBox { cells: vec, tags: vec[FuzzTag] }",
+                "struct FuzzOuter { box: FuzzBox }",
+                "fn fuzz_tag_n(t: &FuzzTag) -> i64 { return t.n; }",
+                "fn fuzz_slice_sum(v: &[i64]) -> i64 { var t = 0; for x in v { t += x; } return t; }",
+                "fn fuzz_slice_forward(v: &[i64]) -> i64 { return fuzz_slice_sum(v); }",
+                "fn fuzz_slice_first(v: &[i64]) -> i64 { return v[0]; }",
+                "fn fuzz_slice_words(v: &[string]) -> i64 { var t = 0; for w in v { t += len(w); } return t; }",
+                "fn fuzz_slice_word_len(v: &[string]) -> i64 { return len(v[0]); }",
+                "fn fuzz_slice_tags(v: &[FuzzTag]) -> i64 { var t = 0; for x in v { t += x.n; } return t; }",
+                "fn fuzz_slice_tag0(v: &[FuzzTag]) -> i64 { return v[0].n; }",
+                "fn fuzz_slice_rows(v: &[vec]) -> i64 { var t = 0; for r in v { t += len(r); } return t; }",
+                "fn fuzz_slice_borrow_tag(v: &[FuzzTag]) -> i64 { return fuzz_tag_n(&v[0]); }",
+                "fn fuzz_vec_len(v: &vec) -> i64 { return len(v); }",
+                "fn fuzz_slice_borrow_row(v: &[vec]) -> i64 { return fuzz_vec_len(&v[0]); }",
+                "fn fuzz_slice_mut_double(m: &mut [i64]) { var i = 0; while i < len(m) { m[i] = m[i] * 2; i += 1; } }",
+                "fn fuzz_slice_mut_fill(m: &mut [i64], v: i64) { m[0] = v; }",
+                "fn eat(t: string) -> i64 { return len(t); }",
+                "fn main() {",
+            ]
+            vars = ["seed0"]
+            lines.append("    var seed0 = 7;")
+            body = self.statement(vars, 0, [], [])
+            lines.extend("    " + line for line in body)
+            lines.append("}")
+            return "\n".join(lines)
         lines = [
             "struct Pt { a: i64, b: i64 }",
             "struct Doc { name: string, note: string }",
             "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
+            "struct FuzzTag { name: string, n: i64 }",
+            "impl Drop for FuzzTag {",
+            '    fn drop(&mut self) { print("d" + self.name); }',
+            "}",
+            "struct FuzzBox { cells: vec, tags: vec[FuzzTag] }",
+            "struct FuzzOuter { box: FuzzBox }",
+            "fn fuzz_tag_n(t: &FuzzTag) -> i64 { return t.n; }",
+            "fn fuzz_slice_sum(v: &[i64]) -> i64 { var t = 0; for x in v { t += x; } return t; }",
+            "fn fuzz_slice_forward(v: &[i64]) -> i64 { return fuzz_slice_sum(v); }",
+            "fn fuzz_slice_first(v: &[i64]) -> i64 { return v[0]; }",
+            "fn fuzz_slice_words(v: &[string]) -> i64 { var t = 0; for w in v { t += len(w); } return t; }",
+            "fn fuzz_slice_word_len(v: &[string]) -> i64 { return len(v[0]); }",
+            "fn fuzz_slice_tags(v: &[FuzzTag]) -> i64 { var t = 0; for x in v { t += x.n; } return t; }",
+            "fn fuzz_slice_tag0(v: &[FuzzTag]) -> i64 { return v[0].n; }",
+            "fn fuzz_slice_rows(v: &[vec]) -> i64 { var t = 0; for r in v { t += len(r); } return t; }",
+            "fn fuzz_slice_borrow_tag(v: &[FuzzTag]) -> i64 { return fuzz_tag_n(&v[0]); }",
+            "fn fuzz_vec_len(v: &vec) -> i64 { return len(v); }",
+            "fn fuzz_slice_borrow_row(v: &[vec]) -> i64 { return fuzz_vec_len(&v[0]); }",
+            "fn fuzz_slice_mut_double(m: &mut [i64]) { var i = 0; while i < len(m) { m[i] = m[i] * 2; i += 1; } }",
+            "fn fuzz_slice_mut_fill(m: &mut [i64], v: i64) { m[0] = v; }",
             "fn eat(t: string) -> i64 { return len(t); }",
             "impl Doc {",
             "    fn rename(&mut self, to: string) -> i64 {",
@@ -557,6 +814,52 @@ def maybe_trim_cache(cache_dir: Path, state: dict) -> None:
         cache_dir.mkdir(parents=True, exist_ok=True)
 
 
+def compile_pure(source: str, workdir: Path, tag: str, timeout: int):
+    """Compile one seed through the pure-MIR C pipeline (`ae emit-pure-c`).
+
+    Returns the binary path when the program is inside the backend's
+    supported subset, or None when the pipeline fails closed with a named
+    unsupported-shape diagnostic (a tracked skip, not a divergence). A
+    successful emission that the host C compiler rejects is a real backend
+    bug and raises.
+    """
+    src = workdir / f"prog_{tag}_pure.ae"
+    src.write_text(source, encoding="utf-8")
+    emitted = subprocess.run(
+        [str(EXE), "emit-pure-c", str(src)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if emitted.returncode != 0:
+        detail = emitted.stderr
+        markers = (
+            "is not supported by the pure C backend",
+            "not linked by the pure C backend",
+            "cannot handle",
+            "unsupported type:",
+            "unsupported feature:",
+        )
+        if any(marker in detail for marker in markers):
+            return None
+        raise RuntimeError(f"emit-pure-c ({tag}) failed: {detail}")
+    c_path = workdir / f"prog_{tag}_pure.c"
+    c_path.write_text(emitted.stdout, encoding="utf-8")
+    exe = workdir / f"prog_{tag}_pure"
+    if os.name == "nt":
+        exe = exe.with_suffix(".exe")
+    cc = os.environ.get("AE_CC") or "gcc"
+    build = subprocess.run(
+        [cc, "-std=c11", "-O0", str(c_path), "-o", str(exe), "-lm"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(f"pure C compile ({tag}) failed: {build.stderr}")
+    return exe
+
+
 def run_seed(seed: int, workdir: Path, cache_dir: Path, compile_timeout: int) -> dict:
     """One seed's four-way differential, fully isolated.
 
@@ -579,10 +882,14 @@ def run_seed(seed: int, workdir: Path, cache_dir: Path, compile_timeout: int) ->
     return result
 
 
+PURE_SUBSET = False
+
+
 def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: int) -> dict:
     started = time.perf_counter()
     result = {"seed": seed, "ok": None, "detail": "", "lines": 0, "source": ""}
     gen = Gen(seed)
+    gen.pure_subset = PURE_SUBSET
     source = gen.program()
     result["source"] = source
     seed_dir = workdir / f"s{seed}"
@@ -602,6 +909,16 @@ def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: in
             timeout=30,
         )
         runs.append(("interp", interp_run))
+        # ADR-0238/0240: the pure-MIR C backend joins as a fifth mode when
+        # the program stays inside its supported subset. Traps join too: the
+        # pure runtime prints the same positioned ae:<line>:<col>: <msg> line
+        # and exits with the same status, so trap seeds compare all five
+        # modes instead of skipping the fifth.
+        result["pure"] = "skip"
+        pure_bin = compile_pure(source, seed_dir, "d", compile_timeout)
+        if pure_bin is not None:
+            runs.append(("pure", subprocess.run([str(pure_bin)], capture_output=True, text=True, timeout=30)))
+            result["pure"] = "ran"
         # A runtime trap is part of the language's observable behavior, so
         # agreement includes traps (seed 1762's overflow): every mode must
         # exit with the same code, print the same stdout up to the trap, and
@@ -665,12 +982,16 @@ def main() -> int:
                         help="seconds before one compile is abandoned (and fails that seed)")
     parser.add_argument("--save-corpus", metavar="DIR",
                         help="write every generated program as DIR/seed_N.ae")
+    parser.add_argument("--pure-subset", action="store_true",
+                        help="generate only the pure-MIR C backend's supported surface")
     parser.add_argument("--duration", type=float, default=0,
                         help="run for this many hours instead of --seeds seeds "
                              "(the M2.13 24h acceptance mode); the seed stream "
                              "continues past any count and the summary reports "
                              "the seeds actually run")
     args = parser.parse_args()
+    global PURE_SUBSET
+    PURE_SUBSET = args.pure_subset
     if args.stop_before is not None and args.stop_before <= args.start:
         parser.error("--stop-before must exceed --start")
 
@@ -754,6 +1075,9 @@ def main() -> int:
     rate = len(results) / elapsed if elapsed > 0 else 0.0
     suffix = f", {len(env_seeds)} environmental" if env_seeds else ""
     print(f"\n{len(results)} seeds, {len(failed_seeds)} failures{suffix}, {elapsed:.1f}s ({rate:.2f} seeds/s, {jobs} jobs)")
+    pure_ran = sum(1 for r in results.values() if r.get("pure") == "ran")
+    pure_skipped = sum(1 for r in results.values() if r.get("pure") == "skip")
+    print(f"pure-MIR C fifth mode: {pure_ran} compared, {pure_skipped} skipped (unsupported subset)")
     if failed_seeds:
         print(f"failed seeds: {failed_seeds}")
     if env_seeds:

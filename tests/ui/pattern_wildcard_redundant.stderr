@@ -1,0 +1,1 @@
+ae: $DIR/pattern_wildcard_redundant.ae:7:9: wildcard '_' is redundant: all variants are already covered

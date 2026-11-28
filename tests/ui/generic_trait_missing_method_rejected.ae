@@ -1,0 +1,11 @@
+trait Area {
+    fn area(shape: T) -> i64;
+}
+
+fn broken[T: Area](shape: T) -> i64 {
+    return shape.volume();
+}
+
+fn main() {
+    print(1);
+}

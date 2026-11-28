@@ -1,0 +1,108 @@
+struct Guard {
+    id: i64,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        print("drop Guard " + to_string(self.id));
+    }
+}
+
+struct Inner {
+    id: i64,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        print("drop Inner " + to_string(self.id));
+    }
+}
+
+struct Outer {
+    id: i64,
+    inner: Inner,
+}
+
+impl Drop for Outer {
+    fn drop(&mut self) -> () {
+        print("drop Outer " + to_string(self.id));
+    }
+}
+
+fn consume(g: Guard) {
+    print("consume " + to_string(g.id));
+}
+
+fn cond_move(flag: bool, id: i64) {
+    let g = Guard { id: id };
+    if flag {
+        consume(g);
+    }
+    print("after cond " + to_string(id));
+}
+
+fn early_ret(flag: bool) -> i64 {
+    let a = Guard { id: 30 };
+    let b = Guard { id: 31 };
+    if flag {
+        return 1;
+    }
+    return 2;
+}
+
+fn none_opt() -> Option[i64] {
+    return Option[i64]::None;
+}
+
+fn propagate_opt(flag: bool) -> Option[i64] {
+    let a = Guard { id: 40 };
+    let b = Guard { id: 41 };
+    if flag {
+        let _v = none_opt()?;
+    }
+    return Option[i64]::Some(99);
+}
+
+fn main() {
+    if true {
+        let a = Guard { id: 1 };
+        let b = Guard { id: 2 };
+        let c = Guard { id: 3 };
+    }
+
+    if true {
+        var g = Guard { id: 10 };
+        g = Guard { id: 11 };
+        print("after overwrite");
+    }
+
+    if true {
+        var g = Guard { id: 12 };
+        consume(g);
+        g = Guard { id: 13 };
+        print("after move-assign");
+    }
+
+    cond_move(true, 20);
+    cond_move(false, 21);
+
+    var i = 0;
+    while i < 3 {
+        let lg = Guard { id: 50 + i };
+        i = i + 1;
+        if i == 1 {
+            continue;
+        }
+        if i == 2 {
+            break;
+        }
+    }
+
+    print(early_ret(true));
+    let _p = propagate_opt(true);
+
+    if true {
+        let inn = Inner { id: 101 };
+        let o = Outer { id: 100, inner: inn };
+    }
+}

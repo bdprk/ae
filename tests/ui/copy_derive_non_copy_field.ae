@@ -1,0 +1,12 @@
+struct Owned {
+    n: i64,
+}
+
+#[derive(Copy)]
+struct Bad {
+    inner: Owned,
+}
+
+fn main() {
+    print(1);
+}

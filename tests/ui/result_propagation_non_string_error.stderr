@@ -1,0 +1,1 @@
+ae: $DIR/result_propagation_non_string_error.ae:6:20: '?' needs an enum shaped { Ok(...), Err(string) } or { Some(T), None }, and 'Result[i64, i64]' is not one
