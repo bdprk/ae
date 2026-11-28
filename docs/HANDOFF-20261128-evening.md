@@ -70,3 +70,20 @@ map 堆槽片的读写面卡在一个变体穿透（切片 100）：
 - 两个同时失败的测试必须分别归因，不能合并回退（22:45 条目）
 - 诊断前先看全量输出——head/tail 截断三次误导归因（23:59 条目）
 - 协调子代理严禁碰本地树（git 写操作/编辑），文档产出走独立 clone/worktree
+
+## 6. 追加（23:59 后）：MapPlace::Pointer 的设计分叉
+
+开工即发现比十文件清单更深一层：map_get 的 C 发射在两层——tree 发射器直接
+从 MapPlace 渲染，MIR 发射器渲染内建语句。Pointer 需携带降级 deref 表达式，
+MIR 侧 lower_operand 绑定为临时；但 MapOf 无视图类型，deref 临时的绑定类型
+就是 MapOf，C 发射器无法靠类型区分按值局部（&v）与指针临时（裸）。下窗二选一：
+
+- **方案 A（推荐）**：`MapRef` 类型拼写进 Type 集（对齐 StrView/VectorRef
+  先例；deref 臂、infer_place_ty、emit_place 地址 cast 各加一臂；语言一致
+  性最好，兼修绑定守卫的临时形态——heap_map.ae 的绑定拒绝即可翻正）
+- **方案 B**：emitter 位标记（MirBinding is_borrow_pointer），改动最小但
+  类型系统留不对称
+
+方案 A 的工作量 ≈ stage-2 字符串切片 + stage-4 向量切片之和（有完全先例可
+抄）；门位图沿用本文件 §2 + 切片 100。探针 work/repro/heap_map.ae 保留
+（当前卡读者臂诊断）。
