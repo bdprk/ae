@@ -289,22 +289,27 @@ impl<'a> Parser<'a> {
                                     expressions.owned_struct_bindings.insert(id);
                                 }
                             }
-                            // A binding from an explicit generic call (`let x = f[T](..)`)
-                            // or a method call (`let x = r.shifted(..)`): the
-                            // instantiated return type exists only at lowering
-                            // time, so its fields and methods are admitted
-                            // permissively there.
-                            if let ExpressionKind::Call { callee, .. } = &initializer.kind
-                                && matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }
-                                    | ExpressionKind::Field { .. }
-                                    // An associated call (`MyVec[Elem]::new()`):
-                                    // the instance's type exists only at
-                                    // lowering, so the receiver's methods
-                                    // resolve lazily.
-                                    | ExpressionKind::Qualified { .. })
+                            // A binding from an explicit generic call (`let x = f[T](..)`),
+                            // a bare inferred generic call (`let x = take(b)`,
+                            // P2.5.2), or a method call (`let x = r.shifted(..)`):
+                            // the instantiated return type exists only at
+                            // lowering time, so its fields and methods are
+                            // admitted permissively there.
+                            if let ExpressionKind::Call { callee, .. } = &initializer.kind {
+                                let bare_generic = matches!(&callee.kind, ExpressionKind::Atom(Kind::Ident(name))
+                                    if self.generics.fn_names.contains_key(name.as_str()));
+                                if bare_generic
+                                    || matches!(callee.kind, ExpressionKind::BracketedCallTarget { .. }
+                                        | ExpressionKind::Field { .. }
+                                        // An associated call (`MyVec[Elem]::new()`):
+                                        // the instance's type exists only at
+                                        // lowering, so the receiver's methods
+                                        // resolve lazily.
+                                        | ExpressionKind::Qualified { .. })
                                 {
                                     expressions.generic_call_bindings.insert(id);
                                 }
+                            }
                             if matches!(initializer.kind, ExpressionKind::Index { .. }) {
                                 expressions.generic_call_bindings.insert(id);
                             }

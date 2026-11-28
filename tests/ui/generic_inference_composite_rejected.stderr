@@ -1,0 +1,1 @@
+ae: $DIR/generic_inference_composite_rejected.ae:15:14: 'peek' is a generic function; write its type arguments, e.g. peek[i64](...)

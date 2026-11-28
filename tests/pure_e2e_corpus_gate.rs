@@ -3,7 +3,7 @@
 //! match byte-for-byte: stdout for a completed program, and stdout + the
 //! positioned stderr line + the exit status for a trap fixture.
 //!
-//! The floor is 178 of 178 accepted fixtures: the corpus is complete at this
+//! The floor is 179 of 179 accepted fixtures: the corpus is complete at this
 //! slice, so any drop is a regression. Emission failures are grouped by
 //! reason in the assertion message so the remaining gaps stay visible.
 
@@ -21,7 +21,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Fixtures the pipeline can emit, compile and run with matching output at
 /// this slice. Raise when coverage grows; never lower without a ledger entry.
-const PASS_FLOOR: usize = 178;
+const PASS_FLOOR: usize = 179;
 
 fn repo_path(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)

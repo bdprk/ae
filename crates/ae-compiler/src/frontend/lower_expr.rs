@@ -771,7 +771,7 @@ impl<'a> Parser<'a> {
                         let pointee_ty = self.subst.get(spelling.as_str()).copied()
                             .or_else(|| super::types::scalar_type(&spelling))
                             .or_else(|| self.struct_names.get(&spelling).map(|&sid| Type::Struct(sid)))
-                            .or_else(|| self.enum_names.get(&spelling).map(|&eid| Type::Enum(self.enums[eid].name.clone(), eid)))
+                            .or_else(|| self.enum_names.get(&spelling).map(|&eid| Type::Enum(self.enums[eid].name, eid)))
                             .ok_or_else(|| self.error_at(type_arguments[0].start, &format!("'ptr::null' needs a pointee type; '{spelling}' is not one")))?;
                         let id = self.ctx.intern_pointee(pointee_ty);
                         self.seek_scalar_offset(expression.range.end);
@@ -2224,7 +2224,7 @@ impl<'a> Parser<'a> {
         // parameters stay on the explicit-type-argument path.
         let patterns: Vec<ParamPattern> = bindings
             .iter()
-            .map(|binding| classify_generic_param_pattern(&def.source[binding.ty.clone()], &def.params))
+            .map(|binding| classify_generic_param_pattern(&def.source[binding.ty.clone()], &def.params, &self.generics.struct_names, &self.generics.names))
             .collect();
         let every_param_covered = (0..def.params.len()).all(|tp| {
             patterns.iter().any(|p| p.type_param() == Some(tp))
@@ -2271,6 +2271,9 @@ impl<'a> Parser<'a> {
                             };
                             (tp, target)
                         })
+                    }
+                    ParamPattern::Composite { tp, gid } if fields.is_empty() => {
+                        self.composite_origin_type(base_ty, gid).map(|inner| (tp, inner))
                     }
                     _ => None,
                 };
@@ -2343,6 +2346,11 @@ impl<'a> Parser<'a> {
                         inferred[tp] = Some(self.ctx.vector_elem(id));
                     }
                 }
+                ParamPattern::Composite { tp, gid } => {
+                    if let Some(inner) = self.composite_origin_type(ty, gid) && inferred[tp].is_none() {
+                        inferred[tp] = Some(inner);
+                    }
+                }
                 ParamPattern::SliceMut(_) | ParamPattern::Fixed => {}
             }
             prelowered[index] = Some((expr, ty));
@@ -2356,6 +2364,31 @@ impl<'a> Parser<'a> {
         let final_args = self.lower_value_arguments_with(name, arguments, &inst_params, slots, prelowered)?;
         Ok(Some((Expr::Call(inst_id, final_args, inst_ret), inst_ret)))
     }
+
+    /// The type argument that produced a composite argument's concrete
+    /// layout: `Box[Point]` unifies `T` through the origin tables recorded
+    /// at `instantiate_struct`/`instantiate_enum` (ADR-0187's method
+    /// dispatch needs the same pair). A non-composite argument, a different
+    /// declaration, or a multi-parameter list leaves `T` uninferred here and
+    /// the caller falls back to the explicit type-argument diagnostic.
+    fn composite_origin_type(&self, ty: Type, gid: usize) -> Option<Type> {
+        let sid = match ty {
+            Type::Struct(sid) | Type::StructRef(sid) | Type::StructMut(sid) => sid,
+            Type::Enum(_, eid) => {
+                let (origin_gid, args) = self.generics.enum_origin.get(&eid)?.clone();
+                if origin_gid != gid || args.len() != 1 {
+                    return None;
+                }
+                return Some(args[0]);
+            }
+            _ => return None,
+        };
+        let (origin_gid, args) = self.generics.struct_origin.get(&sid)?.clone();
+        if origin_gid != gid || args.len() != 1 {
+            return None;
+        }
+        Some(args[0])
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2366,6 +2399,10 @@ enum ParamPattern {
     Slice(usize),
     SliceMut(usize),
     Vec(usize),
+    /// `Name[T]` / `&Name[T]` with `Name` a generic declaration: `T` is
+    /// inferred through the instantiation origin of the argument's concrete
+    /// type (`box_get(&b)` sees `Box[Point]` and unifies `T = Point`).
+    Composite { tp: usize, gid: usize },
     Fixed,
 }
 
@@ -2377,13 +2414,19 @@ impl ParamPattern {
             | Self::BorrowMut(tp)
             | Self::Slice(tp)
             | Self::SliceMut(tp)
-            | Self::Vec(tp) => Some(tp),
+            | Self::Vec(tp)
+            | Self::Composite { tp, .. } => Some(tp),
             Self::Fixed => None,
         }
     }
 }
 
-fn classify_generic_param_pattern(raw: &str, params: &[String]) -> ParamPattern {
+fn classify_generic_param_pattern(
+    raw: &str,
+    params: &[String],
+    struct_names: &HashMap<String, usize>,
+    enum_names: &HashMap<String, usize>,
+) -> ParamPattern {
     let raw = raw.trim();
     if let Some(tp) = params.iter().position(|p| p == raw) {
         return ParamPattern::Value(tp);
@@ -2393,8 +2436,13 @@ fn classify_generic_param_pattern(raw: &str, params: &[String]) -> ParamPattern 
             if let Some(tp) = params.iter().position(|p| p == elem) {
                 return ParamPattern::SliceMut(tp);
             }
-        } else if let Some(tp) = params.iter().position(|p| p == inner) {
+            return ParamPattern::Fixed;
+        }
+        if let Some(tp) = params.iter().position(|p| p == inner) {
             return ParamPattern::BorrowMut(tp);
+        }
+        if let Some(pattern) = composite_param_pattern(inner, params, struct_names, enum_names) {
+            return pattern;
         }
         return ParamPattern::Fixed;
     }
@@ -2403,8 +2451,13 @@ fn classify_generic_param_pattern(raw: &str, params: &[String]) -> ParamPattern 
             if let Some(tp) = params.iter().position(|p| p == elem) {
                 return ParamPattern::Slice(tp);
             }
-        } else if let Some(tp) = params.iter().position(|p| p == inner) {
+            return ParamPattern::Fixed;
+        }
+        if let Some(tp) = params.iter().position(|p| p == inner) {
             return ParamPattern::Borrow(tp);
+        }
+        if let Some(pattern) = composite_param_pattern(inner, params, struct_names, enum_names) {
+            return pattern;
         }
         return ParamPattern::Fixed;
     }
@@ -2413,7 +2466,23 @@ fn classify_generic_param_pattern(raw: &str, params: &[String]) -> ParamPattern 
     {
         return ParamPattern::Vec(tp);
     }
-    ParamPattern::Fixed
+    composite_param_pattern(raw, params, struct_names, enum_names).unwrap_or(ParamPattern::Fixed)
+}
+
+/// The `Name[T]` composite spelling: `Name` must be a generic declaration and
+/// the bracket must name exactly one of the function's own parameters. Two
+/// argument lists (`Result[T, E]`) and concrete composites stay `Fixed`.
+fn composite_param_pattern(
+    raw: &str,
+    params: &[String],
+    struct_names: &HashMap<String, usize>,
+    enum_names: &HashMap<String, usize>,
+) -> Option<ParamPattern> {
+    let (name, inner) = raw.split_once('[')?;
+    let inner = inner.strip_suffix(']')?.trim();
+    let tp = params.iter().position(|p| p == inner)?;
+    let gid = *struct_names.get(name.trim()).or_else(|| enum_names.get(name.trim()))?;
+    Some(ParamPattern::Composite { tp, gid })
 }
 
 /// Resolve a struct-field receiver chain (`a.b.cells`) to its root binding

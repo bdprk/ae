@@ -1,0 +1,16 @@
+use "../../std/alloc/box.ae";
+
+#[repr(C)]
+pub struct Wrap {
+    v: i64,
+}
+
+fn peek[T](b: &Box[T]) -> i64 {
+    let inner = box_get(b);
+    return inner.v;
+}
+
+fn main() {
+    let w = Wrap { v: 1 };
+    let _x = peek(&w);
+}

@@ -1,0 +1,49 @@
+// P2.5.2 composite step: a bare generic call infers a parameter that occurs
+// inside a composite type (`&Box[T]`, `Box[T]`, an enum payload) through the
+// instantiation origin of the argument's concrete type. `Box[T]` itself is
+// exercised with struct and scalar instances, bare calls included.
+use "../../std/alloc/box.ae";
+
+#[repr(C)]
+pub struct Point {
+    x: i64,
+    y: i64,
+}
+
+enum Hold[T] {
+    Some(T),
+    None,
+}
+
+fn peek_x[T](b: &Box[T]) -> i64 {
+    let inner = box_get(b);
+    return inner.x;
+}
+
+fn unwrap_or_zero[T](h: Hold[T], fallback: T) {
+    match h {
+        Hold::Some(v) => { print(v); }
+        Hold::None => { print(fallback); }
+    }
+}
+
+fn main() {
+    // The struct instance flows through every parameter position bare:
+    // by-value construction, a borrowed read, and a by-value consume.
+    let b = box_new(Point { x: 3, y: 4 });
+    print(box_get(&b).x);
+    print(box_get(&b).y);
+    print(peek_x(&b));
+    let taken = box_take(b);
+    print(taken.x + taken.y);
+
+    // A scalar instance infers the same way.
+    let n = box_new(9);
+    print(box_get(&n) + 1);
+
+    // An enum payload infers from a variant construction and a bare value
+    // argument in the same call.
+    let _a = unwrap_or_zero(Hold[i64]::Some(12), 0);
+    let _b = unwrap_or_zero(Hold[i64]::None, 5);
+    let _c = unwrap_or_zero(Hold[string]::Some("held"), "x");
+}
