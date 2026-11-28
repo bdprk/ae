@@ -234,6 +234,9 @@ def run():
         # ADR-0245 stage 4: an unbound deref chain indexes and measures —
         # the borrow-pointer materialization releases nothing.
         ("tests/run/heap_vec_index.ae", b"11\n33\n3\n0\ndone", True),
+        # ADR-0245 stage 5: a bound map view queries and increments through
+        # the borrow pointer; the owned map drops in place exactly once.
+        ("tests/run/heap_map.ae", b"true\n0\ndone", True),
     ]
     with tempfile.TemporaryDirectory(prefix="ae-c-verify-") as tmp:
         tmp = Path(tmp)
