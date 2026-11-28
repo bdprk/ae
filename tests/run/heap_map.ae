@@ -8,6 +8,14 @@ fn main() {
         let _w = ptr_write(raw, held);
         let view = raw.deref();
         print(map_has(view, "alpha"));
+        // The write path through the borrow: map_inc takes the pointer the
+        // same way, and the next read observes the write.
+        let _b = map_inc(view, "alpha", 3);
+        let got = map_get(view, "alpha");
+        match got {
+            IntResult::Ok(n) => { print(n); }
+            IntResult::Err(reason) => { print("missing " + reason); }
+        }
         let dropped = ptr_drop_in_place(raw);
         print(dropped);
         let _f = ae_std_free(raw as *mut i64);

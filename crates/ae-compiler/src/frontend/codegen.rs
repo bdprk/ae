@@ -1173,7 +1173,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             } else {
                 ("ae_map_inc", "int64_t", Type::Int(IntTy::I64))
             };
-            let inc_recv = if place.by_ref() { format!("&{}", place.text()) } else { place.text() };
+            // The mutating calls take a mutable header; a borrow place is
+            // spelled const (the view's release rules), so the mutability
+            // the language already gates (the `var` binding check) is
+            // restored with an explicit cast.
+            let inc_recv = if place.by_ref() {
+                format!("&{}", place.text())
+            } else if place.f64_value() {
+                format!("(ae_mapf *){}", place.text())
+            } else {
+                format!("(ae_map *){}", place.text())
+            };
             out.push_str(&format!("    {c_ty} t{id} = {inc_fn}({inc_recv}, AE_VIEW({}), {}, {line}, {col});\n", k.text, d.text));
             if d.owned { drop_owned_temp(out, &d, ctx); }
             if k.owned { drop_owned_temp(out, &k, ctx); }
@@ -1183,7 +1193,13 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             let k = emit_expr(key, out, next, false, ctx);
             let id = *next; *next += 1;
             let remove_fn = if place.f64_value() { "ae_mapf_remove" } else { "ae_map_remove" };
-            let remove_recv = if place.by_ref() { format!("&{}", place.text()) } else { place.text() };
+            let remove_recv = if place.by_ref() {
+                format!("&{}", place.text())
+            } else if place.f64_value() {
+                format!("(ae_mapf *){}", place.text())
+            } else {
+                format!("(ae_map *){}", place.text())
+            };
             out.push_str(&format!("    bool t{id} = {remove_fn}({remove_recv}, AE_VIEW({}), {line}, {col});\n", k.text));
             if k.owned { drop_owned_temp(out, &k, ctx); }
             Emitted { text: format!("t{id}"), ty: Type::Bool, owned: false, moves: Vec::new(), materialized: true }
@@ -1941,7 +1957,13 @@ pub(super) fn emit_statements(stmts: &[Statement], out: &mut String, next: &mut 
                 let k = emit_expr(key, out, next, false, ctx);
                 let v = emit_expr(value, out, next, false, ctx);
                 let put_fn = if place.f64_value() { "ae_mapf_put" } else { "ae_map_put" };
-                let put_recv = if place.by_ref() { format!("&{}", place.text()) } else { place.text() };
+                let put_recv = if place.by_ref() {
+                    format!("&{}", place.text())
+                } else if place.f64_value() {
+                    format!("(ae_mapf *){}", place.text())
+                } else {
+                    format!("(ae_map *){}", place.text())
+                };
                 out.push_str(&format!("    {put_fn}({put_recv}, AE_VIEW({}), {}, {line}, {col});\n", k.text, v.text));
                 null_moves(out, &k.moves, ctx);
                 null_moves(out, &v.moves, ctx);
