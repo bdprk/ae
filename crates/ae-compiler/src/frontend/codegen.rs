@@ -1532,6 +1532,7 @@ pub(super) fn release_var(out: &mut String, id: usize, ty: Type, ctx: &CompileCo
         // (ADR-0245 stage 2: a heap view binds like any other view).
         Type::StrView => {}
         Type::VectorRef(_) => {}
+        Type::MapRef(_) => {}
         _ => out.push_str(&format!("    ae_str_release(&v{id});\n")),
     }
 }
@@ -1546,6 +1547,7 @@ pub(super) fn release_member(out: &mut String, member: &str, ty: Type, ctx: &Com
         Type::Enum(_, k) => out.push_str(&format!("    ae_e{k}_release(&{member});\n")),
         // A view member releases nothing (it borrows another owner's bytes).
         Type::StrView => {}
+        Type::VectorRef(_) | Type::MapRef(_) => {}
         _ => out.push_str(&format!("    ae_str_release(&{member});\n")),
     }
 }

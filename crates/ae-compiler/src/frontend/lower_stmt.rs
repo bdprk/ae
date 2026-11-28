@@ -218,18 +218,11 @@ impl<'a> Parser<'a> {
                     self.take(Kind::Semi)?;
                     // A heap view binds like any other view (ADR-0245 stage
                     // 4): the deref of a container pointer reads a view the
-                    // scope's ownership filter records no release for. The
-                    // borrow-place rejections (a `&v` view stored in a
-                    // variable) keep their diagnostic for every other shape.
-                    // A map deref is the exception for now: there is no map
-                    // view type, so the deref types as the owned `MapOf`
-                    // whose binding shallow-copies the slots pointer — the
-                    // double-release the other views solved. Bind a raw slot
-                    // read through `map_get(raw.deref(), k)` instead.
-                    if matches!(ty, Type::MapOf(_)) && matches!(&value, Expr::DerefPtr(..)) {
-                        self.seek_scalar_offset(initializer.range.end);
-                        return Err(self.fail("cannot bind a map read through a raw pointer; pass it directly to the map calls"));
-                    }
+                    // scope's ownership filter records no release for —
+                    // strings as `StrView`, vectors as `VectorRef`, maps as
+                    // `MapRef`. The borrow-place rejections (a `&v` view
+                    // stored in a variable) keep their diagnostic for every
+                    // other shape.
                     if !matches!(&value, Expr::DerefPtr(..)) {
                         self.check_borrowed_binding(ty)?;
                     }
