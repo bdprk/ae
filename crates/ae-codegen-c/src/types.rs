@@ -548,11 +548,18 @@ impl ModuleTypes {
                 },
                 ProjectionElem::Deref => {
                     // A reference deref names the borrowed type; a raw
-                    // pointer's pointee is not carried here yet.
+                    // pointer's pointee reads as the view for owned
+                    // containers (ADR-0245): a string reads a `StrView`, a
+                    // vector a `VectorRef` — the header must never gain a
+                    // second owner through a value copy.
                     cur_ty = match cur_ty {
                         TyKind::StructRef(sid) | TyKind::StructMut(sid) => TyKind::Struct(sid),
                         TyKind::VectorRef(id) => TyKind::Vector(id),
-                        TyKind::Ptr(id) | TyKind::PtrMut(id) => *self.pointees.get(&id)?,
+                        TyKind::Ptr(id) | TyKind::PtrMut(id) => match self.pointees.get(&id)? {
+                            TyKind::String => TyKind::StrView,
+                            TyKind::Vector(id) => TyKind::VectorRef(*id),
+                            other => *other,
+                        },
                         _ => return None,
                     };
                 }

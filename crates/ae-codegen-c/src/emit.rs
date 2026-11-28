@@ -199,7 +199,15 @@ fn emit_statement(
         StatementKind::Assign(place, rvalue) => {
             let rhs_ty = types.infer_rvalue_ty(body, rvalue);
             let lhs_ty = types.infer_place_ty(body, place);
-            let pointee_ty = rhs_ty.or(lhs_ty);
+            let mut pointee_ty = rhs_ty.or(lhs_ty);
+            // A view binding reading through a pointer (ADR-0245): the deref's
+            // expected type is the view — the owned twin would emit a header
+            // copy and give the allocation a second owner.
+            if matches!(lhs_ty, Some(TyKind::VectorRef(_)))
+                && matches!(pointee_ty, Some(TyKind::Vector(_)))
+            {
+                pointee_ty = lhs_ty.clone();
+            }
             let place_expr = emit_place(body, place, types, pointee_ty)?;
             let rhs_expr = emit_rvalue(body, rvalue, lhs_ty, types, def_map, stmt.span.clone())?;
             let _ = writeln!(out, "    {place_expr} = {rhs_expr};");
@@ -2807,6 +2815,17 @@ fn emit_place(
                 }
             },
             ProjectionElem::Deref => {
+                // A view-typed result (ADR-0245): the deref of a pointer to a
+                // container is the slot's own address seen through the borrow
+                // type — the header must not be copied, so no read at all.
+                // This decision precedes the pointee lookup, which would
+                // otherwise hand back the owned twin.
+                let expected = if is_last { deref_pointee_ty } else { None };
+                if let Some(TyKind::VectorRef(_)) = expected {
+                    expr = format!("((ae_vec *)({expr}))");
+                    cur_ty = expected;
+                    continue;
+                }
                 // A reference deref knows its pointee from the type; a raw
                 // pointer uses the type the caller inferred for the place.
                 let reference_pointee = match cur_ty {
@@ -2815,7 +2834,7 @@ fn emit_place(
                     Some(TyKind::Ptr(id) | TyKind::PtrMut(id)) => types.pointees.get(&id).copied(),
                     _ => None,
                 };
-                let target_ty = reference_pointee.or(if is_last { deref_pointee_ty } else { None });
+                let target_ty = reference_pointee.or(expected);
                 let pointee = target_ty.ok_or_else(|| CodegenError::UnsupportedFeature {
                     body_name: body.name.clone(),
                     detail: "cannot dereference pointer without known pointee type".to_owned(),

@@ -216,7 +216,14 @@ impl<'a> Parser<'a> {
                     // needs the release recorder to model heap views
                     // (ADR-0245 stage 3).
                     self.take(Kind::Semi)?;
-                    self.check_borrowed_binding(ty)?;
+                    // A heap view binds like any other view (ADR-0245 stage
+                    // 4): the deref of a container pointer reads a view the
+                    // scope's ownership filter records no release for. The
+                    // borrow-place rejections (a `&v` view stored in a
+                    // variable) keep their diagnostic for every other shape.
+                    if !matches!(&value, Expr::DerefPtr(..)) {
+                        self.check_borrowed_binding(ty)?;
+                    }
                     (Statement::Declare(slot, value), ty)
                 };
                 let ty = match (annotation, annotation_range) {

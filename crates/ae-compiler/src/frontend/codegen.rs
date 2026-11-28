@@ -298,11 +298,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         Expr::DerefPtr(pointer, ..) => {
             let t = emit_expr(pointer, out, next, false, ctx);
             let ty = crate::frontend::mir::expr_type(expr, ctx);
-            // A view-typed deref (ADR-0245 stage 2): the pointee is a string,
-            // so the read must not copy the owning header — the view borrows
-            // the slot's bytes and releases nothing.
+            // A view-typed deref (ADR-0245): the pointee is owned, so the
+            // read must not copy the owning header. A string view copies the
+            // ptr/len pair (AE_VIEW); a vector view is the slot's own
+            // address seen through the borrow type — no read at all.
             if ty == Type::StrView {
                 Emitted::value(format!("AE_VIEW(AE_PTR_READ({}))", t.text), ty)
+            } else if let Type::VectorRef(elem_id) = ty {
+                Emitted::value(
+                    format!("((const {} *)({}))", c_output::vector_family(ctx, elem_id), t.text),
+                    ty,
+                )
             } else {
                 Emitted::value(format!("AE_PTR_READ({})", t.text), ty)
             }
@@ -1503,6 +1509,7 @@ pub(super) fn release_var(out: &mut String, id: usize, ty: Type, ctx: &CompileCo
         // A view borrows another owner's bytes and releases nothing
         // (ADR-0245 stage 2: a heap view binds like any other view).
         Type::StrView => {}
+        Type::VectorRef(_) => {}
         _ => out.push_str(&format!("    ae_str_release(&v{id});\n")),
     }
 }
