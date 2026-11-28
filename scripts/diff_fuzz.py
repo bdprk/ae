@@ -164,7 +164,7 @@ class Gen:
         """
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
-        kind = self.rnd() % 32
+        kind = self.rnd() % 33
         if self.pure_subset:
             # Every kind the generator draws from. The pure subset used to be a
             # narrowed list; the backend now covers the whole surface (owned
@@ -274,6 +274,36 @@ class Gen:
                 f"    let {dropped} = ptr_drop_in_place({raw});",
                 f"    print({dropped});",
                 f"    let {block} = ae_std_free({raw} as *mut i64);",
+                "}",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 32:
+            # ADR-0245 stage 5: the bound map view. The bridge allocates a
+            # 40-byte slot, ptr_write moves a populated map in, the deref
+            # binds a view, and map_has/map_get/map_inc read and write
+            # through the borrow pointer. ptr_drop_in_place releases the
+            # map, the block frees — every step observable.
+            raw = self.fresh("raw")
+            held = self.fresh("held")
+            view = self.fresh("mv")
+            key = '"m' + str(self.rnd() % 1000) + '"'
+            return [
+                "unsafe {",
+                f"    let {raw} = ae_std_alloc(c_size_of[map[string, i64]](), 1, 1) as *mut map[string, i64];",
+                f"    var {held} = map_new();",
+                f"    let _i = map_inc({held}, {key}, 7);",
+                f"    let _w = ptr_write({raw}, {held});",
+                f"    let {view} = {raw}.deref();",
+                f"    print(map_has({view}, {key}));",
+                f"    let _b = map_inc({view}, {key}, 3);",
+                f"    let got = map_get({view}, {key});",
+                "    match got {",
+                '        IntResult::Ok(n) => { print(n); }',
+                '        IntResult::Err(reason) => { print("missing " + reason); }',
+                "    }",
+                f"    let dropped = ptr_drop_in_place({raw});",
+                f"    print(dropped);",
+                f"    let _f = ae_std_free({raw} as *mut i64);",
                 "}",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
@@ -937,7 +967,7 @@ def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: in
         # frame-slot model never builds a heap slot), so the interp leg would
         # report a fake divergence for a shape whose compiled outputs must
         # still agree byte for byte.
-        if "c_size_of[string]()" not in source:
+        if not ("c_size_of[string]()" in source or "c_size_of[map[" in source):
             interp_run = subprocess.run(
                 [str(EXE), "run", str(seed_dir / "prog_d.ae"), "--interp"],
                 capture_output=True,
