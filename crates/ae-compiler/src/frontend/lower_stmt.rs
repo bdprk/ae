@@ -221,6 +221,15 @@ impl<'a> Parser<'a> {
                     // scope's ownership filter records no release for. The
                     // borrow-place rejections (a `&v` view stored in a
                     // variable) keep their diagnostic for every other shape.
+                    // A map deref is the exception for now: there is no map
+                    // view type, so the deref types as the owned `MapOf`
+                    // whose binding shallow-copies the slots pointer — the
+                    // double-release the other views solved. Bind a raw slot
+                    // read through `map_get(raw.deref(), k)` instead.
+                    if matches!(ty, Type::MapOf(_)) && matches!(&value, Expr::DerefPtr(..)) {
+                        self.seek_scalar_offset(initializer.range.end);
+                        return Err(self.fail("cannot bind a map read through a raw pointer; pass it directly to the map calls"));
+                    }
                     if !matches!(&value, Expr::DerefPtr(..)) {
                         self.check_borrowed_binding(ty)?;
                     }

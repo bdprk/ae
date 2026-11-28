@@ -134,14 +134,23 @@ impl<'a> Parser<'a> {
                     // spec/unsafe.md 2.4 on the author of the unsafe block.
                     .or_else(|| (name == "string").then_some(Type::String))
                     // The container families too: a heap slot may hold a
-                    // vector. The pointee interning needs the element type —
-                    // scalar and string spellings (named elements are future
-                    // work).
+                    // vector or a map. The pointee interning needs the
+                    // element/key-value types — scalar and string spellings
+                    // (named elements are future work); the map families
+                    // carry string keys with i64/f64 values.
                     .or_else(|| {
                         let inner = name.strip_prefix("vec[")?.strip_suffix(']')?.trim();
                         let elem = super::types::scalar_type(inner)
                             .or_else(|| (inner == "string").then_some(Type::String))?;
                         Some(Type::Vector(self.ctx.intern_vector_elem(elem)))
+                    })
+                    .or_else(|| {
+                        let inner = name.strip_prefix("map[")?.strip_suffix(']')?.trim();
+                        let (key_s, value_s) = inner.split_once(',')?;
+                        let key = super::types::scalar_type(key_s.trim())
+                            .or_else(|| (key_s.trim() == "string").then_some(Type::String))?;
+                        let value = super::types::scalar_type(value_s.trim())?;
+                        Some(Type::MapOf(self.ctx.intern_map_types(key, value)))
                     })
                     // spec/unsafe.md 2.1 promises a retag to any T with a
                     // known layout: a `#[repr(C)]` struct qualifies (its

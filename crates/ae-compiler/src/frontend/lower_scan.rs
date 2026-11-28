@@ -98,7 +98,8 @@ impl<'a> Parser<'a> {
                                 // passes it to a borrowing parameter.
                                 if matches!(pointee.as_ref(),
                                     ae_resolve::TypeSpelling::Primitive("i64" | "f64" | "bool" | "string")
-                                    | ae_resolve::TypeSpelling::Composite { family: "vec", .. }))
+                                    | ae_resolve::TypeSpelling::Composite { family: "vec", .. }
+                                    | ae_resolve::TypeSpelling::Composite { family: "map", .. }))
                         {
                             expressions.scalar_pointer_receivers.insert(occurrence.range.start);
                             expressions.scalar_reads.insert(occurrence.range.start, definition.id);

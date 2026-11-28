@@ -68,10 +68,12 @@ impl Parser<'_> {
         let owned_layout = match self.subst.get(&type_name) {
             Some(Type::String) | Some(Type::StrView) => Some((24, 8)),
             Some(Type::Vector(_)) | Some(Type::VectorRef(_)) => Some((40, 8)),
+            Some(Type::MapOf(_)) => Some((40, 8)),
             Some(_) => None,
             None => match type_name.as_str() {
                 "string" => Some((24, 8)),
                 s if s.starts_with("vec[") => Some((40, 8)),
+                s if s.starts_with("map[") => Some((40, 8)),
                 _ => None,
             },
         };
