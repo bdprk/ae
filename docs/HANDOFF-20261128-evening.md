@@ -107,3 +107,23 @@ c_type_name（`ae_map *`）、c_output c_type_field（`const ae_map *`）/c_type
   MapRef 裸指针）；mir.rs:523 map_place_operand 同步
 - **rung 5**：interp 帧槽模型命名 trap；heap_map.ae 三路夹具化；
   corpus floor 189；门禁全家
+
+## 8. 追加：rung 1-3 已落地，rung 4 的设计深度
+
+rung 2（四处 deref 类型臂 MapOf→MapRef：lower_expr 两站点 + mir expr_type +
+pure infer_place_ty）与 rung 3（release no-ops + 绑定守卫退役）已提交。探针
+推进到读者臂诊断——按计划。
+
+rung 4 开工发现：`MapPlace` 是语义位（slot id），text() 从 id 派生；Pointer
+的语义内容是**表达式**（deref 的 C 文本只在发射期存在）。两难：
+- 携带 `Box<Expr>`：text() 无法工作（需发射器），map 调用五处的
+  `&place.text()` 需重排为 `emit_expr` 分支（值位取 `&`、指位裸）
+- 携带 C 文本：MIR 降级期（mir.rs:523）文本不存在
+
+**推荐路径**：MapPlace::Pointer(Box<Expr>, MapKind) + 五处调用点改
+`emit_expr` 分支（tree 发射器内 map_get/has/inc/remove/keys 各一处，
+`&` 按表达式类型分支：MapOf→`&`、MapRef→裸）+ moved 检查对 Pointer 跳过。
+MIR 路由：mir.rs:523 的 map_place_operand 对 Pointer 走
+lower_operand(expr)（临时绑定，deref_ptr 内建渲染已存在）。interp 三臂命名
+trap（extern 堆块不可解）。工作量 ≈ stage-4 向量切片；先例 heap_vec_index
+（未绑定链的物化临时 + 消费分支）完全同构。
