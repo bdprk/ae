@@ -30,7 +30,7 @@ pub(super) const RESOLVED_BUILTINS: &[&str] = &[
     "json_get", "json_int", "json_bool", "json_len", "json_has",
     // Effectful value builtins: each reads its arguments and returns a value
     // (plain, or a prelude result enum the caller must handle).
-    "read_file", "write_file", "now_ms", "now_s", "args", "read_stdin", "cwd", "env",
+    "read_file", "read_file_bytes", "try_read_file_bytes", "write_file", "now_ms", "now_s", "args", "read_stdin", "cwd", "env",
     "try_read_file", "try_write_file", "try_append_file", "try_list_dir", "try_file_info",
     "try_copy_file", "try_rename_path", "try_remove_file", "try_remove_dir", "try_create_dir",
     "set_cwd", "path_join", "path_name", "path_parent", "path_exists", "path_is_dir",
@@ -51,6 +51,7 @@ pub(super) const ENUM_RESULT_BUILTINS: &[(&str, &str)] = &[
     ("json_get", "ReadResult"), ("json_int", "IntResult"), ("map_get", "IntResult"),
     ("json_bool", "BoolResult"), ("json_len", "IntResult"),
     ("try_read_file", "ReadResult"), ("try_list_dir", "DirResult"),
+    ("try_read_file_bytes", "BytesResult"),
     ("try_file_info", "FileResult"), ("env", "ReadResult"),
     ("cwd", "ReadResult"), ("read_stdin", "ReadResult"),
     ("try_write_file", "WriteResult"), ("try_append_file", "WriteResult"),

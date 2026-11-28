@@ -1953,6 +1953,12 @@ impl<'a> PureMirBuilder<'a> {
             }
             Expr::Args(..) => ("args", Vec::new()),
             Expr::ReadFile(p, ..) | Expr::TryReadFile(p, ..) => ("read_file", vec![self.lower_operand(p)]),
+            Expr::ReadFileBytes(p, o, l, ..) => {
+                let p_op = self.lower_operand(p);
+                let o_op = self.lower_operand(o);
+                let l_op = self.lower_operand(l);
+                ("read_file_bytes", vec![p_op, o_op, l_op])
+            }
             Expr::WriteFile(p, t, ..) | Expr::TryWriteFile(p, t, ..) => {
                 let p_op = self.lower_operand(p);
                 let t_op = self.lower_operand(t);

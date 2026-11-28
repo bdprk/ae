@@ -876,6 +876,37 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             if p.owned { drop_owned_temp(out, &p, ctx); }
             Emitted { text: format!("t{id}"), ty: *ty, owned: true, moves: Vec::new(), materialized: true }
         }
+        Expr::ReadFileBytes(path, offset, limit, ty, line, col) => {
+            let p = emit_expr(path, out, next, false, ctx);
+            let o = emit_expr(offset, out, next, false, ctx);
+            let l = emit_expr(limit, out, next, false, ctx);
+            let id = *next; *next += 1;
+            let emitted = match ty {
+                Type::Enum(_, eid) => {
+                    // The try form builds the enum in place: the error string
+                    // is a static message from the runtime (never released),
+                    // and the byte vector moves into the Ok variant (on the
+                    // Err path it is the empty vector the runtime produced).
+                    let chunk = id;
+                    let err = id + 1;
+                    let _ = next; *next += 2;
+                    out.push_str(&format!(
+                        "    ae_gvec t{chunk};\n    const char *t{err} = ae_read_file_bytes_into({p}.ptr, {o}, {l}, &t{chunk});\n",
+                        chunk = chunk, err = err, p = p.text, o = o.text, l = l.text));
+                    let result_id = *next; *next += 1;
+                    out.push_str(&format!(
+                        "    {}t{result_id} = t{err} ? (ae_e{eid}) {{ AE_BYTES_ERR, {{ .v1 = {{ ae_str_from(t{err}, {line}, {col}) }} }} }} : (ae_e{eid}) {{ AE_BYTES_OK, {{ .v0 = {{ t{chunk} }} }} }};\n",
+                        ty.c_temp(ctx), eid = eid, err = err, chunk = chunk, line = line, col = col));
+                    Emitted { text: format!("t{result_id}"), ty: *ty, owned: true, moves: Vec::new(), materialized: true }
+                }
+                _ => {
+                    out.push_str(&format!("    ae_gvec t{id} = ae_read_file_bytes({p}.ptr, {o}, {l}, {line}, {col});\n", id = id, p = p.text, o = o.text, l = l.text, line = line, col = col));
+                    Emitted { text: format!("t{id}"), ty: *ty, owned: true, moves: Vec::new(), materialized: true }
+                }
+            };
+            if p.owned { drop_owned_temp(out, &p, ctx); }
+            emitted
+        }
         Expr::TryWriteFile(path, content, ty, line, col) => {
             let p = emit_expr(path, out, next, false, ctx);
             let c = emit_expr(content, out, next, false, ctx);

@@ -977,6 +977,52 @@ static inline ae_read_result ae_try_read_file_value(ae_str path) {
     out.text = ae_str_from_parts(buffer, (int64_t)size, true);
     return out;
 }
+// Bounded binary reads: seek to `offset`, read up to `limit` i64 bytes. The
+// `_into` form reports failures through its return value (NULL on success) so
+// the try-form builds an Ok/Err enum instead of terminating; the caller
+// releases the partially-read vector when the return is not NULL.
+static inline const char *ae_read_file_bytes_into(ae_str path, int64_t offset, int64_t limit, ae_vec *result) {
+    *result = ae_vec_new(sizeof(int64_t), NULL);
+    if (offset < 0) return "negative file read offset";
+    if (limit < 0) return "negative file read limit";
+    FILE *file = ae_path_fopen(path, L"rb");
+    if (!file) return "cannot open file";
+#ifdef _WIN32
+    const bool seek_failed = _fseeki64(file, offset, SEEK_SET) != 0;
+#else
+    const bool seek_failed = offset > LONG_MAX || fseek(file, (long)offset, SEEK_SET) != 0;
+#endif
+    if (seek_failed) {
+        fclose(file);
+        return "cannot seek file";
+    }
+    ae_vec out = ae_vec_new(sizeof(int64_t), NULL);
+    const char *failure = NULL;
+    int64_t remaining = limit;
+    unsigned char buffer[4096];
+    while (remaining > 0) {
+        size_t want = sizeof(buffer);
+        if ((int64_t)want > remaining) want = (size_t)remaining;
+        size_t read = fread(buffer, 1, want, file);
+        for (size_t i = 0; i < read; i++) {
+            int64_t byte = buffer[i];
+            ae_vec_push(&out, &byte);
+        }
+        remaining -= (int64_t)read;
+        if (read < want) { break; }
+    }
+    if (ferror(file)) failure = "cannot read file";
+    fclose(file);
+    if (failure) { ae_vec_release(&out); return failure; }
+    *result = out;
+    return NULL;
+}
+static inline ae_vec ae_read_file_bytes_value(ae_str path, int64_t offset, int64_t limit, size_t line, size_t column) {
+    ae_vec out;
+    const char *failure = ae_read_file_bytes_into(path, offset, limit, &out);
+    if (failure) ae_fail_at(failure, line, column);
+    return out;
+}
 static inline ae_read_result ae_try_read_stdin_value(void) {
     ae_read_result out;
     out.status = 0;

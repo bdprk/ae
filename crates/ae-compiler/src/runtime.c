@@ -1524,8 +1524,59 @@ static ae_string ae_read_file(const char *path, size_t line, size_t column) {
     size_t read = fread(buffer, 1, (size_t)size, f);
     fclose(f);
     if (read != (size_t)size) { ae_free(buffer); ae_fail("cannot read file", line, column); }
-    buffer[size] = 0;
-    ae_string out = { buffer, (int64_t)size };
+    buffer[size] = 0;    ae_string out = { buffer, (int64_t)size };
+    return out;
+}
+// Bounded binary reads: seek to `offset`, read up to `limit` bytes. The
+// `_into` form reports failures through its return value (NULL on success)
+// so the try-form can build an Ok/Err enum instead of terminating; the
+// caller releases a partially-read vector when the return is not NULL.
+static const char *ae_read_file_bytes_into(const char *path, int64_t offset, int64_t limit, ae_gvec *result) {
+    *result = (ae_gvec){ NULL, 0, 0, 0, NULL };
+    if (offset < 0) return "negative file read offset";
+    if (limit < 0) return "negative file read limit";
+    FILE *f = ae_fopen(path, "rb");
+    if (!f) return "cannot open file";
+#ifdef _WIN32
+    const bool seek_failed = _fseeki64(f, offset, SEEK_SET) != 0;
+#else
+    const bool seek_failed = offset > LONG_MAX || fseek(f, (long)offset, SEEK_SET) != 0;
+#endif
+    if (seek_failed) {
+        fclose(f);
+        return "cannot seek file";
+    }
+    ae_gvec out = { NULL, 0, 0, sizeof(int64_t), NULL };
+    const char *failure = NULL;
+    int64_t remaining = limit;
+    unsigned char buffer[4096];
+    while (remaining > 0) {
+        size_t want = sizeof(buffer);
+        if ((int64_t)want > remaining) want = (size_t)remaining;
+        size_t read = fread(buffer, 1, want, f);
+        for (size_t i = 0; i < read; i++) {
+            int64_t byte = buffer[i];
+            ae_gvec_push(&out, &byte, 0, 0);
+        }
+        remaining -= (int64_t)read;
+        if (read < want) { break; }
+    }
+    if (ferror(f)) failure = "cannot read file";
+    fclose(f);
+    if (failure) { ae_gvec_release(&out); return failure; }
+    if (!out.data) {
+        // Match the capacity of an ordinary empty vector so it stays pushable.
+        out.cap = 4;
+        out.data = ae_alloc_try((size_t)out.cap * sizeof(*out.data));
+        if (!out.data) return "out of memory";
+    }
+    *result = out;
+    return NULL;
+}
+static ae_gvec ae_read_file_bytes(const char *path, int64_t offset, int64_t limit, size_t line, size_t column) {
+    ae_gvec out;
+    const char *failure = ae_read_file_bytes_into(path, offset, limit, &out);
+    if (failure) ae_fail(failure, line, column);
     return out;
 }
 static int64_t ae_write_file(ae_string path, ae_strview content, size_t line, size_t column) {

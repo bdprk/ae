@@ -1751,6 +1751,50 @@ fn eval_expr(
                 Err(error) => result_value(env, ty, false, vec![Val::Str(format!("cannot read file: {error}"))]),
             }
         }
+        Expr::ReadFileBytes(path, offset, limit, ty, ..) => {
+            // The C runtime's contract: a negative bound is a reported
+            // failure; a huge limit yields "vector too large" instead of a
+            // panic; a short read at EOF is a success. The try form reports
+            // through the enum, the plain form traps.
+            let p = path_operand(eval_expr(env, path, locals, caller_locals, false))?;
+            let off = match eval_expr(env, offset, locals, caller_locals, false)? { Val::Int(v) => v, _ => return Err(Flow::Trap("internal: read offset".to_owned())) };
+            let lim = match eval_expr(env, limit, locals, caller_locals, false)? { Val::Int(v) => v, _ => return Err(Flow::Trap("internal: read limit".to_owned())) };
+            let fail_with = |ty: &Type, message: &'static str| -> Result<Val, Flow> {
+                match ty {
+                    Type::Enum(..) => result_value(env, ty, false, vec![Val::Str(message.to_owned())]),
+                    _ => Err(trap(message, 0, 0)),
+                }
+            };
+            if off < 0 { return fail_with(ty, "negative file read offset"); }
+            if lim < 0 { return fail_with(ty, "negative file read limit"); }
+            let mut file = match std::fs::File::open(&p) {
+                Ok(file) => file,
+                Err(_) => return fail_with(ty, "cannot open file"),
+            };
+            use std::io::{Read as _, Seek as _};
+            if file.seek(std::io::SeekFrom::Start(off as u64)).is_err() {
+                return fail_with(ty, "cannot seek file");
+            }
+            let mut bytes: Vec<i64> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut remaining = lim.max(0) as u64;
+            loop {
+                if remaining == 0 { break; }
+                let want = chunk.len().min(remaining as usize);
+                let read = match file.read(&mut chunk[..want]) {
+                    Ok(read) => read,
+                    Err(_) => return fail_with(ty, "cannot read file"),
+                };
+                if read == 0 { break; }
+                bytes.extend(chunk[..read].iter().map(|byte| *byte as i64));
+                remaining -= read as u64;
+                if read < want { break; }
+            }
+            match ty {
+                Type::Enum(..) => result_value(env, ty, true, vec![Val::VecI(bytes)]),
+                _ => Ok(Val::VecI(bytes)),
+            }
+        }
         Expr::WriteFile(path, text, line, col) => {
             let p = path_operand(eval_expr(env, path, locals, caller_locals, false))?;
             let t = path_operand(eval_expr(env, text, locals, caller_locals, false))?;

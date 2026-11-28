@@ -405,6 +405,7 @@ pub(super) const RESULT_FAMILY_PREFIXES: &[(&str, &str)] = &[
     ("ReadResult", "AE_READ_"), ("IntResult", "AE_INT_"), ("IntResult", "AE_WRITE_"),
     ("DirResult", "AE_DIR_"), ("FileResult", "AE_FILE_"), ("StatusResult", "AE_STATUS_"),
     ("BoolResult", "AE_BOOL_"), ("CommandResult", "AE_COMMAND_"), ("FloatResult", "AE_FLOAT_"),
+    ("BytesResult", "AE_BYTES_"),
 ];
 
 /// The generated `AE_<FAMILY>_RESULT`/`_OK`/`_ERR` defines the runtime source
@@ -528,12 +529,11 @@ pub(super) fn prune_runtime(core: &str, ex: &str, prelude: &[(String, String, St
     // The generated result-family defines must precede the runtime extension
     // functions that name them. A program whose extension units were all
     // pruned carries none of the block (the runtime's fixed text never
-    // references the macros once the static block moved here).
-    let ex_kept = ex_units.iter().any(|(name, body)| match name {
-        Some(n) => keep.contains(n),
-        None => strip_define_lines(body).contains("AE_"),
-    });
-    if ex_kept { out.push_str(aliases); }
+    // references the macros once the static block moved here). The user
+    // section may also name a family's tags directly (the binary reader's
+    // try-form builds the enum in place), so the defines are unconditional:
+    // a family the program never touches costs a handful of lines.
+    out.push_str(aliases);
     for (name, body) in &ex_units {
         if name.is_none() || name.as_ref().is_some_and(|n| keep.contains(n)) { out.push_str(body); }
     }

@@ -1,0 +1,33 @@
+// P4 reader slice: bounded binary reads with a seek offset, surfaced both as
+// a trapping form and a try form. Both backends and the interpreter agree.
+fn main() {
+    let here = "ae_reader_exact_test.bin";
+    print(write_file(here, "abcdefgh"));
+    let chunk = read_file_bytes(here, 2, 3);
+    print(len(chunk));
+    print(chunk[0]);
+    let tried = try_read_file_bytes(here, 0, 2);
+    match tried {
+        BytesResult::Ok(data) => { print(len(data)); print(data[0]); }
+        BytesResult::Err(reason) => { print("err: " + reason); }
+    }
+    let missing = try_read_file_bytes("no-such-file.bin", 0, 4);
+    match missing {
+        BytesResult::Ok(_) => { print("unexpected"); }
+        BytesResult::Err(reason) => { print(reason); }
+    }
+    let neg = try_read_file_bytes(here, -1, 4);
+    match neg {
+        BytesResult::Ok(_) => { print("unexpected"); }
+        BytesResult::Err(reason) => { print(reason); }
+    }
+    let zero = read_file_bytes(here, 0, 0);
+    print(len(zero));
+    let eof = read_file_bytes(here, 8, 4);
+    print(len(eof));
+    let removed = try_remove_file(here);
+    match removed {
+        StatusResult::Ok => { print("cleaned"); }
+        StatusResult::Err(reason) => { print("cleanup: " + reason); }
+    }
+}

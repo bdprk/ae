@@ -485,6 +485,7 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
         Expr::Split(base, sep, ..) => ("split", vec![lower_operand(base, bindings, lowering), lower_operand(sep, bindings, lowering)]),
         Expr::Args(..) => ("args", vec![]),
         Expr::ReadFile(path, ..) => ("read_file", vec![lower_operand(path, bindings, lowering)]),
+        Expr::ReadFileBytes(path, offset, limit, ..) => ("read_file_bytes", vec![lower_operand(path, bindings, lowering), lower_operand(offset, bindings, lowering), lower_operand(limit, bindings, lowering)]),
         Expr::WriteFile(path, text, ..) => ("write_file", vec![lower_operand(path, bindings, lowering), lower_operand(text, bindings, lowering)]),
         Expr::Bytes(e, ..) => ("bytes", vec![lower_operand(e, bindings, lowering)]),
         Expr::Contains(haystack, needle, ..) => ("contains", vec![lower_operand(haystack, bindings, lowering), lower_operand(needle, bindings, lowering)]),
@@ -657,7 +658,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         }
         // Result-returning built-ins carry their result type; the printed
         // temp names the enum the program must match on.
-        Expr::TryReadFile(_, ty, ..) | Expr::TryListDir(_, ty, ..) | Expr::ParseInt(_, ty, ..)
+        Expr::ReadFileBytes(_, _, _, ty, ..) | Expr::TryReadFile(_, ty, ..) | Expr::TryListDir(_, ty, ..) | Expr::ParseInt(_, ty, ..)
         | Expr::TryFileInfo(_, ty, ..) | Expr::TryRemoveFile(_, ty, ..) | Expr::TryRemoveDir(_, ty, ..)
         | Expr::TryCreateDir(_, ty, ..) | Expr::SetCwd(_, ty, ..) | Expr::Env(_, ty, ..)
         | Expr::RunCommand(_, _, ty, ..) | Expr::MapGet(_, _, ty, ..)

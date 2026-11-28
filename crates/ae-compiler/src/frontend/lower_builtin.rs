@@ -556,6 +556,31 @@ impl<'a> Parser<'a> {
                     self.seek_scalar_offset(expression.range.end);
                     Ok((Expr::ReadFile(Box::new(path), line, column), Type::String))
                 }
+                "read_file_bytes" | "try_read_file_bytes" => {
+                    self.expect_resolved_builtin_arity(expression, arguments, 3)?;
+                    let ty = if name == "try_read_file_bytes" {
+                        self.prelude_type("BytesResult")
+                    } else {
+                        Type::Vector(self.ctx.intern_vector_elem(Type::Int(IntTy::I64)))
+                    };
+                    let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;
+                    if !matches!(path_ty, Type::String | Type::StrView) {
+                        self.seek_scalar_offset(arguments[0].range.end);
+                        return Err(self.fail(&format!("{name} expects a string path")));
+                    }
+                    let (offset, offset_ty) = self.lower_scalar_body_expression(&arguments[1], slots)?;
+                    if offset_ty != Type::Int(IntTy::I64) {
+                        self.seek_scalar_offset(arguments[1].range.end);
+                        return Err(self.fail(&format!("{name} expects an i64 offset")));
+                    }
+                    let (limit, limit_ty) = self.lower_scalar_body_expression(&arguments[2], slots)?;
+                    if limit_ty != Type::Int(IntTy::I64) {
+                        self.seek_scalar_offset(arguments[2].range.end);
+                        return Err(self.fail(&format!("{name} expects an i64 limit")));
+                    }
+                    self.seek_scalar_offset(expression.range.end);
+                    Ok((Expr::ReadFileBytes(Box::new(path), Box::new(offset), Box::new(limit), ty, line, column), ty))
+                }
                 "write_file" => {
                     self.expect_resolved_builtin_arity(expression, arguments, 2)?;
                     let (path, path_ty) = self.lower_scalar_body_expression(&arguments[0], slots)?;

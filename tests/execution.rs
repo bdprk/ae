@@ -4054,6 +4054,58 @@ fn execute_with_stdin(source: &str, input: &[u8]) -> std::process::Output {
     output
 }
 #[test]
+fn bounded_binary_reads_report_and_seek_correctly() {
+    // P4 reader slice: read_file_bytes traps, try_read_file_bytes reports
+    // through the enum; both seek to the offset and respect the limit, and
+    // a short read at EOF is a success. All three routes agree.
+    let source = r#"fn main() {
+    let here = "ae_bbr_test.bin";
+    print(write_file(here, "abcdefgh"));
+    let chunk = read_file_bytes(here, 2, 3);
+    print(len(chunk));
+    print(chunk[0]);
+    let tried = try_read_file_bytes(here, 0, 2);
+    match tried {
+        BytesResult::Ok(data) => { print(len(data)); print(data[0]); }
+        BytesResult::Err(reason) => { print("err: " + reason); }
+    }
+    let missing = try_read_file_bytes("no-such-file.bin", 0, 4);
+    match missing {
+        BytesResult::Ok(_) => { print("unexpected"); }
+        BytesResult::Err(reason) => { print(reason); }
+    }
+    let neg = try_read_file_bytes(here, -1, 4);
+    match neg {
+        BytesResult::Ok(_) => { print("unexpected"); }
+        BytesResult::Err(reason) => { print(reason); }
+    }
+    let zero = read_file_bytes(here, 0, 0);
+    print(len(zero));
+    let eof = read_file_bytes(here, 8, 4);
+    print(len(eof));
+    let removed = try_remove_file(here);
+    match removed {
+        StatusResult::Ok => { print("cleaned"); }
+        StatusResult::Err(reason) => { print("cleanup: " + reason); }
+    }
+}"#;
+    let expected = "8\n3\n99\n2\n97\ncannot open file\nnegative file read offset\n0\n0\ncleaned\n";
+    let normalize = |bytes: &[u8]| String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    for arguments in [vec![], vec!["--interp"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run");
+        let path = std::env::temp_dir().join(format!("ae-bbr-{}-{}.ae", std::process::id(), arguments.len()));
+        fs::write(&path, source).unwrap();
+        command.arg(&path);
+        for argument in &arguments { command.arg(argument); }
+        let output = command.output().unwrap();
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(std::env::current_dir().unwrap().join("ae_bbr_test.bin"));
+        assert!(output.status.success(), "{} failed: {}", arguments.len(), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(normalize(&output.stdout), expected, "{} route differs", arguments.len());
+    }
+}
+#[test]
 fn standard_input_arrives_as_bytes_without_newline_translation() {
     let source = r#"fn main() {
     let input = read_stdin();

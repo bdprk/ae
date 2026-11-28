@@ -1393,6 +1393,55 @@ fn emit_intrinsic(
                 }),
             }
         }
+        "read_file_bytes" => {
+            if args.len() != 3 {
+            return Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: "read_file_bytes needs a path, an offset and a limit".to_owned(),
+                });
+            }
+            let path = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            let offset = arg_exprs.get(1).map(String::as_str).unwrap_or("0");
+            let limit = arg_exprs.get(2).map(String::as_str).unwrap_or("0");
+            let dest_ty = types.infer_place_ty(body, destination);
+            match dest_ty {
+                // The Ok payload is a byte vector (an i64 `vec`); tag 0 is
+                // Ok and tag 1 is Err, matching every preset family.
+                Some(TyKind::Enum(_, eid)) => {
+                    let dest_expr = emit_place(body, destination, types, dest_ty)?;
+                    let ok = format!("((ae_enum_{eid}){{ .tag = 0, .u = {{ .v0 = {{ .f0 = _chunk }} }} }})");
+                    let err = format!("((ae_enum_{eid}){{ .tag = 1, .u = {{ .v1 = {{ .f0 = ae_str_from_parts(_failure, (int64_t)strlen(_failure), false) }} }} }})");
+                    let _ = writeln!(
+                        out,
+                         "    {{ ae_vec _chunk; const char *_failure = ae_read_file_bytes_into({path}, (int64_t)({offset}), (int64_t)({limit}), &_chunk);\n      if (_failure == NULL) {{ {dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+                    );
+                    for release in string_temp_releases(body, args) {
+                        let _ = writeln!(out, "{release};");
+                    }
+                    if let Some(next_bb) = target {
+                        let _ = writeln!(out, "    goto bb{};", next_bb.0);
+                    } else {
+                        out.push_str("    ae_trap(\"diverging call returned\");\n");
+                    }
+                    Ok(())
+                }
+                Some(TyKind::Vector(elem_id)) if matches!(types.vector_elem(elem_id), Some(TyKind::Int(IntTy::I64))) => {
+                    finish_value_releasing(
+                        out,
+                        body,
+                        types,
+                        destination,
+                        target,
+                        &format!("ae_read_file_bytes_value({path}, (int64_t)({offset}), (int64_t)({limit}), (size_t){line}, (size_t){column})"),
+                        &string_temp_releases(body, args),
+                    )
+                }
+                other => Err(CodegenError::UnsupportedFeature {
+                    body_name: body.name.clone(),
+                    detail: format!("read_file_bytes into {other:?} is not supported yet"),
+                }),
+            }
+        }
         "read_stdin" => {
             let dest_ty = types.infer_place_ty(body, destination);
             match dest_ty {
