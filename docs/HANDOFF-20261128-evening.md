@@ -197,3 +197,15 @@ ADR-0242 证据账：本地 1800 冒烟 + 服务器 ok 行累计 + 双主机套�
 4. 调用点借用实参准入（`total(&counts)` 的 Argument 形态——vec 先例 View）
 5. MIR/pure/interp 的 MapRef 参数渲染（指针形态）
 探针：work/repro/map_sig.ae。工作量 ≈ stage-4 向量切片。
+
+## 16. P3.4 地基已落：&map[K, V] 参数拼写
+
+文法 borrow 白名单加 `&map[K, V]`（types.rs，键值经 named_type 解析、
+intern_map_types intern）+ lower_body 参数白名单认 MapRef（槽位守卫
+rung 3 已认）。探针 work/repro/map_sig.ae 推进至调用实参门：
+"argument 1 to 'total' must be &map[string, i64]"——调用方写
+`total(&counts)` 后撞借用实参分类器（&map 形态未进 parse_borrow_argument
+/Argument 分类——值参数 `total(counts)` 也被拒因参数是借位）。剩余两门：
+借用实参分类（Argument::View 的 map 形态，&vec 先例）+ 被调端 place
+（MapPlace::VarBorrow 已在，参数绑定成 MapRef 局部即落）。工作量小，
+下窗可完。纯增量地基已提交（零行为变化，门禁全绿）。
