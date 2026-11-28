@@ -1,0 +1,6 @@
+fn main() {
+    let words = vec["alpha", "beta"];
+    let first = words[0];
+    let pick = || -> string { return first; };
+    print(pick());
+}

@@ -1,0 +1,32 @@
+// spec/closures.md 3: a closure body may read a captured string vector's
+// elements (print, local view binding) and may return owned strings it
+// captures, calls for, concatenates, or builds locally. A string-vector
+// element is a borrow, so returning it as an owned `string` is rejected
+// (tests/ui/closure_strvec_return_rejected.ae); every owned return here
+// hands the caller a fresh allocation.
+fn greet() -> string {
+    return "yo";
+}
+
+fn main() {
+    let words = vec["alpha", "beta"];
+    // Borrow probe: reading elements keeps the capture by reference, so the
+    // closure stays callable and the vector is untouched.
+    let show = || -> () { print(words[1]); return; };
+    show();
+    show();
+    let pick = || -> () { let v = words[0]; print(v); return; };
+    pick();
+    // Owned probe: returning a captured string moves it into the call.
+    let note = "hi";
+    let echoed = || -> string { return note; };
+    print(echoed());
+    // A call result, a concatenation and a local literal all return owned.
+    let from_call = || -> string { return greet(); };
+    print(from_call());
+    let base = "hey";
+    let loud = || -> string { return base + "!"; };
+    print(loud());
+    let local = || -> string { let s = "abc"; return s; };
+    print(local());
+}

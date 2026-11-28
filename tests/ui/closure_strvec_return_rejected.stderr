@@ -1,0 +1,1 @@
+ae: $DIR/closure_strvec_return_rejected.ae:4:45: return type must be string
