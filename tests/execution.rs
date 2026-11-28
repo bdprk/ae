@@ -5354,10 +5354,10 @@ fn repr_c_nested_layout_matches_the_native_c_compiler() {
 fn c_alignment_matches_the_native_c_compiler() {
     let dir = unique_temp_dir("scalar_alignment");
     let source = dir.join("layout.ae");
-    fs::write(&source, "#[repr(C)] struct Mixed { a: bool, b: i64 }\nfn alignment[T](v: T) -> i64 { return c_align_of[T](); }\nfn main() { print(c_size_of[i64]()); print(c_align_of[i64]()); print(c_size_of[f64]()); print(c_align_of[f64]()); print(c_size_of[bool]()); print(c_align_of[bool]()); print(c_size_of[Mixed]()); print(c_align_of[Mixed]()); print(c_offset_of[Mixed](\"b\")); print(alignment[bool](true)); let m = Mixed { a: true, b: 1 }; print(alignment[Mixed](m)); }\n").unwrap();
+    fs::write(&source, "#[repr(C)] struct Mixed { a: bool, b: i64 }\nfn alignment[T](v: T) -> i64 { return c_align_of[T](); }\nfn main() { print(c_size_of[i64]()); print(c_align_of[i64]()); print(c_size_of[f64]()); print(c_align_of[f64]()); print(c_size_of[bool]()); print(c_align_of[bool]()); print(c_size_of[Mixed]()); print(c_align_of[Mixed]()); print(c_offset_of[Mixed](\"b\")); print(alignment[bool](true)); let m = Mixed { a: true, b: 1 }; print(alignment[Mixed](m)); print(c_size_of[string]()); print(c_align_of[string]()); }\n").unwrap();
     let c = dir.join("layout.c");
     let executable = dir.join(if cfg!(windows) { "layout.exe" } else { "layout" });
-    fs::write(&c, "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\nstruct Mixed { bool a; int64_t b; };\nint main(void) { printf(\"%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n\", sizeof(int64_t), _Alignof(int64_t), sizeof(double), _Alignof(double), sizeof(bool), _Alignof(bool), sizeof(struct Mixed), _Alignof(struct Mixed), offsetof(struct Mixed, b), _Alignof(bool), _Alignof(struct Mixed)); return 0; }\n").unwrap();
+    fs::write(&c, "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\nstruct Mixed { bool a; int64_t b; };\nstruct AeStr { const char *ptr; int64_t len; bool owned; };\nint main(void) { printf(\"%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n%zu\\n\", sizeof(int64_t), _Alignof(int64_t), sizeof(double), _Alignof(double), sizeof(bool), _Alignof(bool), sizeof(struct Mixed), _Alignof(struct Mixed), offsetof(struct Mixed, b), _Alignof(bool), _Alignof(struct Mixed), sizeof(struct AeStr), _Alignof(struct AeStr)); return 0; }\n").unwrap();
     let compile = Command::new("gcc").arg("-std=c11").arg(&c).arg("-o").arg(&executable).output().unwrap();
     assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
     let native = Command::new(&executable).output().unwrap();
@@ -5370,7 +5370,7 @@ fn c_alignment_matches_the_native_c_compiler() {
         assert!(run.status.success(), "{mode:?}: {}", String::from_utf8_lossy(&run.stderr));
         assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), String::from_utf8_lossy(&native.stdout).replace("\r\n", "\n"));
     }
-    for (index, text) in ["fn main() { print(c_align_of[string]()); }", "struct Plain { a: i64 } fn main() { print(c_align_of[Plain]()); }", "fn main() { print(c_align_of[Missing]()); }"].iter().enumerate() {
+    for (index, text) in ["struct Plain { a: i64 } fn main() { print(c_align_of[Plain]()); }", "fn main() { print(c_align_of[Missing]()); }"].iter().enumerate() {
         let path = dir.join(format!("bad{index}.ae"));
         fs::write(&path, text).unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_ae")).arg("check").arg(&path).output().unwrap();
@@ -5383,20 +5383,19 @@ fn c_alignment_matches_the_native_c_compiler() {
 fn scalar_size_queries_in_generic_and_concrete_contexts() {
     let dir = unique_temp_dir("scalar_size");
     let source = dir.join("scalar_size.ae");
-    fs::write(&source, "fn size[T](v: T) -> i64 { return c_size_of[T](); }\nfn main() { print(c_size_of[i64]()); print(c_size_of[f64]()); print(c_size_of[bool]()); print(size[i64](1)); print(size[f64](1.0)); print(size[bool](true)); }\n").unwrap();
+    fs::write(&source, "fn size[T](v: T) -> i64 { return c_size_of[T](); }\nfn main() { print(c_size_of[i64]()); print(c_size_of[f64]()); print(c_size_of[bool]()); print(size[i64](1)); print(size[f64](1.0)); print(size[bool](true)); print(c_size_of[string]()); }\n").unwrap();
     for mode in [None, Some("--interp"), Some("--release")] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
         command.arg("run").arg(&source);
         if let Some(mode) = mode { command.arg(mode); }
         let run = command.output().unwrap();
         assert!(run.status.success(), "{mode:?}: {}", String::from_utf8_lossy(&run.stderr));
-        assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "8\n8\n1\n8\n8\n1\n");
+        assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "8\n8\n1\n8\n8\n1\n24\n");
     }
     let cases = [
         ("fn main() { print(c_offset_of[i64](\"x\")); }", "not a struct"),
-        ("fn main() { print(c_size_of[string]()); }", "not a struct"),
         ("fn main() { print(c_size_of[Missing]()); }", "not a struct"),
-        ("fn size[T](v: T) -> i64 { return c_size_of[T](); } fn main() { print(size[string](\"x\")); }", "not a struct"),
+        ("fn size[T](v: T) -> i64 { return c_size_of[T](); } fn main() { print(size[Missing](\"x\")); }", "unknown type"),
     ];
     for (index, (text, expected)) in cases.iter().enumerate() {
         let path = dir.join(format!("bad{index}.ae"));

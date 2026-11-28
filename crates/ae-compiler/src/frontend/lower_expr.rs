@@ -135,13 +135,17 @@ impl<'a> Parser<'a> {
                     .or_else(|| (name == "string").then_some(Type::String))
                     // The container families too: a heap slot may hold a
                     // vector or a map. The pointee interning needs the
-                    // element/key-value types — scalar and string spellings
-                    // (named elements are future work); the map families
-                    // carry string keys with i64/f64 values.
+                    // element/key-value types — scalar, string, and
+                    // `#[repr(C)]` struct spellings (whose layout the
+                    // retag's own rule knows); the map families carry
+                    // string keys with i64/f64 values.
                     .or_else(|| {
                         let inner = name.strip_prefix("vec[")?.strip_suffix(']')?.trim();
                         let elem = super::types::scalar_type(inner)
-                            .or_else(|| (inner == "string").then_some(Type::String))?;
+                            .or_else(|| (inner == "string").then_some(Type::String))
+                            .or_else(|| self.struct_names.get(inner).and_then(|&sid| {
+                                self.structs[sid].repr_c.then_some(Type::Struct(sid))
+                            }))?;
                         Some(Type::Vector(self.ctx.intern_vector_elem(elem)))
                     })
                     .or_else(|| {

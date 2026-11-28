@@ -1,0 +1,22 @@
+use "../../std/alloc/bridge.ae";
+
+#[repr(C)]
+pub struct Item {
+    id: i64,
+}
+
+fn main() {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[vec[Item]](), 1, 1) as *mut vec[Item];
+        var held = vec[Item { id: 5 }, Item { id: 6 }];
+        let _w = ptr_write(raw, held);
+        let view = raw.deref();
+        print(view[0].id);
+        print(view[1].id);
+        print(len(view));
+        let dropped = ptr_drop_in_place(raw);
+        print(dropped);
+        let _f = ae_std_free(raw as *mut i64);
+    }
+    print("done");
+}
