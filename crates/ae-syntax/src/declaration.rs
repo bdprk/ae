@@ -729,9 +729,12 @@ impl<'a> DeclarationParser<'a> {
         let start = self.current().offset;
         // The attribute may precede or follow `pub`: `#[repr(C)] pub struct`
         // is the natural spelling, and `pub #[repr(C)] struct` stays legal.
-        let attributes = self.attributes()?;
+        let mut attributes = self.attributes()?;
         let public = if matches!(&self.current().kind, Kind::Ident(name) if name == "pub") {
             self.pos += 1;
+            // The attribute may follow `pub` too (`pub #[repr(C)] struct`):
+            // re-read the attribute list so both spellings reach the checks.
+            attributes.extend(self.attributes()?);
             true
         } else {
             false
