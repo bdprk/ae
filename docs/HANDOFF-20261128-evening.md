@@ -87,3 +87,23 @@ MIR 侧 lower_operand 绑定为临时；但 MapOf 无视图类型，deref 临时
 方案 A 的工作量 ≈ stage-2 字符串切片 + stage-4 向量切片之和（有完全先例可
 抄）；门位图沿用本文件 §2 + 切片 100。探针 work/repro/heap_map.ae 保留
 （当前卡读者臂诊断）。
+
+## 7. 追加：MapRef 已开工（rung 1 落地）
+
+`Type::MapRef(usize)`（map-types intern id，对齐 MapOf）已进 ae-ty，穷尽驱动
+的六臂全落：ae-layout（指针布局）、ae-mir fmt（&Map#N）、ae-codegen-c
+c_type_name（`ae_map *`）、c_output c_type_field（`const ae_map *`）/c_type
+（声明形态）、TypeDisplay（`&map[K, V]`）。**零行为变化**（尚无生产者），
+工作区 0 警告编译，已原子提交。
+
+剩余梯队（下窗按序，每梯一提交）：
+- **rung 2**：三处 deref 类型臂加 `Type::MapOf(id) => Type::MapRef(id)`
+  （lower_expr 两站点 + mir.rs expr_type——照抄 String→StrView/
+  Vector→VectorRef 先例）
+- **rung 3**：release_var/release_member 补 MapRef no-op；lower_stmt 的
+  map 绑定拒绝守卫删除（heap_map.ae 绑定形态翻正）
+- **rung 4**：lower_builtin 读者臂认 `(expr, MapRef)` → MapPlace 新形态
+  （或 Var 加 borrow 位）；调用点 `&` 分支按 place 类型（MapOf 取 `&`、
+  MapRef 裸指针）；mir.rs:523 map_place_operand 同步
+- **rung 5**：interp 帧槽模型命名 trap；heap_map.ae 三路夹具化；
+  corpus floor 189；门禁全家
