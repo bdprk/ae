@@ -184,3 +184,16 @@ seed 1987 在其树双后端当下全过——为超载主机（双树战役+其
 已转达 relay 代理（记账指引 + 轮询改进建议：超时种子复跑一次再计数）。
 ADR-0242 证据账：本地 1800 冒烟 + 服务器 ok 行累计 + 双主机套件绿 + 消毒器
 48 夹具全过——退役决策材料完整，等 relay 总额推送后执行。
+
+## 15. P3.4 邻接切片门位（探针实测）
+
+源级 `&map[string, i64]` 参数拼写当前拒绝，诊断即白名单：
+"unsupported borrow type; write &string, &vec, &vec[string], &vec[f64],
+&Struct, &[i64; N], &mut [T], or &T inside a generic function"。
+切片路径（先例 &vec→VectorRef 完整）：
+1. 共享文法 borrow 白名单加 `&map[K, V]`（诊断文本同步）
+2. 参数类型解析为 `Type::MapRef(id)`（rung 1 已就位）
+3. 槽位守卫已认（rung 3）；map 调用读者已认 `(Variable, MapRef)`→VarBorrow（rung 4）
+4. 调用点借用实参准入（`total(&counts)` 的 Argument 形态——vec 先例 View）
+5. MIR/pure/interp 的 MapRef 参数渲染（指针形态）
+探针：work/repro/map_sig.ae。工作量 ≈ stage-4 向量切片。
