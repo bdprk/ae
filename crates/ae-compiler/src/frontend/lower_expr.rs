@@ -609,6 +609,7 @@ impl<'a> Parser<'a> {
                             let ty = match pointee {
                                 Type::String => Type::StrView,
                                 Type::Vector(id) => Type::VectorRef(id),
+                                Type::MapOf(id) => Type::MapRef(id),
                                 other => other,
                             };
                             return Ok((Expr::DerefPtr(Box::new(operand), line, column), ty));
@@ -794,6 +795,7 @@ impl<'a> Parser<'a> {
                     let ty = match pointee {
                         Type::String => Type::StrView,
                         Type::Vector(id) => Type::VectorRef(id),
+                        Type::MapOf(id) => Type::MapRef(id),
                         other => other,
                     };
                     return Ok((Expr::DerefPtr(Box::new(operand), line, column), ty));

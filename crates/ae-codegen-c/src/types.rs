@@ -561,6 +561,7 @@ impl ModuleTypes {
                         TyKind::Ptr(id) | TyKind::PtrMut(id) => match self.pointees.get(&id)? {
                             TyKind::String => TyKind::StrView,
                             TyKind::Vector(id) => TyKind::VectorRef(*id),
+                            TyKind::MapOf(id) => TyKind::MapRef(*id),
                             other => *other,
                         },
                         _ => return None,

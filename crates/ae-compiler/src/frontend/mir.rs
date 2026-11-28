@@ -658,6 +658,7 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
                 // is a `StrView` and on `*mut vec[E]` a `VectorRef`.
                 Type::String => Type::StrView,
                 Type::Vector(id) => Type::VectorRef(id),
+                Type::MapOf(id) => Type::MapRef(id),
                 other => other,
             },
             other => other,
