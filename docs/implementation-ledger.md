@@ -962,3 +962,5 @@ M5.1 and M6.2 pauses until R2 and R3a land.
   same commit (range default `@{u}..HEAD`, `--base` for anything else).
   Remaining: history-level CI wiring once the workflow fetches full
   history, and flipping the item in this commit.
+
+Slice 88 (M2.12 interp surface) — **the interpreter answers frame-slot `ptr_write`.** The frame-slot model (`&v as *mut i64` names a slot) makes the expression form the same mechanism `Statement::PtrStore` already runs: the write goes through the slot, the value moves in (an owned source slot is forfeited), and the result is 0 — `print(p.deref())` and the original variable observe the write on the interpreter exactly as both compiled backends emit. Heap-slot shapes keep their named traps (the interpreter never builds an extern-bridge slot); the scalar fixture shapes now run on the interpreter, three-route byte parity pinned on `var x` + `ptr_write(p, 77)` + slot deref. Companion to slice 87's scalar `ptr_drop_in_place` arm.
