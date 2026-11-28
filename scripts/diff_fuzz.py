@@ -164,7 +164,7 @@ class Gen:
         """
         if depth >= 3:
             return [f"print({self.int_expr(vars)});"]
-        kind = self.rnd() % 31
+        kind = self.rnd() % 32
         if self.pure_subset:
             # Every kind the generator draws from. The pure subset used to be a
             # narrowed list; the backend now covers the whole surface (owned
@@ -249,6 +249,32 @@ class Gen:
                 f"var {sname} = {a};",
                 f"let {name} = spawn(|| -> string {{ return {sname}; }});",
                 f"print(wait({name}));",
+                *self.statement(vars, depth + 1, docs, pointers),
+            ]
+        if kind == 31:
+            # ADR-0245: the owned heap-string slot. The bridge allocates 24
+            # bytes, ptr_write moves an owned string in, the deref reads a
+            # view (print + equality, no header copy), ptr_drop_in_place
+            # releases the string, and the block frees. Every step prints, so
+            # the compiled backends (interp excluded — externs trap by name)
+            # must agree byte for byte.
+            raw = self.fresh("raw")
+            keep = self.fresh("keep")
+            view = self.fresh("view")
+            dropped = self.fresh("dropped")
+            block = self.fresh("block")
+            a = '"h' + str(self.rnd() % 1000) + '"'
+            return [
+                "unsafe {",
+                f"    let {raw} = ae_std_alloc(c_size_of[string](), 1, 1) as *mut string;",
+                f"    var {keep} = {a};",
+                f"    let _w = ptr_write({raw}, {keep});",
+                f"    print({raw}.deref());",
+                f"    if {raw}.deref() == {a} {{ print(\"{view}\"); }}",
+                f"    let {dropped} = ptr_drop_in_place({raw});",
+                f"    print({dropped});",
+                f"    let {block} = ae_std_free({raw} as *mut i64);",
+                "}",
                 *self.statement(vars, depth + 1, docs, pointers),
             ]
         if kind == 13:
@@ -649,6 +675,8 @@ class Gen:
             # every seed has, plus the owned-struct vector's Drop glue and the
             # nested-receiver shapes (kinds 24/26).
             lines = [
+                'extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;',
+                'extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;',
                 "struct Pt { a: i64, b: i64 }",
                 "struct Doc { name: string, note: string }",
                 "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
@@ -695,6 +723,8 @@ class Gen:
             lines.append("}")
             return "\n".join(lines)
         lines = [
+            'extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;',
+            'extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;',
             "struct Pt { a: i64, b: i64 }",
             "struct Doc { name: string, note: string }",
             "enum Op { Wrap(i64), Pair(i64, i64), Flat }",
@@ -902,13 +932,19 @@ def run_seed_once(seed: int, workdir: Path, cache_dir: Path, compile_timeout: in
         runs = []
         for bin_path in (debug_bin, tree_bin, release_bin):
             runs.append((bin_path.name, subprocess.run([str(bin_path)], capture_output=True, text=True, timeout=30)))
-        interp_run = subprocess.run(
-            [str(EXE), "run", str(seed_dir / "prog_d.ae"), "--interp"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        runs.append(("interp", interp_run))
+        # ADR-0245: a seed whose surface includes the allocator bridge runs
+        # compiled-only — the interpreter traps on extern calls by design (its
+        # frame-slot model never builds a heap slot), so the interp leg would
+        # report a fake divergence for a shape whose compiled outputs must
+        # still agree byte for byte.
+        if "c_size_of[string]()" not in source:
+            interp_run = subprocess.run(
+                [str(EXE), "run", str(seed_dir / "prog_d.ae"), "--interp"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            runs.append(("interp", interp_run))
         # ADR-0238/0240: the pure-MIR C backend joins as a fifth mode when
         # the program stays inside its supported subset. Traps join too: the
         # pure runtime prints the same positioned ae:<line>:<col>: <msg> line
