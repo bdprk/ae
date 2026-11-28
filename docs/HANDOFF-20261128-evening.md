@@ -144,3 +144,15 @@ VectorRef 同列）。`heap_map_bind.ae`（绑定形态：let view = raw.deref()
 map_has(view, ...)）现精确停在 rung 4 核心——"map_has expects a map
 variable or a field of one"。探针文件保留于 work/repro/（gitignore，按本
 文件内容重建即可）。rung 4 落地后此探针应三路通过并夹具化。
+
+## 11. 追加：服务器战役状态（23:59 后）
+
+- evaluate-2 已苏醒（冷却解除）。ae-r2（旧树 04dff421+partial）的 campaign2：
+  套件段 49 二进制全过（repr(C) 测试除外——该树在修复前），pure-subset 段随
+  沙箱休眠中断，其残留进程已按 PID 清理。
+- **ae-r3（当前 main 全量 56 提交）campaign3**：套件段 **49/49 全绿**
+  （suite.log 留存），双模式 20k fuzz 已起（进程 1688708 链）。
+- **ae-relay（协调代理部署）**：pure-subset 20k + duration 1h mixed 双战役
+  自跑（进程 1056623/1535022）。
+- 4 核主机上双树三战役并行——种子总额归并时按树版本标注（ae-r3=ec6aa60f+
+  段；ae-relay=代理部署时点段）。收割下窗进行。
