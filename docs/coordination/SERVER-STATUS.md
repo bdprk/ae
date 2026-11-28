@@ -2,85 +2,85 @@
 
 - Date: 2026-11-28 (+08:00); relay session opened 17:24, still running.
 - Host: `instabox-node3` (instabox-evaluate-2, 4 cores, shared with other
-  sessions' benchmarks/campaigns — load averaged 8.5-12 during this run).
-- Server checkout: `/data/home/ae-relay/` (fresh git-archive extraction of
-  `origin/main`, private in-tree `target/`, sources force-touched per the
-  standing mtime lesson before every build).
-- Fresh binary pinned for every fuzz/verify invocation via
-  `AE_FUZZ_BIN=/data/home/ae-relay/target/debug/ae`.
+  sessions' benchmarks and fuzz campaigns — load averaged 8.5-12 through
+  this run; at times 5 diff_fuzz workers from other sessions were live).
+- Relay checkouts (fresh `git archive` extractions of `origin/main`, each
+  with a private in-tree `target/`, sources force-touched before every
+  build per the standing mtime lesson):
+  - `/data/home/ae-relay/` — segment s1, commit `9907ce26`
+  - `/data/home/ae-relay2/` — segment s2, commit `9bfc9f86`
+- Fresh binary pinned per segment via
+  `AE_FUZZ_BIN=/data/home/<dir>/target/debug/ae`.
 
-## Commit segments verified
+## Suite results (Linux, rustc 1.99.0 + gcc 14)
 
-| Segment | Commit | Status |
+| Segment | Commit | Result |
 |---|---|---|
-| s1 | `9907ce26` (test(p4.1): tree nodes over heap pointers) | suite run, sanitizer leg, fuzz campaign started |
-| s2 | newest `origin/main` tip (moved 29 commits past s1 during the session: heap vectors, box_slot/rc_slot, ADR-0245 stage 3, fuzzer heap-string shape, interp pointer arms, fmt fixes) | re-sync queued (sandbox egress cooldown 10:0xZ→13:25Z blocked ssh; numbers to be amended on this branch) |
+| s1 | `9907ce26` | 695-class workspace: **693 passed / 2 failed / 3 ignored** across all 49 test binaries (`--no-fail-fast`, log `suite2.log`); gates green incl. corpus gate, diagnostic parity, route coverage |
+| s2 | `9bfc9f86` | **695 passed / 0 failed / 3 ignored**, all 49 binaries ok, exit 0 (log `/data/home/ae-relay2/suite.log`) |
 
-## Workspace suite (s1, Linux, rustc 1.99.0 + gcc 14)
+### The s1 failures were stale pins, already fixed by slice 101
 
-- First run `cargo test --workspace --locked` (fail-fast):
-  **execution binary 373 passed / 2 failed**, then cargo aborted the
-  remaining targets. Full log kept at `/data/home/ae-relay/suite.log`.
-- Fail-fast-off rerun (`--no-fail-fast`, `/data/home/ae-relay/suite2.log`):
-  all other targets green, including `pure_e2e_corpus_gate` (5/5 — the
-  182-fixture gate), `pure_diagnostic_parity` (137 negatives, 0
-  divergences) and `pure_route_coverage`. Aggregate at last poll:
-  693 passed / 2 failed / 3 ignored, pending the final binaries.
-- **The only 2 failures are stale negative assertions, not compiler
-  regressions.** `f70a8c63` (P4.1 slice 9, "owned heap pointees — string
-  layout, admissions") deliberately admits string layout queries (the
-  ledger pins `c_size_of[string]` at 24/8), but `tests/execution.rs` still
-  pins both queries as must-be-rejected:
+The two s1 failures were in `tests/execution.rs` negative assertions that
+still pinned `c_size_of[string]()` / `c_align_of[string]()` as
+must-be-rejected, while `f70a8c63` (P4.1 slice 9) had deliberately
+admitted string layout queries (ledger pins 24/8):
 
-  ```
-  ---- c_alignment_matches_the_native_c_compiler stdout ----
-  thread 'c_alignment_matches_the_native_c_compiler' panicked at tests/execution.rs:5377:9:
-  accepted: fn main() { print(c_align_of[string]()); }
+```
+---- c_alignment_matches_the_native_c_compiler stdout ----
+thread 'c_alignment_matches_the_native_c_compiler' panicked at tests/execution.rs:5377:9:
+accepted: fn main() { print(c_align_of[string]()); }
 
-  ---- scalar_size_queries_in_generic_and_concrete_contexts stdout ----
-  thread 'scalar_size_queries_in_generic_and_concrete_contexts' panicked at tests/execution.rs:5405:9:
-  accepted: fn main() { print(c_size_of[string]()); }
-  ```
+---- scalar_size_queries_in_generic_and_concrete_contexts stdout ----
+thread 'scalar_size_queries_in_generic_and_concrete_contexts' panicked at tests/execution.rs:5405:9:
+accepted: fn main() { print(c_size_of[string]()); }
+```
 
-  Direct reproduction on the server: fresh binary `ae check` exits 0 and
-  `ae run` prints 24 for `print(c_size_of[string]())`; the stale
-  04dff421 binary still rejects ("'string' is not a struct; the layout
-  queries name concrete structs"). The last full local suite ran at
-  04dff421, so these two stale tests never met the new admissions until
-  this Linux run. **Decision needed from the main agent:** update the two
-  negative assertions to pin `c_align_of[string]()`/`c_size_of[string]()`
-  = 8/24 (or re-narrow the admissions); relay did not touch compiler or
-  test code.
+Server reproduction at s1: fresh binary `ae run` prints 24 for
+`print(c_size_of[string]())`; the stale 04dff421 binary rejects
+("'string' is not a struct; the layout queries name concrete structs").
+Slice 101 (commit `875469da`, in s2) migrated the pins to positive
+assertions (24/8) — the s2 suite above is the Linux proof they pass.
+Last local full suite had run at 04dff421, which is why the mismatch
+surfaced first here.
 
-- Context: the other session's suite on the stale 04dff421 tree
-  (`/data/home/ae-r2/campaign2.log`) shows exactly 1 failure —
-  `declaration::tests::reads_attributes_on_structs_and_foreign_definitions`
-  — which is the attribute-order bug `bf4dac28` fixed. Attributed to the
-  stale tree; not evidence against current main.
+Context: the other session's suite on the stale 04dff421 tree
+(`/data/home/ae-r2/campaign2.log`) shows exactly 1 failure
+(`declaration::tests::reads_attributes_on_structs_and_foreign_definitions`)
+— the attribute-order bug `bf4dac28` fixed. Stale-tree artifact only.
 
-## Differential fuzz (s1, fresh binary, full untruncated logs)
+## Differential fuzz (full untruncated logs, failures grep-able)
 
-Campaign script `/data/home/ae-relay/relay-fuzz.sh`: pure-subset first,
-then mixed, sequential, `--jobs 2`, logs
-`/data/home/ae-relay/fuzz-pure.log` and `/data/home/ae-relay/fuzz-mixed.log`.
+| Segment | Mode | Seeds so far | Failures | Status |
+|---|---|---|---|---|
+| s1 (`9907ce26` binary) | pure-subset 20k target | **4752** | **0** | stopped early (see note) |
+| s2 (`9bfc9f86` binary) | pure-subset 20k | running | 0 so far | chain: pure then mixed, `--jobs 2` |
+| s2 (`9bfc9f86` binary) | mixed 20k | queued | — | starts after s2 pure |
 
-- pure-subset `--seeds 20000 --jobs 2`: IN PROGRESS at last poll — 862
-  seeds, 0 failures (rate ~0.55 seeds/s under the contested host; the
-  chain runs unattended, totals to be amended).
-- mixed `--seeds 20000 --jobs 2`: queued behind pure-subset.
-- Observed other campaign (NOT this relay's binary): another session runs
-  `campaign2.sh` from the stale `/data/home/ae-r2` tree (04dff421):
-  pure-subset 20000 then mixed 20000, started 08:59. Left untouched per
-  the standing rule. Its totals belong to 04dff421, not to main's tip.
+The s1 chain was retired mid-campaign once the tip binary existed
+(PURE_EXIT=143 by deliberate kill of the relay's own PIDs; its mixed leg
+had not started). Logs: `/data/home/ae-relay/fuzz-pure.log` (s1),
+`/data/home/ae-relay2/fuzz-pure.log` + `fuzz-mixed.log` (s2, live).
+Throughput is ~0.3 seeds/s under the heavily contested host; the chain
+runs unattended and totals will be amended on this branch.
 
-## Sanitizer leg (s1)
+Observed (NOT relay's, left untouched): r2 stale-tree campaign2
+(04dff421), r3 campaign3 on current main (suite green 49/49, its own
+pure+mixed 20k segments), one `--duration 1` mixed fuzzer. Their totals
+belong to their sessions' reports.
 
-`python3 scripts/verify_generated_c.py --sanitize --leak` (41 legacy
-fixtures, gcc + libasan/lsan): **41 PASS / 0 FAIL**, every fixture ends
-with `leak blocks=0 bytes=0`. Log: `/data/home/ae-relay/sanitize.log`.
+## Sanitizer leg
+
+`python3 scripts/verify_generated_c.py --sanitize --leak` (legacy 41
+fixtures, gcc + libasan/lsan):
+
+- s1: **41 PASS / 0 FAIL**, every fixture `leak blocks=0 bytes=0`
+  (`/data/home/ae-relay/sanitize.log`).
+- s2 rerun on the tip: running (`/data/home/ae-relay2/sanitize.log`),
+  result to be amended.
 
 New fixtures' emitted pure C compiled individually with
-`gcc -std=c11 -O0 -fsanitize=address,leak` and run with
+`gcc -std=c11 -O0 -fsanitize=address,leak`,
 `ASAN_OPTIONS=detect_leaks=1`:
 
 | Fixture | Result |
@@ -88,33 +88,31 @@ New fixtures' emitted pure C compiled individually with
 | `box_string.ae` | exit 0, no leak report, stdout matches fixture |
 | `ptr_string_view.ae` | exit 0, no leak report, stdout matches fixture |
 | `closure_capture_strvec.ae` | exit 0, no leak report, stdout matches fixture |
-| `rc_shared.ae` | LSan: 16 bytes in 2 allocations (`ae_cell_new` count cells of the handles still alive at main's end); payload slots freed correctly; process-lifetime exemption anticipated by the briefing. With `detect_leaks=0`: exit 0, stdout matches. |
+| `rc_shared.ae` | LSan: 16 bytes in 2 allocations — the `ae_cell_new` count cells of handles still alive at main's end; payload slots freed correctly. Matches the documented process-lifetime count-cell exemption (slices 84/92). With `detect_leaks=0`: exit 0, stdout matches. |
 | `generic_inference_composite.ae` | LSan: 9 bytes in 1 allocation — the `box_new(9)` slot (`ae_std_alloc` deliberately mallocs size+1, so 8→9) owned by the still-live local `n` at exit. Bisect proof: the enum/string match path alone is clean (exit 0, no leaks); adding explicit `box_free(n)` clears the leak (exit 0). Same process-lifetime class, not a backend bug. With `detect_leaks=0`: exit 0, stdout matches. |
 
-stdout comparison note: the committed `tests/run/*.stdout` files carry
-CRLF line endings; the emitted programs print LF. Byte-equal modulo line
-endings for all five (checked with `diff` after stripping CR).
+stdout comparison note: committed `tests/run/*.stdout` files carry CRLF
+line endings; emitted programs print LF. Byte-equal modulo line endings
+for all five (checked with `diff` after stripping CR).
 
-## Failures and lessons from this relay session
+## Session lessons (relay-specific)
 
 1. `pwsh` is absent and Windows PowerShell 5.1 mangles the Chinese repo
-   path (mojibake), so `scripts/agent-worktree.ps1` cannot run from Git
-   Bash here; the worktree was created with plain `git worktree add`.
+   path, so `scripts/agent-worktree.ps1` cannot run from Git Bash on this
+   machine; the relay worktree was created with plain `git worktree add`.
 2. `.cargo/config.toml` is untracked (`.git/info/exclude`), so a server
-   extraction has no `target-dir` override and lands on the default
-   in-tree `target/` — which is private per checkout. That keeps the
-   relay tree clear of the shared `/data/home/_cache/ae/target` other
-   sessions build into (no binary-race interference), and makes the
-   lesson-1 `touch` + fresh-directory procedure trivially safe.
-3. The ZCode sandbox imposed an egress cooldown (ssh blocked
-   ~10:05Z→13:25Z). All server workloads run under `nohup`, so the suite,
-   sanitizer and fuzz chain were unaffected; polling paused until the
-   window reopened.
+   tarball extraction has no `target-dir` override and lands on the
+   default in-tree `target/` — private per checkout. This keeps relay
+   trees clear of the shared `/data/home/_cache/ae/target` other sessions
+   build into, and makes the fresh-directory + touch procedure trivially
+   safe.
+3. The ZCode sandbox imposed an ssh egress cooldown (~10:05Z→13:25Z).
+   All server workloads run under `nohup`, so nothing was lost.
 
-## Outstanding / next relay steps
+## Outstanding
 
-- Fill in final pure-subset and mixed fuzz totals (and any failure
-  excerpts — full logs are retained server-side, nothing truncated).
-- Re-sync `/data/home/ae-relay/` to the newest tip, force-rebuild, rerun
-  the suite, extend fuzz totals on the new binary.
-- Amend this file with the s2 numbers and push the branch updates.
+- s2 fuzz chain totals (pure + mixed) and the s2 sanitizer rerun result —
+  amend this file and push again as they land.
+- Fuzz accumulation toward the ADR-0242 50k-per-mode target: combined
+  evidence so far on Linux = s1 pure 4752 + r3 segments + s2 in flight.
+  The remaining precondition after suites went green on both hosts.
