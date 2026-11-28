@@ -19,15 +19,15 @@ Status: target specification for the M2.12 milestone. The current language (2026
 ## 2. Raw Pointers
 
 ### 2.1 Types
-- `*const T` and `*mut T` for any `T` with a known layout (scalars, `#[repr(C)]` structs, arrays).
-- Copyable, comparable for equality, passable by value; they carry no ownership and are not tracked by the borrow checker. Creating one from a reference is safe; using one to read or write memory is `unsafe`.
+- `*const T` and `*mut T` for any `T` with a known layout (scalars, `#[repr(C)]` structs, arrays, `string` — whose layout constant is the pure runtime's 24-byte `ae_str`, ADR-0245).
+- Copyable, comparable for equality, passable by value; they carry no ownership and are not tracked by the borrow checker. Creating one from a reference is safe; using one to read or write memory is `unsafe`. A heap slot (`ae_std_alloc`) may hold an owned value: `ptr_write` transfers ownership to the slot and `ptr_drop_in_place` releases it — the author of the `unsafe` block owes spec 2.4's slot contract.
 
 ### 2.2 Operations (all require `unsafe`)
-- `p.deref()` → `T` (by value, `T: Copy`-sized) — reads the pointee.
-- `p.write(value)` / `p.read()` for `*mut T`.
+- `p.deref()` → `T` for `Copy`-sized `T`; for `*mut string` the read is a **view** (`StrView`): print and comparison work on it and it releases nothing; binding it to a variable is rejected until heap views are storable (ADR-0245).
+- `p.write(value)` / `p.read()` — not implemented; the implemented spellings are `ptr_write(p, v)` (the ownership-transfer form) and `*p = v` (owned pointees rejected: the pointer would take over their release).
 - `p.offset(n)`, `p.byte_offset(n)` — pointer arithmetic, no bounds reasoning.
-- `ptr::null[T]()`, `p.is_null()` — `is_null` is safe (it reads nothing).
-- `&v as *const T` / `&mut v as *mut T` — borrows to pointers, safe (an explicit cast).
+- `ptr::null[T]()`, `p.is_null()` — implemented; `is_null` is safe (it reads nothing).
+- `&v as *const T` / `&mut v as *mut T` — borrows to pointers, safe (an explicit cast); the operand must not be owned.
 - `p as usize` / `usize as *const T` — integer round trips, safe casts; what you do with the result is not.
 
 ### 2.3 Diagnostics
