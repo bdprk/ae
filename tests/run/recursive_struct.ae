@@ -46,8 +46,11 @@ fn main() {
         let last = next_of(mid);
         print(val_at(last));
         // The tail's own next field is the block written earlier; the first
-        // node's next is the raw pointer it was written with.
+        // node's next is the raw pointer it was written with. A chained
+        // multi-hop deref walks the ring in one expression.
         let again = next_of(last);
         print(val_at(again));
+        print(head.deref().next.deref().next.deref().val);
+        print(last.deref().next.deref().val);
     }
 }

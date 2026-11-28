@@ -80,8 +80,15 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
             };
             let method_call_base = match &base.kind {
                 ExpressionKind::Call { callee, .. } => {
+                    // The deref receiver may itself be a chained read
+                    // (`raw.deref().next.deref()`): the lowering resolves the
+                    // whole chain and its own type checks keep the typed
+                    // diagnostics, so the scan admits an ident receiver (the
+                    // common form) or a field/call chain step.
                     matches!(&callee.kind, ExpressionKind::Field { base: inner, .. }
-                        if matches!(inner.kind, ExpressionKind::Atom(Kind::Ident(_))))
+                        if matches!(inner.kind, ExpressionKind::Atom(Kind::Ident(_))
+                            | ExpressionKind::Field { .. }
+                            | ExpressionKind::Call { .. }))
                 }
                 _ => false,
             };

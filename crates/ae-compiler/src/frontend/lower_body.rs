@@ -457,9 +457,13 @@ impl<'a> Parser<'a> {
                 let ae_syntax::expression::ExpressionKind::Field { base, name } = &expression.kind else { return false };
                 let ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(receiver)) = &base.kind else {
                     // A temporary or chained receiver: the lowering delegates
-                    // the whole call to the typed postfix layer.
+                    // the whole call to the typed postfix layer. A Field base
+                    // is a chained deref hop (`raw.deref().next.deref()`):
+                    // the deref arm re-checks the receiver is a pointer and
+                    // its diagnostics stay authoritative.
                     return matches!(base.kind, ae_syntax::expression::ExpressionKind::Call { .. }
-                        | ae_syntax::expression::ExpressionKind::Group(_));
+                        | ae_syntax::expression::ExpressionKind::Group(_)
+                        | ae_syntax::expression::ExpressionKind::Field { .. });
                 };
                 // A body local that the precompute typed (a struct literal or
                 // constructor call) answers here even though the lowering has

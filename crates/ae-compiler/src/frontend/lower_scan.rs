@@ -781,9 +781,13 @@ impl<'a> Parser<'a> {
                             if matches!(base.kind, ae_syntax::expression::ExpressionKind::Atom(Kind::Ident(_))
                                 // A method on a temporary/chained result: the
                                 // lowering delegates the whole call to the
-                                // typed postfix layer.
+                                // typed postfix layer. A Field base is a
+                                // chained deref hop (`raw.deref().next
+                                // .deref()`); the deref arm re-checks the
+                                // receiver is a pointer.
                                 | ae_syntax::expression::ExpressionKind::Call { .. }
-                                | ae_syntax::expression::ExpressionKind::Group(_)));
+                                | ae_syntax::expression::ExpressionKind::Group(_)
+                                | ae_syntax::expression::ExpressionKind::Field { .. }));
                     }
                     let field_on_ident = role != ae_resolve::Role::Borrow
                         && matches!(expression.kind, ae_syntax::expression::ExpressionKind::Field { .. })

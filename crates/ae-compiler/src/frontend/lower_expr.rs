@@ -558,6 +558,26 @@ impl<'a> Parser<'a> {
                         && let Some((value, ty)) = self.lower_shared_chain_call(expression, base, method_name, arguments, slots)? {
                             return Ok((value, ty));
                         }
+                    // A deref through a chained receiver
+                    // (`raw.deref().next.deref()`): the receiver lowers
+                    // recursively and the pointer checks stay the typed
+                    // route's own — the `unsafe` gate points at the method
+                    // and a non-pointer receiver keeps the typed delegation
+                    // below.
+                    if !matches!(base.kind, ExpressionKind::Atom(Kind::Ident(_)))
+                        && method_name == "deref"
+                        && arguments.is_empty()
+                    {
+                        let (operand, ty) = self.lower_scalar_body_expression(base, slots)?;
+                        if let Type::Ptr(id) | Type::PtrMut(id) = ty {
+                            let method = self.tokens.partition_point(|token| token.offset < callee.range.end) - 1;
+                            let method_offset = self.tokens[method].offset;
+                            self.check_pointer_deref(method_offset)?;
+                            self.seek_scalar_offset(expression.range.end);
+                            let (line, column) = self.position();
+                            return Ok((Expr::DerefPtr(Box::new(operand), line, column), self.ctx.ptr_pointee(id)));
+                        }
+                    }
                     // A method on a temporary or chained result
                     // (`start.shifted(1, 2).shifted(0, -6)`): the typed postfix
                     // layer owns the receiver semantics and the diagnostics;
