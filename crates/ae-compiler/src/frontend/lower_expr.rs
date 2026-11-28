@@ -734,6 +734,16 @@ impl<'a> Parser<'a> {
                         let bytewise = method_name == "byte_offset";
                         return Ok((Expr::PtrOffset(Box::new(operand), Box::new(count_value), bytewise, line, column), ty));
                     }
+                    // `is_null` is safe (spec/unsafe.md 2.1): it reads
+                    // nothing, so no `unsafe` gate. `deref` stays gated.
+                    if method_name == "is_null" {
+                        if !arguments.is_empty() {
+                            self.seek_scalar_offset(callee.range.end);
+                            return Err(self.fail("is_null takes no arguments"));
+                        }
+                        self.seek_scalar_offset(expression.range.end);
+                        return Ok((Expr::PtrIsNull(Box::new(operand)), Type::Bool));
+                    }
                     if method_name != "deref" {
                         // The typed route consumes the name and fails on the
                         // token that follows it (the `(`), so the span lands
@@ -746,7 +756,28 @@ impl<'a> Parser<'a> {
                     let (line, column) = self.position();
                     return Ok((Expr::DerefPtr(Box::new(operand), line, column), self.ctx.ptr_pointee(id)));
                 }
-                if let ExpressionKind::BracketedCallTarget { base, .. } = &callee.kind {
+                if let ExpressionKind::BracketedCallTarget { base, arguments: type_arguments } = &callee.kind {
+                    // `ptr::null[T]()` (spec/unsafe.md 2.1): a qualified path
+                    // with one type argument naming the pointee. The value is
+                    // a null `*mut T`; `is_null` is the only read.
+                    if let ExpressionKind::Qualified { base: prefix, name } = &base.kind
+                        && matches!(prefix.kind, ExpressionKind::Atom(Kind::Ident(ref word)) if word == "ptr")
+                        && name == "null"
+                        && type_arguments.len() == 1
+                    {
+                        let spelling = self.source.get(type_arguments[0].clone())
+                            .ok_or_else(|| self.error_at(type_arguments[0].start, "cannot read the null pointer's pointee type"))?
+                            .trim().to_owned();
+                        let pointee_ty = self.subst.get(spelling.as_str()).copied()
+                            .or_else(|| super::types::scalar_type(&spelling))
+                            .or_else(|| self.struct_names.get(&spelling).map(|&sid| Type::Struct(sid)))
+                            .or_else(|| self.enum_names.get(&spelling).map(|&eid| Type::Enum(self.enums[eid].name.clone(), eid)))
+                            .ok_or_else(|| self.error_at(type_arguments[0].start, &format!("'ptr::null' needs a pointee type; '{spelling}' is not one")))?;
+                        let id = self.ctx.intern_pointee(pointee_ty);
+                        self.seek_scalar_offset(expression.range.end);
+                        let (line, column) = self.position();
+                        return Ok((Expr::PtrNull(id, line, column), Type::PtrMut(id)));
+                    }
                     let ExpressionKind::Atom(Kind::Ident(name)) = &base.kind else {
                         return Err(self.fail("this call form is not supported by the body route"));
                     };

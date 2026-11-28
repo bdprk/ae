@@ -438,7 +438,9 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
     match expr {
         Expr::Variable(id, ..) => { used.insert(*id); }
         // A pointer takes the address of (or reads through) the slot (M2.12).
-        Expr::BorrowAs(e, ..) | Expr::DerefPtr(e, ..) => walk_expr(e, used, mutated),
+        Expr::BorrowAs(e, ..) | Expr::DerefPtr(e, ..) | Expr::PtrIsNull(e) => walk_expr(e, used, mutated),
+        // A null pointer is a constant: nothing to capture.
+        Expr::PtrNull(..) => {}
         // A field receiver and its index reference captured values.
         Expr::VecIndexOf(base, index, ..) => {
             walk_expr(base, used, mutated);
@@ -511,7 +513,7 @@ fn walk_expr(expr: &Expr, used: &mut std::collections::HashSet<usize>, mutated: 
         Expr::MapInc(place, key, delta, ..) => { record_place(place, used, mutated); walk_expr(key, used, mutated); walk_expr(delta, used, mutated); }
         Expr::MapKeys(place, ..) => { used.insert(place.slot()); }
         Expr::Binary(a, _, b, ..) | Expr::StrEq(a, b, _) | Expr::Contains(a, b, ..) | Expr::Split(a, b, ..) | Expr::WriteFile(a, b, ..) | Expr::Slice(a, b, ..) | Expr::TryWriteFile(a, b, ..) | Expr::TryCopyFile(a, b, ..) | Expr::TryRenamePath(a, b, ..) | Expr::PathJoin(a, b, ..) | Expr::StartsWith(a, b) | Expr::EndsWith(a, b) | Expr::CountLinesWith(a, b, ..) | Expr::Utf8Prefix(a, b, ..) | Expr::Find(a, b, ..) | Expr::JsonGet(a, b, ..) | Expr::JsonInt(a, b, ..) | Expr::JsonBool(a, b, ..) | Expr::JsonLen(a, b, ..) | Expr::JsonHas(a, b, ..) => { walk_expr(a, used, mutated); walk_expr(b, used, mutated); }
-        Expr::Neg(a, ..) | Expr::Not(a) | Expr::Len(a, ..) | Expr::ReadFile(a, ..) | Expr::Bytes(a, ..) | Expr::ReadFileBytes(a, _, _, ..) | Expr::Trim(a, ..) | Expr::Lines(a, ..) | Expr::Utf8Len(a, ..) | Expr::ToString(a, ..) | Expr::FloatToString(a, ..) | Expr::ToF64(a, ..) => walk_expr(a, used, mutated),
+        Expr::Neg(a, ..) | Expr::Not(a) | Expr::Len(a, ..) | Expr::ReadFile(a, ..) | Expr::Bytes(a, ..) | Expr::ReadFileBytes(a, _, _, ..) | Expr::PtrIsNull(a) | Expr::Trim(a, ..) | Expr::Lines(a, ..) | Expr::Utf8Len(a, ..) | Expr::ToString(a, ..) | Expr::FloatToString(a, ..) | Expr::ToF64(a, ..) => walk_expr(a, used, mutated),
         Expr::SliceView(_, _, a, b, ..) => { walk_expr(a, used, mutated); walk_expr(b, used, mutated); }
 
         Expr::StructLit(_, values) | Expr::EnumLit(_, _, _, values) | Expr::VecLit(values, ..) => { for v in values { walk_expr(v, used, mutated); } }

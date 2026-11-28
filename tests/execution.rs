@@ -4054,6 +4054,37 @@ fn execute_with_stdin(source: &str, input: &[u8]) -> std::process::Output {
     output
 }
 #[test]
+fn ptr_null_and_is_null_are_safe_across_routes() {
+    // spec/unsafe.md 2.1: `ptr::null[T]()` and `p.is_null()` — is_null reads
+    // nothing, so it needs no unsafe block, and it distinguishes the null
+    // constant from a borrow-cast pointer. All three routes agree.
+    let source = r#"struct Node { val: i64, next: *mut Node }
+fn main() {
+    let null_node = ptr::null[Node]();
+    print(null_node.is_null());
+    let null_bytes = ptr::null[i64]();
+    print(null_bytes.is_null());
+    var value = 42;
+    let live = &mut value as *mut i64;
+    print(live.is_null());
+    print(null_bytes.is_null());
+}"#;
+    let expected = "true\ntrue\nfalse\ntrue\n";
+    let normalize = |bytes: &[u8]| String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    for arguments in [vec![], vec!["--interp"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
+        command.arg("run");
+        let path = std::env::temp_dir().join(format!("ae-ptr-null-{}-{}.ae", std::process::id(), arguments.len()));
+        fs::write(&path, source).unwrap();
+        command.arg(&path);
+        for argument in &arguments { command.arg(argument); }
+        let output = command.output().unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(output.status.success(), "{} failed: {}", arguments.len(), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(normalize(&output.stdout), expected, "{} route differs", arguments.len());
+    }
+}
+#[test]
 fn bounded_binary_reads_report_and_seek_correctly() {
     // P4 reader slice: read_file_bytes traps, try_read_file_bytes reports
     // through the enum; both seek to the offset and respect the limit, and

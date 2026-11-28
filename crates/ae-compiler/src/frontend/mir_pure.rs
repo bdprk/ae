@@ -2178,6 +2178,8 @@ impl<'a> PureMirBuilder<'a> {
                 vec![self.lower_operand(p)],
             ),
             Expr::PtrDropInPlace(p, ..) => ("ptr_drop_in_place", vec![self.lower_operand(p)]),
+            Expr::PtrNull(..) => ("ptr_null", Vec::new()),
+            Expr::PtrIsNull(p) => ("ptr_is_null", vec![self.lower_operand(p)]),
             Expr::PtrWrite(p, v, ..) => {
                 let p_op = self.lower_operand(p);
                 // The written slot becomes the owner of the value, so this is

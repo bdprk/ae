@@ -482,7 +482,7 @@ impl<'a> Parser<'a> {
                 }
                 let Some(ty) = ty else { return false };
                 if matches!(ty, Type::Ptr(_) | Type::PtrMut(_)) {
-                    return matches!(name.as_str(), "deref" | "offset" | "byte_offset");
+                    return matches!(name.as_str(), "deref" | "is_null" | "offset" | "byte_offset");
                 }
                 return matches!(ty, Type::Struct(_) | Type::StructMut(_) | Type::StructRef(_) | Type::Enum(..));
             }

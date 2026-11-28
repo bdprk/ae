@@ -53,6 +53,9 @@ enum Val {
     // locals-only — no pointer type annotation exists on parameters or
     // returns, so a pointer cannot cross a frame.
     Ptr(usize),
+    // The `ptr::null[T]()` constant (spec/unsafe.md 2.1): it names no frame
+    // slot, and `is_null` is the only operation that reads it.
+    NullPtr,
     Ref(usize),
     // A thread handle (ADR-0214): the sequence number of its stashed result.
     // The interpreter is single-threaded — the spawned callable runs to
@@ -2487,6 +2490,8 @@ fn eval_expr(
         Expr::PtrOffset(..) => Err(Flow::Trap("pointer arithmetic cannot run in the interpreter; run the compiled program".to_owned())),
         Expr::PtrDropInPlace(..) => Err(Flow::Trap("ptr_drop_in_place cannot run in the interpreter; run the compiled program".to_owned())),
         Expr::PtrWrite(..) => Err(Flow::Trap("ptr_write cannot run in the interpreter; run the compiled program".to_owned())),
+        Expr::PtrNull(..) => Ok(Val::NullPtr),
+        Expr::PtrIsNull(pointer) => Ok(Val::Bool(matches!(eval_expr(env, pointer, locals, caller_locals, false)?, Val::NullPtr))),
         Expr::DerefPtr(pointer, ..) => match eval_expr(env, pointer, locals, caller_locals, false)? {
             Val::Ptr(slot) => match locals.get(&slot).cloned() {
                 Some(Val::Moved) => Err(trap("reading through a pointer to a moved value", 0, 0)),

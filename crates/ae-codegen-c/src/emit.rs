@@ -2494,6 +2494,16 @@ fn emit_intrinsic(
             let value = arg_exprs.first().map(String::as_str).unwrap_or("0");
             finish_value(out, body, types, destination, target, &format!("((void *){value})"))
         }
+        "ptr_null" => {
+            // `ptr::null[T]()`: every pointer is `void *` here, so the null
+            // constant is the whole story. `is_null` is the only operation
+            // that reads it.
+            finish_value(out, body, types, destination, target, "((void *)0)")
+        }
+        "ptr_is_null" => {
+            let pointer = arg_exprs.first().map(String::as_str).unwrap_or("0");
+            finish_value(out, body, types, destination, target, &format!("({pointer} == NULL)"))
+        }
         "ptr_drop_in_place" => {
             // The pointer is `void *`; the pointee type decides which release
             // helper runs, exactly like a drop of a local of that type. A

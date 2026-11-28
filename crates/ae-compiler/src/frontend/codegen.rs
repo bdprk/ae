@@ -242,6 +242,17 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted::value(format!("({ptr_c}){cast_arg}"), target_ty)
         }
+        Expr::PtrNull(pointee_id, ..) => {
+            // `ptr::null[T]()`: the pointee only shapes the C cast; the value
+            // is a plain null pointer constant.
+            let pointee = ctx.ptr_pointee(*pointee_id);
+            let ptr_c = format!("{} *", c_type_field(pointee, ctx));
+            Emitted::value(format!("({ptr_c})0"), Type::PtrMut(*pointee_id))
+        }
+        Expr::PtrIsNull(pointer) => {
+            let inner = emit_expr(pointer, out, next, false, ctx);
+            Emitted::value(format!("(({}) == NULL)", inner.text), Type::Bool)
+        }
         Expr::PtrWrite(pointer, value, ..) => {
             let pointer = emit_expr(pointer, out, next, false, ctx);
             let address = *next; *next += 1;

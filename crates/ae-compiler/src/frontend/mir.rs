@@ -437,6 +437,8 @@ fn expr_intrinsic(expr: &Expr, bindings: &mut Vec<MirBinding>, lowering: &mut Mi
             if *mutable { "ptr_cast_mut" } else { "ptr_cast" },
             vec![lower_operand(e, bindings, lowering)],
         ),
+        Expr::PtrNull(..) => ("ptr_null", vec![]),
+        Expr::PtrIsNull(e) => ("ptr_is_null", vec![lower_operand(e, bindings, lowering)]),
         Expr::PtrDropInPlace(e, ..) => ("ptr_drop_in_place", vec![lower_operand(e, bindings, lowering)]),
         Expr::PtrWrite(p, v, ..) => ("ptr_write", vec![lower_operand(p, bindings, lowering), lower_operand(v, bindings, lowering)]),
         Expr::Len(e, ..) => ("len", vec![lower_operand(e, bindings, lowering)]),
@@ -656,6 +658,8 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         Expr::PtrCast(_, mutable, pointee_id, ..) => {
             if *mutable { Type::PtrMut(*pointee_id) } else { Type::Ptr(*pointee_id) }
         }
+        Expr::PtrNull(pointee_id, ..) => Type::PtrMut(*pointee_id),
+        Expr::PtrIsNull(_) => Type::Bool,
         // Result-returning built-ins carry their result type; the printed
         // temp names the enum the program must match on.
         Expr::ReadFileBytes(_, _, _, ty, ..) | Expr::TryReadFile(_, ty, ..) | Expr::TryListDir(_, ty, ..) | Expr::ParseInt(_, ty, ..)

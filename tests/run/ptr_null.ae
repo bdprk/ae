@@ -1,0 +1,15 @@
+// spec/unsafe.md 2.1: `ptr::null[T]()` and `p.is_null()` — is_null is safe
+// (it reads nothing). A null pointer names no slot; a borrow-cast pointer
+// names one, so the two is_null results differ.
+struct Node { val: i64, next: *mut Node }
+
+fn main() {
+    let null_node = ptr::null[Node]();
+    print(null_node.is_null());
+    let null_bytes = ptr::null[i64]();
+    print(null_bytes.is_null());
+    var value = 42;
+    let live = &mut value as *mut i64;
+    print(live.is_null());
+    print(null_bytes.is_null());
+}
