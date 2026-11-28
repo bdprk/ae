@@ -47,6 +47,9 @@ All notable, user-visible changes to the `ae` toolchain and the language it comp
 
 ### Fixed
 
+- **`ae fmt` lexes the full language surface**: attributes (`#[repr(C)]`), pointer types (`*mut T` — no longer split to `* mut`), `extern`/`unsafe`/`as`, and the compound assignments (`+=` — no longer split to `+ =`, which formatted sources into programs that did not compile). Formatting is byte-idempotent on the whole fixture corpus.
+- **The pure-MIR C backend compiles under GCC 14**: the `fopen` mode literals travel through per-platform macros (GCC 14 rejects the wide-char form as an incompatible pointer) and `<limits.h>` is included for `LONG_MAX`.
+- **`pub #[repr(C)] struct` parses again** — the attribute-order relaxation had regressed the `pub`-first spelling.
 - `try_create_dir` in the MIR interpreter creates every missing path level.
 - Error-path releases survive a clean walk: the `?` propagate binding revives even when the move walk looks clean (ASan-verified leak fix).
 - `extern` prototype parameter names are numbered per index, so multi-parameter prototypes no longer collide.
