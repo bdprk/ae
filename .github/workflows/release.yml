@@ -29,7 +29,7 @@ jobs:
           - os: ubuntu-latest
             suffix: linux-x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -57,7 +57,7 @@ jobs:
           mkdir -p dist
           cp "$bin" "dist/ae-${{ github.ref_name }}-${{ matrix.suffix }}"
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           fail_on_unmatched_files: true
