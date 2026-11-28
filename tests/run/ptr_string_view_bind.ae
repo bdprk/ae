@@ -1,0 +1,20 @@
+// ADR-0245 stage 3: a heap view binds like any other view. The slot stays
+// the single owner (the view releases nothing — the leak gate proves the
+// counts), print sees the bytes, and the owned string releases through the
+// in-place drop exactly once before the block frees.
+use "../../std/alloc/box.ae";
+
+fn main() {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[string](), 1, 1) as *mut string;
+        var keep = "bound heap view";
+        let _w = ptr_write(raw, keep);
+        let v = raw.deref();
+        print(v);
+        print(len(v));
+        let dropped = ptr_drop_in_place(raw);
+        print(dropped);
+        let _f = ae_std_free(raw as *mut i64);
+    }
+    print("done");
+}

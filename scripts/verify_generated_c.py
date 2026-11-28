@@ -228,6 +228,9 @@ def run():
         ("tests/run/box_string.ae", b"written\n0\nfreed", True),
         ("tests/run/ptr_string_view.ae", b"heap view\ncompare ok\n0\ndone", True),
         ("tests/run/tree_nodes.ae", b"15\n5\ndone", True),
+        # ADR-0245 stage 3: a bound heap view releases nothing; the owned
+        # string still drops in place exactly once before the block frees.
+        ("tests/run/ptr_string_view_bind.ae", b"bound heap view\n15\n0\ndone", True),
     ]
     with tempfile.TemporaryDirectory(prefix="ae-c-verify-") as tmp:
         tmp = Path(tmp)
