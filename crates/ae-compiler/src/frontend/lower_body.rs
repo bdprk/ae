@@ -380,6 +380,10 @@ impl<'a> Parser<'a> {
                         // classify rules.
                         scalar_type(ty) || matches!(ty, Type::Struct(_) | Type::String | Type::StrView | Type::ArrayOf(..) | Type::Slice(_) | Type::SliceMut(_)
                             | Type::VectorRef(_) | Type::StructRef(_) | Type::StructMut(_)
+                            // A map borrow parameter (ADR-0245): the callee
+                            // reads and mutates through the pointer the map
+                            // calls consume directly.
+                            | Type::MapRef(_)
                             // A by-value vector or map parameter owns the
                             // argument: the call moves it (tracked in
                             // `moved`).

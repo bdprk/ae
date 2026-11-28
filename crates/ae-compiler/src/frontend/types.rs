@@ -1035,6 +1035,19 @@ impl Parser<'_> {
                     self.require_public("struct", &def.name.clone(), &def.file.clone(), def.public)?;
                     return Ok(Type::StructRef(sid));
                 }
+                // `&map[K, V]` (ADR-0245) borrows a map read-only: the callee
+                // reads and mutates through the pointer the map calls consume
+                // directly, with the borrow's lifetime the call's — the same
+                // contract `&vec` gives vectors.
+                if borrowed == "map" && self.tokens.get(self.pos + 1).map(|tok| &tok.kind) == Some(&Kind::LBracket) {
+                    self.pos += 1;
+                    self.take(Kind::LBracket)?;
+                    let key = self.named_type()?;
+                    self.take(Kind::Comma)?;
+                    let value = self.named_type()?;
+                    self.take(Kind::RBracket)?;
+                    return Ok(Type::MapRef(self.ctx.intern_map_types(key, value)));
+                }
                 return Err(self.error_at(amp_offset,
                     "unsupported borrow type; write &string, &vec, &vec[string], &vec[f64], &Struct, &[i64; N], &mut [T], or &T inside a generic function"));
             }
