@@ -239,3 +239,13 @@ borrow-argument 分支更早处：`&counts` 实参进入分类前，place 解析
 前置类型门对 MapOf 基底 bail → 落回标量降级 → catch-all。下窗从
 lower_value_arguments 的 BorrowArgument 臂入口单步追踪（80 行），找到
 bail 点后加 map 形态即可。树已恢复 HEAD 态（误编辑全回退，零残留）。
+
+## 20. §19 完成：classify 修复落地，catch-all 追踪留窗
+
+CallBorrow::classify 加 MapRef↔MapOf→Address 对 + borrows_place 匹配加
+MapRef 臂 + 六站点/向量化臂认 MapRef（全提交）。探针再进：三路一致报
+catch-all（lower_expr.rs:1189）——BorrowArgument 表达式在某路径被
+lower_scalar_body_expression 直接降级（分类分支构建了
+Argument::Value(BorrowAs(place)) 后，某处对该 expr 再降级）。下窗首事：
+追踪 print 臂/values 集合对 total(&counts) 调用实参的降级路径，让
+BorrowAs(MapOf) 走 BorrowAs 发射臂。零 corpus 影响（门禁全绿已验证）。
