@@ -54,15 +54,39 @@ Context: the other session's suite on the stale 04dff421 tree
 | Segment | Mode | Seeds so far | Failures | Status |
 |---|---|---|---|---|
 | s1 (`9907ce26` binary) | pure-subset 20k target | **4752** | **0** | stopped early (see note) |
-| s2 (`9bfc9f86` binary) | pure-subset 20k | running | 0 so far | chain: pure then mixed, `--jobs 2` |
-| s2 (`9bfc9f86` binary) | mixed 20k | queued | — | starts after s2 pure |
+| s2 (`9bfc9f86` binary) | pure-subset 20k | 2194 ok | 0 real / 1593 environmental-ENOSPC | stopped at ~seed 3787 (incident below) |
+| s3 (`a35c8de9` binary) | pure-subset 20k → mixed 20k | queued | — | campaign restart on newest main for comparable seed numbering |
 
-The s1 chain was retired mid-campaign once the tip binary existed
-(PURE_EXIT=143 by deliberate kill of the relay's own PIDs; its mixed leg
-had not started). Logs: `/data/home/ae-relay/fuzz-pure.log` (s1),
-`/data/home/ae-relay2/fuzz-pure.log` + `fuzz-mixed.log` (s2, live).
-Throughput is ~0.3 seeds/s under the heavily contested host; the chain
-runs unattended and totals will be amended on this branch.
+### The s2 ENOSPC incident (why the s2 chain stopped)
+
+At s2 seed ~1987 every subsequent compile died instantly. All 1593
+FAILURE lines carry `(0 lines)` — a compile-stage death — and **zero**
+have non-zero line counts, i.e. no run-stage divergence hides among
+them. Root cause verified on the host, not a timeout theory:
+
+```
+tmpfs           3.9G  3.9G  8.0K 100% /tmp
+ae: writing generated C: No space left on device (os error 28)
+```
+
+`/tmp` (3.9 G tmpfs) filled up — TemporaryDirectory trees leaked by the
+SIGTERM-killed orphan campaigns (the relay's own kills among them)
+stacked on the live campaigns' workdirs. Accounting per the triage
+guidance: the clean metric is **2194 ok seeds / 0 real failures**
+(s2 pure, `9bfc9f86`); the 1593 FAILURE lines are environmental
+compile-stage deaths with the df + probe excerpt above as proof. The
+relay chain was stopped (its remaining seeds would all die the same
+way), leaked tmpdirs were deleted only after verifying zero live
+process references (each dir's /proc scan showed only the diagnostic
+shell), and /tmp recovered to 54% used with the binary probe passing
+again (`PROBE_EXIT=0`).
+
+Seed-numbering note: main's generator gained the kind-31 heap-string
+and kind-32 map-view shapes after `9bfc9f86`, so s2's seed stream is
+not comparable to main's. The s3 restart on `a35c8de9` restores
+comparable numbering and picks up the fixture migrations (including
+`6da1640a`, which fixes the heap_map expected literal below — verified
+present in the s3 tree).
 
 Observed (NOT relay's): r2 stale-tree campaign2 (04dff421), r3 campaign3
 on current main, one `--duration 1` mixed fuzzer (exited on its own
@@ -95,14 +119,13 @@ fixtures, gcc + libasan/lsan):
   Reading the tuple: returncode 0, program stdout `true\n10\n0\ndone\n`
   (byte-identical to the committed `tests/run/heap_map.stdout` modulo
   CRLF), stderr is the leakcheck line with **blocks=0 bytes=0** — the
-  program is correct and leak-free. The failure is a stale expected
-  literal in the harness: `scripts/verify_generated_c.py` line 239 pins
+  program is correct and leak-free. The failure was a stale expected
+  literal in the harness: `scripts/verify_generated_c.py` line 239 pinned
   `("tests/run/heap_map.ae", b"true\n0\ndone", True)` — the fixture's
   output changed when slice "map writes through the borrow"
   (`664a314e`) added the second `map_inc` (7+3 → 10), and the case list
-  was not updated. One-line fix for the main agent: change the literal
-  to `b"true\n10\n0\ndone"`. The Windows leak gate runs the same list
-  and will assert the same way.
+  was not updated. **Fixed on main by `6da1640a`** (the s3 tree carries
+  `b"true\n10\n0\ndone"` at line 239; verified on the host).
 
 New fixtures' emitted pure C compiled individually with
 `gcc -std=c11 -O0 -fsanitize=address,leak`,
