@@ -3356,7 +3356,9 @@ fn emit_rvalue(
                     Ok(format!("((uintptr_t)ae_vec_len(&{place_expr}))"))
                 }
                 Some(TyKind::VectorRef(_)) => {
-                    let place_expr = emit_place(body, place, types, None)?;
+                    // The view type is the expected type: a deref place emits
+                    // the slot's address cast, not a header copy (ADR-0245).
+                    let place_expr = emit_place(body, place, types, ty)?;
                     Ok(format!("((uintptr_t)ae_vec_len({place_expr}))"))
                 }
                 Some(TyKind::MapOf(_)) => {

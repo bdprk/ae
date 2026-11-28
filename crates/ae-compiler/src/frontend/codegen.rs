@@ -295,20 +295,23 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
             };
             Emitted::value(text, base_ty)
         }
-        Expr::DerefPtr(pointer, ..) => {
+        Expr::DerefPtr(pointer, line, column) => {
             let t = emit_expr(pointer, out, next, false, ctx);
             let ty = crate::frontend::mir::expr_type(expr, ctx);
             // A view-typed deref (ADR-0245): the pointee is owned, so the
             // read must not copy the owning header. A string view copies the
-            // ptr/len pair (AE_VIEW); a vector view is the slot's own
-            // address seen through the borrow type — no read at all.
+            // ptr/len pair (AE_VIEW); a vector view materializes the slot's
+            // address as a borrow pointer — the same `(*v)` shape a `&vec`
+            // parameter reads through — so every downstream consumer (len,
+            // element reads, the moved-vector guard) works unchanged.
             if ty == Type::StrView {
                 Emitted::value(format!("AE_VIEW(AE_PTR_READ({}))", t.text), ty)
             } else if let Type::VectorRef(elem_id) = ty {
-                Emitted::value(
-                    format!("((const {} *)({}))", c_output::vector_family(ctx, elem_id), t.text),
-                    ty,
-                )
+                let id = *next; *next += 1;
+                out.push_str(&format!("    const {} *t{id} = ((const {} *)({}));\n",
+                    c_output::vector_family(ctx, elem_id), c_output::vector_family(ctx, elem_id), t.text));
+                out.push_str(&format!("    if (!t{id}->data) ae_fail(\"use of moved vector\", {line}, {column});\n"));
+                Emitted { text: format!("(*t{id})"), ty: Type::Vector(elem_id), owned: false, moves: Vec::new(), materialized: true }
             } else {
                 Emitted::value(format!("AE_PTR_READ({})", t.text), ty)
             }
