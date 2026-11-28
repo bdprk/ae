@@ -2488,7 +2488,19 @@ fn eval_expr(
         // compiled backends run the arithmetic; the corpus pins their
         // behavior without asserting interp agreement.
         Expr::PtrOffset(..) => Err(Flow::Trap("pointer arithmetic cannot run in the interpreter; run the compiled program".to_owned())),
-        Expr::PtrDropInPlace(..) => Err(Flow::Trap("ptr_drop_in_place cannot run in the interpreter; run the compiled program".to_owned())),
+        // A scalar pointee has nothing to release: the drop reads nothing and
+        // reports 0, exactly what the compiled backends emit for scalars. An
+        // owned pointee has no interpreter model — its pointer cannot even be
+        // constructed here (the frame-slot casts reject owned operands), so
+        // it keeps a named trap; heap slots are extern-bridge shapes the
+        // interpreter never builds.
+        Expr::PtrDropInPlace(pointer, pointee, ..) => match eval_expr(env, pointer, locals, caller_locals, false)? {
+            Val::Ptr(_) if matches!(pointee, Type::String | Type::Vector(_) | Type::MapOf(_) | Type::Struct(_) | Type::Enum(..)) => {
+                Err(Flow::Trap("ptr_drop_in_place on an owned pointee cannot run in the interpreter; run the compiled program".to_owned()))
+            }
+            Val::Ptr(_) | Val::NullPtr => Ok(Val::Int(0)),
+            _ => Err(Flow::Trap("internal: drop of a non-pointer".to_owned())),
+        },
         Expr::PtrWrite(..) => Err(Flow::Trap("ptr_write cannot run in the interpreter; run the compiled program".to_owned())),
         Expr::PtrNull(..) => Ok(Val::NullPtr),
         Expr::PtrIsNull(pointer) => Ok(Val::Bool(matches!(eval_expr(env, pointer, locals, caller_locals, false)?, Val::NullPtr))),
