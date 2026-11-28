@@ -1,7 +1,7 @@
-use "../../std/core/ir_linker_script.ae";
-use "../../std/core/ir_archive_ar.ae";
-use "../../std/core/ir_def_exports.ae";
-use "../../std/core/ir_lto_summary.ae";
+use "../../std/compiler/ir_linker_script.ae";
+use "../../std/compiler/ir_archive_ar.ae";
+use "../../std/compiler/ir_def_exports.ae";
+use "../../std/compiler/ir_lto_summary.ae";
 
 fn main() {
     assert(region_end(make_memory_region(134217728, 524288, 5)) == 134742016);

@@ -7,6 +7,7 @@ pub enum LiteralValue<'a> {
     Integer(i64),
     Float(f64),
     Boolean(bool),
+    Char(char),
     /// Source spelling between the quotes, with escape sequences preserved.
     String(&'a str),
 }
@@ -27,6 +28,7 @@ pub fn parse_literal(token: &Token) -> Option<Literal<'_>> {
         Kind::Float(value) => LiteralValue::Float(*value),
         Kind::True => LiteralValue::Boolean(true),
         Kind::False => LiteralValue::Boolean(false),
+        Kind::Char(value) => LiteralValue::Char(*value),
         Kind::Text(value) => LiteralValue::String(value),
         _ => return None,
     };

@@ -1,0 +1,1 @@
+ae: $DIR/typed_binding_borrow.ae:5:12: a local binding cannot hold a borrow; borrows exist as parameters and match bindings

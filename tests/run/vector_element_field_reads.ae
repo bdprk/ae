@@ -1,0 +1,39 @@
+// P2.4 route coverage: a field read on an indexed aggregate.
+// `v[i].x`, `v[i].inner.radius`, an array literal, and both borrowed
+// parameter forms (`&vec[T]`, `&[T; N]`) all resolve the element's fields
+// from the vector/array interner.
+#[derive(Copy)]
+struct Inner { radius: i64 }
+
+#[derive(Copy)]
+struct Outer { inner: Inner, tag: i64 }
+
+fn vec_total(items: &vec[Outer]) -> i64 {
+    var sum = 0;
+    for i in 0..len(items) {
+        sum += items[i].inner.radius + items[i].tag;
+    }
+    return sum;
+}
+
+fn frame_total(frame: &[Outer; 3]) -> i64 {
+    var sum = 0;
+    for i in 0..3 {
+        sum += frame[i].inner.radius * 10 + frame[i].tag;
+    }
+    return sum;
+}
+
+fn main() {
+    var items = vec[Outer { inner: Inner { radius: 2 }, tag: 10 }, Outer { inner: Inner { radius: 3 }, tag: 20 }];
+    print(items[0].inner.radius);
+    print(items[1].tag);
+    print(vec_total(&items));
+    let tag = items[0].tag;
+    print(tag);
+
+    var frame = [Outer { inner: Inner { radius: 4 }, tag: 1 }, Outer { inner: Inner { radius: 5 }, tag: 2 }, Outer { inner: Inner { radius: 6 }, tag: 3 }];
+    print(frame[1].inner.radius);
+    print(frame[2].tag);
+    print(frame_total(&frame));
+}

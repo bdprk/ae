@@ -1,0 +1,24 @@
+// std/compiler/ir_remat.ae
+// Compiler register rematerialization eligibility checker (cheap recomputation vs spill reload).
+
+pub struct RematCandidate {
+    vreg_id: i64,
+    is_constant_or_arg: bool,
+    recompute_cost: i64,
+}
+
+pub fn remat_candidate_new(vreg: i64, is_const: bool, cost: i64) -> RematCandidate {
+    return RematCandidate {
+        vreg_id: vreg,
+        is_constant_or_arg: is_const,
+        recompute_cost: cost,
+    };
+}
+
+pub fn remat_should_rematerialize(c: RematCandidate, spill_reload_cost: i64) -> bool {
+    // Only constants or trivial addresses whose recomputation cost is strictly cheaper than memory reload
+    if !c.is_constant_or_arg {
+        return false;
+    }
+    return c.recompute_cost < spill_reload_cost;
+}

@@ -30,7 +30,7 @@ ID = re.compile(r"(?<![A-Za-z0-9])([A-Z]+\d+(?:\.\d+)*(?:[a-z])?|[A-Z]+\d+[a-z])
 
 
 def run_git(args: list[str]) -> str:
-    result = subprocess.run(["git", *args], capture_output=True, text=True, check=True, cwd=ROOT)
+    result = subprocess.run(["git", *args], capture_output=True, encoding="utf-8", check=True, cwd=ROOT)
     return result.stdout
 
 
@@ -46,31 +46,43 @@ def commits(base: str) -> list[tuple[str, str]]:
     return out
 
 
+def docs_only(commit_hash: str) -> bool:
+    """Whether the commit changes nothing outside `docs/`.
+
+    A docs commit's title may describe state in passing ("handoff: R4.1
+    done") — that is a summary of the ledger, not a claim of completed work
+    that must edit it in the same commit. Code commits keep the strict rule.
+    """
+    listing = run_git(["show", "--format=", "--name-only", commit_hash])
+    files = [name for name in listing.splitlines() if name.strip()]
+    return bool(files) and all(name.startswith("docs/") for name in files)
+
+
 def touches_ledger(commit_hash: str) -> bool:
     """Whether the commit changed the ledger file at all."""
-    files = run_git(["show", "--format=", "--name-only", "--", LEDGER.name, commit_hash])
+    files = run_git(["show", "--format=", "--name-only", commit_hash, "--", LEDGER.relative_to(ROOT).as_posix()])
     return bool(files.strip())
 
 
 def flipped_ids(commit_hash: str) -> set[str]:
     """The ledger IDs this commit checked off (`[ ]` -> `[x]`), if any."""
-    diff = run_git(["show", "--format=", "--unified=0", "--", LEDGER.name, commit_hash])
-    flipped = set()
-    removed = ""
-    for line in diff.split("\n"):
-        if line.startswith("---") or line.startswith("+++") or line.startswith("@@") or line.startswith("index"):
+    diff = run_git(["show", "--format=", "--unified=0", commit_hash, "--", LEDGER.relative_to(ROOT).as_posix()])
+    unchecked = set()
+    checked = set()
+    for line in diff.splitlines():
+        if line.startswith("---") or line.startswith("+++"):
             continue
-        if line.startswith("-"):
-            removed = line[1:]
+        entry = line[1:].lstrip()
+        if line.startswith("-") and entry.startswith("- [ ]"):
+            items = unchecked
+        elif line.startswith("+") and entry.startswith("- [x]"):
+            items = checked
+        else:
             continue
-        if line.startswith("+"):
-            added = line[1:]
-            if removed.lstrip().startswith("- [ ]") and added.lstrip().startswith("- [x]"):
-                match = ID.search(removed.lstrip()[5:])
-                if match:
-                    flipped.add(match.group(1))
-            removed = ""
-    return flipped
+        match = ID.search(entry[5:])
+        if match:
+            items.add(match.group(1))
+    return unchecked & checked
 
 
 def main() -> int:
@@ -82,6 +94,8 @@ def main() -> int:
     for commit_hash, title in commits(options.base):
         claimed = set(ID.findall(title))
         if not claimed:
+            continue
+        if docs_only(commit_hash):
             continue
         if touches_ledger(commit_hash):
             flipped = flipped_ids(commit_hash)

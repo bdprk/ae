@@ -1,0 +1,34 @@
+// std/std/task/timer.ae
+// Timers over caller-supplied clock values (ADR-0219, ADR-0224 R2.4).
+// This replaces the former `timer_new` / `timer_ready` / `timer_cancel`
+// compiler builtins: a timer is an ordinary value holding a deadline fixed at
+// creation plus one shared atomic cell for the cancelled flag, so a copied
+// timer value shares its cancellation state across tasks and threads.
+//
+// Semantics match the old builtin exactly: a cancelled timer is never ready,
+// cancel succeeds only before the deadline and only once, and a timer whose
+// deadline has passed can no longer be cancelled. Negative delays clamp to
+// zero (the old builtin trapped; the language has no panic yet).
+// Real hosted timers belong in std/time over `now_ms`.
+
+pub struct Timer {
+    deadline: i64,
+    cancelled: atomic,
+}
+
+pub fn timer_new(now: i64, delay: i64) -> Timer {
+    var d = delay;
+    if d < 0 { d = 0; }
+    return Timer { deadline: now + d, cancelled: cell_new(0) };
+}
+
+pub fn timer_ready(t: &Timer, now: i64) -> bool {
+    if cell_load(t.cancelled) != 0 { return false; }
+    return now >= t.deadline;
+}
+
+pub fn timer_cancel(t: &Timer, now: i64) -> bool {
+    if cell_load(t.cancelled) != 0 { return false; }
+    if now >= t.deadline { return false; }
+    return cell_cas(t.cancelled, 0, 1);
+}

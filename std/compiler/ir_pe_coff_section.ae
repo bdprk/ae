@@ -1,0 +1,38 @@
+// std/compiler/ir_pe_coff_section.ae
+// Compiler Windows PE/COFF section header and memory characteristics flags.
+
+pub struct CoffSectionHeader {
+    name_id: i64,
+    virtual_size: i64,
+    virtual_address: i64,
+    size_of_raw_data: i64,
+    pointer_to_raw_data: i64,
+    characteristics: i64, // 0x60000020 = CODE | EXECUTE | READ, 0xC0000040 = INITIALIZED_DATA | READ | WRITE
+}
+
+pub fn coff_section_new(name: i64, v_size: i64, v_addr: i64, raw_sz: i64, raw_ptr: i64, chars: i64) -> CoffSectionHeader {
+    return CoffSectionHeader {
+        name_id: name,
+        virtual_size: v_size,
+        virtual_address: v_addr,
+        size_of_raw_data: raw_sz,
+        pointer_to_raw_data: raw_ptr,
+        characteristics: chars,
+    };
+}
+
+pub fn coff_section_is_executable(s: CoffSectionHeader) -> bool {
+    // 0x20000000 (IMAGE_SCN_MEM_EXECUTE)
+    let shifted = s.characteristics / 536870912;
+    return (shifted % 2) == 1;
+}
+
+pub fn coff_section_is_writable(s: CoffSectionHeader) -> bool {
+    // 0x80000000 (IMAGE_SCN_MEM_WRITE)
+    let shifted = s.characteristics / 2147483648;
+    return (shifted % 2) == 1;
+}
+
+pub fn coff_section_raw_size(s: CoffSectionHeader) -> i64 {
+    return s.size_of_raw_data;
+}

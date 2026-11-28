@@ -1,0 +1,38 @@
+// std/compiler/type_unify.ae
+// Compiler type resolution and unification compatibility primitives.
+
+pub enum BuiltinTypeId {
+    TypeI64,
+    TypeF64,
+    TypeBool,
+    TypeString,
+    TypeUnit,
+}
+
+pub fn builtin_type_code(t: BuiltinTypeId) -> i64 {
+    var code = 0;
+    match t {
+        BuiltinTypeId::TypeI64 => { code = 1; }
+        BuiltinTypeId::TypeF64 => { code = 2; }
+        BuiltinTypeId::TypeBool => { code = 3; }
+        BuiltinTypeId::TypeString => { code = 4; }
+        BuiltinTypeId::TypeUnit => { code = 5; }
+    }
+    return code;
+}
+
+pub fn builtin_type_is_numeric(t: BuiltinTypeId) -> bool {
+    var r = false;
+    match t {
+        BuiltinTypeId::TypeI64 => { r = true; }
+        BuiltinTypeId::TypeF64 => { r = true; }
+        BuiltinTypeId::TypeBool => {}
+        BuiltinTypeId::TypeString => {}
+        BuiltinTypeId::TypeUnit => {}
+    }
+    return r;
+}
+
+pub fn builtin_type_can_unify(a: BuiltinTypeId, b: BuiltinTypeId) -> bool {
+    return builtin_type_code(a) == builtin_type_code(b);
+}

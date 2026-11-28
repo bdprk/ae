@@ -48,7 +48,7 @@ ae 标准库严格遵循单向依赖规则，禁止循环引用与反向依赖�
 - **核心模块**:
   - `std/core/option.ae`, `std/core/result.ae`: 可恢复错误与可选值代数类型。
   - `std/core/cmp.ae`, `std/core/clone.ae`, `std/core/hash.ae`: 核心比较、克隆与散列特征。
-  - `std/core/default.ae`, `std/core/num.ae`, `std/core/convert.ae`: 默认重置、数值模长与显式转换。
+  - `std/alloc/default.ae`, `std/core/num.ae`, `std/core/convert.ae`: 默认重置、数值模长与显式转换。
   - `std/core/order.ae`: `Less`, `Equal`, `Greater` 全序枚举。
 
 ### 领域 B: 内存拓扑与分配策略 (Memory Topology & Allocators)
@@ -66,9 +66,9 @@ ae 标准库严格遵循单向依赖规则，禁止循环引用与反向依赖�
   - `std/core/utf8.ae`: UTF-8 字符边界与码点字节长推导。
   - `std/core/ascii_table.ae`, `std/core/ascii_case.ae`: 极速大小写转换与忽略大小写比较。
   - `std/core/strview.ae`: 零拷贝切片子视图与边界安全截断。
-  - `std/core/tokenizer_state.ae`: 词法分析器行号、列号与绝对偏移游标状态。
+  - `std/compiler/tokenizer_state.ae`: 词法分析器行号、列号与绝对偏移游标状态。
   - `std/core/char_predicate.ae`: 标识符与字面量字符谓词（`is_ident_start`, `is_ident_continue`）。
-  - `std/core/span.ae`: 诊断源码跨度与精确定位。
+  - `std/compiler/span.ae`: 诊断源码跨度与精确定位。
 
 ### 领域 D: 算法与数据结构状态机 (Algorithms & Structural States)
 - **定位**: 编译期与高频数据管道算法。

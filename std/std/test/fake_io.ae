@@ -1,0 +1,216 @@
+// std/std/test/fake_io.ae
+// Deterministic in-memory readiness/completion model used by tests (ADR-0224 R2.1).
+// This replaces the former `adapter_*` / `stream_*` compiler builtins. It is a
+// fake: no sockets, no epoll, no IOCP. Real network I/O belongs in std/net (M4.4).
+//
+// Request states: 0 pending / would-block, 1 completed, 2 cancelled, 3 disconnected.
+
+pub struct IoReq {
+    buf: string,
+    chunk: i64,
+    pos: i64,
+    state: i64,
+    rearmed: bool,
+}
+
+pub fn io_submit_read(src: string, chunk: i64) -> IoReq {
+    var state = 0;
+    var size = chunk;
+    if chunk <= 0 {
+        state = 3;
+        size = 0;
+    }
+    return IoReq { buf: src, chunk: size, pos: 0, state: state, rearmed: true };
+}
+
+pub fn io_submit_write(data: string, frag: i64) -> IoReq {
+    var size = frag;
+    if size < 1 {
+        size = 1;
+    }
+    return IoReq { buf: data, chunk: size, pos: 0, state: 0, rearmed: true };
+}
+
+// Advance one readiness event. A pending request that has not been rearmed
+// reports would-block without progress (edge-triggered epoll semantics).
+pub fn io_step(r: &mut IoReq) -> i64 {
+    if r.state != 0 {
+        return r.state;
+    }
+    if !r.rearmed {
+        return 0;
+    }
+    r.pos = r.pos + r.chunk;
+    if r.pos >= len(r.buf) {
+        r.pos = len(r.buf);
+        r.state = 1;
+        return 1;
+    }
+    r.rearmed = false;
+    return 0;
+}
+
+// Cancel a pending request. The buffer stays owned by the request value until
+// it is dropped, which models IOCP buffer retention after cancellation.
+pub fn io_cancel(r: &mut IoReq) -> bool {
+    if r.state != 0 {
+        return false;
+    }
+    r.state = 2;
+    return true;
+}
+
+pub fn io_rearm(r: &mut IoReq) -> bool {
+    if r.state != 0 {
+        return false;
+    }
+    r.rearmed = true;
+    return true;
+}
+
+pub fn io_transferred(r: &mut IoReq) -> string {
+    return "" + slice(r.buf, 0, r.pos);
+}
+
+// Bounded byte pipe with backpressure.
+pub struct BytePipe {
+    cap: i64,
+    buf: string,
+    closed: bool,
+}
+
+pub fn pipe_new(cap: i64) -> BytePipe {
+    var c = cap;
+    if c < 1 {
+        c = 1;
+    }
+    return BytePipe { cap: c, buf: "", closed: false };
+}
+
+// Accept as many bytes as fit; returns the count, or -1 once closed.
+pub fn pipe_send(p: &mut BytePipe, data: string) -> i64 {
+    if p.closed {
+        return -1;
+    }
+    var n = p.cap - len(p.buf);
+    if len(data) < n {
+        n = len(data);
+    }
+    p.buf = p.buf + slice(data, 0, n);
+    return n;
+}
+
+pub fn pipe_recv(p: &mut BytePipe, limit: i64) -> string {
+    var n = limit;
+    if n < 0 {
+        n = 0;
+    }
+    if len(p.buf) < n {
+        n = len(p.buf);
+    }
+    let out = "" + slice(p.buf, 0, n);
+    p.buf = "" + slice(p.buf, n, len(p.buf));
+    return out;
+}
+
+pub fn pipe_close(p: &mut BytePipe) -> i64 {
+    p.closed = true;
+    return 0;
+}
+
+pub fn pipe_is_drained(p: &mut BytePipe) -> bool {
+    return p.closed && len(p.buf) == 0;
+}
+
+pub fn pipe_buffered(p: &mut BytePipe) -> i64 {
+    return len(p.buf);
+}
+
+// --- Late completion and buffer retention (M4.4.01) -------------------------
+// A completion source is an independent event stream (IOCP-style): the I/O
+// system posts (request id, transferred bytes) pairs and the program polls
+// them later. A request whose completion is posted but not yet polled is a
+// late completion: its state is terminal, yet its buffer is still retained
+// until the poll hands it back.
+
+pub struct CompletionSource {
+    in_flight: i64,
+    posted: i64,
+    last_id: i64,
+    last_bytes: i64,
+}
+
+pub fn source_new() -> CompletionSource {
+    return CompletionSource { in_flight: 0, posted: 0, last_id: 0, last_bytes: 0 };
+}
+
+// The request enters the source: one more buffer is in flight.
+pub fn source_track(s: &mut CompletionSource, req_id: i64) -> i64 {
+    let _ = req_id;
+    s.in_flight = s.in_flight + 1;
+    return s.in_flight;
+}
+
+// Post a completion for a tracked request. Posting after a cancel is exactly
+// the late case: the request is terminal either way, and the buffer stays
+// retained until the poll.
+pub fn source_post(s: &mut CompletionSource, req_id: i64, transferred: i64) -> bool {
+    if s.in_flight <= 0 {
+        return false;
+    }
+    // The probe posts one completion at a time, so the source keeps the
+    // last pair rather than a queue: ae has no growable field container
+    // for the receiver position `push` requires.
+    s.posted = s.posted + 1;
+    s.last_id = req_id;
+    s.last_bytes = transferred;
+    return true;
+}
+
+// Poll the next completion: the request id, or -1 when none is queued.
+pub fn source_poll(s: &mut CompletionSource) -> i64 {
+    if s.posted <= 0 {
+        return -1;
+    }
+    s.posted = s.posted - 1;
+    s.in_flight = s.in_flight - 1;
+    return s.last_id;
+}
+
+pub fn source_transferred(s: &CompletionSource) -> i64 {
+    return s.last_bytes;
+}
+
+pub fn source_in_flight(s: &CompletionSource) -> i64 {
+    return s.in_flight;
+}
+
+// The retention oracle: a buffer may be released only when no completion is
+// outstanding. A release attempted while one is still posted counts as a
+// violation, which is what a leak-after-cancel would look like.
+pub struct RetentionOracle {
+    outstanding: i64,
+    violations: i64,
+}
+
+pub fn oracle_new() -> RetentionOracle {
+    return RetentionOracle { outstanding: 0, violations: 0 };
+}
+
+pub fn oracle_hold(o: &mut RetentionOracle) -> i64 {
+    o.outstanding = o.outstanding + 1;
+    return o.outstanding;
+}
+
+pub fn oracle_release(o: &mut RetentionOracle) -> bool {
+    if o.outstanding <= 0 {
+        o.violations = o.violations + 1;
+        return false;
+    }
+    o.outstanding = o.outstanding - 1;
+    return true;
+}
+
+pub fn oracle_violations(o: &RetentionOracle) -> i64 {
+    return o.violations;
+}

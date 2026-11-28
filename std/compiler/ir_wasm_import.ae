@@ -1,0 +1,26 @@
+// std/compiler/ir_wasm_import.ae
+// Compiler WebAssembly import descriptor (module, field, and import kind).
+
+pub struct WasmImport {
+    module_name_len: i64,
+    field_name_len: i64,
+    import_kind: i64, // 0x00=func, 0x01=table, 0x02=mem, 0x03=global
+    type_index: i64,
+}
+
+pub fn wasm_import_new(mod_len: i64, field_len: i64, kind: i64, type_idx: i64) -> WasmImport {
+    return WasmImport {
+        module_name_len: mod_len,
+        field_name_len: field_len,
+        import_kind: kind,
+        type_index: type_idx,
+    };
+}
+
+pub fn wasm_import_is_function(imp: WasmImport) -> bool {
+    return imp.import_kind == 0;
+}
+
+pub fn wasm_import_type_idx(imp: WasmImport) -> i64 {
+    return imp.type_index;
+}

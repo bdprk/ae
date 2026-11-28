@@ -1,12 +1,11 @@
 use std::{env, ffi::{OsStr, OsString}, fs, path::{Path, PathBuf}, process::{Command, ExitCode}, time::Instant};
 
 use ae_compiler::{fmt, frontend, harness, sha256};
-use frontend::compile_path;
 mod package;
 mod render;
 mod frontend_cache;
 
-const USAGE: &str = "usage: ae <check|emit-c|emit-tree|emit-cfg|emit-mir|emit-resolve> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
+const USAGE: &str = "usage: ae <check|emit-c|emit-pure-c|emit-pure-mir|emit-tree|emit-cfg|emit-mir|emit-resolve|emit-types|emit-hir> [source.ae|project]\n       ae check --json [source.ae|project]\n       ae check --render [source.ae|project]\n       ae fmt <source.ae>\n       ae test [source.ae|project] [filter] [--interp]\n       ae run [source.ae|project] [--release|--interp] [--pure] [-- <program args>]\n       ae build [source.ae|project] -o <output> [--debug] [--pure]\n       ae cache [dir|clear|stats]\n       ae deps [source.ae|project]\n       ae new <directory>\n       ae init [directory]\n       ae doc [--test] [source.ae|project]\n       ae explain <E0000>\n       ae add <path>\n       ae remove <name>\n       ae update [project]\n       ae lsp\n       ae version";
 
 /// A toolchain failure with the exit code it maps to. Usage errors exit 2 and
 /// everything else exits 1, so a script can tell "you called it wrong" from
@@ -93,7 +92,18 @@ fn publish_cache(entry: &Path, exe: &Path) {
     let Some(name) = exe.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
     if fs::create_dir_all(entry).is_err() { return; }
     let staging = entry.join(format!("{name}.{}.tmp", std::process::id()));
-    if fs::copy(exe, &staging).is_err() { return; }
+    if fs::write(&staging, &bytes).is_err() {
+        let _ = fs::remove_file(&staging);
+        return;
+    }
+    // The entry is an executable: `fs::write` creates it 0644, and a cache
+    // hit copies those permissions verbatim, so the bit is set before the
+    // rename publishes it. Windows has no executable bit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&staging, fs::Permissions::from_mode(0o755));
+    }
     let manifest = entry.join(format!("manifest.{}.tmp", std::process::id()));
     if fs::write(&manifest, format!("{} {}", bytes.len(), sha256::hex(&bytes))).is_err() {
         let _ = fs::remove_file(&staging);
@@ -257,20 +267,28 @@ fn build_c(c: &str, dir: &Path, release: bool, use_cache: bool) -> Result<PathBu
                 if timings_enabled() { eprintln!("ae cache: disabled (cannot identify the C compiler {cc_name:?})"); }
             }
             Some(identity) => {
-                let key = sha256::hex([
+                let key = sha256::hex_parts(&[
                     c.as_bytes(),
                     optimization.as_bytes(),
                     identity.as_bytes(),
                     cc_name.as_bytes(),
                     env!("CARGO_PKG_VERSION").as_bytes(),
                     if cfg!(windows) { &b"windows"[..] } else { &b"unix"[..] },
-                ].concat().as_slice());
+                ]);
                 let entry = cache_root().join("entries").join(key);
                 let cached = entry.join(exe_name);
                 if cached.is_file() && cache_manifest_matches(&entry, &cached) {
                     let started = Instant::now();
                     touch_used(&entry);
                     fs::copy(&cached, &exe).map_err(|e| format!("copying cached executable: {e}"))?;
+                    // `fs::copy` carries the entry's permissions; an entry
+                    // published before the executable bit was set would copy
+                    // 0644, so heal the destination before running it.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
+                    }
                     if timings_enabled() {
                         eprintln!("ae cache: hit");
                         eprintln!("ae timing: c_compile_and_link_ms={:.3} (cache hit)", started.elapsed().as_secs_f64() * 1000.0);
@@ -367,16 +385,33 @@ fn cache_command(subcommand: Option<&OsString>) -> Result<u8, String> {
     }
 }
 
+/// A compiler error from the pure pipeline already carries its own
+/// `file:line:column` prefix when it comes from a frontend diagnostic; a
+/// lowering/backend message has none, so name the input once here. The
+/// command's own `ae: ` prefix supplies the rest, which keeps the text
+/// comparable to `check`.
+fn locate_message(input: &Path, message: &str) -> String {
+    let named = input.display().to_string();
+    if message.contains(&format!("{named}:")) {
+        return message.to_owned();
+    }
+    format!("{named}: {message}")
+}
+
 fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if args.is_empty() { return Err(Failure::usage(USAGE)); }
     let cmd = args[0].to_str().ok_or(Failure::usage("command must be UTF-8"))?.to_owned();
-    const COMMANDS: [&str; 21] = [
-        "check", "emit-c", "emit-tree", "emit-cfg", "emit-mir", "emit-resolve", "run", "build", "test",
+    const COMMANDS: [&str; 25] = [
+        "check", "emit-c", "emit-pure-c", "emit-pure-mir", "emit-tree", "emit-cfg", "emit-mir", "emit-resolve", "emit-types", "emit-hir", "run", "build", "test",
         "fmt", "cache", "new", "init", "update", "deps", "version", "doc", "explain",
         "add", "remove", "lsp",
     ];
     if !COMMANDS.contains(&cmd.as_str()) {
         return Err(Failure::usage(format!("unknown command: {cmd}\n{USAGE}")));
+    }
+    let mut args = args;
+    if matches!(cmd.as_str(), "check" | "build" | "run" | "test") {
+        args.retain(|arg| arg.to_str() != Some("--offline"));
     }
     if cmd == "lsp" {
         let stdin = std::io::stdin();
@@ -481,7 +516,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         if is_package {
             path.set_file_name("test.ae");
         }
-        return frontend::with_package_imports(imports, || run_tests(&path, filter.as_deref(), use_interp))
+        return run_tests(&path, filter.as_deref(), use_interp, &imports)
             .map_err(Failure::from);
     }
     if cmd == "update" {
@@ -520,9 +555,10 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         // Editor diagnostics: one structured array on stdout, nothing else.
         // Success prints `[]`; lexical recovery may return multiple errors.
         let started = Instant::now();
+        #[allow(clippy::result_large_err)]
         let report = match source.and_then(|path| package::entry_path(&path))
             .map_err(frontend::FrontendError::Legacy)
-            .and_then(|entry| frontend::with_package_imports(entry.imports, || frontend::check_path_diagnostic(&entry.path))) {
+            .and_then(|entry| frontend::check_path_diagnostic_with_imports(&entry.path, &entry.imports)) {
             Ok(()) => "[]".to_owned(),
             Err(frontend::FrontendError::Legacy(message)) => format!("[{}]", diagnostic_json(&message)),
             Err(frontend::FrontendError::Diagnostic(diagnostic)) => format!("[{}]", structured_diagnostic_json(&diagnostic)),
@@ -548,9 +584,10 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         _ => None,
     };
     if let Some(source) = render_check {
+        #[allow(clippy::result_large_err)]
         let outcome = source.and_then(|path| package::entry_path(&path))
             .map_err(frontend::FrontendError::Legacy)
-            .and_then(|entry| frontend::with_package_imports(entry.imports, || frontend::check_path_diagnostic(&entry.path)));
+            .and_then(|entry| frontend::check_path_diagnostic_with_imports(&entry.path, &entry.imports));
         match outcome {
             Ok(()) => return Ok(0),
             Err(frontend::FrontendError::Legacy(message)) => {
@@ -564,13 +601,17 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
                     | frontend::FrontendError::LexDiagnostics(diagnostics) => diagnostics,
                     frontend::FrontendError::Legacy(_) => unreachable!("handled above"),
                 };
+                let mut file_cache: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
                 for diagnostic in &diagnostics {
                     eprintln!("ae: {diagnostic}");
                     let Some(label) = &diagnostic.primary else { continue };
                     let span = &label.span;
                     let Some(file) = &span.file else { continue };
-                    let Ok(text) = fs::read_to_string(file) else { continue };
-                    if let Some(snippet) = render::render_snippet(&text, span.line, span.range.start, span.range.end) {
+                    let text = file_cache
+                        .entry(file.as_str())
+                        .or_insert_with(|| fs::read_to_string(file).ok());
+                    let Some(text) = text.as_deref() else { continue };
+                    if let Some(snippet) = render::render_snippet(text, span.line, span.range.start, span.range.end) {
                         eprintln!("{snippet}");
                     }
                 }
@@ -578,10 +619,21 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
             }
         }
     }
-    let mut args = args;
+    // `build --pure` / `run --pure` compile through the pure-MIR C backend
+    // (ADR-0237); `--legacy` forces the default legacy MIR backend, and
+    // `AE_BACKEND=pure|legacy` selects the same thing without a flag. The
+    // flags are removed before the positional parsing below, so `-o`,
+    // `--release` and `--debug` keep their existing shapes.
+    let backend_env = std::env::var("AE_BACKEND").unwrap_or_default();
+    let mut pure = matches!(cmd.as_str(), "build" | "run")
+        && (args.iter().any(|a| a.to_str() == Some("--pure")) || backend_env == "pure");
+    if args.iter().any(|a| a.to_str() == Some("--legacy")) {
+        pure = false;
+    }
+    args.retain(|a| a.to_str() != Some("--pure") && a.to_str() != Some("--legacy"));
     let first = args.get(1).and_then(|arg| arg.to_str());
     let implicit_project = match cmd.as_str() {
-        "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" => args.len() == 1,
+        "check" | "emit-c" | "emit-pure-c" | "emit-pure-mir" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" => args.len() == 1,
         "run" => args.len() == 1 || matches!(first, Some("--release" | "--debug" | "--interp" | "--")),
         "build" => first == Some("-o"),
         _ => false,
@@ -613,7 +665,7 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
     if interp_run {
         let package::PackageEntry { path: input, imports, .. } = package::entry_path(Path::new(&args[1]))?;
         let input = input.as_path();
-        match frontend::with_package_imports(imports, || frontend::interpret_path(input)) {
+        match frontend::interpret_path_with_imports(input, &imports) {
             Ok((out, code)) => {
                 print!("{out}");
                 return Ok(code);
@@ -634,18 +686,16 @@ fn run(args: Vec<OsString>) -> Result<u8, Failure> {
         _ => level.unwrap_or(false),
     };
     let output = match cmd.as_str() {
-        "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "run" if args.len() == 2 => None,
+        "check" | "emit-c" | "emit-pure-c" | "emit-pure-mir" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" | "run" if args.len() == 2 => None,
         "run" if level.is_some() => None,
         "build" if (args.len() == 4 || level.is_some()) && args[2] == "-o" => Some(PathBuf::from(&args[3])),
-        "check" | "emit-c" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "run" | "build" => return Err(Failure::usage(USAGE)),
+        "check" | "emit-c" | "emit-pure-c" | "emit-pure-mir" | "emit-tree" | "emit-cfg" | "emit-mir" | "emit-resolve" | "emit-types" | "emit-hir" | "run" | "build" => return Err(Failure::usage(USAGE)),
         _ => return Err(Failure::usage(format!("unknown command: {cmd}\n{USAGE}"))),
     };
     let package::PackageEntry { path: input, imports, lock } = package::entry_path(Path::new(&args[1]))?;
     let import_key = sha256::hex(format!("{imports:?}").as_bytes());
-    frontend::with_package_imports(imports, || {
-        run_source(&cmd, &input, output, &program_args, release, &import_key, lock.filter(|_| cmd == "build"))
-    })
-    .map_err(Failure::from)
+    run_source(&cmd, &input, output, &program_args, release, pure, &import_key, &imports, lock.filter(|_| cmd == "build"))
+        .map_err(Failure::from)
 }
 
 /// Renders doc comments as Markdown: one section per block, headed by the
@@ -708,12 +758,12 @@ fn doc_test(path: &Path, source: &str) -> Result<u8, Failure> {
     Ok(if failures == 0 { 0 } else { 1 })
 }
 
-fn run_tests(input: &Path, filter: Option<&str>, use_interp: bool) -> Result<u8, String> {
+fn run_tests(input: &Path, filter: Option<&str>, use_interp: bool, imports: &frontend::PackageImports) -> Result<u8, String> {
     let started = Instant::now();
     // The staged copy is dropped (and deleted) on every path below.
     let program = harness::prepare(input, filter)?;
     if use_interp {
-        match frontend::interpret_path(&program.staging) {
+        match frontend::interpret_path_with_imports(&program.staging, imports) {
             Ok((out, code)) => {
                 print!("{out}");
                 if timings_enabled() {
@@ -723,27 +773,30 @@ fn run_tests(input: &Path, filter: Option<&str>, use_interp: bool) -> Result<u8,
             }
             Err((out, msg)) => {
                 print!("{out}");
-                return Err(msg.into());
+                return Err(msg);
             }
         }
     }
-    let c = compile_path(&program.staging)?;
+    let c = frontend::compile_path_with_imports(&program.staging, imports)?;
     let dir = TempDir::create(&env::temp_dir())?;
     let exe = build_c(&c, &dir.0, false, true)?;
     let status = Command::new(&exe).status().map_err(|e| format!("cannot start test program: {e}"))?;
     if timings_enabled() {
         eprintln!("ae timing: test_ms={:.3} tests={}", started.elapsed().as_secs_f64() * 1000.0, program.tests.len());
     }
-    return Ok(status.code().and_then(|n| u8::try_from(n).ok()).unwrap_or(1));
+    Ok(status.code().and_then(|n| u8::try_from(n).ok()).unwrap_or(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_source(
     cmd: &str,
     input: &Path,
     output: Option<PathBuf>,
     program_args: &[OsString],
     release: bool,
+    pure: bool,
     import_key: &str,
+    imports: &frontend::PackageImports,
     lock: Option<package::PackageLock>,
 ) -> Result<u8, String> {
     let started = Instant::now();
@@ -759,13 +812,53 @@ fn run_source(
         print!("{}", ae_resolve::dump(&module, &resolution));
         return Ok(0);
     }
+    if cmd == "emit-types" {
+        // The type facts are the resolver's own stage output (P1.2): a
+        // deterministic dump of signatures, spellings, local shapes and
+        // checked scalar results, pinned by tests/types snapshots.
+        let (module, resolution) = ae_resolve::load_and_resolve(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        print!("{}", ae_resolve::dump_types::dump(&module, &resolution));
+        return Ok(0);
+    }
+    if cmd == "emit-hir" {
+        // The HIR view is built from the shared syntax tree plus the
+        // resolver's def ids and parsed closure bodies (P1.3 slice 1).
+        let (module, resolution) = ae_resolve::load_and_resolve(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let hir = ae_hir::build(&module, Some(&resolution));
+        print!("{}", ae_hir::dump::dump(&hir));
+        return Ok(0);
+    }
+    if cmd == "emit-pure-c" {
+        // The pure-MIR C pipeline (ADR-0237): lower -> optimize -> validate ->
+        // borrow-check -> C11. Relative imports are followed (byte_streams
+        // compiles through std/io/reader.ae); package imports are not
+        // resolved by this path yet.
+        let config = ae_compiler::ae_codegen_c::EmitConfig {
+            target: ae_compiler::ae_layout::TargetSpec::host(),
+            // Like `emit-c`, the output is a runnable translation unit.
+            emit_main_wrapper: true,
+        };
+        let c = ae_compiler::compile_path_pure_mir_to_c(input, &config)
+            .map_err(|e| locate_message(input, &e))?;
+        print!("{c}");
+        return Ok(0);
+    }
+    if cmd == "emit-pure-mir" {
+        // The pure pipeline's own graph, before any backend: the same lowering
+        // the C backend consumes, so a backend bug can be told apart from a
+        // lowering bug.
+        let text = ae_compiler::format_pure_mir_path(input)
+            .map_err(|e| locate_message(input, &e))?;
+        print!("{text}");
+        return Ok(0);
+    }
     if cmd == "emit-mir" {
-        let mir = frontend::mir_path(input)?;
+        let mir = frontend::mir_path_with_imports(input, imports)?;
         print!("{mir}");
         return Ok(0);
     }
     if cmd == "emit-cfg" {
-        let graph = frontend::cfg_path(input)?;
+        let graph = frontend::cfg_path_with_imports(input, imports)?;
         print!("{graph}");
         return Ok(0);
     }
@@ -773,12 +866,12 @@ fn run_source(
         // The tree always comes from a fresh frontend pass: like `emit-c`,
         // its output IS the frontend's answer, so the reuse cache never
         // stands in for it.
-        let tree = frontend::tree_path(input)?;
+        let tree = frontend::tree_path_with_imports(input, imports)?;
         print!("{tree}");
         return Ok(0);
     }
     if cmd == "check" {
-        frontend::check_path(input)?;
+        frontend::check_path_with_imports(input, imports)?;
         if timings_enabled() {
             eprintln!("ae timing: frontend_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -788,7 +881,9 @@ fn run_source(
     // previous build, the frontend work is skipped entirely. `emit-c` and
     // `check` always run the frontend, because their output *is* the
     // frontend's answer.
-    let cacheable = matches!(cmd, "build" | "run");
+    // The frontend cache stores the legacy backend's C, so a pure build never
+    // reads or writes it.
+    let cacheable = matches!(cmd, "build" | "run") && !pure;
     let c = match if cacheable { frontend_cache::lookup(&cache_root(), input, import_key) } else { None } {
         Some(hit) => {
             if let Some(lock) = &lock { lock.verify(&hit.units)?; }
@@ -798,11 +893,28 @@ fn run_source(
             }
             hit.c
         }
+        None if pure => {
+            // The pure-MIR C pipeline (ADR-0237): lower -> optimize -> validate
+            // -> borrow-check -> C11. Relative imports are followed; package
+            // imports are resolved through the same map the frontend uses.
+            let config = ae_compiler::ae_codegen_c::EmitConfig {
+                target: ae_compiler::ae_layout::TargetSpec::host(),
+                emit_main_wrapper: true,
+            };
+            let bodies = ae_compiler::compile_path_pure_mir_bodies_with_imports(input, imports)?;
+            let c = ae_compiler::ae_codegen_c::emit_module_c(&bodies, &config)
+                .map_err(|e| format!("{e}"))?;
+            if timings_enabled() {
+                eprintln!("ae backend: pure MIR -> C11");
+                eprintln!("ae timing: frontend_and_codegen_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+            }
+            c
+        }
         None => {
-            let tracked = frontend::compile_path_tracked(input)?;
+            let tracked = frontend::compile_path_tracked_with_imports(input, imports)?;
             if let Some(lock) = &lock { lock.verify(&tracked.units)?; }
             let c = format!("{}{}", tracked.runtime, tracked.user);
-            let key = frontend_cache::store(&cache_root(), input, import_key, &tracked);
+            let key = frontend_cache::store_c(&cache_root(), input, import_key, &tracked, &c);
             if timings_enabled() {
                 if cacheable {
                     eprintln!("ae frontend-cache: miss (key {})", key.unwrap_or_else(|| "not stored".into()));

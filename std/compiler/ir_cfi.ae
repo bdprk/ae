@@ -1,0 +1,112 @@
+// std/compiler/ir_cfi.ae
+// Call Frame Information opcode construction for .eh_frame / .debug_frame.
+// Only the parts an emitter needs to size and place records are modelled: the
+// primary opcodes, the extended forms a large delta or register number forces,
+// and the record lengths. No encoder is provided here.
+
+pub fn cfi_nop() -> i64 {
+    return 0;
+}
+
+pub fn cfi_set_loc() -> i64 {
+    return 1;
+}
+
+pub fn cfi_advance_loc_primary(delta: i64) -> i64 {
+    // 0x40 | delta, valid only for 1..=63 code units.
+    if delta < 1 || delta > 63 {
+        return -1;
+    }
+    return 64 + delta;
+}
+
+pub fn cfi_advance_loc_extended() -> i64 {
+    return 2;
+}
+
+pub fn cfi_offset_primary(reg: i64) -> i64 {
+    // 0x80 | reg, valid only for 0..=63.
+    if reg < 0 || reg > 63 {
+        return -1;
+    }
+    return 128 + reg;
+}
+
+pub fn cfi_offset_extended() -> i64 {
+    return 5;
+}
+
+pub fn cfi_restore_primary(reg: i64) -> i64 {
+    // 0xc0 | reg, valid only for 0..=63.
+    if reg < 0 || reg > 63 {
+        return -1;
+    }
+    return 192 + reg;
+}
+
+pub fn cfi_restore_extended() -> i64 {
+    return 6;
+}
+
+pub fn cfi_def_cfa() -> i64 {
+    return 12;
+}
+
+pub fn cfi_def_cfa_register() -> i64 {
+    return 13;
+}
+
+pub fn cfi_def_cfa_offset() -> i64 {
+    return 14;
+}
+
+pub fn cfi_remember_state() -> i64 {
+    return 10;
+}
+
+pub fn cfi_restore_state() -> i64 {
+    return 11;
+}
+
+pub fn cfi_primary_opcode_fits(value: i64) -> bool {
+    // The three primary opcodes carry a six-bit operand; anything wider has to
+    // travel through the extended form with a ULEB128 operand.
+    return value >= 0 && value <= 63;
+}
+
+pub fn cfi_fde_len(initial_loc_bytes: i64, range_bytes: i64, aug_data_len: i64, instruction_len: i64) -> i64 {
+    // length(4) + CIE_pointer(4) + initial_location + address_range
+    // + augmentation length (ULEB128) + instructions. The length field counts
+    // everything after itself, which is why it enters as a constant, not a sum.
+    if initial_loc_bytes < 0 || range_bytes < 0 || aug_data_len < 0 || instruction_len < 0 {
+        return -1;
+    }
+    // The augmentation length is a ULEB128, so it costs one byte up to 127.
+    var variable = 1;
+    if aug_data_len >= 128 {
+        variable = 2;
+    }
+    if aug_data_len >= 16384 {
+        variable = 3;
+    }
+    return 4 + 4 + initial_loc_bytes + range_bytes + variable + instruction_len;
+}
+
+pub fn cfi_fde_cie_pointer(fde_offset: i64, cie_offset: i64) -> i64 {
+    // The CIE pointer is the distance backwards from the FDE's own CIE_pointer
+    // field to the start of the CIE it belongs to.
+    return fde_offset - cie_offset;
+}
+
+pub fn cfi_fde_cie_pointer_valid(fde_offset: i64, cie_offset: i64) -> bool {
+    // Zero would be read as a terminator, and a negative distance points forward,
+    // which the format does not allow.
+    if fde_offset <= cie_offset {
+        return false;
+    }
+    return true;
+}
+
+pub fn cfi_is_terminator(length_field: i64) -> bool {
+    return length_field == 0;
+}

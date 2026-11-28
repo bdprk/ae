@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_opt2.ae
 // Verification of SwitchLoweringStrategy, InlineCandidate, TailCallEligibility, and LatticeValue (SCCP).
 
-use "../../std/core/ir_switch_table.ae";
-use "../../std/core/ir_inline_cost.ae";
-use "../../std/core/ir_tail_call.ae";
-use "../../std/core/ir_constant_prop.ae";
+use "../../std/compiler/ir_switch_table.ae";
+use "../../std/compiler/ir_inline_cost.ae";
+use "../../std/compiler/ir_tail_call.ae";
+use "../../std/compiler/ir_constant_prop.ae";
 
 fn main() {
     print("--- batch_core_compiler_opt2 test start ---");

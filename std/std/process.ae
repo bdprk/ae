@@ -1,0 +1,28 @@
+// std/std/process.ae
+// Hosted process surface (P4.3): the program's own arguments, its exit, and a
+// child process. The compiler builtins stay the runtime implementation.
+
+// The program's own command line, including the program name at index 0.
+pub fn argv() -> vec[string] {
+    return args();
+}
+
+// Terminate with `code`. This is the same exit the runtime's `exit` performs:
+// the status is the process's, and no destructor runs.
+pub fn exit_with(code: i64) {
+    exit(code);
+}
+
+// Run a child program. The argument vector is consumed (the child owns its
+// copy); stdout and stderr arrive as one stream in write order, and a non-zero
+// exit status is a successful `Ok` carrying that status.
+pub fn launch(program: &string, arguments: vec[string]) -> CommandResult {
+    return run_command(program, arguments);
+}
+
+// A convenience for the common "no arguments" case.
+pub fn launch_plain(program: &string) -> CommandResult {
+    // `run_command` takes a bare vector variable, not an expression.
+    let empty = strvec_new();
+    return run_command(program, empty);
+}

@@ -1,0 +1,33 @@
+// P2.4 container rung: an owned element type (`vec[vec]`).
+// The outer vector stores inner vector headers; `ae_gvec`'s drop hook runs
+// each inner release on pop, overwrite and scope exit. Element reads are
+// views (`&vec`), so the outer vector keeps the storage and never lets a
+// binding move an element out.
+fn total(rows: &vec[vec]) -> i64 {
+    var sum = 0;
+    for row in rows {
+        sum += len(row);
+    }
+    return sum;
+}
+
+fn main() {
+    var rows = vec[vec[1, 2], vec[3, 4, 5]];
+    print(len(rows));
+    print(len(rows[0]));
+    print(len(rows[1]));
+    print(total(&rows));
+
+    var extra = vec[7, 8, 9, 10];
+    push(rows, extra);
+    print(len(rows));
+    print(len(rows[2]));
+
+    var replacement = vec[4, 4];
+    rows[0] = replacement;
+    print(len(rows[0]));
+
+    pop(rows);
+    print(len(rows));
+    print(total(&rows));
+}

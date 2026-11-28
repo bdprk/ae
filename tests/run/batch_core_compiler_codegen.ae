@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_codegen.ae
 // Verification of IR register allocation, stack frame layout, calling convention, and spill weight.
 
-use "../../std/core/ir_reg_alloc.ae";
-use "../../std/core/ir_stack_frame.ae";
-use "../../std/core/ir_call_conv.ae";
-use "../../std/core/ir_spill.ae";
+use "../../std/compiler/ir_reg_alloc.ae";
+use "../../std/compiler/ir_stack_frame.ae";
+use "../../std/compiler/ir_call_conv.ae";
+use "../../std/compiler/ir_spill.ae";
 
 fn main() {
     print("--- batch_core_compiler_codegen test start ---");

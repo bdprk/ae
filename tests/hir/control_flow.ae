@@ -1,0 +1,33 @@
+// The compiler rejects every statement here; emit-resolve still dumps it,
+// pinning the resolver's control-flow diagnostics (probes s1/s4/s5/s6 texts
+// plus return agreement). The missing-return-path analysis needs a CFG and
+// stays out (ADR-0229 slice 4 remainder).
+enum Opt[T] { Some(T), None }
+
+fn wrong_condition() -> i64 {
+    if 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn wrong_while() -> i64 {
+    while "text" {
+        return 1;
+    }
+    return 0;
+}
+
+fn wrong_return() -> string {
+    return 5;
+}
+
+fn missing_arm(v: Opt[i64]) -> i64 {
+    match v {
+        Opt::Some(x) => { return x; }
+    }
+}
+
+fn main() {
+    print(wrong_condition());
+}

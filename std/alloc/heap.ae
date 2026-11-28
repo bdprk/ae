@@ -1,0 +1,20 @@
+// std/alloc/heap.ae
+// Core Heap Allocation Header & Offset Calculation (M1.4 / M2.4)
+
+pub struct AllocHeader {
+    size: i64,
+    alignment: i64,
+    is_used: bool,
+}
+
+pub fn alloc_header_create(size: i64, align: i64) -> AllocHeader {
+    return AllocHeader { size: size, alignment: align, is_used: true };
+}
+
+pub fn alloc_is_aligned(addr: i64, align: i64) -> bool {
+    return addr % align == 0;
+}
+
+pub fn alloc_payload_size(header: AllocHeader) -> i64 {
+    return header.size;
+}

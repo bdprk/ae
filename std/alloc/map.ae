@@ -1,0 +1,23 @@
+// std/alloc/map.ae
+pub struct Map[K, V] {
+    count: i64,
+    capacity: i64,
+}
+
+impl[K, V] Map[K, V] {
+    pub fn new() -> Map[K, V] {
+        return Map { count: 0, capacity: 0 };
+    }
+
+    pub fn len(&self) -> i64 {
+        return self.count;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        return self.count == 0;
+    }
+
+    pub fn capacity(&self) -> i64 {
+        return self.capacity;
+    }
+}

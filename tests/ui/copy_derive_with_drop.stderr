@@ -1,0 +1,1 @@
+ae: $DIR/copy_derive_with_drop.ae:7:24: cannot implement 'drop' for Copy struct 'Bad'

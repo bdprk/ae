@@ -4,6 +4,10 @@ version = "0.1.1"
 edition = "2024"
 
 [dependencies]
+ae-codegen-c = { path = "../ae-codegen-c" }
+ae-layout = { path = "../ae-layout" }
+ae-mir = { path = "../ae-mir" }
 ae-resolve = { path = "../ae-resolve" }
 ae-syntax = { path = "../ae-syntax" }
 ae-span = { path = "../ae-span" }
+ae-ty = { path = "../ae-ty" }

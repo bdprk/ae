@@ -1,0 +1,47 @@
+// std/std/io.ae
+// Hosted text I/O surface (P4.3): standard input, standard output, and the
+// view-producing line/split helpers. The compiler builtins stay the runtime
+// implementation; this module names them for call sites.
+//
+// `lines_of`/`split_of` return elements that are views into the caller's
+// string: the caller keeps it alive, exactly like the builtins.
+
+// The whole of standard input as one owned string. Empty input is
+// `Ok("")` with length 0; read failures are `Err` with the OS text.
+// Reading is byte-exact: line endings are not translated (ADR-0244).
+pub fn read_all() -> ReadResult {
+    return read_stdin();
+}
+
+// Write one line: the text followed by a newline, through `print`.
+pub fn write_line(text: &string) {
+    print(text);
+}
+
+// Write one integer, one boolean or one character as a line.
+pub fn write_number(value: i64) {
+    print(value);
+}
+
+pub fn write_bool(value: bool) {
+    print(value);
+}
+
+// The non-empty lines of `text`, as views into it (the builtin's rule:
+// trailing newlines do not produce an empty final line).
+pub fn lines_of(text: &string) -> vec[string] {
+    return lines(text);
+}
+
+// Split `text` by `separator`, keeping empty segments, as views into it.
+pub fn split_of(text: &string, separator: &string) -> vec[string] {
+    return split(text, separator);
+}
+
+// The number of tokens `split_of` would produce, without materializing them.
+pub fn token_count(text: &string, separator: &string) -> i64 {
+    if len(separator) == 0 {
+        return 0;
+    }
+    return len(split(text, separator));
+}

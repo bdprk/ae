@@ -1,0 +1,27 @@
+// std/compiler/ir_asm_directive.ae
+// Compiler assembly text emission directive classification.
+
+pub struct AsmDirective {
+    dir_type: i64,      // 1=.globl, 2=.text, 3=.data, 4=.rodata, 5=.align, 6=.size
+    operand_val: i64,
+}
+
+pub fn asm_directive_new(dtype: i64, op_val: i64) -> AsmDirective {
+    return AsmDirective {
+        dir_type: dtype,
+        operand_val: op_val,
+    };
+}
+
+pub fn asm_directive_is_section(d: AsmDirective) -> bool {
+    // 2=.text, 3=.data, 4=.rodata
+    return d.dir_type >= 2 && d.dir_type <= 4;
+}
+
+pub fn asm_directive_is_align(d: AsmDirective) -> bool {
+    return d.dir_type == 5;
+}
+
+pub fn asm_directive_alignment(d: AsmDirective) -> i64 {
+    return d.operand_val;
+}

@@ -1,0 +1,1 @@
+ae: $DIR/generic_trait_missing_method_rejected.ae:6:12: generic function 'broken' calls missing method 'volume' on type parameter 'T' with bounds 'Area' (no bound defines 'volume')

@@ -1,0 +1,7 @@
+fn broken[T](x: T) -> i64 {
+    return x.area();
+}
+
+fn main() {
+    print(1);
+}

@@ -1,0 +1,25 @@
+// P4.3 hosted `std/time`: the wall-clock face over the compiler's clock
+// builtins. The values themselves are nondeterministic, so the fixture pins
+// the relations a caller relies on instead of the numbers.
+use "../../std/std/time.ae";
+
+fn body() -> i64 {
+    let seconds = now_seconds();
+    let millis = now_millis();
+
+    // A plausible epoch instant: after 2023 and before the year 2100.
+    print(seconds > 1700000000);
+    print(seconds < 4102444800);
+
+    // The millisecond clock agrees with the second clock within a second.
+    print(millis > seconds * millis_per_second() - 1000);
+    print(millis < (seconds + 1) * millis_per_second() + 1000);
+
+    // The epoch form is the same clock under another name.
+    print(epoch_millis() > 0);
+    return 0;
+}
+
+fn main() {
+    assert(body() == 0);
+}

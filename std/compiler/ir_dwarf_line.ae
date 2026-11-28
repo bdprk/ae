@@ -1,0 +1,30 @@
+// std/compiler/ir_dwarf_line.ae
+// Compiler DWARF line table entry and state machine delta encoder.
+
+pub struct DwarfLineEntry {
+    address: i64,
+    line: i64,
+    column: i64,
+    file_id: i64,
+}
+
+pub fn dwarf_line_new(addr: i64, line: i64, col: i64, file: i64) -> DwarfLineEntry {
+    return DwarfLineEntry {
+        address: addr,
+        line: line,
+        column: col,
+        file_id: file,
+    };
+}
+
+pub fn dwarf_line_addr_delta(entry: DwarfLineEntry, prev_addr: i64) -> i64 {
+    return entry.address - prev_addr;
+}
+
+pub fn dwarf_line_num_delta(entry: DwarfLineEntry, prev_line: i64) -> i64 {
+    return entry.line - prev_line;
+}
+
+pub fn dwarf_line_is_same_file(entry: DwarfLineEntry, prev_file: i64) -> bool {
+    return entry.file_id == prev_file;
+}

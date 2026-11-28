@@ -1,0 +1,16 @@
+fn value() -> Result[i64, i64] {
+    return Result[i64, i64]::Ok(1);
+}
+
+fn propagate() -> Result[i64, i64] {
+    let v = value()?;
+    return Result[i64, i64]::Ok(v);
+}
+
+fn main() {
+    let r = propagate();
+    match r {
+        Result::Ok(v) => { print(v); }
+        Result::Err(e) => { print(e); }
+    }
+}

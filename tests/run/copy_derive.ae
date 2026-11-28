@@ -1,0 +1,77 @@
+#[repr(C)]
+#[derive(Copy)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+#[repr(C)]
+#[derive(Copy)]
+struct Rect {
+    origin: Point,
+    size: Point,
+}
+
+#[derive(Copy)]
+enum Shape {
+    Empty,
+    Circle(i64),
+    Scale(f64),
+}
+
+#[derive(Copy)]
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+fn sum_point(p: Point) -> i32 {
+    return p.x + p.y;
+}
+
+fn dup[T: Copy](v: T) -> T {
+    return v;
+}
+
+fn describe(s: Shape) -> i64 {
+    match s {
+        Shape::Empty => { return 0; }
+        Shape::Circle(r) => { return r; }
+        Shape::Scale(f) => { return f as i64; }
+    }
+}
+
+fn main() {
+    let p1 = Point { x: 10 as i32, y: 20 as i32 };
+    let p2 = p1;
+    print(sum_point(p1));
+    print(sum_point(p2));
+    print(p1.x);
+
+    let r = Rect { origin: p1, size: p2 };
+    let r2 = r;
+    print(r.origin.x + r2.size.y);
+
+    let s1 = Shape::Circle(7);
+    let s2 = Shape::Scale(30.5);
+    print(describe(s1));
+    print(describe(s1));
+    print(describe(s2));
+    print(describe(s2));
+
+    let pair = Pair[i32, u8] { first: 42 as i32, second: 9 as u8 };
+    let pair2 = pair;
+    print(pair.first);
+    print(pair2.second);
+
+    let d_i32 = dup[i32](12 as i32);
+    let d_u8 = dup[u8](3 as u8);
+    let d_f32 = dup[f32](1.5 as f32);
+    let d_char = dup[char]('Z');
+    let d_pt = dup[Point](p1);
+    print(d_i32);
+    print(d_u8);
+    print(d_f32);
+    print(d_char);
+    print(d_pt.y);
+}

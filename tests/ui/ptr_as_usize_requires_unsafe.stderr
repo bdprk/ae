@@ -1,0 +1,1 @@
+ae: $DIR/ptr_as_usize_requires_unsafe.ae:4:13: pointer-to-integer cast requires 'unsafe'

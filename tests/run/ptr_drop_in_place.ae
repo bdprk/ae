@@ -1,0 +1,14 @@
+// A scalar pointee has no owned state, so dropping in place through the
+// pointer is a well-defined no-op that still reports 0 (spec/unsafe.md 2.2).
+// A pointer to an owned value is rejected at the cast, so this is the only
+// shape that reaches the intrinsic.
+fn main() {
+    var n = 4;
+    let p = &mut n as *mut i64;
+    unsafe {
+        let dropped = ptr_drop_in_place(p);
+        print(dropped);
+        print(p.deref());
+    }
+    print("done");
+}

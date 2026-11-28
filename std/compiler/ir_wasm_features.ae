@@ -1,0 +1,24 @@
+// std/compiler/ir_wasm_features.ae
+// Compiler WebAssembly target feature flags bitmask (simd, bulk-memory, multi-value).
+
+pub struct WasmFeatures {
+    flags: i64, // 1=bulk_memory, 2=simd128, 4=multi_value, 8=mutable_globals
+}
+
+pub fn wasm_features_new(flags: i64) -> WasmFeatures {
+    return WasmFeatures { flags: flags };
+}
+
+pub fn wasm_has_bulk_memory(f: WasmFeatures) -> bool {
+    return (f.flags % 2) == 1;
+}
+
+pub fn wasm_has_simd128(f: WasmFeatures) -> bool {
+    let shifted = f.flags / 2;
+    return (shifted % 2) == 1;
+}
+
+pub fn wasm_has_multi_value(f: WasmFeatures) -> bool {
+    let shifted = f.flags / 4;
+    return (shifted % 2) == 1;
+}

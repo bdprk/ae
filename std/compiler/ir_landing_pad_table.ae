@@ -1,0 +1,23 @@
+// std/compiler/ir_landing_pad_table.ae
+// Compiler exception action and landing pad table address lookup mapper.
+
+pub struct ActionTableEntry {
+    type_filter: i64,
+    next_action_offset: i64,
+}
+
+pub fn action_entry_new(filter: i64, next_off: i64) -> ActionTableEntry {
+    return ActionTableEntry {
+        type_filter: filter,
+        next_action_offset: next_off,
+    };
+}
+
+pub fn action_is_catch_all(entry: ActionTableEntry) -> bool {
+    // Filter 0 matches all exceptions (catch (...))
+    return entry.type_filter == 0;
+}
+
+pub fn action_has_next(entry: ActionTableEntry) -> bool {
+    return entry.next_action_offset > 0;
+}

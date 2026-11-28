@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_dwarf2.ae
 // Verification of SLEB128 encoding, DwarfExprOp, DwarfDie, and DwarfCie primitives.
 
-use "../../std/core/ir_leb128_signed.ae";
-use "../../std/core/ir_dwarf_expr.ae";
-use "../../std/core/ir_dwarf_die.ae";
-use "../../std/core/ir_dwarf_cie.ae";
+use "../../std/compiler/ir_leb128_signed.ae";
+use "../../std/compiler/ir_dwarf_expr.ae";
+use "../../std/compiler/ir_dwarf_die.ae";
+use "../../std/compiler/ir_dwarf_cie.ae";
 
 fn main() {
     print("--- batch_core_compiler_dwarf2 test start ---");

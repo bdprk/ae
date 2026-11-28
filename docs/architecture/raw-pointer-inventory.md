@@ -33,11 +33,11 @@ only place the contract needs reviewing.
 | Function | Receives | Assumes | Who releases |
 |---|---|---|---|
 | `ae_str_release(ae_string *slot)` | pointer to an owned string slot | the slot is live and not aliased; the pointer is either NULL, read-only data, or an allocator block | call itself: frees, then nulls the slot |
-| `ae_vec_release`, `ae_f64vec_release`, `ae_strvec_release`, `ae_map_release`, `ae_mapf_release` | pointer to the container slot | same as above | call itself |
+| `ae_gvec_release`, `ae_strvec_release`, `ae_map_release`, `ae_mapf_release` | pointer to the container slot | same as above | call itself |
 | `ae_t<N>_release`, `ae_e<N>_release` | pointer to a struct or enum value | the value is initialized and owned by the caller | call itself, field by field |
-| `ae_vec_push(ae_vec *v, ...)` | pointer to a mutable slot | exclusive access; no live view of the same buffer | the slot keeps ownership |
+| `ae_gvec_push(ae_gvec *v, const void *elem, ...)`, `ae_strvec_push`, `ae_map_put(ae_map *m, ...)`, `ae_mapf_put(ae_mapf *m, ...)` | pointer to a mutable slot | exclusive access; no live view of the same buffer | the slot keeps ownership |
 | `ae_slice_view(s, start, end)` | view by value, returns a view into `s.ptr` | `s.ptr` stays live as long as the result (enforced by the borrow checker, not by C) | nobody: views are never freed |
-| `ae_slice(s, start, end)` | view by value | returns an owned copy | the returned string |
+| `ae_str_slice(s, start, end)` | view by value | returns an owned copy | the returned string |
 
 ## 3. Safe wrappers and the check that enforces their invariant (M2.4.04)
 

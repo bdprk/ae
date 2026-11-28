@@ -1,5 +1,5 @@
 // ADR-0224 R2.4: cancellation tokens are ae source in std/sync.
-use "../../std/sync/cancel.ae";
+use "../../std/std/sync/cancel.ae";
 
 fn early_return_scope(c: atomic) -> i64 {
     let sc = scope_new();
@@ -44,12 +44,13 @@ fn main() {
         print(steps);
         return 0;
     });
-    task_spawn(ex, || -> i64 {
+    let trigger = || -> i64 {
         task_yield();
         let ok = cancel_trigger(t_park);
         print(ok);
         return 0;
-    });
+    };
+    task_spawn(ex, (trigger));
     print(exec_run(ex));
 
     // M4.2.07: 4-worker work-stealing pool executes 100 tasks exactly once

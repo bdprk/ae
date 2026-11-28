@@ -1,0 +1,31 @@
+// std/compiler/ir_wasm_type.ae
+// Compiler WebAssembly valtype and functype descriptor for multi-target backend emission.
+
+pub struct WasmFuncType {
+    param_count: i64,
+    return_count: i64,
+    // 0x7F=i32, 0x7E=i64, 0x7D=f32, 0x7C=f64
+    first_param_type: i64,
+    return_type: i64,
+}
+
+pub fn wasm_type_new(params: i64, rets: i64, p1: i64, r1: i64) -> WasmFuncType {
+    return WasmFuncType {
+        param_count: params,
+        return_count: rets,
+        first_param_type: p1,
+        return_type: r1,
+    };
+}
+
+pub fn wasm_type_is_void_return(t: WasmFuncType) -> bool {
+    return t.return_count == 0;
+}
+
+pub fn wasm_type_has_params(t: WasmFuncType) -> bool {
+    return t.param_count > 0;
+}
+
+pub fn wasm_type_is_i64(type_code: i64) -> bool {
+    return type_code == 126; // 0x7E
+}

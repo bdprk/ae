@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_wasm4.ae
 // Verification of WasmCustomSection, WasmRelocEntry, WasmShadowStackFrame, and WasmFeatures.
 
-use "../../std/core/ir_wasm_leb_custom.ae";
-use "../../std/core/ir_wasm_reloc.ae";
-use "../../std/core/ir_wasm_stack_frame.ae";
-use "../../std/core/ir_wasm_features.ae";
+use "../../std/compiler/ir_wasm_leb_custom.ae";
+use "../../std/compiler/ir_wasm_reloc.ae";
+use "../../std/compiler/ir_wasm_stack_frame.ae";
+use "../../std/compiler/ir_wasm_features.ae";
 
 fn main() {
     print("--- batch_core_compiler_wasm4 test start ---");

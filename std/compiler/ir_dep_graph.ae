@@ -1,0 +1,91 @@
+// std/compiler/ir_dep_graph.ae
+// Incremental compilation dependency graph state. A node is one query result;
+// an edge records that recomputing the callee can invalidate the caller. Only
+// the counters a scheduler needs are modelled here, not the graph storage.
+
+pub struct DepNode {
+    node_id: i64,
+    dep_count: i64,
+    interface_dep_count: i64,
+    is_dirty: bool,
+}
+
+pub struct DepEdge {
+    from_node: i64,
+    to_node: i64,
+    crosses_crate: bool,
+}
+
+pub fn make_dep_node(node_id: i64, deps: i64, interface_deps: i64) -> DepNode {
+    return DepNode {
+        node_id: node_id,
+        dep_count: deps,
+        interface_dep_count: interface_deps,
+        is_dirty: false,
+    };
+}
+
+pub fn dep_node_mark_dirty(node: DepNode) -> DepNode {
+    return DepNode {
+        node_id: node.node_id,
+        dep_count: node.dep_count,
+        interface_dep_count: node.interface_dep_count,
+        is_dirty: true,
+    };
+}
+
+pub fn dep_node_mark_clean(node: DepNode) -> DepNode {
+    return DepNode {
+        node_id: node.node_id,
+        dep_count: node.dep_count,
+        interface_dep_count: node.interface_dep_count,
+        is_dirty: false,
+    };
+}
+
+pub fn dep_node_needs_recompute(node: DepNode, reached_from_changed: bool) -> bool {
+    // Red-green marking: a node recomputes when it is dirty itself, or when it
+    // was reached through a dependency that already changed. A node that is
+    // neither stays green and its cached result is reused untouched.
+    return node.is_dirty || reached_from_changed;
+}
+
+pub fn dep_body_dependents(node: DepNode) -> i64 {
+    // Edges that stay inside the crate: a body change reaches these only.
+    return node.dep_count - node.interface_dep_count;
+}
+
+pub fn dep_invalidated_count(node: DepNode, interface_changed: bool) -> i64 {
+    if interface_changed {
+        return node.interface_dep_count;
+    }
+    return dep_body_dependents(node);
+}
+
+pub fn dep_node_overcounts(node: DepNode) -> bool {
+    // An interface dependency is also a dependency; a node whose interface
+    // edges exceed its total edges is inconsistent.
+    return node.interface_dep_count > node.dep_count;
+}
+
+pub fn make_dep_edge(from_node: i64, to_node: i64, crosses_crate: bool) -> DepEdge {
+    return DepEdge { from_node: from_node, to_node: to_node, crosses_crate: crosses_crate };
+}
+
+pub fn dep_edge_is_self_loop(edge: DepEdge) -> bool {
+    return edge.from_node == edge.to_node;
+}
+
+pub fn dep_edge_requires_interface_hash(edge: DepEdge) -> bool {
+    // Only a cross-crate edge makes the callee's interface summary part of the
+    // caller's cache key.
+    return edge.crosses_crate;
+}
+
+pub fn dep_cycle_guard(depth: i64, max_depth: i64) -> bool {
+    // Bounds fixed-point propagation when the dependency graph has a cycle.
+    if max_depth <= 0 {
+        return false;
+    }
+    return depth >= max_depth;
+}

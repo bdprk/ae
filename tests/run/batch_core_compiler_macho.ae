@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_macho.ae
 // Verification of MachO64Header, MachOSegment64, MachOSection64, and MachONlist64 primitives.
 
-use "../../std/core/ir_macho_header.ae";
-use "../../std/core/ir_macho_segment.ae";
-use "../../std/core/ir_macho_section.ae";
-use "../../std/core/ir_macho_symtab.ae";
+use "../../std/compiler/ir_macho_header.ae";
+use "../../std/compiler/ir_macho_segment.ae";
+use "../../std/compiler/ir_macho_section.ae";
+use "../../std/compiler/ir_macho_symtab.ae";
 
 fn main() {
     print("--- batch_core_compiler_macho test start ---");

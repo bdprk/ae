@@ -1,0 +1,21 @@
+// std/alloc/fmt.ae
+// Core String Formatting & Display Trait (M1.7 / M1.12)
+
+pub trait Display {
+    fn display(x: T) -> string;
+}
+
+impl Display for i64 {
+    fn display(x: i64) -> string {
+        return to_string(x);
+    }
+}
+
+impl Display for bool {
+    fn display(x: bool) -> string {
+        if x {
+            return "true";
+        }
+        return "false";
+    }
+}

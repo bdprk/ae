@@ -1,0 +1,30 @@
+// std/compiler/ir_stack_map.ae
+// Compiler GC and debugging stack map frame descriptor.
+
+pub struct StackMapFrame {
+    pc_offset: i64,
+    live_slot_mask: i64, // Bitmask of live GC pointer slots
+    slot_count: i64,
+}
+
+pub fn stack_map_frame_new(pc: i64, mask: i64, count: i64) -> StackMapFrame {
+    return StackMapFrame {
+        pc_offset: pc,
+        live_slot_mask: mask,
+        slot_count: count,
+    };
+}
+
+pub fn stack_map_is_live(frame: StackMapFrame, slot_idx: i64) -> bool {
+    if slot_idx < 0 || slot_idx >= frame.slot_count {
+        return false;
+    }
+    // Check bit (1 << slot_idx) using repeated div/rem
+    var m = frame.live_slot_mask;
+    var i = 0;
+    while i < slot_idx {
+        m = m / 2;
+        i = i + 1;
+    }
+    return (m % 2) == 1;
+}

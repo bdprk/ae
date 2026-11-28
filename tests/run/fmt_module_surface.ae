@@ -1,0 +1,57 @@
+// P4.4 hosted `std/fmt`: integer bases, padding and digit grouping. The
+// fixture pins the boundary widths (64-bit min/max in each base), the padding
+// rules and the grouping of negative values.
+use "../../std/std/fmt.ae";
+
+fn body() -> i64 {
+    assert(hex_i64(0, 0) == "0");
+    assert(hex_i64(15, 0) == "f");
+    assert(hex_i64(16, 0) == "10");
+    assert(hex_i64(255, 0) == "ff");
+    assert(hex_i64(255, 4) == "00ff");
+    assert(hex_i64(0, 8) == "00000000");
+    print("hex");
+
+    // -1 is all ones: sixteen f's.
+    let minus_one = hex_i64(0 - 1, 0);
+    assert(len(minus_one) == 16);
+    assert(minus_one == "ffffffffffffffff");
+    let lowest = hex_i64(0 - 9223372036854775807 - 1, 0);
+    assert(lowest == "8000000000000000");
+    print("hex negative");
+
+    assert(hex_i64_upper(255, 0) == "FF");
+    assert(hex_i64_upper(3735928559, 0) == "DEADBEEF");
+    print("upper");
+
+    assert(bin_i64(0, 0) == "0");
+    assert(bin_i64(5, 0) == "101");
+    assert(bin_i64(5, 8) == "00000101");
+    print("binary");
+
+    assert(oct_i64(0, 0) == "0");
+    assert(oct_i64(8, 0) == "10");
+    assert(oct_i64(64, 0) == "100");
+    assert(oct_i64(511, 0) == "777");
+    print("octal");
+
+    assert(pad_left("7", 3, "0") == "007");
+    assert(pad_left("abc", 3, "0") == "abc");
+    assert(pad_left("x", 5, " ") == "    x");
+    assert(pad_right("7", 3, ".") == "7..");
+    assert(pad_right("abc", 2, ".") == "abc");
+    assert(pad_left("x", 4, "") == "x");
+    print("padding");
+
+    assert(grouped_i64(0) == "0");
+    assert(grouped_i64(999) == "999");
+    assert(grouped_i64(1000) == "1_000");
+    assert(grouped_i64(1234567) == "1_234_567");
+    assert(grouped_i64(0 - 1234567) == "-1_234_567");
+    print("grouping");
+    return 0;
+}
+
+fn main() {
+    assert(body() == 0);
+}

@@ -1,0 +1,92 @@
+// P4.3 hosted `std/fs`: the named surface over the compiler's filesystem
+// builtins. One round trip exercises create/write/append/read/rename/copy/
+// list/info/remove/rmdir through the module, plus the error classifier.
+use "../../std/std/fs.ae";
+
+fn run() -> i64 {
+    let dir = "ae-fs-module";
+    // Each result is bound before the match: a match subject is a place the
+    // ownership pass can track, so a bare call expression is not one.
+    let made = mkdir(dir);
+    match made {
+        StatusResult::Ok => { print("made"); }
+        StatusResult::Err(r) => { print("mkdir " + r); return 0; }
+    }
+
+    let wrote = write_text_in(dir, "a.txt", "alpha");
+    match wrote {
+        WriteResult::Ok(n) => { print(n); }
+        WriteResult::Err(r) => { print("write " + r); return 0; }
+    }
+
+    let added = append_text(child(dir, "a.txt"), "beta");
+    match added {
+        WriteResult::Ok(n) => { print(n); }
+        WriteResult::Err(r) => { print("append " + r); return 0; }
+    }
+
+    let back = read_text(child(dir, "a.txt"));
+    match back {
+        ReadResult::Ok(text) => { print(len(text)); print(text); }
+        ReadResult::Err(r) => { print("read " + r); return 0; }
+    }
+
+    let moved = rename(child(dir, "a.txt"), child(dir, "b.txt"));
+    match moved {
+        StatusResult::Ok => { print("renamed"); }
+        StatusResult::Err(r) => { print("rename " + r); return 0; }
+    }
+
+    let copied = copy(child(dir, "b.txt"), child(dir, "c.txt"));
+    match copied {
+        StatusResult::Ok => { print("copied"); }
+        StatusResult::Err(r) => { print("copy " + r); return 0; }
+    }
+
+    let listed = list(dir);
+    match listed {
+        DirResult::Ok(names) => {
+            print(len(names));
+            for n in names { print(n); }
+        }
+        DirResult::Err(r) => { print("list " + r); return 0; }
+    }
+
+    let meta_result = info(child(dir, "c.txt"));
+    match meta_result {
+        FileResult::Ok(meta) => { print(meta.size); }
+        FileResult::Err(r) => { print("info " + r); return 0; }
+    }
+
+    print(exists(child(dir, "c.txt")));
+    print(is_dir(dir));
+
+    // The classifier sees a real missing file through the module.
+    let missing = read_text(child(dir, "gone.txt"));
+    match missing {
+        ReadResult::Ok(t) => { print("unexpected "); print(len(t)); }
+        ReadResult::Err(reason) => { print(io_error_kind_code(io_error_kind_of(reason))); }
+    }
+
+    // Cleanup in reverse order: files, then the directory.
+    let rm_b = remove(child(dir, "b.txt"));
+    match rm_b {
+        StatusResult::Ok => { print("rm b"); }
+        StatusResult::Err(r) => { print(r); }
+    }
+    let rm_c = remove(child(dir, "c.txt"));
+    match rm_c {
+        StatusResult::Ok => { print("rm c"); }
+        StatusResult::Err(r) => { print(r); }
+    }
+    let rm_dir = rmdir(dir);
+    match rm_dir {
+        StatusResult::Ok => { print("rmdir"); }
+        StatusResult::Err(r) => { print(r); }
+    }
+    return 0;
+}
+
+fn main() {
+    assert(run() == 0);
+}

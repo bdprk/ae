@@ -1,0 +1,8 @@
+exported: tracked diff 141 lines, 0 untracked files
+applied: 2 changed paths in the WSL clone
+cargo build: Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.34s
+cargo test: 496 passed, 0 failed across 13 binaries
+sanitize+leak: PASS bounds.ae
+fuzz 40 seeds: 40 seeds, 0 failures, 3.0s (13.15 seeds/s, 8 jobs)
+std layering: std layering holds
+commit ids: commit titles and ledger records agree

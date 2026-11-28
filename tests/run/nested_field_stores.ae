@@ -1,0 +1,26 @@
+// P2.4: field stores through a nested receiver (`o.m.inner.n = 5`,
+// `o.m.inner.cells = vec[7, 8]`). The chain resolves from the root binding;
+// a `&mut` root writes through its pointer at every level, an owned aggregate
+// moves into the leaf field, and a write into a moved value is a use of it.
+struct Inner { n: i64, name: string, cells: vec }
+
+struct Mid { inner: Inner, tag: i64 }
+
+struct Outer { m: Mid }
+
+fn bump(h: &mut Outer) { h.m.inner.n += 3; }
+
+fn main() {
+    var o = Outer { m: Mid { inner: Inner { n: 1, name: "a", cells: vec[1] }, tag: 10 } };
+    o.m.inner.n = 5;
+    print(o.m.inner.n);
+    o.m.tag = 20;
+    print(o.m.tag);
+    o.m.inner.name = "beta";
+    print(o.m.inner.name);
+    o.m.inner.cells = vec[7, 8];
+    print(len(o.m.inner.cells));
+    print(o.m.inner.cells[1]);
+    bump(&mut o);
+    print(o.m.inner.n);
+}

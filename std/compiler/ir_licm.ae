@@ -1,0 +1,23 @@
+// std/compiler/ir_licm.ae
+// Compiler Loop Invariant Code Motion (LICM) safety analysis and hoist eligibility checker.
+
+pub struct LoopHoistCandidate {
+    def_vreg: i64,
+    is_pure_expression: bool,
+    operands_loop_invariant: bool,
+    has_side_effects: bool,
+}
+
+pub fn licm_candidate_new(vreg: i64, is_pure: bool, inv_operands: bool, side_effects: bool) -> LoopHoistCandidate {
+    return LoopHoistCandidate {
+        def_vreg: vreg,
+        is_pure_expression: is_pure,
+        operands_loop_invariant: inv_operands,
+        has_side_effects: side_effects,
+    };
+}
+
+pub fn licm_can_hoist(c: LoopHoistCandidate) -> bool {
+    // Hoisting is valid only if pure, no side effects, and all operands dominate or are invariant
+    return c.is_pure_expression && c.operands_loop_invariant && !c.has_side_effects;
+}

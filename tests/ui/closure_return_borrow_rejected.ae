@@ -1,0 +1,9 @@
+fn make_borrow() -> impl Fn(i64) -> i64 {
+    let local = "temp";
+    return |x: i64| -> i64 { return len(local) + x; };
+}
+
+fn main() {
+    let f = make_borrow();
+    print(f(1));
+}

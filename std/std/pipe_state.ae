@@ -1,0 +1,28 @@
+// std/std/pipe_state.ae
+// IPC anonymous pipe read/write channel state primitives for Tier 3 std.
+
+pub enum PipeChannelState {
+    Open,
+    Broken,
+    Closed,
+}
+
+pub fn pipe_state_can_write(s: PipeChannelState) -> bool {
+    var r = false;
+    match s {
+        PipeChannelState::Open => { r = true; }
+        PipeChannelState::Broken => {}
+        PipeChannelState::Closed => {}
+    }
+    return r;
+}
+
+pub fn pipe_state_can_read(s: PipeChannelState) -> bool {
+    var r = false;
+    match s {
+        PipeChannelState::Open => { r = true; }
+        PipeChannelState::Broken => {}
+        PipeChannelState::Closed => {}
+    }
+    return r;
+}

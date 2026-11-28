@@ -1,0 +1,18 @@
+fn main() {
+    var v: vec[f64] = vec[];
+    push(v, 1.5);
+    push(v, 2.5);
+    print(len(v));
+    print(v[0]);
+    let n: i64 = 41;
+    print(n);
+    let s: string = "hi";
+    print(s);
+    var w: vec[string] = vec[];
+    push(w, "alpha");
+    print(w[0]);
+    var nested: vec[vec[f64]] = vec[];
+    push(nested, vec[1.5, 2.5]);
+    print(len(nested));
+    print(len(nested[0]));
+}

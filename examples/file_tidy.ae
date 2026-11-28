@@ -81,15 +81,15 @@ fn organize() -> i64 {
                 let source = path_join(raw, name);
                 let info = try_file_info(source);
                 match info {
-                    FileResult::Ok(size, modified, is_dir) => {
-                        assert(modified >= 0);
-                        if !is_dir {
-                            let bucket = classify(size);
+                    FileResult::Ok(meta) => {
+                        assert(meta.mtime >= 0);
+                        if !meta.is_dir {
+                            let bucket = classify(meta.size);
                             let target = path_join(root, bucket);
                             let copied = try_copy_file(source, path_join(target, name));
                             match copied {
                                 StatusResult::Ok => {
-                                    print(name + " " + to_string(size) + " " + bucket);
+                                    print(name + " " + to_string(meta.size) + " " + bucket);
                                     organized = organized + 1;
                                 }
                                 StatusResult::Err(reason) => {

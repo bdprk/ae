@@ -1,0 +1,10 @@
+[package]
+name = "ae-codegen-c"
+version = "0.1.1"
+edition = "2024"
+
+[dependencies]
+ae-layout = { path = "../ae-layout" }
+ae-mir = { path = "../ae-mir" }
+ae-span = { path = "../ae-span" }
+ae-ty = { path = "../ae-ty" }

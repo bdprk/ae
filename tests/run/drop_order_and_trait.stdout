@@ -1,0 +1,24 @@
+drop Guard 3
+drop Guard 2
+drop Guard 1
+drop Guard 10
+after overwrite
+drop Guard 11
+consume 12
+drop Guard 12
+after move-assign
+drop Guard 13
+consume 20
+drop Guard 20
+after cond 20
+after cond 21
+drop Guard 21
+drop Guard 50
+drop Guard 51
+drop Guard 31
+drop Guard 30
+1
+drop Guard 41
+drop Guard 40
+drop Outer 100
+drop Inner 101

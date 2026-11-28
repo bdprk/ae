@@ -1,0 +1,25 @@
+// std/compiler/ir_wasm_opcode.ae
+// Compiler WebAssembly instruction opcodes and stack effect descriptor.
+
+pub struct WasmOp {
+    opcode: i64,      // 0x20=local.get, 0x21=local.set, 0x7C=i64.add, 0x7E=i64.mul, 0x0F=return
+    stack_pop_count: i64,
+    stack_push_count: i64,
+}
+
+pub fn wasm_op_new(op: i64, pops: i64, pushes: i64) -> WasmOp {
+    return WasmOp {
+        opcode: op,
+        stack_pop_count: pops,
+        stack_push_count: pushes,
+    };
+}
+
+pub fn wasm_op_net_stack_growth(op: WasmOp) -> i64 {
+    return op.stack_push_count - op.stack_pop_count;
+}
+
+pub fn wasm_op_is_terminator(op: WasmOp) -> bool {
+    // 0x0F is return
+    return op.opcode == 15;
+}

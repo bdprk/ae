@@ -1,8 +1,8 @@
 // ADR-0224 R2.2: the fake clock is ordinary ae source in std/test, not a
 // compiler builtin. Output is pinned against the former builtin implementation
 // (timers_clock.stdout); timers now take the current time as a plain value.
-use "../../std/test/fake_clock.ae";
-use "../../std/task/timer.ae";
+use "../../std/std/test/fake_clock.ae";
+use "../../std/std/task/timer.ae";
 
 fn main() {
     let clk = fake_clock_new();

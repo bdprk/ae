@@ -1,0 +1,1 @@
+ae: $DIR/result_unit_binding_rejected.ae:2:37: 'StatusResult::Ok' carries no value; use a bare `?`

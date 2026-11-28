@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_coff.ae
 // Verification of CoffHeader, CoffSectionHeader, CoffRelocEntry, and CoffSymbol primitives.
 
-use "../../std/core/ir_pe_coff_header.ae";
-use "../../std/core/ir_pe_coff_section.ae";
-use "../../std/core/ir_pe_coff_reloc.ae";
-use "../../std/core/ir_pe_coff_symtab.ae";
+use "../../std/compiler/ir_pe_coff_header.ae";
+use "../../std/compiler/ir_pe_coff_section.ae";
+use "../../std/compiler/ir_pe_coff_reloc.ae";
+use "../../std/compiler/ir_pe_coff_symtab.ae";
 
 fn main() {
     print("--- batch_core_compiler_coff test start ---");

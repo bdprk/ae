@@ -1,0 +1,14 @@
+#[derive(Copy)]
+struct Guard {
+    id: i64,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        print(self.id);
+    }
+}
+
+fn main() {
+    print(1);
+}

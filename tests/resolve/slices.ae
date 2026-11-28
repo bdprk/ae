@@ -1,0 +1,10 @@
+fn sum(values: &[i64]) -> i64 {
+    var total = 0;
+    for x in values { total += x; }
+    return total;
+}
+
+fn main() {
+    var v = vec[1, 2];
+    print(sum(&v));
+}

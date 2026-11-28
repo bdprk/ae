@@ -1,4 +1,4 @@
-use "../../std/core/box.ae";
+use "../../std/alloc/box.ae";
 
 pub struct Node {
     val: i64,

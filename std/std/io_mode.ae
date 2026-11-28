@@ -1,0 +1,52 @@
+// std/std/io_mode.ae
+// File open mode and access permissions bitflags primitives for Tier 3 std.
+
+pub struct OpenOptions {
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+}
+
+pub fn open_options_read_only() -> OpenOptions {
+    return OpenOptions {
+        read: true,
+        write: false,
+        append: false,
+        truncate: false,
+        create: false,
+    };
+}
+
+pub fn open_options_write_new() -> OpenOptions {
+    return OpenOptions {
+        read: false,
+        write: true,
+        append: false,
+        truncate: true,
+        create: true,
+    };
+}
+
+pub fn open_options_append() -> OpenOptions {
+    return OpenOptions {
+        read: false,
+        write: true,
+        append: true,
+        truncate: false,
+        create: true,
+    };
+}
+
+pub fn open_options_can_read(opt: OpenOptions) -> bool {
+    return opt.read;
+}
+
+pub fn open_options_can_write(opt: OpenOptions) -> bool {
+    return opt.write;
+}
+
+pub fn open_options_is_append(opt: OpenOptions) -> bool {
+    return opt.append;
+}

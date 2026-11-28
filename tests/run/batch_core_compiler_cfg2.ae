@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_cfg2.ae
 // Verification of Dominator tree, NaturalLoop, CriticalEdge splitting, and PostDominator tree.
 
-use "../../std/core/ir_cfg_dom.ae";
-use "../../std/core/ir_cfg_loop.ae";
-use "../../std/core/ir_cfg_critical.ae";
-use "../../std/core/ir_cfg_postdom.ae";
+use "../../std/compiler/ir_cfg_dom.ae";
+use "../../std/compiler/ir_cfg_loop.ae";
+use "../../std/compiler/ir_cfg_critical.ae";
+use "../../std/compiler/ir_cfg_postdom.ae";
 
 fn main() {
     print("--- batch_core_compiler_cfg2 test start ---");

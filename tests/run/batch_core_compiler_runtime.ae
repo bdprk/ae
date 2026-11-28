@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_runtime.ae
 // Verification of TLS descriptor, SafepointPoll, LandingPad, and CallGraphEdge primitives.
 
-use "../../std/core/ir_thread_local.ae";
-use "../../std/core/ir_safepoint.ae";
-use "../../std/core/ir_landing_pad.ae";
-use "../../std/core/ir_call_graph.ae";
+use "../../std/compiler/ir_thread_local.ae";
+use "../../std/compiler/ir_safepoint.ae";
+use "../../std/compiler/ir_landing_pad.ae";
+use "../../std/compiler/ir_call_graph.ae";
 
 fn main() {
     print("--- batch_core_compiler_runtime test start ---");

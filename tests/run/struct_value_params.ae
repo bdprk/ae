@@ -1,0 +1,36 @@
+// A by-value plain struct parameter (`Stats`, no `Drop`, scalar fields) is
+// owned by the callee but carries nothing a release routine walks, so the
+// body route reads its fields, builds a new struct from them, and returns
+// the parameter itself (P1.1 slice 4).
+struct Stats { a: i64, b: i64 }
+
+fn total(s: Stats) -> i64 {
+    return s.a + s.b;
+}
+
+fn doubled(s: Stats) -> Stats {
+    return Stats { a: s.a * 2, b: s.b * 2 };
+}
+
+fn identity(s: Stats) -> Stats {
+    return s;
+}
+
+fn pick(s: Stats, limit: i64) -> i64 {
+    if s.a > limit {
+        return s.a;
+    }
+    return s.b;
+}
+
+fn main() {
+    print("total");
+    print(total(Stats { a: 3, b: 4 }));
+    let d = doubled(Stats { a: 3, b: 4 });
+    print(d.a);
+    print(d.b);
+    let i = identity(Stats { a: 7, b: 8 });
+    print(i.a + i.b);
+    print(pick(Stats { a: 5, b: 2 }, 4));
+    print(pick(Stats { a: 1, b: 2 }, 4));
+}

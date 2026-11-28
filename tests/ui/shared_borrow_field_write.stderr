@@ -1,0 +1,1 @@
+ae: $DIR/shared_borrow_field_write.ae:3:5: cannot assign to immutable variable 'p'

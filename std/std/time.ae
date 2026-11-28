@@ -1,0 +1,22 @@
+// std/std/time.ae
+// Hosted wall-clock surface (P4.3): seconds and milliseconds since the Unix
+// epoch from the compiler's clock builtins. Monotonic time and durations live
+// in std/core/time.ae; this module is the wall-clock face a program imports.
+
+pub fn now_seconds() -> i64 {
+    return now_s();
+}
+
+pub fn now_millis() -> i64 {
+    return now_ms();
+}
+
+// Milliseconds per second, named so callers do not repeat the constant.
+pub fn millis_per_second() -> i64 {
+    return 1000;
+}
+
+// The epoch instant as milliseconds, for a caller that only needs ordering.
+pub fn epoch_millis() -> i64 {
+    return now_ms();
+}

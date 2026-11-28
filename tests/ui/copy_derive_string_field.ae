@@ -1,0 +1,8 @@
+#[derive(Copy)]
+struct Bad {
+    name: string,
+}
+
+fn main() {
+    print(1);
+}

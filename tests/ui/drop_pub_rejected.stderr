@@ -1,0 +1,1 @@
+ae: $DIR/drop_pub_rejected.ae:6:16: destructor 'drop' cannot be marked 'pub'; only compiler-generated drop glue may invoke it

@@ -1,0 +1,12 @@
+fn is_pos(x: i64) -> bool {
+    return x > 0;
+}
+
+struct Handler {
+    cb: fn(i64) -> i64,
+}
+
+fn main() {
+    let h = Handler { cb: is_pos };
+    print(h.cb(1));
+}

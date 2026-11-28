@@ -1,0 +1,4 @@
+fn main() {
+    let a = 32768 as i16;
+    print(a);
+}

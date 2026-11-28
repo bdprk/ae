@@ -1,0 +1,8 @@
+[package]
+name = "ae-mir"
+version = "0.1.1"
+edition = "2024"
+
+[dependencies]
+ae-span = { path = "../ae-span" }
+ae-ty = { path = "../ae-ty" }

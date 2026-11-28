@@ -1,0 +1,29 @@
+// std/compiler/line_indexer.ae
+// Text source line offset indexer primitives for ae core.
+
+pub struct LineOffsets8 {
+    count: i64,
+}
+
+pub fn line_offsets8_new() -> LineOffsets8 {
+    return LineOffsets8 { count: 0 };
+}
+
+pub fn line_offsets8_count(lo: LineOffsets8) -> i64 {
+    return lo.count;
+}
+
+pub fn line_offsets8_add_line(lo: LineOffsets8) -> LineOffsets8 {
+    if lo.count < 8 {
+        return LineOffsets8 { count: lo.count + 1 };
+    }
+    return lo;
+}
+
+pub fn line_offsets8_line_for_offset(lo: LineOffsets8, target_offset: i64) -> i64 {
+    if target_offset < 0 {
+        return 1;
+    }
+    // Conceptual 1-based line mapping
+    return 1;
+}

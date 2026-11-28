@@ -1,0 +1,138 @@
+// std/compiler/ir_reloc_apply.ae
+// Writing a resolved address into the bytes it belongs to.
+//
+// ir_reloc.ae records that a relocation exists and does the PC32 arithmetic;
+// this decides whether the result actually fits the field, which is the check
+// that turns a silently truncated address into a link error.
+
+pub fn reloc_width_byte() -> i64 { return 1; }
+pub fn reloc_width_word() -> i64 { return 2; }
+pub fn reloc_width_long() -> i64 { return 4; }
+pub fn reloc_width_quad() -> i64 { return 8; }
+
+pub struct AppliedReloc {
+    ok: bool,
+    value: i64,        // Valid only when ok; zeroed on overflow so a caller that
+                       // ignores ok cannot patch an address it never proved.
+    overflow: bool,
+}
+
+fn reloc_applied(value: i64) -> AppliedReloc {
+    return AppliedReloc { ok: true, value: value, overflow: false };
+}
+
+fn reloc_overflow() -> AppliedReloc {
+    return AppliedReloc { ok: false, value: 0, overflow: true };
+}
+
+/// 2^(8*width-1), the exclusive upper bound of a signed field of that width.
+fn reloc_signed_limit(width_bytes: i64) -> i64 {
+    if width_bytes == 1 { return 128; }
+    if width_bytes == 2 { return 32768; }
+    if width_bytes == 4 { return 2147483648; }
+    // An eight-byte field holds every i64; callers handle that width before
+    // reaching here.
+    return 9223372036854775807;
+}
+
+/// 2^(8*width), the exclusive upper bound of an unsigned field of that width.
+fn reloc_unsigned_limit(width_bytes: i64) -> i64 {
+    if width_bytes == 1 { return 256; }
+    if width_bytes == 2 { return 65536; }
+    if width_bytes == 4 { return 4294967296; }
+    return 0;
+}
+
+pub fn reloc_fits_signed(value: i64, width_bytes: i64) -> bool {
+    // Every i64 fits eight bytes; wider (or unknown) fields are not modelled.
+    if width_bytes >= 8 {
+        return true;
+    }
+    // A zero-width field holds nothing, so nothing fits it.
+    if width_bytes <= 0 {
+        return false;
+    }
+    let limit = reloc_signed_limit(width_bytes);
+    if value >= limit {
+        return false;
+    }
+    if value < 0 - limit {
+        return false;
+    }
+    return true;
+}
+
+pub fn reloc_fits_unsigned(value: i64, width_bytes: i64) -> bool {
+    if width_bytes <= 0 {
+        return false;
+    }
+    if width_bytes >= 8 {
+        // Eight bytes hold any non-negative address; a negative i64 would need
+        // all 64 bits and is not an address.
+        return value >= 0;
+    }
+    if value < 0 {
+        return false;
+    }
+    return value < reloc_unsigned_limit(width_bytes);
+}
+
+/// Bits a field of this width covers, as a mask. Eight-byte fields answer -1,
+/// which is every bit set in an i64; a caller that needs an unsigned mask must
+/// convert rather than treat the value as a length.
+pub fn reloc_mask(width_bytes: i64) -> i64 {
+    if width_bytes == 1 { return 255; }
+    if width_bytes == 2 { return 65535; }
+    if width_bytes == 4 { return 4294967295; }
+    if width_bytes == 8 { return 0 - 1; }
+    return 0;
+}
+
+/// R_X86_64_PC32 / R_X86_64_PLT32: S + A - P, signed into the field.
+pub fn reloc_apply_pcrel(place: i64, target: i64, addend: i64, width_bytes: i64) -> AppliedReloc {
+    let value = target + addend - place;
+    if width_bytes >= 8 {
+        return reloc_applied(value);
+    }
+    if !reloc_fits_signed(value, width_bytes) {
+        return reloc_overflow();
+    }
+    return reloc_applied(value);
+}
+
+/// R_X86_64_32: S + A, zero-extended into the field.
+pub fn reloc_apply_abs(place: i64, target: i64, addend: i64, width_bytes: i64) -> AppliedReloc {
+    let value = target + addend;
+    if !reloc_fits_unsigned(value, width_bytes) {
+        return reloc_overflow();
+    }
+    return reloc_applied(value);
+}
+
+/// R_X86_64_32S: S + A, sign-extended into the field.
+pub fn reloc_apply_abs_signed(place: i64, target: i64, addend: i64, width_bytes: i64) -> AppliedReloc {
+    let value = target + addend;
+    if width_bytes >= 8 {
+        return reloc_applied(value);
+    }
+    if !reloc_fits_signed(value, width_bytes) {
+        return reloc_overflow();
+    }
+    return reloc_applied(value);
+}
+
+/// The place a PC-relative field is measured from: x86-64 counts from the end of
+/// the field, so a relocation on a field at `field_offset` uses the offset just
+/// past it.
+pub fn reloc_pcrel_place(field_offset: i64, width_bytes: i64) -> i64 {
+    return field_offset + width_bytes;
+}
+
+/// Whether the field lies entirely inside the section being patched. A field
+/// that runs past the end would write into the next section.
+pub fn reloc_field_in_bounds(field_offset: i64, width_bytes: i64, section_size: i64) -> bool {
+    if field_offset < 0 || width_bytes <= 0 {
+        return false;
+    }
+    return field_offset + width_bytes <= section_size;
+}

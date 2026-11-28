@@ -26,18 +26,22 @@ class LayeringTests(unittest.TestCase):
     def test_core_reaching_up_is_reported(self):
         root = self.build({
             "core/lower.ae": "pub fn value() -> i64 { return 1; }\n",
-            "io/hosted.ae": "pub fn hosted() -> i64 { return 2; }\n",
-            "core/climber.ae": 'use "../io/hosted.ae";\n',
+            "std/io/hosted.ae": "pub fn hosted() -> i64 { return 2; }\n",
+            "core/climber.ae": 'use "../std/io/hosted.ae";\n',
+            "alloc/climber.ae": 'use "../compiler/model.ae";\n',
+            "compiler/model.ae": 'use "../std/io/hosted.ae";\n',
         })
         violations = std_layering.check(root)
-        self.assertEqual(len(violations), 1)
-        self.assertIn("core imports hosted module io/hosted.ae", violations[0])
+        self.assertEqual(len(violations), 3)
+        self.assertIn("alloc imports higher layer compiler/model.ae", violations[0])
+        self.assertIn("compiler imports higher layer std/io/hosted.ae", violations[1])
+        self.assertIn("core imports higher layer std/io/hosted.ae", violations[2])
 
     def test_core_importing_core_and_hosted_importing_core_pass(self):
         root = self.build({
             "core/lower.ae": "pub fn value() -> i64 { return 1; }\n",
             "core/upper.ae": 'use "lower.ae";\n',
-            "io/hosted.ae": 'use "../core/lower.ae";\n',
+            "std/io/hosted.ae": 'use "../../core/lower.ae";\n',
         })
         self.assertEqual(std_layering.check(root), [])
 

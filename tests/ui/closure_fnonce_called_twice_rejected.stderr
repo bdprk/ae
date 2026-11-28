@@ -1,0 +1,1 @@
+ae: $DIR/closure_fnonce_called_twice_rejected.ae:2:19: cannot use 'f' because it was moved

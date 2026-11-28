@@ -1,0 +1,30 @@
+// std/compiler/ir_live_split.ae
+// Compiler live range splitting interval and split point decision engine.
+
+pub struct LiveRangeSplit {
+    vreg_id: i64,
+    start_point: i64,
+    end_point: i64,
+    split_point: i64,
+}
+
+pub fn live_range_split_new(vreg: i64, start_p: i64, end_p: i64, split_p: i64) -> LiveRangeSplit {
+    return LiveRangeSplit {
+        vreg_id: vreg,
+        start_point: start_p,
+        end_point: end_p,
+        split_point: split_p,
+    };
+}
+
+pub fn live_range_split_is_valid(s: LiveRangeSplit) -> bool {
+    return s.split_point > s.start_point && s.split_point < s.end_point;
+}
+
+pub fn live_range_first_half_len(s: LiveRangeSplit) -> i64 {
+    return s.split_point - s.start_point;
+}
+
+pub fn live_range_second_half_len(s: LiveRangeSplit) -> i64 {
+    return s.end_point - s.split_point;
+}

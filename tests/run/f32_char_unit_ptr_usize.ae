@@ -1,0 +1,64 @@
+fn add_f32(a: f32, b: f32) -> f32 {
+    return a + b;
+}
+
+fn do_unit(flag: bool) -> () {
+    if flag {
+        print("early");
+        return;
+    }
+    print("late");
+}
+
+fn implicit_unit() {
+    print("implicit");
+}
+
+fn main() {
+    let a = 1.5 as f32;
+    let b = 2.25 as f32;
+    let c = add_f32(a, b);
+    print(c);
+    print(-a);
+    print(a * b);
+    print(b / a);
+    print(a < b);
+    print(c == (3.75 as f32));
+    print(c as f64);
+    print((42 as i32) as f32);
+    print(((-7) as i8) as f32);
+    print((3.9 as f32) as i16);
+    print(to_string(a));
+
+    let ch_a = 'a';
+    let ch_nl = '\n';
+    let ch_tab = '\t';
+    let ch_quote = '\'';
+    let ch_bs = '\\';
+    let ch_nul = '\0';
+    let ch_han = '\u{4E2D}';
+    print(ch_a);
+    print(ch_quote);
+    print(ch_bs);
+    print(ch_han);
+    print(ch_a < 'b');
+    print(ch_han == '\u{4E2D}');
+    print(ch_nl != ch_tab);
+    print(ch_nul as u32);
+    print(ch_a as u32);
+    print((20013 as u32) as char);
+    print("[" + to_string(ch_han) + "]");
+
+    let u = ();
+    let u2 = do_unit(true);
+    let u3 = do_unit(false);
+    implicit_unit();
+
+    let x = 42;
+    unsafe {
+        let p_r = &x as *const i64;
+        let addr_r = p_r as usize;
+        let ptr_r = addr_r as *const i64;
+        print(ptr_r.deref());
+    }
+}

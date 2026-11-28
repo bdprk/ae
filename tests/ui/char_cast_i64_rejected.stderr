@@ -1,0 +1,1 @@
+ae: $DIR/char_cast_i64_rejected.ae:3:16: conversion from char to i64 is not allowed

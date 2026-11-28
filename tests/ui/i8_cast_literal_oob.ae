@@ -1,0 +1,4 @@
+fn main() {
+    let a = 128 as i8;
+    print(a);
+}

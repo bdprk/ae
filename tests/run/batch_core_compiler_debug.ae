@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_debug.ae
 // Verification of ULEB128 encoding, DWARF Line, StackMap, and DebugLoc primitives.
 
-use "../../std/core/ir_leb128.ae";
-use "../../std/core/ir_dwarf_line.ae";
-use "../../std/core/ir_stack_map.ae";
-use "../../std/core/ir_debug_loc.ae";
+use "../../std/compiler/ir_leb128.ae";
+use "../../std/compiler/ir_dwarf_line.ae";
+use "../../std/compiler/ir_stack_map.ae";
+use "../../std/compiler/ir_debug_loc.ae";
 
 fn main() {
     print("--- batch_core_compiler_debug test start ---");

@@ -1,5 +1,7 @@
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, Write};
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
@@ -335,7 +337,19 @@ pub struct Document {
     pub version: i64,
     pub text: String,
     pub line_index: LineIndex,
+    /// The resolver's name resolution for this document's text, computed
+    /// lazily and invalidated on every update (R3d: hover and definition
+    /// read the def table instead of matching text). The imports resolve
+    /// from disk next to the document, so imported defs carry their own
+    /// file's name for cross-file definition.
+    pub resolution: OnceCell<Option<std::sync::Arc<CachedResolution>>>,
 }
+
+type CachedResolution = (
+    ae_resolve::module::Module,
+    Vec<(String, ae_resolve::module::Module)>,
+    ae_resolve::resolve::Resolution,
+);
 
 impl Document {
     pub fn new(uri: String, version: i64, text: String) -> Self {
@@ -345,19 +359,207 @@ impl Document {
             version,
             text,
             line_index,
+            resolution: OnceCell::new(),
         }
     }
 
     pub fn update(&mut self, version: i64, text: String) {
         self.version = version;
         self.line_index = LineIndex::new(&text);
+        self.resolution = OnceCell::new();
         self.text = text;
+    }
+
+    /// The document's module, disk-loaded imports and name resolution,
+    /// computed on first use from its text. The imports come from disk next
+    /// to the document (the use headers' modules), so imported defs carry
+    /// their own file's name. Documents the shared module parse rejects
+    /// (lex or declaration diagnostics) have none: their features fall
+    /// back to the text heuristics.
+    pub fn resolution(&self) -> Option<&std::sync::Arc<CachedResolution>> {
+        // A failed parse caches its failure: an unparseable buffer (a
+        // half-typed `p.`, say) must not re-lex and re-parse on every
+        // request — that cost 160 ms per completion on a 100k-line file.
+        self.resolution.get_or_init(|| {
+            let tokens = Rc::new(ae_syntax::lex_diagnostic(&self.text).ok()?);
+            let module = ae_resolve::module::parse_module_tokens(&self.uri, &self.text, tokens.as_slice()).ok()?;
+            let imports = self.disk_imports();
+            let resolution = ae_resolve::resolve::resolve_with_tokens(&module, &imports, tokens.as_slice());
+            Some(std::sync::Arc::new((module, imports, resolution)))
+        }).as_ref()
+    }
+
+    /// The use headers' modules, loaded from disk next to this document.
+    /// A document that is not a disk file (unsaved buffer) resolves
+    /// single-file.
+    fn disk_imports(&self) -> Vec<(String, ae_resolve::module::Module)> {
+        let Some(path) = self.disk_path() else { return Vec::new() };
+        match ae_resolve::imports::load_module_transitive(&path) {
+            Ok((_, imports)) => imports,
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The disk path behind a `file:///` document URI, if any.
+    fn disk_path(&self) -> Option<std::path::PathBuf> {
+        let rest = self.uri.strip_prefix("file:///")?;
+        Some(std::path::PathBuf::from(rest))
     }
 }
 
 pub struct LspServer {
     documents: HashMap<String, Document>,
     cancelled_requests: HashSet<i64>,
+}
+
+/// The occurrence covering `offset`, with its resolved def. Occurrences in
+/// closure bodies are included (the resolver walked them), so cursors inside
+/// closures resolve too.
+fn occurrence_at(
+    resolution: &ae_resolve::resolve::Resolution,
+    offset: usize,
+) -> Option<(&ae_resolve::Occurrence, &ae_resolve::DefEntry)> {
+    let occurrence = resolution.functions.iter().flat_map(|function| &function.occurrences)
+        .find(|occurrence| occurrence.range.start <= offset && offset < occurrence.range.end)?;
+    let def = resolution.defs.get(occurrence.target?.0 as usize)?;
+    Some((occurrence, def))
+}
+
+/// The def under `offset`: an occurrence's target when the cursor reads or
+/// writes a name, otherwise the def whose own declaration name the cursor
+/// sits on (declarations have no occurrence of their own). An occurrence
+/// wins, because it disambiguates shadowed names.
+fn def_at(
+    resolution: &ae_resolve::resolve::Resolution,
+    offset: usize,
+) -> Option<&ae_resolve::DefEntry> {
+    if let Some((_, def)) = occurrence_at(resolution, offset) {
+        return Some(def);
+    }
+    resolution.defs.iter().find(|def| {
+        !def.imported && def.range.start <= offset && offset < def.range.end
+    })
+}
+
+/// The display form of a spelling, with named defs rendered as their item
+/// names (the bare `describe()` prints def ids, which are table internals).
+fn describe_spelling(
+    spelling: &ae_resolve::TypeSpelling,
+    resolution: &ae_resolve::resolve::Resolution,
+) -> String {
+    match spelling {
+        ae_resolve::TypeSpelling::Named { def } => {
+            resolution.defs.get(def.0 as usize).map(|entry| entry.name.clone()).unwrap_or_else(|| "unknown".to_owned())
+        }
+        ae_resolve::TypeSpelling::Borrow { mutable, inner } => {
+            format!("&{}{}", if *mutable { "mut " } else { "" }, describe_spelling(inner, resolution))
+        }
+        ae_resolve::TypeSpelling::Pointer { mutable, pointee } => {
+            format!("*{}{}", if *mutable { "mut " } else { "" }, describe_spelling(pointee, resolution))
+        }
+        other => other.describe(),
+    }
+}
+
+/// The LSP SymbolKind number for a def kind (12 function, 23 struct,
+/// 10 enum, 11 trait, 2 module-ish impl, 13 variable fallback).
+fn symbol_kind_number(kind: ae_resolve::DefKind) -> u32 {
+    match kind {
+        ae_resolve::DefKind::Function => 12,
+        ae_resolve::DefKind::Struct => 23,
+        ae_resolve::DefKind::Enum => 10,
+        ae_resolve::DefKind::Trait => 11,
+        ae_resolve::DefKind::Impl => 2,
+        _ => 13,
+    }
+}
+
+fn textual_member_fields(text: &str, receiver: &str, cursor: usize) -> Option<Vec<(String, String)>> {
+    // String searches (memchr-backed) instead of a line walk: a 100k-line
+    // document was scanned line-by-line several times per completion, which
+    // blew the M6.2.05 latency target.
+    let before = &text[..cursor.min(text.len())];
+    let let_marker = format!("let {receiver}");
+    let var_marker = format!("var {receiver}");
+    let decl_at = before.rfind(&let_marker).or_else(|| before.rfind(&var_marker))?;
+    let decl = &text[decl_at..];
+    let equal = decl.find('=')?;
+    let after_equal = decl[equal + 1..].trim_start();
+    let name_end = after_equal.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_equal.len());
+    if name_end == 0 || !after_equal[name_end..].trim_start().starts_with('{') {
+        return None;
+    }
+    let struct_name = &after_equal[..name_end];
+    let marker = format!("struct {struct_name}");
+    let mut search_from = 0usize;
+    let body = loop {
+        let at = text[search_from..].find(&marker)? + search_from;
+let boundary_ok = text[at..].get(marker.len()..).is_some_and(|rest| {
+            rest.starts_with(|c: char| c == ' ' || c == '{' || c == char::from(10) || c == char::from(13))
+        });
+        if boundary_ok {
+            break &text[at..];
+        }
+        search_from = at + marker.len();
+    };
+    let open = body.find('{')?;
+    let inline = &body[open + 1..];
+    let mut fields = Vec::new();
+    let mut remaining = inline;
+    loop {
+        let trimmed = remaining.trim_start();
+        if trimmed.starts_with('}') {
+            break;
+        }
+        let Some((field, rest)) = trimmed.split_once(':') else { break };
+        let field = field.trim();
+        if !is_ident(field) {
+            return None;
+        }
+        let rest_trimmed = rest.trim_start();
+let ty_end = rest_trimmed.find(|c: char| c == ',' || c == '}' || c == char::from(10) || c == char::from(13))
+            .unwrap_or(rest_trimmed.len());
+        fields.push((field.to_owned(), rest_trimmed[..ty_end].trim().to_owned()));
+        if rest_trimmed[ty_end..].trim_start().starts_with('}') {
+            break;
+        }
+        remaining = rest_trimmed.get(ty_end + 1..).unwrap_or("");
+        if remaining.trim_start().starts_with('}') {
+            break;
+        }
+    }
+    (!fields.is_empty()).then_some(fields)
+}
+
+/// An imported function's declared signature, sliced from its own module's
+/// source (`fn name(params) -> ret`) — the entry-side def table has no
+/// parameter spellings for imported items.
+fn imported_fn_signature(
+    imports: &[(String, ae_resolve::module::Module)],
+    def: &ae_resolve::DefEntry,
+) -> Option<String> {
+    let (_, import_module) = imports.iter()
+        .find(|(_, module)| module.declarations.iter().any(|declaration| declaration.name == def.name))?;
+    let declaration = import_module.declarations.iter().find(|declaration| declaration.name == def.name)?;
+    let body_start = declaration.body.as_ref().map(|body| body.start)?;
+    let signature = import_module.source.get(declaration.range.start..body_start)?.trim().to_owned();
+    Some(format!("fn {}", signature))
+}
+
+fn kind_label(kind: ae_resolve::DefKind) -> &'static str {
+    match kind {
+        ae_resolve::DefKind::Function => "fn",
+        ae_resolve::DefKind::Struct => "struct",
+        ae_resolve::DefKind::Enum => "enum",
+        ae_resolve::DefKind::Variant => "variant",
+        ae_resolve::DefKind::Trait => "trait",
+        ae_resolve::DefKind::Impl => "impl",
+        ae_resolve::DefKind::Parameter => "parameter",
+        ae_resolve::DefKind::ClosureParameter => "closure parameter",
+        ae_resolve::DefKind::Binding => "let",
+        ae_resolve::DefKind::ForBinding => "for binding",
+        ae_resolve::DefKind::PatternBinding => "pattern binding",
+    }
 }
 
 impl Default for LspServer {
@@ -410,6 +612,24 @@ impl LspServer {
                 comp.insert("triggerCharacters".to_owned(), JsonValue::Array(triggers));
                 caps.insert("completionProvider".to_owned(), JsonValue::Object(comp));
                 caps.insert("renameProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("documentSymbolProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("signatureHelpProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("foldingRangeProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("codeActionProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("inlayHintProvider".to_owned(), JsonValue::Bool(true));
+                let token_types = ["variable", "parameter", "function", "struct", "enum", "property"];
+                caps.insert("documentHighlightProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("selectionRangeProvider".to_owned(), JsonValue::Bool(true));
+                caps.insert("semanticTokensProvider".to_owned(), {
+                    let mut legend = BTreeMap::new();
+                    legend.insert("tokenTypes".to_owned(), JsonValue::Array(
+                        token_types.iter().map(|t| JsonValue::String((*t).to_owned())).collect()));
+                    legend.insert("tokenModifiers".to_owned(), JsonValue::Array(Vec::new()));
+                    let mut provider = BTreeMap::new();
+                    provider.insert("legend".to_owned(), JsonValue::Object(legend));
+                    provider.insert("full".to_owned(), JsonValue::Bool(true));
+                    JsonValue::Object(provider)
+                });
 
                 let mut res = BTreeMap::new();
                 res.insert("capabilities".to_owned(), JsonValue::Object(caps));
@@ -435,6 +655,179 @@ impl LspServer {
                     }
                     None => Self::make_response(id, JsonValue::Null),
                 }
+            }
+            "textDocument/documentSymbol" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("").to_owned();
+                let symbols = self.document_symbols(&uri);
+                let items: Vec<JsonValue> = symbols.into_iter().map(|(name, kind, range)| {
+                    let mut location = BTreeMap::new();
+                    location.insert("uri".to_owned(), JsonValue::String(uri.clone()));
+                    location.insert("range".to_owned(), Self::range_to_json(&range));
+                    let mut symbol = BTreeMap::new();
+                    symbol.insert("name".to_owned(), JsonValue::String(name));
+                    symbol.insert("kind".to_owned(), JsonValue::Number(kind as f64));
+                    symbol.insert("location".to_owned(), JsonValue::Object(location));
+                    JsonValue::Object(symbol)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(items))
+            }
+            "textDocument/references" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("").to_owned();
+                let line = params.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let character = params.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let include_declaration = matches!(
+                    params.get("context").and_then(|c| c.get("includeDeclaration")),
+                    Some(JsonValue::Bool(true)) | None
+                );
+                let refs = self.references(&uri, Position { line, character }, include_declaration);
+                let items: Vec<JsonValue> = refs.into_iter().map(|location| {
+                    let mut map = BTreeMap::new();
+                    map.insert("uri".to_owned(), JsonValue::String(location.uri));
+                    map.insert("range".to_owned(), Self::range_to_json(&location.range));
+                    JsonValue::Object(map)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(items))
+            }
+            "workspace/symbol" => {
+                let query = params.and_then(|p| p.get("query")).and_then(|q| q.as_str()).unwrap_or("").to_lowercase();
+                let items: Vec<JsonValue> = self.workspace_symbols(&query).into_iter().map(|(uri, name, kind, range)| {
+                    let mut location = BTreeMap::new();
+                    location.insert("uri".to_owned(), JsonValue::String(uri));
+                    location.insert("range".to_owned(), Self::range_to_json(&range));
+                    let mut symbol = BTreeMap::new();
+                    symbol.insert("name".to_owned(), JsonValue::String(name));
+                    symbol.insert("kind".to_owned(), JsonValue::Number(kind as f64));
+                    symbol.insert("location".to_owned(), JsonValue::Object(location));
+                    JsonValue::Object(symbol)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(items))
+            }
+            "textDocument/signatureHelp" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let line = params.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let character = params.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                match self.signature_help(uri, Position { line, character }) {
+                    Some(signature) => Self::make_response(id, signature),
+                    None => Self::make_response(id, JsonValue::Null),
+                }
+            }
+            "textDocument/selectionRange" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let positions: Vec<Position> = params.get("positions").and_then(|p| p.as_array()).unwrap_or(&[])
+                    .iter().filter_map(|p| Some(Position {
+                        line: p.get("line")?.as_i64()? as u32,
+                        character: p.get("character")?.as_i64()? as u32,
+                    })).collect();
+                let ranges: Vec<JsonValue> = self.selection_ranges(uri, &positions).into_iter().map(|chain| {
+                    // Chain outermost-first so each inner entry can name the
+                    // next one as its parent by index.
+                    let mut value = JsonValue::Null;
+                    for range in chain.into_iter().rev() {
+                        let mut entry = BTreeMap::new();
+                        entry.insert("range".to_owned(), Self::range_to_json(&range));
+                        if !matches!(value, JsonValue::Null) {
+                            entry.insert("parent".to_owned(), value);
+                        }
+                        value = JsonValue::Object(entry);
+                    }
+                    value
+                }).collect();
+                Self::make_response(id, JsonValue::Array(ranges))
+            }
+            "textDocument/documentHighlight" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let line = params.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let character = params.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let highlights: Vec<JsonValue> = self.document_highlights(uri, Position { line, character })
+                    .into_iter().map(|(range, kind)| {
+                        let mut map = BTreeMap::new();
+                        map.insert("range".to_owned(), Self::range_to_json(&range));
+                        map.insert("kind".to_owned(), JsonValue::Number(kind as f64));
+                        JsonValue::Object(map)
+                    }).collect();
+                Self::make_response(id, JsonValue::Array(highlights))
+            }
+            "textDocument/semanticTokens/full" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let tokens = self.semantic_tokens(uri);
+                let mut result = BTreeMap::new();
+                result.insert("data".to_owned(), JsonValue::Array(
+                    tokens.into_iter().map(|value| JsonValue::Number(value as f64)).collect()));
+                Self::make_response(id, JsonValue::Object(result))
+            }
+            "textDocument/inlayHint" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let hints: Vec<JsonValue> = self.inlay_hints(uri).into_iter().map(|(position, label)| {
+                    let mut hint = BTreeMap::new();
+                    hint.insert("position".to_owned(), {
+                        let mut p = BTreeMap::new();
+                        p.insert("line".to_owned(), JsonValue::Number(position.line as f64));
+                        p.insert("character".to_owned(), JsonValue::Number(position.character as f64));
+                        JsonValue::Object(p)
+                    });
+                    hint.insert("label".to_owned(), JsonValue::String(label));
+                    hint.insert("kind".to_owned(), JsonValue::Number(1.0));
+                    JsonValue::Object(hint)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(hints))
+            }
+            "textDocument/codeAction" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let fixes = self.quick_fixes(uri);
+                let actions: Vec<JsonValue> = fixes.into_iter().map(|(title, diagnostic)| {
+                    let mut action = BTreeMap::new();
+                    action.insert("title".to_owned(), JsonValue::String(title));
+                    action.insert("kind".to_owned(), JsonValue::String("quickfix".to_owned()));
+                    let mut diag = BTreeMap::new();
+                    diag.insert("range".to_owned(), Self::range_to_json(&diagnostic.range));
+                    diag.insert("message".to_owned(), JsonValue::String(diagnostic.message.clone()));
+                    if let Some(code) = &diagnostic.code {
+                        diag.insert("code".to_owned(), JsonValue::String(code.clone()));
+                    }
+                    action.insert("diagnostics".to_owned(), JsonValue::Array(vec![JsonValue::Object(diag)]));
+                    JsonValue::Object(action)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(actions))
+            }
+            "textDocument/foldingRange" => {
+                let Some(params) = params else {
+                    return Self::make_response(id, JsonValue::Null);
+                };
+                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                let ranges: Vec<JsonValue> = self.folding_ranges(uri).into_iter().map(|(start, end, kind)| {
+                    let mut range = BTreeMap::new();
+                    range.insert("startLine".to_owned(), JsonValue::Number(start as f64));
+                    range.insert("endLine".to_owned(), JsonValue::Number(end as f64));
+                    if !kind.is_empty() {
+                        range.insert("kind".to_owned(), JsonValue::String(kind.to_owned()));
+                    }
+                    JsonValue::Object(range)
+                }).collect();
+                Self::make_response(id, JsonValue::Array(ranges))
             }
             "textDocument/definition" => {
                 let Some(params) = params else {
@@ -588,9 +981,578 @@ impl LspServer {
         JsonValue::Object(notif).serialize()
     }
 
+    /// R3d: hover from the def table. The occurrence under the cursor names
+    /// its def; functions render their parameter and return spellings,
+    /// structs render their fields, bindings render their inferred type.
+    fn hover_from_defs(&self, doc: &Document, offset: usize) -> Option<String> {
+        let cached = doc.resolution()?;
+        let resolution = &cached.2;
+        let def = def_at(resolution, offset)?;
+        let describe = |spelling: &ae_resolve::TypeSpelling| describe_spelling(spelling, resolution);
+        match def.kind {
+            ae_resolve::DefKind::Function => {
+                // An imported function's signature comes from its own
+                // module's declaration text; the entry-side def table has
+                // no parameter spellings for it.
+                if def.imported
+                    && let Some(signature) = imported_fn_signature(&cached.1, def)
+                {
+                    return Some(format!("```ae\n{signature}\n```"));
+                }
+                let mut params = String::new();
+                for entry in resolution.defs.iter().filter(|entry| {
+                    entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
+                }) {
+                    if !params.is_empty() { params.push_str(", "); }
+                    let ty = entry.inferred.as_ref().map(describe).unwrap_or_else(|| "deferred".to_owned());
+                    params.push_str(&format!("{}: {}", entry.name, ty));
+                }
+                let mut returns = String::new();
+                if let Some(entry) = resolution.spellings.iter().find(|entry| {
+                    entry.owner == def.id && entry.role == ae_resolve::SpellingRole::Return
+                }) {
+                    returns = format!(" -> {}", describe(&entry.spelled.spelling));
+                }
+                Some(format!("```ae\nfn {}({params}){returns}\n```", def.name))
+            }
+            ae_resolve::DefKind::Struct => {
+                let mut fields = String::new();
+                for entry in resolution.spellings.iter().filter(|entry| {
+                    entry.owner == def.id && !entry.name.is_empty()
+                }) {
+                    if !fields.is_empty() { fields.push_str(", "); }
+                    fields.push_str(&format!("{}: {}", entry.name, describe(&entry.spelled.spelling)));
+                }
+                Some(format!("```ae\nstruct {} {{ {fields} }}\n```", def.name))
+            }
+            ae_resolve::DefKind::Binding | ae_resolve::DefKind::Parameter
+            | ae_resolve::DefKind::ForBinding | ae_resolve::DefKind::PatternBinding => {
+                let ty = def.inferred.as_ref().map(describe).unwrap_or_else(|| "deferred".to_owned());
+                Some(format!("{} {}\ntype: {ty}", kind_label(def.kind), def.name))
+            }
+            _ => Some(format!("```ae\n{} {}\n```", kind_label(def.kind), def.name)),
+        }
+    }
+
+/// M6.2.05: the fields of the receiver before a `.` — the identifier ending
+/// at the dot resolves through the def table, its inferred spelling names a
+/// file-local struct, and that struct's declared fields come back with
+/// their shapes. `None` when the receiver has no resolved struct type.
+    fn member_fields(&self, doc: &Document, offset: usize) -> Option<Vec<(String, String)>> {
+        let mut dot = offset;
+        while dot > 0 && doc.text.as_bytes()[dot - 1].is_ascii_whitespace() { dot -= 1; }
+        if dot == 0 || doc.text.as_bytes()[dot - 1] != b'.' { return None; }
+        let mut end = dot - 1;
+        while end > 0 && doc.text.as_bytes()[end - 1].is_ascii_whitespace() { end -= 1; }
+        let mut start = end;
+        while start > 0 && (doc.text.as_bytes()[start - 1].is_ascii_alphanumeric()
+            || doc.text.as_bytes()[start - 1] == b'_') { start -= 1; }
+        if start == end { return None; }
+        let receiver = &doc.text[start..end];
+        // A document with an incomplete `p.` does not parse, so the def
+        // table is unavailable: fall back to the receiver's own declaration
+        // (its `= Name {` initializer names the struct) and read that
+        // struct's fields from the text. Still type-driven — never a sweep
+        // over every field in the file.
+        let Some(cached) = doc.resolution() else {
+            return textual_member_fields(&doc.text, receiver, offset);
+        };
+        let resolution = &cached.2;
+        // The receiver's occurrence resolves by offset when the statement is
+        // complete; an incomplete `p.` has no occurrence yet, so the def
+        // table's bindings answer by name instead (the most recent one
+        // wins, which matches shadowing).
+        let by_occurrence = resolution.functions.iter().flat_map(|function| &function.occurrences)
+            .find(|occurrence| occurrence.range.start == start && occurrence.range.end == end)
+            .and_then(|occurrence| occurrence.target)
+            .and_then(|target| resolution.defs.get(target.0 as usize));
+        let def = match by_occurrence {
+            Some(def) => def,
+            None => resolution.defs.iter().rev().find(|def| {
+                !def.imported && def.name == receiver && def.kind == ae_resolve::DefKind::Binding
+            })?,
+        };
+        if def.name != receiver { return None; }
+        let spelling = def.inferred.as_ref()?;
+        let struct_def = match spelling {
+            ae_resolve::TypeSpelling::Named { def } => *def,
+            ae_resolve::TypeSpelling::Borrow { inner, .. } => match inner.as_ref() {
+                ae_resolve::TypeSpelling::Named { def } => *def,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let struct_entry = resolution.defs.get(struct_def.0 as usize)?;
+        if struct_entry.kind != ae_resolve::DefKind::Struct { return None; }
+        let fields: Vec<(String, String)> = resolution.spellings.iter()
+            .filter(|entry| entry.owner == struct_def
+                && entry.role == ae_resolve::SpellingRole::Field)
+            .map(|entry| (entry.name.clone(), describe_spelling(&entry.spelled.spelling, resolution)))
+            .collect();
+        Some(fields)
+    }
+
+    /// R3d: selection ranges — innermost to outermost: the identifier under
+/// the cursor, its line, the enclosing brace block, then the whole file.
+    fn selection_ranges(&self, uri: &str, positions: &[Position]) -> Vec<Vec<Range>> {
+        let Some(doc) = self.documents.get(uri) else {
+            return positions.iter().map(|_| Vec::new()).collect();
+        };
+        let bytes = doc.text.as_bytes();
+        positions.iter().map(|&pos| {
+            let offset = doc.line_index.position_to_offset(&doc.text, pos);
+            let mut chain = Vec::new();
+            // 1. The identifier under the cursor.
+            let mut start = offset.min(bytes.len());
+            while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') { start -= 1; }
+            let mut end = offset.min(bytes.len());
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') { end += 1; }
+            chain.push(Range {
+                start: doc.line_index.offset_to_position(&doc.text, start),
+                end: doc.line_index.offset_to_position(&doc.text, end),
+            });
+            // 2. The line.
+            let line_start = doc.text[..offset.min(bytes.len())].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = doc.text[offset.min(bytes.len())..].find('\n').map_or(bytes.len(), |index| offset.min(bytes.len()) + index);
+            chain.push(Range {
+                start: doc.line_index.offset_to_position(&doc.text, line_start),
+                end: doc.line_index.offset_to_position(&doc.text, line_end),
+            });
+            // 3. The enclosing brace block, walking outwards.
+            let mut depth = 0usize;
+            let mut open = None;
+            let mut index = offset.min(bytes.len());
+            while index > 0 {
+                index -= 1;
+                match bytes[index] {
+                    b'}' => depth += 1,
+                    b'{' => {
+                        if depth == 0 { open = Some(index); break; }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(open) = open {
+                let mut depth = 0usize;
+                let mut index = open;
+                let mut close = None;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 { close = Some(index + 1); break; }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                if let Some(close) = close {
+                    chain.push(Range {
+                        start: doc.line_index.offset_to_position(&doc.text, open),
+                        end: doc.line_index.offset_to_position(&doc.text, close),
+                    });
+                }
+            }
+            // 4. The whole file.
+            chain.push(Range {
+                start: Position { line: 0, character: 0 },
+                end: doc.line_index.offset_to_position(&doc.text, bytes.len()),
+            });
+            chain
+        }).collect()
+    }
+
+    /// R3d: document highlights — every occurrence of the resolved def in this
+/// document, kind 2 (read) or 3 (write).
+    fn document_highlights(&self, uri: &str, pos: Position) -> Vec<(Range, u32)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        let Some(cached) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &cached.2;
+        let Some(def) = def_at(resolution, offset) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target != Some(def.id) {
+                    continue;
+                }
+                let kind = match occurrence.role {
+                    ae_resolve::Role::Write | ae_resolve::Role::DerefWrite => 3,
+                    _ => 2,
+                };
+                let start = doc.line_index.offset_to_position(&doc.text, occurrence.range.start);
+                let end = doc.line_index.offset_to_position(&doc.text, occurrence.range.end);
+                out.push((Range { start, end }, kind));
+            }
+        }
+        out
+    }
+
+    /// R3d: semantic tokens — each resolved occurrence becomes a token whose
+/// type follows the def it names (variable/parameter/function/struct/
+/// enum/property for a field read). The LSP wire form is the delta-encoded
+/// quintuple array: [deltaLine, deltaStartChar, length, tokenType, mods].
+    fn semantic_tokens(&self, uri: &str) -> Vec<u32> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(cached) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &cached.2;
+        let mut located: Vec<(u32, u32, u32, u32)> = Vec::new();
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                let Some(target) = occurrence.target else { continue };
+                let Some(def) = resolution.defs.get(target.0 as usize) else { continue };
+                if def.imported && def.kind == ae_resolve::DefKind::Variant {
+                    continue;
+                }
+                let token_type = match def.kind {
+                    ae_resolve::DefKind::Function => 2,
+                    ae_resolve::DefKind::Struct => 3,
+                    ae_resolve::DefKind::Enum => 4,
+                    ae_resolve::DefKind::Parameter | ae_resolve::DefKind::ClosureParameter => 1,
+                    ae_resolve::DefKind::Binding
+                    | ae_resolve::DefKind::ForBinding
+                    | ae_resolve::DefKind::PatternBinding => 0,
+                    _ => continue,
+                };
+                let start = doc.line_index.offset_to_position(&doc.text, occurrence.range.start);
+                let end = doc.line_index.offset_to_position(&doc.text, occurrence.range.end);
+                if start.line != end.line {
+                    continue;
+                }
+                located.push((start.line, start.character, end.character.saturating_sub(start.character), token_type));
+            }
+        }
+        located.sort_unstable();
+        located.dedup();
+        let mut data = Vec::with_capacity(located.len() * 5);
+        let mut previous_line = 0u32;
+        let mut previous_character = 0u32;
+        for (line, character, length, token_type) in located {
+            let delta_line = line - previous_line;
+            let delta_start = if delta_line == 0 { character.saturating_sub(previous_character) } else { character };
+            data.extend([delta_line, delta_start, length, token_type, 0]);
+            previous_line = line;
+            previous_character = character;
+        }
+        data
+    }
+
+    /// R3d: inlay hints — every file-local binding with a resolved type gets
+/// a `: type` hint right after its name, so the editor shows the inferred
+/// shape the def table carries. Deferred shapes stay silent.
+    fn inlay_hints(&self, uri: &str) -> Vec<(Position, String)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(cached) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &cached.2;
+        resolution.defs.iter()
+            .filter(|def| !def.imported && def.kind == ae_resolve::DefKind::Binding)
+            .filter_map(|def| {
+                let shape = def.inferred.as_ref()?;
+                let label = format!(": {}", describe_spelling(shape, resolution));
+                Some((doc.line_index.offset_to_position(&doc.text, def.range.end), label))
+            })
+            .collect()
+    }
+
+    /// R3d: quick fixes — each diagnostic suggestion becomes a quickfix
+/// action titled with the suggestion text and carrying the diagnostic it
+/// addresses.
+    fn quick_fixes(&self, uri: &str) -> Vec<(String, Diagnostic)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Err(diagnostic) = crate::frontend::check_source_diagnostic(&doc.text) else {
+            return Vec::new();
+        };
+        let index = LineIndex::new(&doc.text);
+        let offsets = diagnostic.primary.map_or(0..0, |label| label.span.range);
+        let start = index.offset_to_position(&doc.text, offsets.start);
+        let end = index.offset_to_position(&doc.text, offsets.end);
+        let located = Diagnostic {
+            range: Range { start, end },
+            severity: 1,
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        };
+        diagnostic.suggestions.iter()
+            .map(|suggestion| (suggestion.clone(), located.clone()))
+            .collect()
+    }
+
+    /// R3d: folding ranges — a brace-balanced brace pair folds from its line
+/// to the line of its closing brace; a run of `//` comment lines folds as
+/// one comment region. Purely lexical, no resolution needed.
+    fn folding_ranges(&self, uri: &str) -> Vec<(u32, u32, &'static str)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        let mut line_start = 0usize;
+        let mut line = 0u32;
+        let mut open: Vec<u32> = Vec::new();
+        let mut comment_block: Option<u32> = None;
+        let mut in_block_comment = false;
+        let bytes = doc.text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\n' => {
+                    let text = &doc.text[line_start..index];
+                    let trimmed = text.trim_start().starts_with("//");
+                    match (trimmed, comment_block) {
+                        (true, None) => comment_block = Some(line),
+                        (false, Some(start)) => {
+                            let end = line.saturating_sub(1);
+                            if end > start { ranges.push((start, end, "comment")); }
+                            comment_block = None;
+                        }
+                        _ => {}
+                    }
+                    line += 1;
+                    line_start = index + 1;
+                }
+                b'{' if !in_block_comment => open.push(line),
+                b'}' if !in_block_comment => {
+                    if let Some(start) = open.pop() && line > start {
+                        ranges.push((start, line, ""));
+                    }
+                }
+                b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => { in_block_comment = true; index += 1; }
+                b'*' if in_block_comment && index + 1 < bytes.len() && bytes[index + 1] == b'/' => { in_block_comment = false; index += 1; }
+                _ => {}
+            }
+            index += 1;
+        }
+        if let Some(start) = comment_block {
+            let end = line.saturating_sub(1);
+            if end > start { ranges.push((start, end, "comment")); }
+        }
+        ranges
+    }
+
+    /// R3d: signature help — when the cursor sits inside a call's argument
+    /// list, the enclosing call's callee name is found by walking back over
+    /// the balanced parentheses, and the def table renders its declared
+    /// signature with the active parameter index.
+    fn signature_help(&self, uri: &str, pos: Position) -> Option<JsonValue> {
+        let doc = self.documents.get(uri)?;
+        let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        let cached = doc.resolution()?;
+        let resolution = &cached.2;
+        // Walk back from the cursor over the current argument list.
+        let mut depth = 0usize;
+        let mut index = offset;
+        let bytes = doc.text.as_bytes();
+        while index > 0 {
+            index -= 1;
+            match bytes[index] {
+                b')' => depth += 1,
+                b'(' => {
+                    if depth == 0 { break; }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        if index == 0 { return None; }
+        // The '(' at `index`; its callee name sits just before the spaces.
+        let mut name_end = index;
+        while name_end > 0 && bytes[name_end - 1].is_ascii_whitespace() { name_end -= 1; }
+        let mut name_start = name_end;
+        while name_start > 0 && (bytes[name_start - 1].is_ascii_alphanumeric() || bytes[name_start - 1] == b'_') {
+            name_start -= 1;
+        }
+        if name_start == name_end { return None; }
+        let callee = &doc.text[name_start..name_end];
+        // The active parameter: count commas since the '(' at depth zero.
+        let mut active = 0usize;
+        let mut depth = 0usize;
+        for &byte in &bytes[index + 1..offset] {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => active += 1,
+                _ => {}
+            }
+        }
+        let def = resolution.defs.iter().find(|def| def.name == callee
+            && (def.kind == ae_resolve::DefKind::Function))?;
+        let signature = if def.imported {
+            imported_fn_signature(&cached.1, def)?
+        } else {
+            let mut params = String::new();
+            for entry in resolution.defs.iter().filter(|entry| {
+                entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
+            }) {
+                if !params.is_empty() { params.push_str(", "); }
+                let ty = entry.inferred.as_ref()
+                    .map(|shape| describe_spelling(shape, resolution))
+                    .unwrap_or_else(|| "deferred".to_owned());
+                params.push_str(&format!("{}: {}", entry.name, ty));
+            }
+            let mut returns = String::new();
+            if let Some(entry) = resolution.spellings.iter().find(|entry| {
+                entry.owner == def.id && entry.role == ae_resolve::SpellingRole::Return
+            }) {
+                returns = format!(" -> {}", describe_spelling(&entry.spelled.spelling, resolution));
+            }
+            format!("fn {}({params}){returns}", def.name)
+        };
+        let mut label = BTreeMap::new();
+        label.insert("label".to_owned(), JsonValue::String(signature));
+        let mut res = BTreeMap::new();
+        res.insert("signatures".to_owned(), JsonValue::Array(vec![JsonValue::Object(label)]));
+        res.insert("activeSignature".to_owned(), JsonValue::Number(0.0));
+        res.insert("activeParameter".to_owned(), JsonValue::Number(active as f64));
+        Some(JsonValue::Object(res))
+    }
+
+    /// R3d: the document outline from the def table — every file-local
+    /// function, struct, enum and trait with its declared name range.
+    fn document_symbols(&self, uri: &str) -> Vec<(String, u32, Range)> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let Some(resolution) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &resolution.2;
+        resolution.defs.iter().filter(|def| {
+            !def.imported && !def.kind.is_local()
+        }).map(|def| {
+            let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+            (def.name.clone(), symbol_kind_number(def.kind), Range { start, end })
+        }).collect()
+    }
+
+    /// R3d: find all references — every occurrence targeting the resolved
+    /// def, plus the def's own declaration when asked. Imported defs
+    /// resolve within their own file's occurrences only (the single-file
+    /// occurrence walk does not reach other files).
+    fn references(&self, uri: &str, pos: Position, include_declaration: bool) -> Vec<Location> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        let Some(resolution) = doc.resolution() else {
+            return Vec::new();
+        };
+        let resolution = &resolution.2;
+        let Some(def) = def_at(resolution, offset) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        if include_declaration && !def.imported {
+            let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+            locations.push(Location { uri: doc.uri.clone(), range: Range { start, end } });
+        }
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target != Some(def.id) {
+                    continue;
+                }
+                // An occurrence's range belongs to the file the resolution
+                // was computed for — the entry document here.
+                let start = doc.line_index.offset_to_position(&doc.text, occurrence.range.start);
+                let end = doc.line_index.offset_to_position(&doc.text, occurrence.range.end);
+                locations.push(Location { uri: doc.uri.clone(), range: Range { start, end } });
+            }
+        }
+        locations
+    }
+
+    /// R3d: workspace-wide symbol search over every open document's def
+    /// table — file-local items whose name contains the query
+    /// (case-insensitive), each with its own document's URI and name range.
+    fn workspace_symbols(&self, query: &str) -> Vec<(String, String, u32, Range)> {
+        let mut out = Vec::new();
+        for (uri, doc) in &self.documents {
+            let Some(resolution) = doc.resolution() else { continue };
+            let resolution = &resolution.2;
+            for def in &resolution.defs {
+                if def.imported || def.kind.is_local() {
+                    continue;
+                }
+                if def.name.to_lowercase().contains(query) {
+                    let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+                    let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+                    out.push((uri.clone(), def.name.clone(), symbol_kind_number(def.kind), Range { start, end }));
+                }
+            }
+        }
+        out
+    }
+
+    /// R3d: the def's own range is the definition site. Imported defs carry
+    /// ranges absolute to their own file, which this slice does not map to
+    /// document URIs yet — they fall back to the text scan.
+    fn definition_from_defs(&self, doc: &Document, offset: usize) -> Option<Location> {
+        let cached = doc.resolution()?;
+        let resolution = &cached.2;
+        let def = def_at(resolution, offset)?;
+        if def.imported {
+            return self.imported_definition(doc, cached, def);
+        }
+        let start = doc.line_index.offset_to_position(&doc.text, def.range.start);
+        let end = doc.line_index.offset_to_position(&doc.text, def.range.end);
+        Some(Location { uri: doc.uri.clone(), range: Range { start, end } })
+    }
+
+    /// R3d: an imported def's definition site — the owning import module's
+    /// file on disk, found by matching the def's name and its own file's
+    /// name span against each import's declarations.
+    fn imported_definition(
+        &self,
+        doc: &Document,
+        cached: &std::sync::Arc<CachedResolution>,
+        def: &ae_resolve::DefEntry,
+    ) -> Option<Location> {
+        let (_, imports, _) = &**cached;
+        // An imported declaration's range spans its whole text, while the
+        // def's range is the name token (the resolver's import_name_range),
+        // so the match is by name — top-level names are unique per module.
+        let (file_name, declaration) = imports.iter().find_map(|(file, import_module)| {
+            import_module.declarations.iter()
+                .find(|declaration| declaration.name == def.name)
+                .map(|declaration| (file, declaration))
+        })?;
+        let disk_dir = doc.disk_path()?.parent()?.to_path_buf();
+        let import_path = disk_dir.join(file_name);
+        let source = std::fs::read_to_string(&import_path).ok()?;
+        let index = LineIndex::new(&source);
+        let start = index.offset_to_position(&source, declaration.range.start);
+        let end = index.offset_to_position(&source, declaration.range.end);
+        let dir = disk_dir.to_string_lossy().replace('\\', "/");
+        let uri = format!("file:///{dir}/{file_name}");
+        Some(Location { uri, range: Range { start, end } })
+    }
+
     pub fn hover(&self, uri: &str, pos: Position) -> Option<String> {
         let doc = self.documents.get(uri)?;
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        // R3d: the def table answers first; the text heuristics below stay
+        // as the fallback for builtins, prelude items and unresolved names.
+        if let Some(markup) = self.hover_from_defs(doc, offset) {
+            return Some(markup);
+        }
         let ident = extract_ident_at(&doc.text, offset)?;
 
         match ident {
@@ -621,25 +1583,31 @@ impl LspServer {
     pub fn definition(&self, uri: &str, pos: Position) -> Option<Location> {
         let doc = self.documents.get(uri)?;
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
+        // R3d: the def table's def range is the definition; the text scan
+        // below stays as the fallback for names the single-file pass does
+        // not own (builtins, prelude, imports).
+        if let Some(location) = self.definition_from_defs(doc, offset) {
+            return Some(location);
+        }
         let ident = extract_ident_at(&doc.text, offset)?;
 
         for (line_idx, line) in doc.text.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("fn ") || trimmed.starts_with("struct ") || trimmed.starts_with("let ") || trimmed.starts_with("var ") {
-                if let Some(col) = line.find(ident) {
-                    let start = Position {
-                        line: line_idx as u32,
-                        character: line[..col].encode_utf16().count() as u32,
-                    };
-                    let end = Position {
-                        line: line_idx as u32,
-                        character: line[..col + ident.len()].encode_utf16().count() as u32,
-                    };
-                    return Some(Location {
-                        uri: uri.to_owned(),
-                        range: Range { start, end },
-                    });
-                }
+            if (trimmed.starts_with("fn ") || trimmed.starts_with("struct ") || trimmed.starts_with("let ") || trimmed.starts_with("var "))
+                && let Some(col) = line.find(ident)
+            {
+                let start = Position {
+                    line: line_idx as u32,
+                    character: line[..col].encode_utf16().count() as u32,
+                };
+                let end = Position {
+                    line: line_idx as u32,
+                    character: line[..col + ident.len()].encode_utf16().count() as u32,
+                };
+                return Some(Location {
+                    uri: uri.to_owned(),
+                    range: Range { start, end },
+                });
             }
         }
         None
@@ -652,31 +1620,17 @@ impl LspServer {
         };
 
         let offset = doc.line_index.position_to_offset(&doc.text, pos);
-        let prefix_bytes = doc.text[..offset].as_bytes();
+        let prefix_bytes = &doc.text.as_bytes()[..offset];
 
         let is_dot = prefix_bytes.iter().rev().find(|&&b| !b.is_ascii_whitespace()) == Some(&b'.');
         if is_dot {
-            for line in doc.text.lines() {
-                let trimmed = line.trim();
-                if let Some(start_brace) = trimmed.find('{') {
-                    if let Some((inside, _)) = trimmed[start_brace + 1..].split_once('}') {
-                        for field_part in inside.split(',') {
-                            if let Some((field, _)) = field_part.split_once(':') {
-                                let f = field.trim();
-                                if is_ident(f) {
-                                    out.push((f.to_owned(), 5, Some("field".to_owned())));
-                                }
-                            }
-                        }
-                    }
-                }
-                if trimmed.contains(':') && !trimmed.starts_with("fn ") && !trimmed.starts_with("let ") && !trimmed.starts_with("var ") && !trimmed.starts_with("struct ") {
-                    if let Some((field, _)) = trimmed.split_once(':') {
-                        let f = field.trim();
-                        if is_ident(f) {
-                            out.push((f.to_owned(), 5, Some("field".to_owned())));
-                        }
-                    }
+            // M6.2.05: member completion reads the receiver's inferred type
+            // from the def table. A receiver without a resolved struct type
+            // offers nothing — the old text scan advertised every field in
+            // the file, which was wrong more often than right.
+            if let Some(fields) = self.member_fields(doc, offset) {
+                for (name, ty) in fields {
+                    out.push((name.clone(), 5, Some(ty)));
                 }
             }
             return out;
@@ -698,12 +1652,195 @@ impl LspServer {
             out.push((name.to_owned(), kind, Some(detail.to_owned())));
         }
 
+        // Locals use the resolver's visibility ranges. Module items retain
+        // their declared signatures.
+        if let Some(cached) = doc.resolution() {
+            let resolution = &cached.2;
+            // The identifier prefix being typed (empty right after a space).
+            // Bulk items answer prefix matches only, and a cap keeps the
+            // candidate list bounded on very large files: a 100k-line file
+            // holds tens of thousands of structs, and rendering every one
+            // blew the completion latency target.
+            let prefix_start = {
+                let bytes = doc.text.as_bytes();
+                let mut start = offset.min(bytes.len());
+                while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+                    start -= 1;
+                }
+                start
+            };
+            let prefix = &doc.text[prefix_start..offset.min(doc.text.len())];
+            let mut structs_seen = 0usize;
+            let mut seen = std::collections::HashSet::new();
+            let visible: Vec<_> = resolution.functions.iter().flat_map(|function| &function.binding_visibility)
+                .rev().filter(|(_, range)| range.contains(&offset))
+                .map(|(id, _)| &resolution.defs[id.0 as usize])
+                .filter(|def| seen.insert(&def.name)).collect();
+            for def in visible.into_iter().rev() {
+                let ty = def.inferred.as_ref()
+                    .map(|shape| describe_spelling(shape, resolution))
+                    .unwrap_or_else(|| "deferred".to_owned());
+                out.push((def.name.clone(), 6, Some(format!("{}: {ty}", def.name))));
+            }
+            for def in &resolution.defs {
+                if def.imported {
+                    // An imported function's declared shape comes from its
+                    // own module's declaration text.
+                    if def.kind == ae_resolve::DefKind::Function
+                        && let Some(signature) = imported_fn_signature(&cached.1, def)
+                    {
+                        out.push((def.name.clone(), 3, Some(signature)));
+                    }
+                    continue;
+                }
+                let (kind, detail) = match def.kind {
+                    ae_resolve::DefKind::Function => {
+                        let mut params = String::new();
+                        for entry in resolution.defs.iter().filter(|entry| {
+                            entry.owner == Some(def.id) && entry.kind == ae_resolve::DefKind::Parameter
+                        }) {
+                            if !params.is_empty() { params.push_str(", "); }
+                            let ty = entry.inferred.as_ref()
+                                .map(|shape| describe_spelling(shape, resolution))
+                                .unwrap_or_else(|| "deferred".to_owned());
+                            params.push_str(&format!("{}: {}", entry.name, ty));
+                        }
+                        let mut returns = String::new();
+                        if let Some(entry) = resolution.spellings.iter().find(|entry| {
+                            entry.owner == def.id && entry.role == ae_resolve::SpellingRole::Return
+                        }) {
+                            returns = format!(" -> {}", describe_spelling(&entry.spelled.spelling, resolution));
+                        }
+                        (3, format!("fn {}({params}){returns}", def.name))
+                    }
+                    ae_resolve::DefKind::Struct => {
+                        if (!prefix.is_empty() && !def.name.starts_with(prefix)) || structs_seen >= 200 {
+                            continue;
+                        }
+                        structs_seen += 1;
+                        (7, format!("struct {}", def.name))
+                    }
+                    _ => continue,
+                };
+                out.push((def.name.clone(), kind, Some(detail)));
+            }
+        }
+
         let keywords = ["fn", "let", "var", "if", "else", "while", "return", "struct", "enum", "impl", "use", "pub", "true", "false"];
         for kw in keywords {
             out.push((kw.to_owned(), 14, None));
         }
 
         out
+    }
+
+    /// R3d: rename an imported def across files — the import module's own
+    /// declaration and internal uses (from a fresh resolution of that
+    /// module's source) plus the entry document's occurrences, keyed per
+    /// file URI in the WorkspaceEdit.
+    fn imported_rename(
+        &self,
+        doc: &Document,
+        cached: &std::sync::Arc<CachedResolution>,
+        def: &ae_resolve::DefEntry,
+        new_name: &str,
+    ) -> Option<JsonValue> {
+        let (_, imports, resolution) = &**cached;
+        let (file_name, import_module) = imports.iter().find(|(_, import_module)| {
+            import_module.declarations.iter().any(|declaration| declaration.name == def.name)
+        })?;
+        // Resolve the import module itself so its internal uses join the
+        // edit set.
+        let tokens = Rc::new(ae_syntax::lex_diagnostic(&import_module.source).ok()?);
+        let import_resolution = ae_resolve::resolve::resolve_with_tokens(import_module, &[], tokens.as_slice());
+        let import_def = import_resolution.defs.iter()
+            .find(|entry| entry.name == def.name && entry.kind == def.kind)?;
+
+        let disk_dir = doc.disk_path()?.parent()?.to_path_buf();
+        let import_path = disk_dir.join(file_name);
+        let import_source = std::fs::read_to_string(&import_path).ok()?;
+        let import_index = LineIndex::new(&import_source);
+        let import_uri = format!("file:///{}/{}", disk_dir.to_string_lossy().replace('\\', "/"), file_name);
+
+        let mut edits: Vec<JsonValue> = Vec::new();
+        let mut push_edit = |source: &str, index: &LineIndex, range: std::ops::Range<usize>| {
+            let start = index.offset_to_position(source, range.start);
+            let end = index.offset_to_position(source, range.end);
+            let mut text_edit = BTreeMap::new();
+            text_edit.insert("range".to_owned(), Self::range_to_json(&Range { start, end }));
+            text_edit.insert("newText".to_owned(), JsonValue::String(new_name.to_owned()));
+            edits.push(JsonValue::Object(text_edit));
+        };
+        push_edit(&import_source, &import_index, import_def.range.clone());
+        for function in &import_resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target == Some(import_def.id) {
+                    push_edit(&import_source, &import_index, occurrence.range.clone());
+                }
+            }
+        }
+
+        let mut entry_edits: Vec<(usize, JsonValue)> = Vec::new();
+        let mut push_entry_edit = |range: std::ops::Range<usize>| {
+            let start = doc.line_index.offset_to_position(&doc.text, range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, range.end);
+            let mut text_edit = BTreeMap::new();
+            text_edit.insert("range".to_owned(), Self::range_to_json(&Range { start, end }));
+            text_edit.insert("newText".to_owned(), JsonValue::String(new_name.to_owned()));
+            entry_edits.push((range.start, JsonValue::Object(text_edit)));
+        };
+        for function in resolution.functions.iter() {
+            for occurrence in &function.occurrences {
+                if occurrence.target == Some(def.id) {
+                    push_entry_edit(occurrence.range.clone());
+                }
+            }
+        }
+        entry_edits.sort_by_key(|(start, _)| *start);
+
+        let mut changes = BTreeMap::new();
+        changes.insert(doc.uri.clone(), JsonValue::Array(entry_edits.into_iter().map(|(_, edit)| edit).collect()));
+        changes.insert(import_uri, JsonValue::Array(edits));
+        let mut res = BTreeMap::new();
+        res.insert("changes".to_owned(), JsonValue::Object(changes));
+        Some(JsonValue::Object(res))
+    }
+
+    /// R3d: rename the resolved def only — every occurrence whose target is
+    /// the same def, plus the def's own declaration range, ordered by
+    /// offset. Scope-exact, unlike the text fallback which renames every
+    /// same-named token in the file.
+    fn rename_from_defs(&self, doc: &Document, offset: usize, new_name: &str) -> Option<JsonValue> {
+        let cached = doc.resolution()?;
+        let resolution = &cached.2;
+        let def = def_at(resolution, offset)?;
+        if def.imported {
+            return self.imported_rename(doc, cached, def, new_name);
+        }
+        let mut edits: Vec<(usize, JsonValue)> = Vec::new();
+        let mut push_edit = |range: std::ops::Range<usize>| {
+            let start = doc.line_index.offset_to_position(&doc.text, range.start);
+            let end = doc.line_index.offset_to_position(&doc.text, range.end);
+            let mut text_edit = BTreeMap::new();
+            text_edit.insert("range".to_owned(), Self::range_to_json(&Range { start, end }));
+            text_edit.insert("newText".to_owned(), JsonValue::String(new_name.to_owned()));
+            edits.push((range.start, JsonValue::Object(text_edit)));
+        };
+        push_edit(def.range.clone());
+        for function in &resolution.functions {
+            for occurrence in &function.occurrences {
+                if occurrence.target == Some(def.id) {
+                    push_edit(occurrence.range.clone());
+                }
+            }
+        }
+        edits.sort_by_key(|(start, _)| *start);
+        let ordered: Vec<JsonValue> = edits.into_iter().map(|(_, edit)| edit).collect();
+        let mut changes = BTreeMap::new();
+        changes.insert(doc.uri.clone(), JsonValue::Array(ordered));
+        let mut res = BTreeMap::new();
+        res.insert("changes".to_owned(), JsonValue::Object(changes));
+        Some(JsonValue::Object(res))
     }
 
     pub fn rename(&self, uri: &str, pos: Position, new_name: &str) -> Option<JsonValue> {
@@ -713,15 +1850,21 @@ impl LspServer {
         if !is_ident(new_name) {
             return None;
         }
+        // R3d: the def table answers first — scope-exact edits for the
+        // resolved def only; the text scan below stays as the fallback for
+        // names the single-file pass does not own.
+        if let Some(result) = self.rename_from_defs(doc, offset, new_name) {
+            return Some(result);
+        }
 
         let mut edits = Vec::new();
         for (line_idx, line) in doc.text.lines().enumerate() {
             let mut search_start = 0;
             while let Some(rel_pos) = line[search_start..].find(ident) {
                 let col = search_start + rel_pos;
-                let before_ok = col == 0 || !line[..col].chars().next_back().unwrap().is_alphanumeric() && line[..col].chars().next_back().unwrap() != '_';
+                let before_ok = line[..col].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '_');
                 let after_idx = col + ident.len();
-                let after_ok = after_idx >= line.len() || !line[after_idx..].chars().next().unwrap().is_alphanumeric() && line[after_idx..].chars().next().unwrap() != '_';
+                let after_ok = line[after_idx..].chars().next().is_none_or(|c| !c.is_alphanumeric() && c != '_');
 
                 if before_ok && after_ok {
                     let range = Range {
@@ -825,6 +1968,8 @@ fn is_ident(s: &str) -> bool {
     (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
+const MAX_LSP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn read_lsp_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     let mut size: Option<usize> = None;
     let mut line = String::new();
@@ -846,6 +1991,12 @@ pub fn read_lsp_message(reader: &mut impl BufRead) -> io::Result<Option<String>>
     let Some(content_length) = size else {
         return Ok(None);
     };
+    if content_length > MAX_LSP_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Content-Length exceeds maximum message size",
+        ));
+    }
 
     let mut buf = vec![0u8; content_length];
     reader.read_exact(&mut buf)?;

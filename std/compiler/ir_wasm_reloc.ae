@@ -1,0 +1,30 @@
+// std/compiler/ir_wasm_reloc.ae
+// Compiler WebAssembly linking relocation entry (R_WASM_*).
+
+pub struct WasmRelocEntry {
+    reloc_type: i64,    // 1=TYPE_INDEX_LEB, 2=FUNCTION_INDEX_LEB, 4=GLOBAL_INDEX_LEB, 9=MEMORY_ADDR_LEB
+    offset: i64,
+    index: i64,
+    addend: i64,
+}
+
+pub fn wasm_reloc_new(r_type: i64, off: i64, idx: i64, add: i64) -> WasmRelocEntry {
+    return WasmRelocEntry {
+        reloc_type: r_type,
+        offset: off,
+        index: idx,
+        addend: add,
+    };
+}
+
+pub fn wasm_reloc_is_func(r: WasmRelocEntry) -> bool {
+    return r.reloc_type == 2;
+}
+
+pub fn wasm_reloc_is_mem(r: WasmRelocEntry) -> bool {
+    return r.reloc_type == 9;
+}
+
+pub fn wasm_reloc_offset(r: WasmRelocEntry) -> i64 {
+    return r.offset;
+}

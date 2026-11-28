@@ -1,0 +1,63 @@
+fn read_text(flag: bool) -> ReadResult {
+    if flag {
+        return ReadResult::Ok("data");
+    }
+    return ReadResult::Err("missing");
+}
+
+fn read_again(flag: bool) -> Result[string, string] {
+    let text = read_text(flag)?;
+    return Result[string, string]::Ok(text);
+}
+
+fn names(flag: bool) -> DirResult {
+    if flag {
+        var list = strvec_new();
+        push(list, "a");
+        push(list, "b");
+        return DirResult::Ok(list);
+    }
+    return DirResult::Err("no dir");
+}
+
+fn names_again(flag: bool) -> Result[vec[string], string] {
+    let list = names(flag)?;
+    return Result[vec[string], string]::Ok(list);
+}
+
+fn flag_result(flag: bool) -> Result[bool, string] {
+    if flag {
+        return Result[bool, string]::Ok(true);
+    }
+    return BoolResult::Err("no flag");
+}
+
+fn float_result(flag: bool) -> FloatResult {
+    if flag {
+        return Result[f64, string]::Ok(1.5);
+    }
+    return FloatResult::Err("no float");
+}
+
+fn main() {
+    let a = read_again(true);
+    match a {
+        Result::Ok(text) => { print(text); }
+        ReadResult::Err(e) => { print(e); }
+    }
+    let b = names_again(true);
+    match b {
+        Result::Ok(list) => { print(len(list)); }
+        DirResult::Err(e) => { print(e); }
+    }
+    let c = flag_result(false);
+    match c {
+        Result::Ok(bit) => { print(bit); }
+        Result::Err(e) => { print(e); }
+    }
+    let d = float_result(true);
+    match d {
+        FloatResult::Ok(value) => { print(value); }
+        Result::Err(e) => { print(e); }
+    }
+}

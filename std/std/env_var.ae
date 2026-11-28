@@ -1,0 +1,13 @@
+// std/std/env_var.ae
+// Environment variable key and value validation primitives for Tier 3 std.
+
+use "../core/char_predicate.ae";
+
+pub fn is_valid_env_key_char(c: i64) -> bool {
+    // [a-zA-Z0-9_] : alphanumeric or underscore
+    return is_ident_continue(c);
+}
+
+pub fn env_key_len_is_valid(total_len: i64) -> bool {
+    return total_len > 0 && total_len <= 256;
+}

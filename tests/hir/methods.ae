@@ -1,0 +1,31 @@
+struct Doc { name: string, note: string }
+
+impl Doc {
+    fn rename(&mut self, to: string) -> i64 {
+        self.name = to;
+        return len(self.name);
+    }
+    fn static_name() -> string {
+        return "doc";
+    }
+}
+
+enum Shape {
+    Circle(i64),
+    Box(string),
+}
+
+fn area(shape: Shape) -> i64 {
+    match shape {
+        Shape::Circle(radius) => { return radius * radius; }
+        Shape::Box(label) => { return len(label); }
+    }
+}
+
+fn main() {
+    var d = Doc { name: "alpha", note: "keep" };
+    print(d.rename("beta"));
+    print(Doc::static_name());
+    print(area(Shape::Circle(3)));
+    print(area(Shape::Box("hall")));
+}

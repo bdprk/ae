@@ -1,0 +1,18 @@
+// `bytes(s)` copies the string's UTF-8 bytes into an i64 vector. The
+// interpreter now answers it too, so the values are part of the four-backend
+// parity contract.
+fn main() {
+    let text = bytes("héllo");
+    print(len(text));
+    print(text[0]);
+    print(text[1]);
+    print(text[2]);
+
+    let wide = bytes("中");
+    print(len(wide));
+    print(wide[0]);
+    print(wide[2]);
+
+    let empty = bytes("");
+    print(len(empty));
+}

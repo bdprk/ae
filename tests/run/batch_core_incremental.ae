@@ -1,7 +1,7 @@
-use "../../std/core/ir_query_key.ae";
-use "../../std/core/ir_dep_graph.ae";
-use "../../std/core/ir_crate_interface.ae";
-use "../../std/core/ir_query_stats.ae";
+use "../../std/compiler/ir_query_key.ae";
+use "../../std/compiler/ir_dep_graph.ae";
+use "../../std/compiler/ir_crate_interface.ae";
+use "../../std/compiler/ir_query_stats.ae";
 
 fn sample_stats() -> QueryStats {
     // 3 recomputed, 7 reused: the shape of a session that changed one item.

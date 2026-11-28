@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_elf2.ae
 // Verification of ElfSymEntry, ElfRelaEntry, ShstrtabBuilder, and ElfHash primitives.
 
-use "../../std/core/ir_elf_symtab.ae";
-use "../../std/core/ir_elf_reloc_rela.ae";
-use "../../std/core/ir_elf_shstrtab.ae";
-use "../../std/core/ir_elf_hash.ae";
+use "../../std/compiler/ir_elf_symtab.ae";
+use "../../std/compiler/ir_elf_reloc_rela.ae";
+use "../../std/compiler/ir_elf_shstrtab.ae";
+use "../../std/compiler/ir_elf_hash.ae";
 
 fn main() {
     print("--- batch_core_compiler_elf2 test start ---");

@@ -46,33 +46,8 @@ static double ae_f64_max(double a, double b) {
 #include <fcntl.h>
 #endif
 
-#define AE_READ_RESULT ae_e0
-#define AE_READ_OK AE_E0_0
-#define AE_READ_ERR AE_E0_1
-#define AE_WRITE_RESULT ae_e1
-#define AE_WRITE_OK AE_E1_0
-#define AE_WRITE_ERR AE_E1_1
-#define AE_FLOAT_RESULT ae_e8
-#define AE_FLOAT_OK AE_E8_0
-#define AE_FLOAT_ERR AE_E8_1
-#define AE_INT_RESULT ae_e2
-#define AE_INT_OK AE_E2_0
-#define AE_INT_ERR AE_E2_1
-#define AE_DIR_RESULT ae_e3
-#define AE_DIR_OK AE_E3_0
-#define AE_DIR_ERR AE_E3_1
-#define AE_FILE_RESULT ae_e4
-#define AE_FILE_OK AE_E4_0
-#define AE_FILE_ERR AE_E4_1
-#define AE_STATUS_RESULT ae_e5
-#define AE_STATUS_OK AE_E5_0
-#define AE_STATUS_ERR AE_E5_1
-#define AE_BOOL_RESULT ae_e6
-#define AE_BOOL_OK AE_E6_0
-#define AE_BOOL_ERR AE_E6_1
-#define AE_COMMAND_RESULT ae_e7
-#define AE_COMMAND_OK AE_E7_0
-#define AE_COMMAND_ERR AE_E7_1
+// The AE_<FAMILY>_RESULT/_OK/_ERR defines are generated from the registered
+// prelude enums and emitted just before this file (P2.4); no ids live here.
 
 static AE_STATUS_RESULT ae_status_ok(void) {
     AE_STATUS_RESULT out = { AE_STATUS_OK, { { 0 } } };
@@ -430,6 +405,17 @@ static ae_string ae_to_string(int64_t value, size_t line, size_t column) {
     if (length < 0) ae_fail("cannot format integer", line, column);
     return ae_str_from_len(buffer, (int64_t)length, line, column);
 }
+static ae_string ae_to_string_u64(uint64_t value, size_t line, size_t column) {
+    char buffer[24];
+    const int length = snprintf(buffer, sizeof buffer, "%" PRIu64, value);
+    if (length < 0) ae_fail("cannot format integer", line, column);
+    return ae_str_from_len(buffer, (int64_t)length, line, column);
+}
+static ae_string ae_to_string_char(uint32_t value, size_t line, size_t column) {
+    char buf[4];
+    const size_t len = ae_utf8_encode(value, buf);
+    return ae_str_from_len(buf, (int64_t)len, line, column);
+}
 
 // ---- f64 text (ADR-37) ------------------------------------------------------
 // One spelling on every platform. `%g` alone is not enough: UCRT writes a NaN
@@ -538,6 +524,10 @@ static double ae_f64_div(double a, double b, size_t line, size_t column) {
     if (b == 0.0) ae_fail("f64 division by zero", line, column);
     return a / b;
 }
+static float ae_f32_div(float a, float b, size_t line, size_t column) {
+    if (b == 0.0f) ae_fail("f32 division by zero", line, column);
+    return a / b;
+}
 
 static double ae_f64_from_i64(int64_t value, size_t line, size_t column) {
     // Every integer up to 2^53 is exact; beyond that the conversion would
@@ -546,6 +536,112 @@ static double ae_f64_from_i64(int64_t value, size_t line, size_t column) {
         ae_fail("i64 to f64 conversion would lose precision", line, column);
     }
     return (double)value;
+}
+
+static int64_t ae_f64_to_i64_trunc(double value, size_t line, size_t column) {
+    // `as` truncates toward zero; non-finite and out-of-range values trap.
+    if (!isfinite(value) || value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int64_t)value;
+}
+static int8_t ae_f64_to_i8_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -129.0 || value >= 128.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int8_t)value;
+}
+static uint8_t ae_f64_to_u8_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 256.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (uint8_t)(int16_t)value;
+}
+static int16_t ae_f64_to_i16_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -32769.0 || value >= 32768.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int16_t)value;
+}
+static uint16_t ae_f64_to_u16_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 65536.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (uint16_t)(int32_t)value;
+}
+static int32_t ae_f64_to_i32_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -2147483649.0 || value >= 2147483648.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (int32_t)value;
+}
+static uint32_t ae_f64_to_u32_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 4294967296.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (uint32_t)(int64_t)value;
+}
+static intptr_t ae_f64_to_isize_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    return (intptr_t)value;
+}
+static uint64_t ae_f64_to_u64_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 18446744073709551616.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    if (value < 0.0) return 0;
+    return (uint64_t)value;
+}
+static uintptr_t ae_f64_to_usize_trunc(double value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0 || value >= 18446744073709551616.0) {
+        ae_fail("float-to-integer cast out of range", line, column);
+    }
+    if (value < 0.0) return 0;
+    return (uintptr_t)value;
+}
+static int8_t ae_f32_to_i8_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -129.0f || value >= 128.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int8_t)value;
+}
+static uint8_t ae_f32_to_u8_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 256.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (uint8_t)(int16_t)value;
+}
+static int16_t ae_f32_to_i16_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -32769.0f || value >= 32768.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int16_t)value;
+}
+static uint16_t ae_f32_to_u16_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 65536.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (uint16_t)(int32_t)value;
+}
+static int32_t ae_f32_to_i32_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -2147483648.0f || value >= 2147483648.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int32_t)value;
+}
+static uint32_t ae_f32_to_u32_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 4294967296.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (uint32_t)(int64_t)value;
+}
+static int64_t ae_f32_to_i64_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -9223372036854775808.0f || value >= 9223372036854775808.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (int64_t)value;
+}
+static intptr_t ae_f32_to_isize_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value < -9223372036854775808.0f || value >= 9223372036854775808.0f) ae_fail("float-to-integer cast out of range", line, column);
+    return (intptr_t)value;
+}
+static uint64_t ae_f32_to_u64_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 18446744073709551616.0f) ae_fail("float-to-integer cast out of range", line, column);
+    if (value < 0.0f) return 0;
+    return (uint64_t)value;
+}
+static uintptr_t ae_f32_to_usize_trunc(float value, size_t line, size_t column) {
+    if (!isfinite(value) || value <= -1.0f || value >= 18446744073709551616.0f) ae_fail("float-to-integer cast out of range", line, column);
+    if (value < 0.0f) return 0;
+    return (uintptr_t)value;
 }
 
 static AE_INT_RESULT ae_f64_to_i64(double value, size_t line, size_t column) {
@@ -771,7 +867,7 @@ static AE_FILE_RESULT ae_try_file_info(const char *path, size_t line, size_t col
     const int64_t ticks = (int64_t)(((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32) | (uint64_t)data.ftLastWriteTime.dwLowDateTime);
     const int64_t modified = ticks / 10000000 - 11644473600LL;
     const bool is_dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { size, modified, is_dir } } };
+    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { { size, modified, is_dir } } } };
     return out;
 #else
     errno = 0;
@@ -780,7 +876,7 @@ static AE_FILE_RESULT ae_try_file_info(const char *path, size_t line, size_t col
         AE_FILE_RESULT out = { AE_FILE_ERR, { .v1 = { ae_io_message(errno, line, column) } } };
         return out;
     }
-    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { (int64_t)info.st_size, (int64_t)info.st_mtime, S_ISDIR(info.st_mode) } } };
+    AE_FILE_RESULT out = { AE_FILE_OK, { .v0 = { { (int64_t)info.st_size, (int64_t)info.st_mtime, S_ISDIR(info.st_mode) } } } };
     return out;
 #endif
 }
@@ -956,10 +1052,15 @@ static AE_INT_RESULT ae_map_get(const ae_map *m, ae_strview key, size_t line, si
 // Keys are copied and sorted by bytes, so iteration is reproducible and the
 // caller owns a plain string vector.
 static ae_strvec ae_map_keys(const ae_map *m, size_t line, size_t column) {
-    ae_strvec keys = ae_strvec_new(line, column);
+    ae_strvec keys;
+    keys.len = 0;
+    keys.cap = m->len > 4 ? m->len : 4;
+    keys.data = ae_alloc((size_t)keys.cap * sizeof(ae_string), line, column);
+    keys.arena = NULL;
+    keys.arena_len = 0;
     for (int64_t i = 0; i < m->cap; i++) {
         if (m->states[i] != AE_MAP_FULL) continue;
-        ae_strvec_push(&keys, ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column), line, column);
+        keys.data[keys.len++] = ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column);
     }
     if (keys.len > 1) qsort(keys.data, (size_t)keys.len, sizeof(ae_string), ae_name_compare);
     return keys;
@@ -1062,12 +1163,25 @@ static bool ae_mapf_remove(ae_mapf *m, ae_strview key, size_t line, size_t colum
     return true;
 }
 static double ae_mapf_inc(ae_mapf *m, ae_strview key, double delta, size_t line, size_t column) {
-    int64_t at = ae_mapf_find(m, key);
-    if (at >= 0) {
-        m->slots[at].value = m->slots[at].value + delta;
-        return m->slots[at].value;
+    ae_mapf_grow(m, line, column);
+    int64_t at = ae_map_slot_of(key, m->cap);
+    int64_t reuse = -1;
+    for (;;) {
+        const unsigned char state = m->states[at];
+        if (state == AE_MAP_EMPTY) break;
+        if (state == AE_MAP_DELETED) {
+            if (reuse < 0) reuse = at;
+        } else if (ae_str_eq(AE_VIEW(m->slots[at].key), key)) {
+            m->slots[at].value = m->slots[at].value + delta;
+            return m->slots[at].value;
+        }
+        at = (at + 1) & (m->cap - 1);
     }
-    ae_mapf_put(m, key, delta, line, column);
+    if (reuse >= 0) at = reuse; else m->used = m->used + 1;
+    m->slots[at].key = ae_str_from_len(key.ptr, key.len, line, column);
+    m->slots[at].value = delta;
+    m->states[at] = AE_MAP_FULL;
+    m->len = m->len + 1;
     return delta;
 }
 static int64_t ae_mapf_len(const ae_mapf *m, size_t line, size_t column) {
@@ -1096,10 +1210,15 @@ static void ae_mapf_forfeit(ae_mapf *m) {
     m->used = 0;
 }
 static ae_strvec ae_mapf_keys(const ae_mapf *m, size_t line, size_t column) {
-    ae_strvec keys = ae_strvec_new(line, column);
+    ae_strvec keys;
+    keys.len = 0;
+    keys.cap = m->len > 4 ? m->len : 4;
+    keys.data = ae_alloc((size_t)keys.cap * sizeof(ae_string), line, column);
+    keys.arena = NULL;
+    keys.arena_len = 0;
     for (int64_t i = 0; i < m->cap; i++) {
         if (m->states[i] != AE_MAP_FULL) continue;
-        ae_strvec_push(&keys, ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column), line, column);
+        keys.data[keys.len++] = ae_str_copy_view(AE_VIEW(m->slots[i].key), line, column);
     }
     if (keys.len > 1) qsort(keys.data, (size_t)keys.len, sizeof(ae_string), ae_name_compare);
     return keys;
@@ -1290,16 +1409,35 @@ static int ae_json_member(const char *t, int64_t n, int64_t *pos, const char *ke
     if (i < n && t[i] == '}') { *pos = i + 1; return 1; }
     for (;;) {
         ae_json_ws(t, n, &i);
-        ae_string name;
-        if (!ae_json_decode(t, n, &i, &name, line, column)) return 0;
+        if (i >= n || t[i] != '"') return 0;
+        // Fast path: unescaped keys can be matched directly without heap allocation.
+        int64_t j = i + 1;
+        int has_escape = 0;
+        while (j < n) {
+            const unsigned char ch = (unsigned char)t[j];
+            if (ch == '"') break;
+            if (ch == '\\') { has_escape = 1; break; }
+            if (ch < 0x20u) return 0;
+            j += 1;
+        }
+        int match = 0;
+        if (!has_escape) {
+            if (j >= n) return 0;
+            const int64_t raw_len = j - (i + 1);
+            match = raw_len == key_len && (key_len == 0 || memcmp(t + i + 1, key, (size_t)key_len) == 0);
+            i = j + 1;
+        } else {
+            ae_string name;
+            if (!ae_json_decode(t, n, &i, &name, line, column)) return 0;
+            match = name.len == key_len && memcmp(name.ptr, key, (size_t)key_len) == 0;
+            ae_str_release(&name);
+        }
         ae_json_ws(t, n, &i);
-        if (i >= n || t[i] != ':') { ae_str_release(&name); return 0; }
+        if (i >= n || t[i] != ':') return 0;
         i += 1;
         ae_json_ws(t, n, &i);
         const int64_t start = i;
-        if (!ae_json_skip_value(t, n, &i, 0)) { ae_str_release(&name); return 0; }
-        const int match = name.len == key_len && memcmp(name.ptr, key, (size_t)key_len) == 0;
-        ae_str_release(&name);
+        if (!ae_json_skip_value(t, n, &i, 0)) return 0;
         if (match) { *vs = start; *ve = i; *found = 1; return 1; }
         ae_json_ws(t, n, &i);
         if (i >= n) return 0;
@@ -1701,7 +1839,7 @@ static AE_COMMAND_RESULT ae_run_command(const char *program, const ae_strvec *ar
     const int64_t code = WIFEXITED(status) ? (int64_t)WEXITSTATUS(status)
                                            : (int64_t)(128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0));
     ae_string output = { buffer, length };
-    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { code, output } } };
+    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { { code, output } } } };
     return out;
 }
 #else
@@ -1811,7 +1949,7 @@ static AE_COMMAND_RESULT ae_run_command(const char *program, const ae_strvec *ar
     GetExitCodeProcess(pi.hProcess, &status);
     CloseHandle(pi.hProcess);
     ae_string output = { buffer, length };
-    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { (int64_t)status, output } } };
+    AE_COMMAND_RESULT out = { AE_COMMAND_OK, { .v0 = { { (int64_t)status, output } } } };
     return out;
 }
 #endif

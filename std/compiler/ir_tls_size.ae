@@ -1,0 +1,33 @@
+// std/compiler/ir_tls_size.ae
+// Compiler Thread Local Storage section sizing, alignment padding, and static TBSS offset calculation.
+
+pub struct TlsSectionLayout {
+    tdata_size: i64,
+    tbss_size: i64,
+    alignment: i64,
+}
+
+pub fn tls_layout_new(tdata: i64, tbss: i64, align: i64) -> TlsSectionLayout {
+    return TlsSectionLayout {
+        tdata_size: tdata,
+        tbss_size: tbss,
+        alignment: align,
+    };
+}
+
+pub fn tls_layout_total_unaligned(l: TlsSectionLayout) -> i64 {
+    return l.tdata_size + l.tbss_size;
+}
+
+pub fn tls_layout_total_aligned(l: TlsSectionLayout) -> i64 {
+    let raw = l.tdata_size + l.tbss_size;
+    let rem = raw % l.alignment;
+    if rem > 0 {
+        return raw + (l.alignment - rem);
+    }
+    return raw;
+}
+
+pub fn tls_tbss_offset(l: TlsSectionLayout) -> i64 {
+    return l.tdata_size;
+}

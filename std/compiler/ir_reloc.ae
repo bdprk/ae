@@ -1,0 +1,26 @@
+// std/compiler/ir_reloc.ae
+// Compiler object file relocation entry and symbol resolution descriptor.
+
+pub struct RelocEntry {
+    offset: i64,      // Offset in section
+    symbol_id: i64,   // Target symbol table index
+    reloc_type: i64,  // 1=R_X86_64_64, 2=R_X86_64_PC32, 3=R_X86_64_PLT32
+    addend: i64,      // Relocation addend
+}
+
+pub fn reloc_entry_new(offset: i64, symbol: i64, r_type: i64, addend: i64) -> RelocEntry {
+    return RelocEntry {
+        offset: offset,
+        symbol_id: symbol,
+        reloc_type: r_type,
+        addend: addend,
+    };
+}
+
+pub fn reloc_is_pc_relative(entry: RelocEntry) -> bool {
+    return entry.reloc_type == 2 || entry.reloc_type == 3;
+}
+
+pub fn reloc_calculate_pc32(target_address: i64, current_address: i64, addend: i64) -> i64 {
+    return target_address + addend - current_address;
+}

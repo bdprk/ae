@@ -1,0 +1,27 @@
+// std/compiler/ir_vector_pack.ae
+// Compiler auto-vectorization SIMD packable candidate descriptor.
+
+pub struct SimdPackGroup {
+    element_type_size: i64, // e.g. 4 for i32, 8 for i64
+    vector_width: i64,      // e.g. 16 for 128-bit SIMD, 32 for 256-bit SIMD
+    consecutive_loads: bool,
+    has_loop_carried_dep: bool,
+}
+
+pub fn simd_pack_new(elem_size: i64, width: i64, consecutive: bool, loop_dep: bool) -> SimdPackGroup {
+    return SimdPackGroup {
+        element_type_size: elem_size,
+        vector_width: width,
+        consecutive_loads: consecutive,
+        has_loop_carried_dep: loop_dep,
+    };
+}
+
+pub fn simd_pack_lane_count(g: SimdPackGroup) -> i64 {
+    return g.vector_width / g.element_type_size;
+}
+
+pub fn simd_pack_can_vectorize(g: SimdPackGroup) -> bool {
+    // Requires consecutive memory accesses and no loop carried dependencies
+    return g.consecutive_loads && !g.has_loop_carried_dep;
+}

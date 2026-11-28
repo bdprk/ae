@@ -1,0 +1,58 @@
+fn add_i8(a: i8, b: i8) -> i8 {
+    return a + b;
+}
+
+fn add_u8(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+
+fn main() {
+    let imin = (-128) as i8;
+    let imax = 127 as i8;
+    let umin = 0 as u8;
+    let umax = 255 as u8;
+    print(imin);
+    print(imax);
+    print(umin);
+    print(umax);
+
+    var iv = add_i8(10 as i8, (-3) as i8);
+    iv = iv * (2 as i8);
+    iv = iv - (4 as i8);
+    print(iv / (2 as i8));
+    print(iv % (3 as i8));
+    print(-iv);
+
+    var uv = add_u8(200 as u8, 50 as u8);
+    uv = uv - (100 as u8);
+    print(uv / (3 as u8));
+    print(uv % (4 as u8));
+
+    print((3 as i8) << (2 as i8));
+    print((12 as i8) >> (2 as i8));
+    print((3 as u8) << (3 as u8));
+    print((24 as u8) >> (2 as u8));
+
+    print(imin < imax);
+    print(umax > umin);
+    print((5 as i8) == (5 as i8));
+    print((5 as u8) != (6 as u8));
+
+    print(imax as i64);
+    print(umax as i64);
+    print(imin as u8);
+    print(umax as i8);
+    print(imin as f64);
+    print(umax as f64);
+    print((-128.5) as i8);
+    print(127.5 as i8);
+    print((-0.5) as u8);
+    print(255.5 as u8);
+
+    let wide = 258;
+    print(wide as u8);
+    let neg_wide = -2;
+    print(neg_wide as u8);
+    let wrap_i8 = 128;
+    print(wrap_i8 as i8);
+}

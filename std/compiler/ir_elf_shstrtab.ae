@@ -1,0 +1,30 @@
+// std/compiler/ir_elf_shstrtab.ae
+// Compiler ELF64 section header name string table (.shstrtab) builder.
+
+pub struct ShstrtabBuilder {
+    buffer_offset: i64,
+    section_count: i64,
+}
+
+pub fn shstrtab_new() -> ShstrtabBuilder {
+    // 0 is null byte in ELF
+    return ShstrtabBuilder {
+        buffer_offset: 1,
+        section_count: 0,
+    };
+}
+
+pub fn shstrtab_offset(s: ShstrtabBuilder) -> i64 {
+    return s.buffer_offset;
+}
+
+pub fn shstrtab_append(s: ShstrtabBuilder, name_len: i64) -> ShstrtabBuilder {
+    return ShstrtabBuilder {
+        buffer_offset: s.buffer_offset + name_len + 1,
+        section_count: s.section_count + 1,
+    };
+}
+
+pub fn shstrtab_count(s: ShstrtabBuilder) -> i64 {
+    return s.section_count;
+}

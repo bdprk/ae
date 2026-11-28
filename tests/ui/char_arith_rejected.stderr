@@ -1,0 +1,1 @@
+ae: $DIR/char_arith_rejected.ae:4:16: arithmetic requires integer operands

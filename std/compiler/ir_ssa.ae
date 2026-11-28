@@ -1,0 +1,47 @@
+// std/compiler/ir_ssa.ae
+// Compiler Static Single Assignment (SSA) Phi-node and variable version tracking primitives.
+
+pub struct SsaVar {
+    base_var_id: i64,
+    version: i64,
+}
+
+pub fn ssa_var_new(base_id: i64, ver: i64) -> SsaVar {
+    return SsaVar {
+        base_var_id: base_id,
+        version: ver,
+    };
+}
+
+pub fn ssa_var_id(v: SsaVar) -> i64 {
+    return v.base_var_id;
+}
+
+pub fn ssa_var_version(v: SsaVar) -> i64 {
+    return v.version;
+}
+
+pub fn ssa_var_next_def(v: SsaVar) -> SsaVar {
+    return SsaVar {
+        base_var_id: v.base_var_id,
+        version: v.version + 1,
+    };
+}
+
+pub struct PhiNode2 {
+    out_var: SsaVar,
+    in_left: SsaVar,
+    in_right: SsaVar,
+}
+
+pub fn phi_node2_new(out: SsaVar, left: SsaVar, right: SsaVar) -> PhiNode2 {
+    return PhiNode2 {
+        out_var: out,
+        in_left: left,
+        in_right: right,
+    };
+}
+
+pub fn phi_node2_out_version(phi: PhiNode2) -> i64 {
+    return phi.out_var.version;
+}

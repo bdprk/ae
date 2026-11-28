@@ -1,0 +1,1 @@
+ae: $DIR/drop_duplicate_impl_rejected.ae:11:21: duplicate destructor 'drop' for 'Guard'

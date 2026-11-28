@@ -1,4 +1,4 @@
-use "../../std/core/heap.ae";
+use "../../std/alloc/heap.ae";
 use "../../std/core/arena.ae";
 use "../../std/core/ref.ae";
 use "../../std/core/order.ae";

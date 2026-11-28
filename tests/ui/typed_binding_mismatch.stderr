@@ -1,0 +1,1 @@
+ae: $DIR/typed_binding_mismatch.ae:2:12: the annotation says i64, but the initializer is f64

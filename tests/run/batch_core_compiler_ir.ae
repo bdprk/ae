@@ -1,7 +1,7 @@
-use "../../std/core/ir_opcode.ae";
-use "../../std/core/basic_block.ae";
-use "../../std/core/vreg.ae";
-use "../../std/core/cfg_edge.ae";
+use "../../std/compiler/ir_opcode.ae";
+use "../../std/compiler/basic_block.ae";
+use "../../std/compiler/vreg.ae";
+use "../../std/compiler/cfg_edge.ae";
 
 fn main() {
     assert(!ir_opcode_is_jump(IrOpcode::OpNop));

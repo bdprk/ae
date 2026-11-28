@@ -1,0 +1,54 @@
+types calls.ae
+item spellings: none
+fn #0 apply
+  params:
+    value: i64
+  return: i64
+  locals:
+    #3 value = i64
+    #4 x = i64
+    #5 double = fn(i64) -> i64
+  expressions:
+    47..80 deferred
+    72..73 checked i64
+    72..77 checked i64
+    76..77 checked i64
+    93..99 deferred
+    93..106 deferred
+    100..105 checked i64
+fn #1 bump
+  params:
+    pointer: *mut i64
+  return: i64
+  locals:
+    #6 pointer = *mut i64
+  expressions:
+    179..180 checked i64
+    197..198 checked i64
+fn #2 main
+  params: none
+  return: (none)
+  locals:
+    #7 value = i64
+    #8 after = i64
+    #9 numbers = vec[i64]
+  expressions:
+    237..238 checked i64
+    256..260 deferred
+    256..284 deferred
+    261..283 deferred
+    296..301 checked i64
+    314..319 deferred
+    332..337 deferred
+    332..341 deferred
+    338..340 checked i64
+    362..371 deferred
+    366..367 checked i64
+    369..370 checked i64
+    377..381 deferred
+    377..393 deferred
+    382..389 deferred
+    391..392 checked i64
+    405..408 deferred
+    405..417 deferred
+    409..416 deferred

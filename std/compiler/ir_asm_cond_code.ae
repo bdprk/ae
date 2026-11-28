@@ -1,0 +1,28 @@
+// std/compiler/ir_asm_cond_code.ae
+// Compiler machine condition code branch suffix and flag condition evaluator.
+
+pub struct AsmCondCode {
+    cond_kind: i64, // 1=E/Z, 2=NE/NZ, 3=L/B, 4=LE/BE, 5=G/A, 6=GE/AE
+    is_signed: bool,
+}
+
+pub fn asm_cond_new(kind: i64, signed_cmp: bool) -> AsmCondCode {
+    return AsmCondCode {
+        cond_kind: kind,
+        is_signed: signed_cmp,
+    };
+}
+
+pub fn asm_cond_is_equality(c: AsmCondCode) -> bool {
+    return c.cond_kind == 1 || c.cond_kind == 2;
+}
+
+pub fn asm_cond_invert_kind(c: AsmCondCode) -> i64 {
+    // Invert condition: 1 <-> 2, 3 <-> 6, 4 <-> 5
+    if c.cond_kind == 1 { return 2; }
+    if c.cond_kind == 2 { return 1; }
+    if c.cond_kind == 3 { return 6; }
+    if c.cond_kind == 6 { return 3; }
+    if c.cond_kind == 4 { return 5; }
+    return 4;
+}

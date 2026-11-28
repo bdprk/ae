@@ -1,0 +1,39 @@
+// P4.3 hosted `std/process`: argv, exit and a child process through the
+// module. The child is one that cannot start, so the fixture is portable:
+// every host reports the failure as a CommandResult::Err.
+use "../../std/std/process.ae";
+
+fn body() -> i64 {
+    // The fixture is invoked without program arguments, so argv holds the
+    // program name alone.
+    let own = argv();
+    print(len(own) >= 1);
+    print(len(own[0]) > 0);
+
+    let child = launch_plain("ae-definitely-missing-program");
+    match child {
+        CommandResult::Ok(finished) => {
+            print("unexpected " + to_string(finished.status));
+            return 0;
+        }
+        CommandResult::Err(reason) => {
+            print(contains(reason, "cannot start the program"));
+        }
+    }
+
+    let with_args = launch("ae-definitely-missing-program", strvec_new());
+    match with_args {
+        CommandResult::Ok(finished) => {
+            print("unexpected " + to_string(finished.status));
+            return 0;
+        }
+        CommandResult::Err(reason) => {
+            print(contains(reason, "cannot start the program"));
+        }
+    }
+    return 0;
+}
+
+fn main() {
+    assert(body() == 0);
+}

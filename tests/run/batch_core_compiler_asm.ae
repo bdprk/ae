@@ -1,10 +1,10 @@
 // tests/run/batch_core_compiler_asm.ae
 // Verification of x86_64 and ARM64 assembly register conventions, directives, and comment formatting.
 
-use "../../std/core/ir_asm_intel.ae";
-use "../../std/core/ir_asm_arm64.ae";
-use "../../std/core/ir_asm_directive.ae";
-use "../../std/core/ir_asm_comment.ae";
+use "../../std/compiler/ir_asm_intel.ae";
+use "../../std/compiler/ir_asm_arm64.ae";
+use "../../std/compiler/ir_asm_directive.ae";
+use "../../std/compiler/ir_asm_comment.ae";
 
 fn main() {
     print("--- batch_core_compiler_asm test start ---");

@@ -122,8 +122,8 @@ fn elaborate_with_round_limit(function: &mut MirFunction, rounds: usize) -> Drop
 fn sync_releases_binding(bindings: &mut Vec<MirBinding>, original: &[usize], kept: &[(usize, Type)], consumed: &mut usize) {
     let mut index = *consumed;
     while index < bindings.len() {
-        if let MirRvalue::Intrinsic(name, ops, _) = &bindings[index].rvalue {
-            if *name == "releases" {
+        if let MirRvalue::Intrinsic(name, ops, _) = &bindings[index].rvalue
+            && *name == "releases" {
                 let ids: Vec<usize> = ops.iter().filter_map(|op| match op {
                     MirOperand::Place(MirPlace::Local(id, _)) => Some(*id),
                     _ => None,
@@ -133,13 +133,12 @@ fn sync_releases_binding(bindings: &mut Vec<MirBinding>, original: &[usize], kep
                         bindings.remove(index);
                     } else {
                         let new_ops: Vec<MirOperand> = kept.iter().map(|&(id, ty)| MirOperand::Place(MirPlace::Local(id, ty))).collect();
-                        bindings[index].rvalue = MirRvalue::Intrinsic("releases", new_ops, Type::Int);
+                        bindings[index].rvalue = MirRvalue::Intrinsic("releases", new_ops, Type::Int(IntTy::I64));
                     }
                     *consumed = index;
                     return;
                 }
             }
-        }
         index += 1;
     }
 }
@@ -212,7 +211,13 @@ fn terminator_targets(terminator: &CfgTerminator) -> Vec<usize> {
     match terminator {
         CfgTerminator::Goto(target) => vec![*target],
         CfgTerminator::Branch(_, yes, no) => vec![*yes, *no],
-        CfgTerminator::Switch(_, _, targets) => targets.clone(),
+        CfgTerminator::Switch(_, _, _, targets, default) => {
+            let mut out: Vec<usize> = targets.iter().map(|(_, t)| *t).collect();
+            if let Some(d) = default {
+                out.push(*d);
+            }
+            out
+        }
         CfgTerminator::Return(_) | CfgTerminator::Exit(_) | CfgTerminator::Unreachable => Vec::new(),
     }
 }
@@ -361,7 +366,7 @@ mod tests {
     fn unvisited_backedge_does_not_poison_live_loop_state() {
         use super::super::mir::MirBlock;
         let function = MirFunction {
-            id: 0, is_main: false, params: vec![(7, Type::String)], returns: Type::Int,
+            id: 0, is_main: false, params: vec![(7, Type::String)], returns: Type::Int(IntTy::I64),
             blocks: vec![
                 MirBlock { id: 0, statements: vec![], bindings: vec![], terminator: CfgTerminator::Goto(1) },
                 MirBlock { id: 1, statements: vec![], bindings: vec![], terminator: CfgTerminator::Branch(Expr::BoolLit(true), 1, 2) },
@@ -377,7 +382,7 @@ mod tests {
     fn later_predecessor_is_joined_and_unreachable_block_is_preserved() {
         use super::super::mir::MirBlock;
         let mut function = MirFunction {
-            id: 0, is_main: false, params: vec![(7, Type::String)], returns: Type::Int,
+            id: 0, is_main: false, params: vec![(7, Type::String)], returns: Type::Int(IntTy::I64),
             blocks: vec![
                 MirBlock { id: 0, statements: vec![], bindings: vec![], terminator: CfgTerminator::Branch(Expr::BoolLit(true), 1, 2) },
                 MirBlock { id: 1, statements: vec![], bindings: vec![], terminator: CfgTerminator::Goto(3) },
@@ -396,7 +401,7 @@ mod tests {
     #[test]
     fn incomplete_analysis_does_not_rewrite_releases() {
         let mut function = MirFunction {
-            id: 0, is_main: false, params: vec![], returns: Type::Int,
+            id: 0, is_main: false, params: vec![], returns: Type::Int(IntTy::I64),
             blocks: vec![super::super::mir::MirBlock {
                 id: 0,
                 statements: vec![Statement::Frees(vec![(7, Type::String)])],

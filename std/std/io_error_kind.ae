@@ -1,0 +1,84 @@
+// std/std/io_error_kind.ae
+// Standardized I/O error category classification primitives for Tier 3 std.
+
+pub enum IoErrorKind {
+    NotFound,
+    PermissionDenied,
+    ConnectionRefused,
+    ConnectionReset,
+    TimedOut,
+    UnexpectedEof,
+    Interrupted,
+    Other,
+}
+
+pub fn io_error_kind_code(k: IoErrorKind) -> i64 {
+    var code = 0;
+    match k {
+        IoErrorKind::NotFound => { code = 1; }
+        IoErrorKind::PermissionDenied => { code = 2; }
+        IoErrorKind::ConnectionRefused => { code = 3; }
+        IoErrorKind::ConnectionReset => { code = 4; }
+        IoErrorKind::TimedOut => { code = 5; }
+        IoErrorKind::UnexpectedEof => { code = 6; }
+        IoErrorKind::Interrupted => { code = 7; }
+        IoErrorKind::Other => { code = 8; }
+    }
+    return code;
+}
+
+pub fn io_error_is_recoverable(k: IoErrorKind) -> bool {
+    var r = false;
+    match k {
+        IoErrorKind::NotFound => {}
+        IoErrorKind::PermissionDenied => {}
+        IoErrorKind::ConnectionRefused => {}
+        IoErrorKind::ConnectionReset => {}
+        IoErrorKind::TimedOut => { r = true; }
+        IoErrorKind::UnexpectedEof => {}
+        IoErrorKind::Interrupted => { r = true; }
+        IoErrorKind::Other => {}
+    }
+    return r;
+}
+
+// P4.3: classify the OS message a hosted call returns into the enum above, so
+// callers stop matching platform strings. The runtime still reports the OS
+// text (ADR-0244 keeps `read_file` byte- and message-exact); this is the one
+// place that maps it, with both the POSIX `strerror` spelling and the Win32
+// one for the categories whose wording differs.
+pub fn io_error_kind_of(reason: &string) -> IoErrorKind {
+    if io_has(reason, "No such file") || io_has(reason, "no such file")
+        || io_has(reason, "cannot find the file") || io_has(reason, "cannot find the path") {
+        return IoErrorKind::NotFound;
+    }
+    if io_has(reason, "Permission denied") || io_has(reason, "permission denied")
+        || io_has(reason, "Access is denied") || io_has(reason, "access is denied") {
+        return IoErrorKind::PermissionDenied;
+    }
+    if io_has(reason, "Connection refused") || io_has(reason, "connection refused")
+        || io_has(reason, "actively refused") {
+        return IoErrorKind::ConnectionRefused;
+    }
+    if io_has(reason, "Connection reset") || io_has(reason, "connection reset")
+        || io_has(reason, "forcibly closed") || io_has(reason, "was aborted") {
+        return IoErrorKind::ConnectionReset;
+    }
+    if io_has(reason, "timed out") || io_has(reason, "Timed out")
+        || io_has(reason, "timeout") {
+        return IoErrorKind::TimedOut;
+    }
+    if io_has(reason, "unexpected end") || io_has(reason, "Unexpected end")
+        || io_has(reason, "End of file") || io_has(reason, "end of file") {
+        return IoErrorKind::UnexpectedEof;
+    }
+    if io_has(reason, "Interrupted") || io_has(reason, "interrupted") {
+        return IoErrorKind::Interrupted;
+    }
+    return IoErrorKind::Other;
+}
+
+// `contains` is the byte substring test the stdlib already uses.
+fn io_has(text: &string, pattern: &string) -> bool {
+    return contains(text, pattern);
+}

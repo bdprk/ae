@@ -1,0 +1,30 @@
+// std/compiler/ir_wasm_data.ae
+// Compiler WebAssembly active/passive data segment layout descriptor.
+
+pub struct WasmDataSegment {
+    memory_index: i64,
+    offset_const: i64,
+    byte_count: i64,
+    is_passive: bool,
+}
+
+pub fn wasm_data_new(mem_idx: i64, offset: i64, count: i64, passive: bool) -> WasmDataSegment {
+    return WasmDataSegment {
+        memory_index: mem_idx,
+        offset_const: offset,
+        byte_count: count,
+        is_passive: passive,
+    };
+}
+
+pub fn wasm_data_is_passive(d: WasmDataSegment) -> bool {
+    return d.is_passive;
+}
+
+pub fn wasm_data_offset(d: WasmDataSegment) -> i64 {
+    return d.offset_const;
+}
+
+pub fn wasm_data_end_offset(d: WasmDataSegment) -> i64 {
+    return d.offset_const + d.byte_count;
+}

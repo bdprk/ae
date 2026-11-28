@@ -1,7 +1,7 @@
-use "../../std/core/env_var.ae";
-use "../../std/core/exit_code.ae";
+use "../../std/std/env_var.ae";
+use "../../std/std/exit_code.ae";
 use "../../std/core/clock_ticks.ae";
-use "../../std/core/pipe_state.ae";
+use "../../std/std/pipe_state.ae";
 
 fn main() {
     assert(is_valid_env_key_char(65)); // 'A'
