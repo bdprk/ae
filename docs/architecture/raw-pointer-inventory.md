@@ -1,7 +1,8 @@
 # M2.4.01 — Inventory of Raw Pointer Operations
 
-Status: verified against revision e6610a3 (2026-11-19) on Windows x86-64; the
-same source drives both platforms. Scope: every unchecked memory access the
+Status: verified against main @ d90ed3aa (2026-11-28) on Windows x86-64; the
+same source drives both platforms (P4.1 additions: the null pair, owned-string
+heap slots and the deref-as-view rule, ADR-0245). Scope: every unchecked memory access the
 language can emit, plus the runtime entry points that receive pointers and the
 safe wrappers whose invariant keeps those pointers valid.
 
@@ -21,7 +22,11 @@ tests/run/ptr_offset.ae and tests/run/ptr_retag.ae.
 | Raw write (statement) | `*p = v;` | `Statement::PtrStore` | `AE_PTR_WRITE(p, v)` | `unsafe` required |
 | Pointer arithmetic | `p.offset(n)`, `p.byte_offset(n)` | `Expr::PtrOffset` | `(T *)(p + n)` / `(T *)((char *)p + n)` | `unsafe` required; no bounds or alignment reasoning |
 | In-place drop | `ptr_drop_in_place(p)` | `Expr::PtrDropInPlace` | `ae_*_release((T *)p)` | `unsafe` required; `*mut T` only |
-| Layout query | `c_size_of[T]()`, `c_align_of[T]()`, `c_offset_of[T](f)` | constant | literal | compile time; `#[repr(C)]` layout only |
+| Layout query | `c_size_of[T]()`, `c_align_of[T]()`, `c_offset_of[T](f)` | constant | literal | compile time; `#[repr(C)]` layout only; `string` is 24/8 (ADR-0245, the pure runtime's `ae_str`) |
+| Null constant | `ptr::null[T]()` | `Expr::PtrNull` | `(T *)0` legacy; `((void *)0)` pure | safe; scalar, struct, enum and string pointees resolve (the same chains the retag uses) |
+| Null test | `p.is_null()` | `Expr::PtrIsNull` | pointer equality | safe; reads nothing (spec 2.2) |
+| Owned-string retag | `raw as *mut string` | `Expr::PtrCast` | pointer identity | `unsafe` context via the deref/write that follow; the retag itself is address identity; the slot contract of spec/unsafe.md 2.4 is the author's (ADR-0245) |
+| Heap view read | `p.deref()` on `*mut string` | `Expr::DerefPtr` (typed `StrView`) | `AE_VIEW(AE_PTR_READ(p))` legacy; a header copy typed `StrView` pure | `unsafe` required; the view never releases — binding it to a variable is rejected until the release recorder models heap views (ADR-0245 stage 3) |
 
 Every unchecked read and write is emitted as `AE_PTR_READ` /
 `AE_PTR_WRITE` (runtime.c, M2.4.03). `grep -n AE_PTR_ <generated>.c`
@@ -56,10 +61,14 @@ those two, and both require `unsafe`.
 
 ## 4. Recorded gaps
 
-- spec/unsafe.md 2.2 names `p.write(value)`, `p.read()`, `ptr::null[T]()` and
-  `p.is_null()`. None is implemented; the implemented spellings are
-  `ptr_write(p, v)`, `*p = v`, `p.deref()`, `p.offset(n)`, `p.byte_offset(n)`
-  and `ptr_drop_in_place(p)`. A spec edit should either drop the four names or
+- spec/unsafe.md 2.2's `ptr::null[T]()` and `p.is_null()` are implemented
+  (slice 79). The remaining spec-vs-implementation spelling gaps are
+  `p.write(value)` / `p.read()` — the implemented forms stay
+  `ptr_write(p, v)`, `*p = v` and `p.deref()`. The string pointee joins the
+  retag/null/deref chains with the deref-as-view rule (ADR-0245); binding a
+  heap view is rejected with its own diagnostic until the release recorder
+  learns heap views (ADR-0245 stage 3). Spec edits should either drop the
+  two method spellings or
   list them as future work.
 - Alignment is never checked at runtime. It cannot be violated through safe
   code (see section 3); `unsafe` offset arithmetic and C pointers can break it,
