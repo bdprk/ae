@@ -1606,7 +1606,7 @@ impl<'a> Parser<'a> {
             // address (`Argument::Borrow`); the same classify rules,
             // messages and statement-scoped borrow registers the typed
             // route uses.
-            if matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_)) {
+            if matches!(expected, Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_) | Type::StructMut(_) | Type::MapRef(_)) {
                 // A binding already spelled as a borrow (`&vec`/`&Struct`, a
                 // `for` element view) forwards its pointer unchanged: the
                 // argument is the binding itself, not `&binding`.

@@ -1,0 +1,19 @@
+fn total(m: &map[string, i64]) -> i64 {
+    var t = 0;
+    let names = keys(m);
+    for name in names {
+        let c = map_get(m, name);
+        match c {
+            IntResult::Ok(n) => { t += n; }
+            IntResult::Err(reason) => { print("missing " + reason); }
+        }
+    }
+    return t;
+}
+
+fn main() {
+    var counts = map_new();
+    let _i = map_inc(counts, "alpha", 3);
+    let _j = map_inc(counts, "beta", 4);
+    print(total(&counts));
+}
