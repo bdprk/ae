@@ -231,6 +231,9 @@ def run():
         # ADR-0245 stage 3: a bound heap view releases nothing; the owned
         # string still drops in place exactly once before the block frees.
         ("tests/run/ptr_string_view_bind.ae", b"bound heap view\n15\n0\ndone", True),
+        # ADR-0245 stage 4: an unbound deref chain indexes and measures —
+        # the borrow-pointer materialization releases nothing.
+        ("tests/run/heap_vec_index.ae", b"11\n33\n3\n0\ndone", True),
     ]
     with tempfile.TemporaryDirectory(prefix="ae-c-verify-") as tmp:
         tmp = Path(tmp)
