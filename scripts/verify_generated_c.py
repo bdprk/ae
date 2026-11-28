@@ -217,6 +217,17 @@ def run():
             "😀 emoji 也按一个字符计算，不会被…\n"
             "lines 3\nchars 68\nbytes 167"
         ).encode("utf-8"), True),
+        # P4.1 heap shapes: the allocator bridge, the container wrappers,
+        # owned string slots, heap views and the recursive tree — every one
+        # must free exactly once under the leak wrapper. rc_shared stays out:
+        # its count cell is a process-lifetime atomic by design, which the
+        # strict block-count equality reads as a leak (the sanitizer sweep
+        # covers it with the established exemption).
+        ("tests/run/box_alloc.ae", b"42\n42\n99", True),
+        ("tests/run/box_wrapper.ae", b"42\n42", True),
+        ("tests/run/box_string.ae", b"written\n0\nfreed", True),
+        ("tests/run/ptr_string_view.ae", b"heap view\ncompare ok\n0\ndone", True),
+        ("tests/run/tree_nodes.ae", b"15\n5\ndone", True),
     ]
     with tempfile.TemporaryDirectory(prefix="ae-c-verify-") as tmp:
         tmp = Path(tmp)
@@ -230,7 +241,10 @@ def run():
             baseline = leak_counts(executable, cc, tmp, trivial, options)[0]
             print(f"BASELINE leak blocks={baseline}")
         for name, expected, ok in cases + [(str(bad), b"array index out of bounds", False)]:
-            source = Path(name) if name == str(bad) else ROOT / "examples" / name
+            # A `tests/` prefix resolves against the repo root (fixtures that
+            # import the standard library through their in-tree relative
+            # paths); every other name stays an example.
+            source = Path(name) if name == str(bad) else ROOT / (name if name.startswith("tests/") else Path("examples") / name)
             generated = subprocess.run([executable, "emit-c", source], check=True, capture_output=True).stdout
             cfile = tmp / "test.c"
             binary = tmp / ("test.exe" if os.name == "nt" else "test")
