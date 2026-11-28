@@ -127,3 +127,12 @@ MIR 路由：mir.rs:523 的 map_place_operand 对 Pointer 走
 lower_operand(expr)（临时绑定，deref_ptr 内建渲染已存在）。interp 三臂命名
 trap（extern 堆块不可解）。工作量 ≈ stage-4 向量切片；先例 heap_vec_index
 （未绑定链的物化临时 + 消费分支）完全同构。
+
+## 9. 更正：interp 无需 MapRef 臂
+
+§7 的「interp 三臂命名 trap」判断过重。实测分析：interp 的 DerefPtr 求值
+按槽位取值、不对结果类型分支（`Val::Map` 原样返回）；MapRef 只是编译期类型
+标记，interp 值域里不可见。且堆 map 指针在帧槽模型中本不可构造（extern
+alloc 陷阱）——interp 对 map 堆槽形状保持现有行为即正确，rung 4 的 interp
+工作量归零。§8 的三臂清单相应缩减为：读者臂 + MapPlace 表达式形态 + 五调
+用点 + mir.rs:523。rung 4 剩余面比 §8 估计再小一档。
