@@ -255,6 +255,10 @@ impl<'a> Parser<'a> {
                     let kind = map_kind_of(map_ty, self.ctx);
                     let place = match (&map, map_ty) {
                         (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::MapOf(_)) => MapPlace::Var(*id, kind),
+                        // A borrow-typed local (ADR-0245: `let view =
+                        // raw.deref();` on a heap slot) reads as the pointer
+                        // the map calls consume directly.
+                        (Expr::Variable(id, inner, ..), t) if *inner == t && matches!(t, Type::MapRef(_)) => MapPlace::VarBorrow(*id, kind),
                         (Expr::Field(base, fname, t), _) if matches!(*t, Type::MapOf(_)) => match **base {
                             Expr::Variable(id, ..) => MapPlace::Field(id, fname.clone(), kind),
                             _ => {

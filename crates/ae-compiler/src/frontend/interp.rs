@@ -182,7 +182,7 @@ fn map_val_ref<'a>(
     caller_locals: &'a mut Option<&mut HashMap<usize, Val>>,
 ) -> Result<MapVal<'a>, Flow> {
     let slot: Option<&mut Val> = match place {
-        MapPlace::Var(id, _) => locals.get_mut(id),
+        MapPlace::Var(id, _) | MapPlace::VarBorrow(id, _) => locals.get_mut(id),
         MapPlace::Field(id, fname, _) => match locals.get_mut(id) {
             Some(Val::Struct(_, fields)) => fields.get_mut(fname),
             _ => None,
@@ -264,7 +264,7 @@ fn path_parent(path: &str) -> String {
 // present, looked up through the same place resolution as the value above.
 fn m_contains_ref(place: &MapPlace, locals: &HashMap<usize, Val>, caller_locals: &Option<&mut HashMap<usize, Val>>, key: &str) -> bool {
     let slot: Option<&Val> = match place {
-        MapPlace::Var(id, _) => locals.get(id),
+        MapPlace::Var(id, _) | MapPlace::VarBorrow(id, _) => locals.get(id),
         MapPlace::Field(id, fname, _) => match locals.get(id) {
             Some(Val::Struct(_, fields)) => fields.get(fname),
             _ => None,
@@ -810,11 +810,11 @@ fn eval_stmts(
                     _ => None,
                 };
                 match place {
-                    MapPlace::Var(id, MapKind::Int) => match locals.get_mut(id) {
+                    MapPlace::Var(id, MapKind::Int) | MapPlace::VarBorrow(id, MapKind::Int) => match locals.get_mut(id) {
                         Some(Val::Map(m)) => { if let Some(n) = int_value { m.insert(key, n); } }
                         _ => return Flow::Trap("internal: map put on non-map".to_owned()),
                     },
-                    MapPlace::Var(id, MapKind::Float) => match locals.get_mut(id) {
+                    MapPlace::Var(id, MapKind::Float) | MapPlace::VarBorrow(id, MapKind::Float) => match locals.get_mut(id) {
                         Some(Val::MapF(m)) => { if let Some(x) = float_value { m.insert(key, x); } }
                         _ => return Flow::Trap("internal: map put on non-map".to_owned()),
                     },

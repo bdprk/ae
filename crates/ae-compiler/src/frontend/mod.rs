@@ -357,6 +357,8 @@ impl TypeDisplay for Type {
             // (ADR-0235 slice 4), which is a pointer to the element.
             Type::VectorRef(id) => format!("const {} *", c_output::vector_family(ctx, id)),
             Type::MapOf(id) => format!("{} ", c_output::map_family(ctx, id)),
+            // A borrowed map is the pointer to the owner's header (ADR-0245).
+            Type::MapRef(id) => format!("const {} *", c_output::map_family(ctx, id)),
             Type::Struct(k) => format!("ae_t{k} "),
             // A borrow has no storage of its own, so a temporary of these
             // types is never declared; the arms exist so a stray use fails
@@ -669,23 +671,31 @@ impl IntMethodKind {
 // Which value type a map holds: the builtins dispatch on it (ADR-65).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MapKind { Int, Float }
-// A map reachable without a move: either a variable slot or a field of one.
+// A map reachable without a move: a variable slot, a field of one, or a
+// borrow-typed local (ADR-0245: `let view = raw.deref();` on a heap slot —
+// the local's C form is the `const ae_map *` pointer, so the map calls take
+// it bare instead of by address).
 #[derive(Debug, Clone)]
-enum MapPlace { Var(usize, MapKind), Field(usize, String, MapKind) }
+enum MapPlace { Var(usize, MapKind), Field(usize, String, MapKind), VarBorrow(usize, MapKind) }
 impl MapPlace {
     fn text(&self) -> String {
         match self {
-            MapPlace::Var(id, _) => format!("v{id}"),
+            MapPlace::Var(id, _) | MapPlace::VarBorrow(id, _) => format!("v{id}"),
             MapPlace::Field(id, name, _) => format!("v{id}.{name}"),
         }
     }
+    /// Whether the C call sites take the place's address: value places do,
+    /// a borrow-typed local already is the pointer.
+    fn by_ref(&self) -> bool {
+        !matches!(self, MapPlace::VarBorrow(..))
+    }
     fn slot(&self) -> usize {
         match self {
-            MapPlace::Var(id, _) | MapPlace::Field(id, _, _) => *id,
+            MapPlace::Var(id, _) | MapPlace::Field(id, _, _) | MapPlace::VarBorrow(id, _) => *id,
         }
     }
     fn f64_value(&self) -> bool {
-        matches!(self, MapPlace::Var(_, MapKind::Float) | MapPlace::Field(_, _, MapKind::Float))
+        matches!(self, MapPlace::Var(_, MapKind::Float) | MapPlace::Field(_, _, MapKind::Float) | MapPlace::VarBorrow(_, MapKind::Float))
     }
 }
 fn map_kind_of(ty: Type, ctx: &CompileContext) -> MapKind {

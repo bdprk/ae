@@ -1802,7 +1802,7 @@ impl<'a> PureMirBuilder<'a> {
 
     fn lower_map_place(&mut self, place: &MapPlace) -> Operand {
         match place {
-            MapPlace::Var(id, kind) => {
+            MapPlace::Var(id, kind) | MapPlace::VarBorrow(id, kind) => {
                 let ty = map_kind_ty(kind, self.ctx);
                 let (local, _) = self.ensure_var(*id, ty);
                 Operand::Copy(Place::from_local(local))

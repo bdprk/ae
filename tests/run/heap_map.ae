@@ -1,0 +1,16 @@
+use "../../std/alloc/bridge.ae";
+
+fn main() {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[map[string, i64]](), 1, 1) as *mut map[string, i64];
+        var held = map_new();
+        let _i = map_inc(held, "alpha", 7);
+        let _w = ptr_write(raw, held);
+        let view = raw.deref();
+        print(map_has(view, "alpha"));
+        let dropped = ptr_drop_in_place(raw);
+        print(dropped);
+        let _f = ae_std_free(raw as *mut i64);
+    }
+    print("done");
+}

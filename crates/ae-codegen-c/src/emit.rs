@@ -2003,12 +2003,12 @@ fn emit_intrinsic(
             let value = emit_operand(body, &args[2], types, def_map)?;
             match value_ty {
                 TyKind::Int(_) => {
-                    let _ = writeln!(out, "    ae_map_put(&{map}, {key}, (int64_t)({value}));");
+                    let _ = writeln!(out, "    ae_map_put({map}, {key}, (int64_t)({value}));");
                 }
                 TyKind::Float(FloatTy::F64) => {
                     let _ = writeln!(
                         out,
-                        "    {{ double _v = {value}; int64_t _bits; memcpy(&_bits, &_v, sizeof _bits); ae_map_put(&{map}, {key}, _bits); }}"
+                        "    {{ double _v = {value}; int64_t _bits; memcpy(&_bits, &_v, sizeof _bits); ae_map_put({map}, {key}, _bits); }}"
                     );
                 }
                 other => {
@@ -2083,7 +2083,7 @@ fn emit_intrinsic(
             };
             let _ = writeln!(
                 out,
-                "    {{ {prefix} if (ae_map_lookup(&{map}, {key}, &_bits)) {{ {prepare}{dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
+                "    {{ {prefix} if (ae_map_lookup({map}, {key}, &_bits)) {{ {prepare}{dest_expr} = {ok}; }} else {{ {dest_expr} = {err}; }} }}"
             );
             for release in string_temp_releases(body, args) {
                 let _ = writeln!(out, "    {release};");
@@ -2098,12 +2098,12 @@ fn emit_intrinsic(
         "map_has" => {
             let (map, _key_ty, _value_ty) = map_operand(body, &args[0], types, def_map)?;
             let key = emit_operand(body, &args[1], types, def_map)?;
-            finish_value(out, body, types, destination, target, &format!("ae_map_has(&{map}, {key})"))
+            finish_value(out, body, types, destination, target, &format!("ae_map_has({map}, {key})"))
         }
         "map_remove" => {
             let (map, _key_ty, _value_ty) = map_operand(body, &args[0], types, def_map)?;
             let key = emit_operand(body, &args[1], types, def_map)?;
-            finish_value(out, body, types, destination, target, &format!("ae_map_remove(&{map}, {key})"))
+            finish_value(out, body, types, destination, target, &format!("ae_map_remove({map}, {key})"))
         }
         "map_inc" => {
             if args.len() != 3 {
@@ -2116,9 +2116,9 @@ fn emit_intrinsic(
             let key = emit_operand(body, &args[1], types, def_map)?;
             let delta = emit_operand(body, &args[2], types, def_map)?;
             let call = match value_ty {
-                TyKind::Int(_) => format!("ae_map_inc(&{map}, {key}, (int64_t)({delta}))"),
+                TyKind::Int(_) => format!("ae_map_inc({map}, {key}, (int64_t)({delta}))"),
                 TyKind::Float(FloatTy::F64) => {
-                    format!("ae_map_inc_f64(&{map}, {key}, (double)({delta}))")
+                    format!("ae_map_inc_f64({map}, {key}, (double)({delta}))")
                 }
                 other => {
                     return Err(CodegenError::UnsupportedFeature {
@@ -2137,7 +2137,7 @@ fn emit_intrinsic(
                     detail: format!("map keys of {key_ty:?} are not supported yet"),
                 });
             }
-            finish_value(out, body, types, destination, target, &format!("ae_map_keys(&{map})"))
+            finish_value(out, body, types, destination, target, &format!("ae_map_keys({map})"))
         }
         "shared_new" => {
             let arg = args.first().ok_or_else(|| CodegenError::UnsupportedFeature {
@@ -2826,6 +2826,11 @@ fn emit_place(
                     cur_ty = expected;
                     continue;
                 }
+                if let Some(TyKind::MapRef(_)) = expected {
+                    expr = format!("((ae_map *)({expr}))");
+                    cur_ty = expected;
+                    continue;
+                }
                 // A reference deref knows its pointee from the type; a raw
                 // pointer uses the type the caller inferred for the place.
                 let reference_pointee = match cur_ty {
@@ -3057,6 +3062,16 @@ fn map_operand(
     })?;
     let id = match ty {
         TyKind::MapOf(id) => id,
+        // A borrow-typed local already is the `const ae_map *` (ADR-0245);
+        // the map calls take it directly, no address-of.
+        TyKind::MapRef(id) => {
+            let expr = emit_place(body, place, types, Some(ty))?;
+            let (key, value) = types.map_types(id).ok_or_else(|| CodegenError::UnsupportedFeature {
+                body_name: body.name.clone(),
+                detail: format!("map types for id {id} are not carried on the body"),
+            })?;
+            return Ok((expr, key, value));
+        }
         other => {
             return Err(CodegenError::UnsupportedFeature {
                 body_name: body.name.clone(),
@@ -3068,8 +3083,10 @@ fn map_operand(
         body_name: body.name.clone(),
         detail: format!("map types for id {id} are not carried on the body"),
     })?;
+    // The receiver travels as the final C argument: a value place takes the
+    // address here, a borrow-typed place already is the pointer (ADR-0245).
     let expr = emit_place(body, place, types, Some(ty))?;
-    Ok((expr, key, value))
+    Ok((format!("&{expr}"), key, value))
 }
 
 fn emit_operand(

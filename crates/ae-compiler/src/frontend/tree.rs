@@ -336,7 +336,7 @@ impl<'a> TreePrinter<'a> {
 
     fn map_place_text(&self, place: &MapPlace) -> String {
         match place {
-            MapPlace::Var(id, kind) => format!("v{}[{}]", id, if *kind == MapKind::Float { "f64" } else { "i64" }),
+            MapPlace::Var(id, kind) | MapPlace::VarBorrow(id, kind) => format!("v{}[{}]", id, if *kind == MapKind::Float { "f64" } else { "i64" }),
             MapPlace::Field(id, fname, kind) => format!("v{}.{}[{}]", id, fname, if *kind == MapKind::Float { "f64" } else { "i64" }),
         }
     }
