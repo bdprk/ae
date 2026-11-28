@@ -1,0 +1,84 @@
+// binarytrees.ae — the allocation-throughput benchmark (Shootout shape,
+// ported to AE's surface for the P4.1 post-Box measurements).
+//
+// Build bottom-up full binary trees: create(depth) allocates one node per
+// call through the allocator bridge until depth 0, item = depth. check adds
+// every node's item. The loop stretches the allocator across short-lived
+// trees of depth 4..max plus one long-lived tree of depth max.
+//
+// Node: 64 bytes (item, two pointers) via ae_std_alloc; every short-lived
+// tree frees before the next iteration, so live memory stays bounded and
+// the run is leak-clean.
+
+extern "C" fn ae_std_alloc(size: i64, line: i64, column: i64) -> *mut i64;
+extern "C" fn ae_std_free(block: *mut i64) -> *mut i64;
+
+#[repr(C)]
+pub struct Node {
+    item: i64,
+    left: *mut Node,
+    right: *mut Node,
+}
+
+fn create(depth: i64) -> *mut Node {
+    unsafe {
+        let node = ae_std_alloc(c_size_of[Node](), 1, 1) as *mut Node;
+        if depth > 0 {
+            let a = create(depth - 1);
+            let b = create(depth - 1);
+            var _w = ptr_write(node, Node { item: depth, left: a, right: b });
+            return node;
+        }
+        var _w = ptr_write(node, Node { item: depth, left: ptr::null[Node](), right: ptr::null[Node]() });
+        return node;
+    }
+}
+
+fn check(node: *mut Node) -> i64 {
+    unsafe {
+        if node.is_null() {
+            return 0;
+        }
+        let tree = node.deref();
+        return tree.item + check(tree.left) + check(tree.right);
+    }
+}
+
+fn destroy(node: *mut Node) {
+    unsafe {
+        if node.is_null() {
+            return;
+        }
+        let tree = node.deref();
+        destroy(tree.left);
+        destroy(tree.right);
+        let _f = ae_std_free(node as *mut i64);
+        return;
+    }
+}
+
+fn main() {
+    let max_depth = 16;
+    let stretch = create(max_depth + 1);
+    print("stretch tree of depth " + to_string(max_depth + 1) + " check: " + to_string(check(stretch)));
+    destroy(stretch);
+
+    let keeper = create(max_depth);
+    var iterations = 1;
+    var depth = 4;
+    while depth <= max_depth {
+        var total = 0;
+        var i = 0;
+        while i < iterations {
+            let tree = create(depth);
+            total = total + check(tree);
+            destroy(tree);
+            i = i + 1;
+        }
+        print(to_string(iterations) + " trees of depth " + to_string(depth) + " check: " + to_string(total));
+        iterations = iterations * 2;
+        depth = depth + 2;
+    }
+    print("long lived tree of depth " + to_string(max_depth) + " check: " + to_string(check(keeper)));
+    destroy(keeper);
+}
