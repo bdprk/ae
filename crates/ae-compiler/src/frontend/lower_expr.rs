@@ -1773,10 +1773,13 @@ impl<'a> Parser<'a> {
                         self.mut_borrows.push((slot, self.scopes.len()));
                         args.push(Argument::Borrow(slot, address));
                     }
-                    (Type::VectorRef(_) | Type::ArrayOf(..), borrow) => {
+                    (Type::VectorRef(_) | Type::ArrayOf(..) | Type::MapRef(_), borrow) => {
                         // An owned vector takes the address; a
                         // parameter already spelled `&vec` forwards
-                        // its pointer unchanged.
+                        // its pointer unchanged. A borrowed map is the
+                        // same shape (ADR-0245): the header pointer
+                        // travels, and the map surface's mutability
+                        // convention has no `&mut` spelling.
                         args.push(Argument::Borrow(slot, borrow.address()));
                     }
                     _ => {

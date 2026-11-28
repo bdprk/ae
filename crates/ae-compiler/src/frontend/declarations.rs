@@ -15,6 +15,7 @@ impl CallBorrow {
     pub(super) fn classify(expected: Type, actual: Type) -> Option<Self> {
         match (expected, actual) {
             (Type::VectorRef(wanted), Type::Vector(found)) if wanted == found => Some(Self::Address),
+            (Type::MapRef(wanted), Type::MapOf(found)) if wanted == found => Some(Self::Address),
             (Type::VectorRef(_) | Type::ArrayOf(..) | Type::StructRef(_), actual)
                 if expected == actual => Some(Self::Forward),
             (Type::StructRef(wanted) | Type::StructMut(wanted), Type::Struct(found) | Type::StructMut(found))
