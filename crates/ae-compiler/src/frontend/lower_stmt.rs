@@ -210,6 +210,16 @@ impl<'a> Parser<'a> {
                     // still be read (the typed block path's rule).
                     self.record_borrow_bases(&value);
                     self.check_view_binding(*mutable, ty)?;
+                    // A view read through a raw pointer borrows a heap slot:
+                    // using it directly (print, compare, a borrow argument)
+                    // is the supported surface; binding it as a variable
+                    // needs the release recorder to model heap views
+                    // (ADR-0245 stage 3).
+                    if ty == Type::StrView
+                        && matches!(&value, Expr::DerefPtr(..)) {
+                            self.seek_scalar_offset(initializer.range.end);
+                            return Err(self.fail("cannot bind a view read through a raw pointer; use it directly"));
+                        }
                     self.take(Kind::Semi)?;
                     self.check_borrowed_binding(ty)?;
                     (Statement::Declare(slot, value), ty)

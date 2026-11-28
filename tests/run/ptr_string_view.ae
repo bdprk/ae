@@ -1,0 +1,20 @@
+// ADR-0245 stage 2: reading through a pointer to an owned string is a view.
+// The view prints and compares without copying the owning header, so the
+// slot stays the single owner and the release chain runs exactly once.
+use "../../std/alloc/box.ae";
+
+fn main() {
+    unsafe {
+        let raw = ae_std_alloc(c_size_of[string](), 1, 1) as *mut string;
+        var keep = "heap view";
+        let _w = ptr_write(raw, keep);
+        print(raw.deref());
+        if raw.deref() == "heap view" {
+            print("compare ok");
+        }
+        let dropped = ptr_drop_in_place(raw);
+        print(dropped);
+        let _f = ae_std_free(raw as *mut i64);
+    }
+    print("done");
+}

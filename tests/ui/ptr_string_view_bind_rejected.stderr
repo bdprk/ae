@@ -1,0 +1,1 @@
+ae: $DIR/ptr_string_view_bind_rejected.ae:8:28: cannot bind a view read through a raw pointer; use it directly

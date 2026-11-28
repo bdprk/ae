@@ -647,7 +647,20 @@ pub(super) fn expr_type(expr: &Expr, ctx: &CompileContext) -> Type {
         // Both pointer forms deref to their pointee — PtrMut was missing
         // here, so a *mut f64 deref printed through the i64 printer (the
         // slice-3 shapes were i64-only and matched the fallback by luck).
-        Expr::DerefPtr(p, ..) => match expr_type(p, ctx) { Type::Ptr(id) | Type::PtrMut(id) => ctx.ptr_pointee(id), other => other },
+        // An owned pointee reads as a view (ADR-0245 stage 2): a value read
+        // would copy the string header and give the allocation a second
+        // owner, so `p.deref()` on `*mut string` is a `StrView`.
+        Expr::DerefPtr(p, ..) => match expr_type(p, ctx) {
+            Type::Ptr(id) | Type::PtrMut(id) => match ctx.ptr_pointee(id) {
+                // An owned pointee reads as a view (ADR-0245 stage 2): a
+                // value read would copy the string header and give the
+                // allocation a second owner, so `p.deref()` on `*mut string`
+                // is a `StrView`.
+                Type::String => Type::StrView,
+                other => other,
+            },
+            other => other,
+        },
         // Offsetting keeps the base's pointer type.
         Expr::PtrOffset(p, ..) => expr_type(p, ctx),
         Expr::PtrDropInPlace(..) | Expr::PtrWrite(..) => Type::Int(IntTy::I64),

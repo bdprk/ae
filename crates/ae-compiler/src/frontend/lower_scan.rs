@@ -92,7 +92,10 @@ impl<'a> Parser<'a> {
                         expressions.call_definitions.insert(occurrence.range.start, definition.id);
                         if matches!(definition.inferred.as_ref(),
                             Some(ae_resolve::TypeSpelling::Pointer { pointee, .. })
-                                if matches!(pointee.as_ref(), ae_resolve::TypeSpelling::Primitive("i64" | "f64" | "bool")))
+                                // `string` joins the deref-as-view surface
+                                // (ADR-0245 stage 2): `p.deref()` on a heap
+                                // slot reads a view, prints it, compares it.
+                                if matches!(pointee.as_ref(), ae_resolve::TypeSpelling::Primitive("i64" | "f64" | "bool" | "string")))
                         {
                             expressions.scalar_pointer_receivers.insert(occurrence.range.start);
                             expressions.scalar_reads.insert(occurrence.range.start, definition.id);

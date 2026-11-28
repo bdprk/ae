@@ -579,7 +579,12 @@ impl<'a> Parser<'a> {
                             self.check_pointer_deref(method_offset)?;
                             self.seek_scalar_offset(expression.range.end);
                             let (line, column) = self.position();
-                            return Ok((Expr::DerefPtr(Box::new(operand), line, column), self.ctx.ptr_pointee(id)));
+                            // An owned pointee reads as a view (ADR-0245
+                            // stage 2): the header must not gain a second
+                            // owner through a value copy.
+                            let pointee = self.ctx.ptr_pointee(id);
+                            let ty = if pointee == Type::String { Type::StrView } else { pointee };
+                            return Ok((Expr::DerefPtr(Box::new(operand), line, column), ty));
                         }
                     }
                     // A method on a temporary or chained result
@@ -758,7 +763,9 @@ impl<'a> Parser<'a> {
                     self.check_pointer_deref(method_offset)?;
                     self.seek_scalar_offset(expression.range.end);
                     let (line, column) = self.position();
-                    return Ok((Expr::DerefPtr(Box::new(operand), line, column), self.ctx.ptr_pointee(id)));
+                    let pointee = self.ctx.ptr_pointee(id);
+                    let ty = if pointee == Type::String { Type::StrView } else { pointee };
+                    return Ok((Expr::DerefPtr(Box::new(operand), line, column), ty));
                 }
                 if let ExpressionKind::BracketedCallTarget { base, arguments: type_arguments } = &callee.kind {
                     // `ptr::null[T]()` (spec/unsafe.md 2.1): a qualified path

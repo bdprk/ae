@@ -297,7 +297,15 @@ pub(super) fn emit_expr(expr: &Expr, out: &mut String, next: &mut usize, moving:
         }
         Expr::DerefPtr(pointer, ..) => {
             let t = emit_expr(pointer, out, next, false, ctx);
-            Emitted::value(format!("AE_PTR_READ({})", t.text), crate::frontend::mir::expr_type(expr, ctx))
+            let ty = crate::frontend::mir::expr_type(expr, ctx);
+            // A view-typed deref (ADR-0245 stage 2): the pointee is a string,
+            // so the read must not copy the owning header — the view borrows
+            // the slot's bytes and releases nothing.
+            if ty == Type::StrView {
+                Emitted::value(format!("AE_VIEW(AE_PTR_READ({}))", t.text), ty)
+            } else {
+                Emitted::value(format!("AE_PTR_READ({})", t.text), ty)
+            }
         }
         Expr::Number(n) => Emitted::value(format!("INT64_C({n})"), Type::Int(IntTy::I64)),
         Expr::FloatLit(x) => Emitted::value(c_float_literal(*x), Type::Float(FloatTy::F64)),
@@ -1492,6 +1500,9 @@ pub(super) fn release_var(out: &mut String, id: usize, ty: Type, ctx: &CompileCo
         // ADR-0216: scope exit unlocks the mutex guard (idempotent if moved).
         Type::Guard => out.push_str(&format!("    ae_mutex_unlock(&v{id});\n")),
         Type::TaskScope => out.push_str(&format!("    ae_scope_release(&v{id});\n")),
+        // A view borrows another owner's bytes and releases nothing
+        // (ADR-0245 stage 2: a heap view binds like any other view).
+        Type::StrView => {}
         _ => out.push_str(&format!("    ae_str_release(&v{id});\n")),
     }
 }
@@ -1504,6 +1515,8 @@ pub(super) fn release_member(out: &mut String, member: &str, ty: Type, ctx: &Com
         Type::MapOf(map_id) => out.push_str(&format!("    {}_release(&{member});\n", c_output::map_family(ctx, map_id))),
         Type::Struct(k) => out.push_str(&format!("    ae_t{k}_release(&{member});\n")),
         Type::Enum(_, k) => out.push_str(&format!("    ae_e{k}_release(&{member});\n")),
+        // A view member releases nothing (it borrows another owner's bytes).
+        Type::StrView => {}
         _ => out.push_str(&format!("    ae_str_release(&{member});\n")),
     }
 }
