@@ -156,3 +156,12 @@ variable or a field of one"。探针文件保留于 work/repro/（gitignore，�
   自跑（进程 1056623/1535022）。
 - 4 核主机上双树三战役并行——种子总额归并时按树版本标注（ae-r3=ec6aa60f+
   段；ae-relay=代理部署时点段）。收割下窗进行。
+
+## 12. 追加：campaign3 中期状态
+
+套件段 **49/49 全绿**（suite.log）。pure-subset 段跑至 seed ~425 全 ok 后被
+沙箱休眠终止（无汇总行）；mixed 段正跑（seed 400+，持续 ok）。收割时：
+mixed 段汇总即 mixed 证据；pure-subset 需重跑（`cd /data/home/ae-r3 &&
+python3 scripts/diff_fuzz.py --pure-subset --seeds 20000 --jobs 2`，混合段
+完成后）。ADR-0242 前置的本地+服务器套件绿已齐；5 万种子目标按双模式累计
+（本地 900 + 服务器段）。
