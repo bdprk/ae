@@ -36,7 +36,7 @@ enum Class {
     Fn, Let, Var, Mut, Print, If, Else, While, For, In, Return, Break, Continue, Assert, True, False, Use, Struct, Enum, Match,
     EqEq, NotEq, Less, LessEq, Greater, GreaterEq, And, Or, Bang,
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Colon, Arrow, Amp, Semi, Equal, Plus, Minus, Star, Slash, Percent, Dot, DotDot, ColonColon, FatArrow, Question, Pipe,
-    Trait, Impl, Eof,
+    Trait, Impl, Extern, Unsafe, As, Hash, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, Caret, Shl, Shr, Eof,
 }
 
 impl Class {
@@ -62,7 +62,8 @@ impl Class {
             Class::Equal => "Equal", Class::Plus => "Plus", Class::Minus => "Minus", Class::Star => "Star",
             Class::Slash => "Slash", Class::Percent => "Percent", Class::Dot => "Dot", Class::DotDot => "DotDot",
             Class::ColonColon => "ColonColon", Class::FatArrow => "FatArrow", Class::Question => "Question",
-            Class::Trait => "Trait", Class::Impl => "Impl", Class::Eof => "Eof",
+            Class::Trait => "Trait", Class::Impl => "Impl", Class::Extern => "Extern", Class::Unsafe => "Unsafe", Class::As => "As", Class::Hash => "Hash",
+            Class::PlusEq => "PlusEqual", Class::MinusEq => "MinusEqual", Class::StarEq => "StarEqual", Class::SlashEq => "SlashEqual", Class::PercentEq => "PercentEqual", Class::Caret => "Caret", Class::Shl => "Shl", Class::Shr => "Shr", Class::Eof => "Eof",
         }
     }
 }
@@ -157,6 +158,7 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
                 "assert" => Class::Assert, "true" => Class::True, "false" => Class::False, "use" => Class::Use,
                 "struct" => Class::Struct, "enum" => Class::Enum, "match" => Class::Match,
                 "trait" => Class::Trait, "impl" => Class::Impl,
+                "extern" => Class::Extern, "unsafe" => Class::Unsafe, "as" => Class::As,
                 _ => Class::Ident,
             }
         } else if c.is_ascii_digit() {
@@ -180,13 +182,20 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
                 }
             }
             if floating { Class::Float } else { Class::Number }
-        } else if ["==", "!=", "<=", ">=", "->", "&&", "||", "..", "=>", "::"].iter().any(|op| source[i..].starts_with(op)) {
+        } else if ["==", "!=", "<=", ">=", "->", "&&", "||", "..", "=>", "::", "+=", "-=", "*=", "/=", "%=", "<<", ">>"].iter().any(|op| source[i..].starts_with(op)) {
             i += 2;
             match &source[start..i] {
                 "==" => Class::EqEq, "!=" => Class::NotEq, "<=" => Class::LessEq, ">=" => Class::GreaterEq,
                 "->" => Class::Arrow, "&&" => Class::And, "||" => Class::Or, ".." => Class::DotDot,
-                "=>" => Class::FatArrow, "::" => Class::ColonColon, _ => unreachable!(),
+                "=>" => Class::FatArrow, "::" => Class::ColonColon,
+                "+=" => Class::PlusEq, "-=" => Class::MinusEq, "*=" => Class::StarEq,
+                "/=" => Class::SlashEq, "%=" => Class::PercentEq,
+                "<<" => Class::Shl, ">>" => Class::Shr,
+                _ => unreachable!(),
             }
+        } else if c == '^' {
+            i += 1;
+            Class::Caret
         } else {
             i += c.len_utf8();
             match c {
@@ -197,6 +206,7 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
                 '<' => Class::Less, '>' => Class::Greater, '!' => Class::Bang, '.' => Class::Dot,
                 '?' => Class::Question,
                 '|' => Class::Pipe,
+                '#' => Class::Hash,
                 _ => return Err(lex_error(start_line, &format!("unexpected character {c:?}"))),
             }
         };
@@ -206,6 +216,13 @@ fn lex_fmt(source: &str) -> Result<Vec<FmtToken>, String> {
         // and emit-c tests keep it honest.
         let prefix_op = match class {
             Class::Bang => true,
+            // A pointer star (`*mut T`, the retag and pointer-type spellings):
+            // it sticks to what follows. The previous token never ends an
+            // expression there — multiplication always follows an operand.
+            Class::Star => !result.last().is_none_or(|prev: &FmtToken| matches!(prev.class,
+                Class::Ident | Class::Number | Class::Float | Class::Text | Class::RParen
+                | Class::RBracket | Class::Question | Class::True | Class::False)),
+            Class::Hash => true,
             Class::Minus | Class::Plus => result.last().is_none_or(|prev: &FmtToken| matches!(prev.class,
                 Class::LParen | Class::LBracket | Class::Comma | Class::Colon | Class::Equal
                 | Class::Plus | Class::Minus | Class::Star | Class::Slash | Class::Percent
@@ -254,7 +271,7 @@ fn need_space(prev: &FmtToken, next: &FmtToken) -> bool {
     if matches!(next.class, Class::LBracket)
         && matches!(prev.class, Class::Ident | Class::RParen | Class::RBracket) { return false; }
     // Never a space after these.
-    if matches!(prev.class, Class::LParen | Class::LBracket | Class::Amp | Class::Dot | Class::ColonColon | Class::DotDot) { return false; }
+    if matches!(prev.class, Class::LParen | Class::LBracket | Class::Amp | Class::Dot | Class::ColonColon | Class::DotDot | Class::Hash) { return false; }
     // Prefix operators stick to their operand: `-1`, `+x`, `!(a)`.
     if prev.prefix_op { return false; }
     true
