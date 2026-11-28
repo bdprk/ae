@@ -27,6 +27,14 @@ fn main() {
     print(rc_get(&twin).hits);
     print(rc_count(&shared));
     print(rc_count(&twin));
+
+    // The raw slot reads a shared string as a view; the handles below still
+    // own the release.
+    let text = rc_new("shared view");
+    unsafe {
+        print(rc_slot(&text).deref());
+        print(len(rc_slot(&text).deref()));
+    }
 }
 
 fn doubled(v: i64) -> i64 {

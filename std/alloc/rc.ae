@@ -57,3 +57,11 @@ pub fn rc_get[T](r: &Rc[T]) -> T {
 pub fn rc_count[T](r: &Rc[T]) -> i64 {
     return cell_load(r.refs);
 }
+
+// The raw slot for an `unsafe` reader: `rc_slot(&r).deref()` reads the
+// shared value as a view (an owned payload reads without copying its
+// header, ADR-0245). The handle is a copy; the last drop keeps the release
+// duty.
+pub fn rc_slot[T](r: &Rc[T]) -> *mut T {
+    return r.slot;
+}
