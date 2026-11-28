@@ -154,6 +154,10 @@ pub(super) fn scalar_body_expression(expression: &ae_syntax::expression::Express
                 // A field receiver (`r.cells[0]`): the lowering resolves the
                 // field's type and reports a non-container base itself.
                 ExpressionKind::Field { .. } => true,
+                // A call result (`raw.deref()[0]`, ADR-0245): the base lowers
+                // recursively and the lowering answers the element read by
+                // the view's element type.
+                ExpressionKind::Call { .. } => true,
                 _ => false,
             };
             base_ok && scalar_body_expression(index, resolved, supports_call, supports_field)
