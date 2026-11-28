@@ -727,13 +727,15 @@ impl<'a> DeclarationParser<'a> {
 
     fn declaration(&mut self) -> Result<Declaration, Diagnostic> {
         let start = self.current().offset;
+        // The attribute may precede or follow `pub`: `#[repr(C)] pub struct`
+        // is the natural spelling, and `pub #[repr(C)] struct` stays legal.
+        let attributes = self.attributes()?;
         let public = if matches!(&self.current().kind, Kind::Ident(name) if name == "pub") {
             self.pos += 1;
             true
         } else {
             false
         };
-        let attributes = self.attributes()?;
         let attribute = attributes.first().cloned();
         for attr in &attributes {
             match attr {

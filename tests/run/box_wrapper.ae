@@ -1,7 +1,7 @@
 use "../../std/alloc/box.ae";
 
 #[repr(C)]
-struct Wrapped {
+pub struct Wrapped {
     n: i64,
 }
 

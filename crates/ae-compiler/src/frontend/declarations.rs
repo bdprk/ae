@@ -177,13 +177,14 @@ impl Parser<'_> {
                 DeclarationKind::Function { parameters, .. } => Some(parameters.as_slice()),
                 _ => None,
             });
-            let public = self.take_pub();
             // `#[repr(C)]` is the language's one attribute (M2.12 U8): it
             // pins the struct's layout for the C ABI. The bracket shape is
             // parsed literally, and anything but repr(C) is rejected by
-            // name so a typo cannot silently mean "no attribute".
+            // name so a typo cannot silently mean "no attribute". The
+            // attribute may precede or follow `pub`.
             let (attributes, end) = parse_declaration_attributes(&self.file, self.source, &self.tokens, self.pos)?;
             self.pos = end;
+            let public = self.take_pub();
             let repr_c = attributes.contains(&DeclarationAttribute::ReprC);
             let no_mangle = attributes.contains(&DeclarationAttribute::NoMangle);
             let derive_copy = attributes.contains(&DeclarationAttribute::DeriveCopy);
